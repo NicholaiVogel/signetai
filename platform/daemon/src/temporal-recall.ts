@@ -1,4 +1,4 @@
-import type { RecallTemporalMeta, TemporalFacet } from "@signet/core";
+import type { AgentRosterReadPolicy, RecallTemporalMeta, TemporalFacet } from "@signet/core";
 import { getDbAccessor } from "./db-accessor";
 import { buildAgentScopeClause } from "./memory-access-scope";
 
@@ -78,7 +78,7 @@ export interface TemporalRecallParams {
 	readonly time?: TemporalTimeOptions;
 	readonly limit: number;
 	readonly agentId?: string;
-	readonly readPolicy?: string;
+	readonly readPolicy?: AgentRosterReadPolicy;
 	readonly policyGroup?: string | null;
 	readonly project?: string;
 	readonly sessionKey?: string;
