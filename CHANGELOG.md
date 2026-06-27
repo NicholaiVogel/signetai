@@ -6,6 +6,13 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-26
+- Bug fixes: surface Signet health diagnostics.
+
+### 2026-06-24
+- Features: Rust daemon full parity effort.
+- Bug fixes: harden workspace backup commits.
+
 ### 2026-06-21
 - Bug fixes: scope document chunk routes.
 
@@ -23,16 +30,34 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-06-14
 - Bug fixes: reject invalid workspace config.
 
-### 2026-06-13
-- Bug fixes: enforce scoped connector memory access; enforce scope checks on remember and aggregate-save routes.
-- Refactoring: modularize hooks architecture.
-- Docs: add remote harness setup guide.
-
-### 2026-06-11
-- Features: publish npm installer packages; support portable remote daemon auth.
-- Bug fixes: stage connector packages for signetai npm scope; publish connector packages under signetai scope; expose source and session search tools.
-
 ## Release Ledger
+
+## [0.145.2] - 2026-06-26
+
+Release summary: 1 bug fix.
+Tag range: `v0.145.1..v0.145.2`.
+
+### Bug Fixes
+
+- **openclaw**: surface Signet health diagnostics (#870)
+
+## [0.145.1] - 2026-06-24
+
+Release summary: 1 bug fix.
+Tag range: `v0.145.0..v0.145.1`.
+
+### Bug Fixes
+
+- **git**: harden workspace backup commits (#866)
+
+## [0.145.0] - 2026-06-24
+
+Release summary: 1 feature.
+Tag range: `v0.144.1..v0.145.0`.
+
+### Features
+
+- **daemon-rs**: Rust daemon full parity effort  (#861)
 
 ## [0.144.1] - 2026-06-21
 
