@@ -72,7 +72,9 @@ function app(): Hono {
 		agentsDir: dir,
 		getDbAccessor: () => dbAccessor,
 		getInferenceProvider: () =>
-			makeProvider("SUMMARY: We fixed reflections.\nPATTERNS: persistence, scoping\nQUESTION: Keep it?"),
+			makeProvider(
+				"QUESTION: Nicholai, you wrote that daily reflections should be grounded in memory, and later the route persisted one from saved context. How does that fit now?",
+			),
 	});
 	return next;
 }
@@ -119,7 +121,10 @@ describe("reflection routes", () => {
 		const res = await app().request("/api/reflections/generate?agentId=agent-a", { method: "POST" });
 		expect(res.status).toBe(200);
 		const body = await res.json();
-		expect(body.reflection.summary).toBe("Keep it?");
+		expect(body.reflection.summary).toBe(
+			"Nicholai, you wrote that daily reflections should be grounded in memory, and later the route persisted one from saved context. How does that fit now?",
+		);
+		expect(body.reflection.question).toBe(body.reflection.summary);
 		expect(body.reflection.patterns).toEqual([]);
 
 		const row = dbAccessor.withReadDb(

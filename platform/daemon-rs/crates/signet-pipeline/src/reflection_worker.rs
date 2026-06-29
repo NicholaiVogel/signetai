@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use signet_core::db::{DbPool, Priority};
@@ -24,6 +24,7 @@ use uuid::Uuid;
 const POLL_INTERVAL_MS: i64 = 300_000;
 const MINUTE_MS: i64 = 60_000;
 const DAY_MS: i64 = 24 * 60 * MINUTE_MS;
+const DAILY_BRIEF_MEMORY_BATCH_SIZE: usize = 50;
 
 #[derive(Debug, Error)]
 pub enum ReflectionWorkerError {
@@ -222,23 +223,82 @@ fn trim_line(text: &str, max: usize) -> String {
     }
 }
 
+fn is_question_led_insight(text: &str) -> bool {
+    let normalized = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if normalized.ends_with('?') {
+        return true;
+    }
+    let first = normalized.split_whitespace().next().unwrap_or_default();
+    if !matches!(
+        first,
+        "has"
+            | "have"
+            | "does"
+            | "did"
+            | "do"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "can"
+            | "could"
+            | "will"
+            | "would"
+            | "should"
+            | "what"
+            | "which"
+            | "who"
+            | "when"
+            | "where"
+            | "why"
+            | "how"
+    ) {
+        return false;
+    }
+    normalized
+        .chars()
+        .take_while(|ch| !matches!(ch, '.' | '!' | '?'))
+        .count()
+        < normalized.chars().count()
+        && normalized
+            .chars()
+            .take_while(|ch| !matches!(ch, '.' | '!'))
+            .any(|ch| ch == '?')
+}
+
 pub fn parse_daily_brief_insights(text: &str, limit: usize) -> Vec<DailyBriefInsight> {
     let mut insights = Vec::new();
     let mut pending: Option<String> = None;
+    let mut pending_is_question = false;
     let mut patterns: Vec<String> = Vec::new();
 
     fn flush(
         insights: &mut Vec<DailyBriefInsight>,
         pending: &mut Option<String>,
+        pending_is_question: &mut bool,
         patterns: &mut Vec<String>,
     ) {
         let Some(raw) = pending.take() else { return };
-        let summary = trim_line(&raw, 420);
-        insights.push(DailyBriefInsight {
-            question: summary.contains('?').then_some(summary.clone()),
-            summary,
-            patterns: std::mem::take(patterns),
-        });
+        let summary = trim_line(&raw, 560);
+        if !summary.is_empty() {
+            let question = if *pending_is_question || is_question_led_insight(&summary) {
+                Some(summary.clone())
+            } else {
+                None
+            };
+            insights.push(DailyBriefInsight {
+                question,
+                summary,
+                patterns: std::mem::take(patterns),
+            });
+        } else {
+            patterns.clear();
+        }
+        *pending_is_question = false;
     }
 
     for raw_line in text.lines() {
@@ -246,27 +306,28 @@ pub fn parse_daily_brief_insights(text: &str, limit: usize) -> Vec<DailyBriefIns
         if line.is_empty() {
             continue;
         }
-        let upper = line.to_ascii_uppercase();
         let cleaned = line
             .strip_prefix("- ")
             .or_else(|| line.strip_prefix("* "))
             .unwrap_or(line)
             .trim();
-        let cleaned_upper = cleaned.to_ascii_uppercase();
-        if let Some((_, value)) = cleaned.split_once(':') {
-            if cleaned_upper.starts_with("INSIGHT:")
-                || cleaned_upper.starts_with("QUESTION:")
-                || cleaned_upper.starts_with("BRIEF:")
-            {
-                flush(&mut insights, &mut pending, &mut patterns);
+        if let Some((label, value)) = cleaned.split_once(':') {
+            let label_upper = label.trim().to_ascii_uppercase();
+            if matches!(
+                label_upper.as_str(),
+                "ASK" | "QUESTION" | "BRIEF" | "GAP" | "INSIGHT" | "SUMMARY"
+            ) {
+                flush(
+                    &mut insights,
+                    &mut pending,
+                    &mut pending_is_question,
+                    &mut patterns,
+                );
                 pending = Some(value.trim().to_string());
+                pending_is_question = matches!(label_upper.as_str(), "ASK" | "QUESTION");
                 continue;
             }
-            if pending.is_some()
-                && (upper.starts_with("FOCUS:")
-                    || upper.starts_with("PATTERNS:")
-                    || upper.starts_with("TAGS:"))
-            {
+            if pending.is_some() && matches!(label_upper.as_str(), "FOCUS" | "PATTERNS" | "TAGS") {
                 patterns = value
                     .split(',')
                     .map(str::trim)
@@ -277,13 +338,45 @@ pub fn parse_daily_brief_insights(text: &str, limit: usize) -> Vec<DailyBriefIns
             }
         }
     }
-    flush(&mut insights, &mut pending, &mut patterns);
+    flush(
+        &mut insights,
+        &mut pending,
+        &mut pending_is_question,
+        &mut patterns,
+    );
 
     if insights.is_empty() {
-        let fallback = trim_line(text, 420);
-        if !fallback.is_empty() {
+        let has_structured_label = text.lines().any(|line| {
+            let cleaned = line
+                .trim()
+                .strip_prefix("- ")
+                .or_else(|| line.trim().strip_prefix("* "))
+                .unwrap_or(line.trim());
+            let Some((label, _)) = cleaned.split_once(':') else {
+                return false;
+            };
+            matches!(
+                label.trim().to_ascii_uppercase().as_str(),
+                "ASK"
+                    | "BRIEF"
+                    | "FOCUS"
+                    | "GAP"
+                    | "INSIGHT"
+                    | "PATTERNS"
+                    | "QUESTION"
+                    | "SUMMARY"
+                    | "TAGS"
+            )
+        });
+        let fallback = trim_line(text, 560);
+        if !has_structured_label && !fallback.is_empty() {
+            let question = if is_question_led_insight(&fallback) {
+                Some(fallback.clone())
+            } else {
+                None
+            };
             insights.push(DailyBriefInsight {
-                question: fallback.contains('?').then_some(fallback.clone()),
+                question,
                 summary: fallback,
                 patterns: Vec::new(),
             });
@@ -294,7 +387,7 @@ pub fn parse_daily_brief_insights(text: &str, limit: usize) -> Vec<DailyBriefIns
     insights
         .into_iter()
         .filter(|item| {
-            let key = normalize_insight(item.question.as_deref().unwrap_or(&item.summary));
+            let key = normalize_insight(&item.summary);
             !key.is_empty() && seen.insert(key)
         })
         .take(limit)
@@ -302,91 +395,67 @@ pub fn parse_daily_brief_insights(text: &str, limit: usize) -> Vec<DailyBriefIns
 }
 
 pub fn build_reflection_prompt(context: &ReflectionSourceContext, count: usize) -> String {
+    let plural = if count == 1 { "question" } else { "questions" };
     let mut lines = vec![
-        "You are Signet's Daily Brief generator.".to_string(),
-        "Reason over recent transcripts, memory, and the knowledge graph like a helpful assistant searching its memory for what is unclear or worth resolving.".to_string(),
-        "Generate fresh, concrete, non-redundant insights for the dashboard. Do not write a daily report. Do not summarize the last 24 hours.".to_string(),
-        format!("Return exactly {count} items. Each item should be one short useful question or observation, ideally one sentence and never more than two."),
-        "Prefer open loops, contradictions, unresolved decisions, repeated blockers, or connections the user has not explicitly closed.".to_string(),
-        "Avoid repeating existing brief items. Avoid generic productivity advice.".to_string(),
+        "You are the question generator for a daily memory brief.".to_string(),
+        "You will receive a mechanically selected bundle of recent user memories. It is not curated for a topic. Treat it as raw memory evidence.".to_string(),
+        String::new(),
+        format!("Goal: write {count} {plural} the user might actually want to answer today."),
+        String::new(),
+        "Pattern to prefer:".to_string(),
+        "- Find an earlier/later pair, repeated thread, or gentle mismatch in the memories.".to_string(),
+        "- Shape: \"You wrote/said X, and later Y showed up. How does that fit/feel now?\"".to_string(),
+        "- The question should be a memory prompt, not a task prompt.".to_string(),
+        String::new(),
+        "Rules:".to_string(),
+        "- Address the user by name only if the name is clear from the memories.".to_string(),
+        "- Use concrete details from the memories: people, projects, quotes, places, dates, or repeated phrases.".to_string(),
+        "- Ask about a real remembered tension, change, or open feeling.".to_string(),
+        "- Do not ask what Signet, an agent, or a tool should do.".to_string(),
+        "- Do not ask for productivity planning unless the memories themselves clearly center on an active decision.".to_string(),
+        "- Do not invent hypotheticals or future scenarios.".to_string(),
+        "- Do not over-compress into vague labels like \"hidden mess,\" \"small kind thing,\" or \"relationship architecture.\"".to_string(),
+        "- Keep each question natural and answerable on first read. 45-85 words is fine.".to_string(),
         String::new(),
         "Output only lines in this format:".to_string(),
-        "INSIGHT: <short useful question or insight>".to_string(),
-        "FOCUS: <2-5 comma-separated concrete tags>".to_string(),
+        "QUESTION: <daily brief question>".to_string(),
         String::new(),
     ];
 
     if !context.existing_reflections.is_empty() {
         lines.push("Existing brief items to avoid repeating:".to_string());
         for reflection in context.existing_reflections.iter().take(12) {
-            let text = reflection.question.as_ref().unwrap_or(&reflection.summary);
             lines.push(format!(
                 "  [{}] {}",
                 &reflection.created_at[..reflection.created_at.len().min(10)],
-                trim_line(text, 220)
+                trim_line(&reflection.summary, 220)
             ));
+            if let Some(question) = &reflection.question {
+                if normalize_insight(question) != normalize_insight(&reflection.summary) {
+                    lines.push(format!(
+                        "  [{}] {}",
+                        &reflection.created_at[..reflection.created_at.len().min(10)],
+                        trim_line(question, 220)
+                    ));
+                }
+            }
         }
         lines.push(String::new());
     }
 
-    if !context.transcripts.is_empty() {
-        lines.push("Recent transcript excerpts:".to_string());
-        for transcript in &context.transcripts {
-            let project = transcript
-                .project
-                .as_ref()
-                .map(|p| format!(" project={p}"))
-                .unwrap_or_default();
-            lines.push(format!(
-                "  [{}{}] {}",
-                &transcript.created_at[..transcript.created_at.len().min(10)],
-                project,
-                trim_line(&transcript.content, 900)
-            ));
-        }
-        lines.push(String::new());
-    }
-
-    if !context.summaries.is_empty() {
-        lines.push("Recent session summaries:".to_string());
-        for summary in &context.summaries {
-            lines.push(format!(
-                "  [{}] {}",
-                &summary.created_at[..summary.created_at.len().min(10)],
-                trim_line(&summary.content, 650)
-            ));
-        }
-        lines.push(String::new());
-    }
-
-    if !context.memories.is_empty() {
-        lines.push("Relevant memories:".to_string());
-        for memory in &context.memories {
-            let date = &memory.created_at[..memory.created_at.len().min(10)];
-            let tags = if memory.tags.is_empty() {
-                String::new()
-            } else {
-                format!("[{}] ", memory.tags)
-            };
-            lines.push(format!(
-                "  [{date}] ({}) {tags}{}",
-                memory.memory_type,
-                trim_line(&memory.content, 500)
-            ));
-        }
-        lines.push(String::new());
-    }
-
-    if !context.graph_facts.is_empty() {
-        lines.push("Knowledge graph facts:".to_string());
-        for fact in &context.graph_facts {
-            lines.push(format!(
-                "  {} ({}): {}",
-                fact.entity,
-                fact.kind,
-                trim_line(&fact.detail, 360)
-            ));
-        }
+    lines.push("Recent saved memories:".to_string());
+    for memory in &context.memories {
+        let date = &memory.created_at[..memory.created_at.len().min(10)];
+        let tags = if memory.tags.is_empty() {
+            String::new()
+        } else {
+            format!("[{}] ", memory.tags)
+        };
+        lines.push(format!(
+            "  [{date}] ({}) {tags}{}",
+            memory.memory_type,
+            trim_line(&memory.content, 500)
+        ));
     }
 
     lines.join("\n")
@@ -395,93 +464,29 @@ pub fn build_reflection_prompt(context: &ReflectionSourceContext, count: usize) 
 pub async fn collect_reflection_context(
     pool: &DbPool,
     agent_id: &str,
-    config: &ReflectionConfig,
+    _config: &ReflectionConfig,
 ) -> Result<ReflectionSourceContext, ReflectionWorkerError> {
     let agent_id = agent_id.to_string();
-    let max_memories = config.max_memories.max(24);
-    let max_summaries = config.max_summaries.max(12);
-    let hours = config.time_window_hours.max(1);
-    let cutoff = (Utc::now() - ChronoDuration::hours(hours)).to_rfc3339();
 
     pool.read(move |conn| {
         let memories = {
             let mut stmt = conn.prepare_cached(
                 "SELECT id, content, type, tags, created_at FROM memories
-                 WHERE agent_id = ?1 AND is_deleted = 0 AND (created_at >= ?2 OR pinned = 1)
-                 ORDER BY pinned DESC, importance DESC, created_at DESC LIMIT ?3",
+                 WHERE agent_id = ?1 AND is_deleted = 0
+                 ORDER BY created_at DESC LIMIT ?2",
             )?;
-            stmt.query_map(params![agent_id, cutoff, max_memories as i64], |row| {
-                Ok(ReflectionMemory {
-                    id: row.get(0)?,
-                    content: row.get(1)?,
-                    memory_type: row.get(2)?,
-                    tags: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    created_at: row.get(4)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-
-        let summaries = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT id, content, created_at, latest_at, session_key FROM session_summaries
-                 WHERE agent_id = ?1 AND COALESCE(latest_at, created_at) >= ?2
-                 ORDER BY COALESCE(latest_at, created_at) DESC LIMIT ?3",
-            )?;
-            stmt.query_map(params![agent_id, cutoff, max_summaries as i64], |row| {
-                Ok(ReflectionSummary {
-                    id: row.get(0)?,
-                    content: row.get(1)?,
-                    created_at: row.get(2)?,
-                    latest_at: row.get(3)?,
-                    session_key: row.get(4)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-
-        let transcripts = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT session_key, content, project, created_at FROM session_transcripts
-                 WHERE agent_id = ?1 AND COALESCE(updated_at, created_at) >= ?2
-                 ORDER BY COALESCE(updated_at, created_at) DESC LIMIT 4",
-            )?;
-            stmt.query_map(params![agent_id, cutoff], |row| {
-                Ok(ReflectionTranscript {
-                    session_key: row.get(0)?,
-                    content: row.get(1)?,
-                    project: row.get(2)?,
-                    created_at: row.get(3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-
-        let graph_facts = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT e.name AS entity, e.entity_type AS kind, ea.name AS aspect,
-                        attr.content AS content, attr.updated_at AS updated_at
-                 FROM entity_attributes attr
-                 LEFT JOIN entity_aspects ea ON ea.id = attr.aspect_id
-                 LEFT JOIN entities e ON e.id = ea.entity_id
-                 WHERE attr.agent_id = ?1 AND attr.status = 'active' AND e.name IS NOT NULL
-                   AND COALESCE(attr.updated_at, attr.created_at) >= ?2
-                 ORDER BY attr.importance DESC, attr.updated_at DESC LIMIT 28",
-            )?;
-            stmt.query_map(params![agent_id, cutoff], |row| {
-                let aspect = row.get::<_, Option<String>>(2)?.unwrap_or_default();
-                let content: String = row.get(3)?;
-                Ok(ReflectionGraphFact {
-                    entity: row.get(0)?,
-                    kind: row.get(1)?,
-                    detail: if aspect.is_empty() {
-                        content
-                    } else {
-                        format!("{aspect}: {content}")
-                    },
-                    updated_at: row.get(4)?,
-                })
-            })?
+            stmt.query_map(
+                params![agent_id, DAILY_BRIEF_MEMORY_BATCH_SIZE as i64],
+                |row| {
+                    Ok(ReflectionMemory {
+                        id: row.get(0)?,
+                        content: row.get(1)?,
+                        memory_type: row.get(2)?,
+                        tags: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                        created_at: row.get(4)?,
+                    })
+                },
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?
         };
 
@@ -504,9 +509,9 @@ pub async fn collect_reflection_context(
 
         Ok(ReflectionSourceContext {
             memories,
-            summaries,
-            transcripts,
-            graph_facts,
+            summaries: Vec::new(),
+            transcripts: Vec::new(),
+            graph_facts: Vec::new(),
             existing_reflections,
         })
     })
@@ -522,11 +527,7 @@ pub async fn generate_daily_brief_insights(
     count: usize,
 ) -> Result<Vec<String>, ReflectionWorkerError> {
     let context = collect_reflection_context(pool, agent_id, config).await?;
-    if context.memories.is_empty()
-        && context.summaries.is_empty()
-        && context.transcripts.is_empty()
-        && context.graph_facts.is_empty()
-    {
+    if context.memories.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -539,14 +540,16 @@ pub async fn generate_daily_brief_insights(
     let mut existing = context
         .existing_reflections
         .iter()
-        .map(|r| normalize_insight(r.question.as_deref().unwrap_or(&r.summary)))
+        .flat_map(|r| [Some(r.summary.as_str()), r.question.as_deref()])
+        .flatten()
+        .map(normalize_insight)
         .filter(|key| !key.is_empty())
         .collect::<HashSet<_>>();
 
     let insights = parse_daily_brief_insights(&raw, (count * 2).max(count))
         .into_iter()
         .filter(|insight| {
-            let key = normalize_insight(insight.question.as_deref().unwrap_or(&insight.summary));
+            let key = normalize_insight(&insight.summary);
             !key.is_empty() && existing.insert(key)
         })
         .take(count)
@@ -582,8 +585,7 @@ pub async fn generate_daily_brief_insights(
             let mut ids = Vec::new();
             for insight in insights {
                 let id = Uuid::new_v4().to_string();
-                let content_key =
-                    normalize_insight(insight.question.as_deref().unwrap_or(&insight.summary));
+                let content_key = normalize_insight(&insight.summary);
                 let patterns =
                     serde_json::to_string(&insight.patterns).unwrap_or_else(|_| "[]".to_string());
                 let changes = conn.execute(
@@ -708,7 +710,7 @@ impl ReflectionWorkerHandle {
                 ) {
                     warn!(agent_id, error = %e, "failed to persist reflection timestamp");
                 }
-                info!(agent_id, count = ids.len(), "generated daily brief insight");
+                info!(agent_id, count = ids.len(), "generated daily brief question");
             }
             Err(e) => warn!(agent_id, error = %e, "reflection generation failed"),
         }
@@ -755,25 +757,19 @@ impl ReflectionWorkerHandle {
 
 pub async fn list_active_agent_ids(
     pool: &DbPool,
-    config: &ReflectionConfig,
+    _config: &ReflectionConfig,
 ) -> Result<Vec<String>, ReflectionWorkerError> {
-    let cutoff = (Utc::now() - ChronoDuration::hours(config.time_window_hours.max(1))).to_rfc3339();
     let ids = pool
         .read(move |conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT DISTINCT agent_id FROM memories
-                 WHERE created_at >= ?1 AND is_deleted = 0
-                 UNION
-                 SELECT DISTINCT agent_id FROM session_summaries
-                 WHERE created_at >= ?2",
+                 WHERE is_deleted = 0",
             )?;
-            stmt.query_map(params![cutoff, cutoff], |row| {
-                row.get::<_, Option<String>>(0)
-            })?
-            .filter_map(Result::ok)
-            .flatten()
-            .collect::<Vec<_>>()
-            .pipe(Ok)
+            stmt.query_map([], |row| row.get::<_, Option<String>>(0))?
+                .filter_map(Result::ok)
+                .flatten()
+                .collect::<Vec<_>>()
+                .pipe(Ok)
         })
         .await
         .map_err(|e| ReflectionWorkerError::Database(e.to_string()))?;

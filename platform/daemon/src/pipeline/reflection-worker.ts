@@ -22,6 +22,7 @@ const DEFAULT_DEPS: ReflectionDeps = {
 const POLL_INTERVAL_MS = 300_000;
 const MINUTE_MS = 60_000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
+const DAILY_BRIEF_MEMORY_BATCH_SIZE = 50;
 
 function getAgentsDir(): string {
 	return resolveDefaultBasePath();
@@ -121,60 +122,57 @@ function trimLine(text: string, max = 260): string {
 	return single.length > max ? `${single.slice(0, max - 1).trim()}…` : single;
 }
 
-export function buildReflectionPrompt(context: ReflectionSourceContext, count = 3): string {
+function isQuestionLedInsight(text: string): boolean {
+	const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
+	if (normalized.endsWith("?")) return true;
+	return /^(?:has|have|does|did|do|is|are|was|were|can|could|will|would|should|what|which|who|when|where|why|how)\b[^.!?]*\?/.test(
+		normalized,
+	);
+}
+
+export function buildReflectionPrompt(context: ReflectionSourceContext, count = 1): string {
+	const plural = count === 1 ? "question" : "questions";
 	const lines: string[] = [
-		"You are Signet's Daily Brief generator.",
-		"Reason over recent transcripts, memory, and the knowledge graph like a helpful assistant searching its memory for what is unclear or worth resolving.",
-		"Generate fresh, concrete, non-redundant insights for the dashboard. Do not write a daily report. Do not summarize the last 24 hours.",
-		`Return exactly ${count} items. Each item should be one short useful question or observation, ideally one sentence and never more than two.`,
-		"Prefer open loops, contradictions, unresolved decisions, repeated blockers, or connections the user has not explicitly closed.",
-		"Avoid repeating existing brief items. Avoid generic productivity advice.",
+		"You are the question generator for a daily memory brief.",
+		"You will receive a mechanically selected bundle of recent user memories. It is not curated for a topic. Treat it as raw memory evidence.",
+		"",
+		`Goal: write ${count} ${plural} the user might actually want to answer today.`,
+		"",
+		"Pattern to prefer:",
+		"- Find an earlier/later pair, repeated thread, or gentle mismatch in the memories.",
+		'- Shape: "You wrote/said X, and later Y showed up. How does that fit/feel now?"',
+		"- The question should be a memory prompt, not a task prompt.",
+		"",
+		"Rules:",
+		"- Address the user by name only if the name is clear from the memories.",
+		"- Use concrete details from the memories: people, projects, quotes, places, dates, or repeated phrases.",
+		"- Ask about a real remembered tension, change, or open feeling.",
+		"- Do not ask what Signet, an agent, or a tool should do.",
+		"- Do not ask for productivity planning unless the memories themselves clearly center on an active decision.",
+		"- Do not invent hypotheticals or future scenarios.",
+		'- Do not over-compress into vague labels like "hidden mess," "small kind thing," or "relationship architecture."',
+		"- Keep each question natural and answerable on first read. 45-85 words is fine.",
 		"",
 		"Output only lines in this format:",
-		"INSIGHT: <short useful question or insight>",
-		"FOCUS: <2-5 comma-separated concrete tags>",
+		"QUESTION: <daily brief question>",
 		"",
 	];
 
 	if (context.existingReflections.length > 0) {
 		lines.push("Existing brief items to avoid repeating:");
 		for (const r of context.existingReflections.slice(0, 12)) {
-			lines.push(`  [${r.createdAt.slice(0, 10)}] ${trimLine(r.question ?? r.summary, 220)}`);
+			lines.push(`  [${r.createdAt.slice(0, 10)}] ${trimLine(r.summary, 220)}`);
+			if (r.question && normalizeInsight(r.question) !== normalizeInsight(r.summary)) {
+				lines.push(`  [${r.createdAt.slice(0, 10)}] ${trimLine(r.question, 220)}`);
+			}
 		}
 		lines.push("");
 	}
 
-	if (context.transcripts.length > 0) {
-		lines.push("Recent transcript excerpts:");
-		for (const t of context.transcripts) {
-			const project = t.project ? ` project=${t.project}` : "";
-			lines.push(`  [${t.createdAt.slice(0, 10)}${project}] ${trimLine(t.content, 900)}`);
-		}
-		lines.push("");
-	}
-
-	if (context.summaries.length > 0) {
-		lines.push("Recent session summaries:");
-		for (const s of context.summaries) {
-			lines.push(`  [${s.createdAt.slice(0, 10)}] ${trimLine(s.content, 650)}`);
-		}
-		lines.push("");
-	}
-
-	if (context.memories.length > 0) {
-		lines.push("Relevant memories:");
-		for (const m of context.memories) {
-			const date = m.createdAt.slice(0, 10);
-			lines.push(`  [${date}] (${m.type}) ${m.tags ? `[${m.tags}] ` : ""}${trimLine(m.content, 500)}`);
-		}
-		lines.push("");
-	}
-
-	if (context.graphFacts.length > 0) {
-		lines.push("Knowledge graph facts:");
-		for (const g of context.graphFacts) {
-			lines.push(`  ${g.entity} (${g.kind}): ${trimLine(g.detail, 360)}`);
-		}
+	lines.push("Recent saved memories:");
+	for (const m of context.memories) {
+		const date = m.createdAt.slice(0, 10);
+		lines.push(`  [${date}] (${m.type}) ${m.tags ? `[${m.tags}] ` : ""}${trimLine(m.content, 500)}`);
 	}
 
 	return lines.join("\n");
@@ -194,29 +192,35 @@ export function parseReflectionResponse(text: string): { summary: string; patter
 	return { summary, patterns, question };
 }
 
-export function parseDailyBriefInsights(text: string, limit = 3): DailyBriefInsight[] {
+export function parseDailyBriefInsights(text: string, limit = 1): DailyBriefInsight[] {
 	const insights: DailyBriefInsight[] = [];
 	let pending: string | null = null;
+	let pendingIsQuestion = false;
 	let patterns: string[] = [];
 
 	function flush(): void {
 		if (!pending) return;
-		const summary = trimLine(pending, 420);
-		insights.push({ summary, question: summary.includes("?") ? summary : undefined, patterns });
+		const summary = trimLine(pending, 560);
+		if (summary) {
+			const question = pendingIsQuestion || isQuestionLedInsight(summary) ? summary : undefined;
+			insights.push({ summary, question, patterns });
+		}
 		pending = null;
+		pendingIsQuestion = false;
 		patterns = [];
 	}
 
 	for (const rawLine of text.split(/\r?\n/)) {
 		const line = rawLine.trim();
 		if (!line) continue;
-		const insight = line.match(/^(?:[-*]\s*)?(?:INSIGHT|QUESTION|BRIEF)\s*:\s*(.+)$/i)?.[1];
-		if (insight) {
+		const entry = line.match(/^(?:[-*]\s*)?(?:ASK|QUESTION|BRIEF|GAP|INSIGHT|SUMMARY)\s*:\s*(.+)$/i);
+		if (entry) {
 			flush();
-			pending = insight.trim();
+			pending = entry[1].trim();
+			pendingIsQuestion = /^(?:[-*]\s*)?(?:ASK|QUESTION)\s*:/i.test(line);
 			continue;
 		}
-		const focus = line.match(/^(?:FOCUS|PATTERNS|TAGS)\s*:\s*(.+)$/i)?.[1];
+		const focus = line.match(/^(?:[-*]\s*)?(?:FOCUS|PATTERNS|TAGS)\s*:\s*(.+)$/i)?.[1];
 		if (focus && pending) {
 			patterns = focus
 				.split(",")
@@ -228,15 +232,20 @@ export function parseDailyBriefInsights(text: string, limit = 3): DailyBriefInsi
 	flush();
 
 	if (insights.length === 0) {
-		const fallback = trimLine(text, 420);
-		if (fallback)
-			insights.push({ summary: fallback, question: fallback.includes("?") ? fallback : undefined, patterns: [] });
+		const hasStructuredLabel = /^\s*(?:[-*]\s*)?(?:ASK|BRIEF|FOCUS|GAP|INSIGHT|PATTERNS|QUESTION|SUMMARY|TAGS)\s*:/im.test(
+			text,
+		);
+		const fallback = trimLine(text, 560);
+		if (!hasStructuredLabel && fallback) {
+			const question = isQuestionLedInsight(fallback) ? fallback : undefined;
+			insights.push({ summary: fallback, question, patterns: [] });
+		}
 	}
 
 	const seen = new Set<string>();
 	return insights
 		.filter((item) => {
-			const key = normalizeInsight(item.question ?? item.summary);
+			const key = normalizeInsight(item.summary);
 			if (!key || seen.has(key)) return false;
 			seen.add(key);
 			return true;
@@ -246,22 +255,19 @@ export function parseDailyBriefInsights(text: string, limit = 3): DailyBriefInsi
 
 export function collectReflectionContext(
 	agentId: string,
-	config: PipelineReflectionsConfig,
+	_config: PipelineReflectionsConfig,
 	deps: Pick<ReflectionDeps, "getDbAccessor"> = DEFAULT_DEPS,
 ): ReflectionSourceContext {
-	const maxMemories = Math.max(config.maxMemories, 24);
-	const maxSummaries = Math.max(config.maxSummaries, 12);
-	const cutoff = new Date(Date.now() - Math.max(config.timeWindowHours, 1) * 60 * 60 * 1000).toISOString();
 	const dbAccessor = deps.getDbAccessor();
 
 	const memories = dbAccessor.withReadDb((db) => {
 		const rows = db
 			.prepare(
 				`SELECT id, content, type, tags, created_at FROM memories
-				 WHERE agent_id = ? AND is_deleted = 0 AND (created_at >= ? OR pinned = 1)
-				 ORDER BY pinned DESC, importance DESC, created_at DESC LIMIT ?`,
+				 WHERE agent_id = ? AND is_deleted = 0
+				 ORDER BY created_at DESC LIMIT ?`,
 			)
-			.all(agentId, cutoff, maxMemories) as {
+			.all(agentId, DAILY_BRIEF_MEMORY_BATCH_SIZE) as {
 			id: string;
 			content: string;
 			type: string;
@@ -277,71 +283,6 @@ export function collectReflectionContext(
 		}));
 	});
 
-	const summaries = dbAccessor.withReadDb((db) => {
-		const rows = db
-			.prepare(
-				`SELECT id, content, created_at, latest_at, session_key FROM session_summaries
-				 WHERE agent_id = ? AND COALESCE(latest_at, created_at) >= ?
-				 ORDER BY COALESCE(latest_at, created_at) DESC LIMIT ?`,
-			)
-			.all(agentId, cutoff, maxSummaries) as {
-			id: string;
-			content: string;
-			created_at: string;
-			latest_at: string | null;
-			session_key: string | null;
-		}[];
-		return rows.map((r) => ({
-			id: r.id,
-			content: r.content,
-			createdAt: r.created_at,
-			latestAt: r.latest_at,
-			sessionKey: r.session_key,
-		}));
-	});
-
-	const transcripts = dbAccessor.withReadDb((db) => {
-		const rows = db
-			.prepare(
-				`SELECT session_key, content, project, created_at FROM session_transcripts
-				 WHERE agent_id = ? AND COALESCE(updated_at, created_at) >= ?
-				 ORDER BY COALESCE(updated_at, created_at) DESC LIMIT 4`,
-			)
-			.all(agentId, cutoff) as { session_key: string; content: string; project: string | null; created_at: string }[];
-		return rows.map((r) => ({
-			sessionKey: r.session_key,
-			content: r.content,
-			project: r.project,
-			createdAt: r.created_at,
-		}));
-	});
-
-	const graphFacts = dbAccessor.withReadDb((db) => {
-		const attributes = db
-			.prepare(
-				`SELECT e.name AS entity, e.entity_type AS kind, ea.name AS aspect, attr.content AS content, attr.updated_at AS updated_at
-				 FROM entity_attributes attr
-				 LEFT JOIN entity_aspects ea ON ea.id = attr.aspect_id
-				 LEFT JOIN entities e ON e.id = ea.entity_id
-				 WHERE attr.agent_id = ? AND attr.status = 'active' AND e.name IS NOT NULL
-				   AND COALESCE(attr.updated_at, attr.created_at) >= ?
-				 ORDER BY attr.importance DESC, attr.updated_at DESC LIMIT 28`,
-			)
-			.all(agentId, cutoff) as {
-			entity: string;
-			kind: string;
-			aspect: string | null;
-			content: string;
-			updated_at: string | null;
-		}[];
-		return attributes.map((r) => ({
-			entity: r.entity,
-			kind: r.kind,
-			detail: `${r.aspect ? `${r.aspect}: ` : ""}${r.content}`,
-			updatedAt: r.updated_at,
-		}));
-	});
-
 	const existingReflections = dbAccessor.withReadDb((db) => {
 		const rows = db
 			.prepare(
@@ -353,34 +294,30 @@ export function collectReflectionContext(
 		return rows.map((r) => ({ id: r.id, question: r.question, summary: r.summary, createdAt: r.created_at }));
 	});
 
-	return { memories, summaries, transcripts, graphFacts, existingReflections };
+	return { memories, summaries: [], transcripts: [], graphFacts: [], existingReflections };
 }
 
 export async function generateDailyBriefInsights(
 	agentId: string,
 	config: PipelineReflectionsConfig,
-	count = 3,
+	count = 1,
 	deps: ReflectionDeps = DEFAULT_DEPS,
 ): Promise<string[]> {
 	const context = collectReflectionContext(agentId, config, deps);
-	if (
-		context.memories.length === 0 &&
-		context.summaries.length === 0 &&
-		context.transcripts.length === 0 &&
-		context.graphFacts.length === 0
-	) {
-		return [];
-	}
+	if (context.memories.length === 0) return [];
 
 	const prompt = buildReflectionPrompt(context, count);
 	const provider = deps.getInferenceProvider("default");
 	const raw = await provider.generate(prompt, { timeoutMs: config.timeout, maxTokens: config.maxTokens });
 	const existing = new Set(
-		context.existingReflections.map((r) => normalizeInsight(r.question ?? r.summary)).filter(Boolean),
+		context.existingReflections
+			.flatMap((r) => [r.summary, r.question ?? ""])
+			.map((text) => normalizeInsight(text))
+			.filter(Boolean),
 	);
 	const insights = parseDailyBriefInsights(raw, Math.max(count * 2, count))
 		.filter((insight) => {
-			const key = normalizeInsight(insight.question ?? insight.summary);
+			const key = normalizeInsight(insight.summary);
 			if (!key || existing.has(key)) return false;
 			existing.add(key);
 			return true;
@@ -398,7 +335,7 @@ export async function generateDailyBriefInsights(
 	deps.getDbAccessor().withWriteTx((db) => {
 		for (const insight of insights) {
 			const id = randomUUID();
-			const contentKey = normalizeInsight(insight.question ?? insight.summary);
+			const contentKey = normalizeInsight(insight.summary);
 			const result = db
 				.prepare(
 					`INSERT OR IGNORE INTO daily_reflections
@@ -448,7 +385,7 @@ export function startReflectionWorker(
 				return;
 			}
 			writeLastReflectionTime(agentId, todayDate());
-			deps.logger.info("reflections", "Generated daily brief insight", { agentId, count: ids.length });
+			deps.logger.info("reflections", "Generated daily brief question", { agentId, count: ids.length });
 		} catch (e) {
 			deps.logger.warn("reflections", "Generation failed", {
 				error: e instanceof Error ? e.message : String(e),
@@ -458,17 +395,13 @@ export function startReflectionWorker(
 	}
 
 	function listActiveAgentIds(): string[] {
-		const cutoff = new Date(Date.now() - config.timeWindowHours * 60 * 60 * 1000).toISOString();
 		const rows = deps.getDbAccessor().withReadDb((db) => {
 			return db
 				.prepare(
 					`SELECT DISTINCT agent_id FROM memories
-					 WHERE created_at >= ? AND is_deleted = 0
-					 UNION
-					 SELECT DISTINCT agent_id FROM session_summaries
-					 WHERE created_at >= ?`,
+					 WHERE is_deleted = 0`,
 				)
-				.all(cutoff, cutoff) as { agent_id: string | null }[];
+				.all() as { agent_id: string | null }[];
 		});
 		const agentIds = rows.map((row) => row.agent_id).filter((agentId): agentId is string => !!agentId);
 		return agentIds.length > 0 ? agentIds : ["default"];

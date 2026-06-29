@@ -8,9 +8,11 @@ import { closeDbAccessor, getDbAccessor, initDbAccessor } from "../db-accessor";
 import { logger } from "../logger";
 import { txIngestEnvelope } from "../transactions";
 import {
+	buildReflectionPrompt,
 	collectReflectionContext,
 	generateDailyBriefInsights,
 	nextReflectionDelayMs,
+	parseDailyBriefInsights,
 	startReflectionWorker,
 } from "./reflection-worker";
 
@@ -124,29 +126,95 @@ describe("reflection worker", () => {
 		expect(existsSync(join(dir, ".daemon", "last-reflection.default.json"))).toBe(false);
 	});
 
-	it("collects recent source context and only lets pinned old memories bypass the cutoff", () => {
-		const old = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
-		const recentId = seedMemory("default", { content: "Recent source", hash: "recent-source" });
-		const pinnedId = seedMemory("default", {
-			content: "Pinned durable source",
-			createdAt: old,
-			pinned: 1,
-			hash: "pinned-source",
-		});
-		seedMemory("default", { content: "Stale unpinned source", createdAt: old, hash: "stale-source" });
+	it("collects the last 50 saved memories as the daily brief source batch", () => {
+		const ids: string[] = [];
+		const base = Date.now() - 60_000;
+		for (let i = 0; i < 55; i += 1) {
+			ids.push(
+				seedMemory("default", {
+					content: `Saved memory ${i}`,
+					createdAt: new Date(base + i * 1000).toISOString(),
+					hash: `saved-memory-${i}`,
+				}),
+			);
+		}
 
 		const context = collectReflectionContext("default", config);
 
-		expect(context.memories.map((m) => m.id)).toEqual([pinnedId, recentId]);
-		expect(context.memories.map((m) => m.content)).not.toContain("Stale unpinned source");
+		expect(context.memories).toHaveLength(50);
+		expect(context.memories.map((m) => m.id)).toEqual(ids.slice(5).reverse());
+		expect(context.summaries).toEqual([]);
+		expect(context.transcripts).toEqual([]);
+		expect(context.graphFacts).toEqual([]);
 	});
 
-	it("persists generated brief insights", async () => {
+	it("builds a memory-question prompt over saved memories", () => {
+		const prompt = buildReflectionPrompt(
+			{
+				memories: [
+					{
+						id: "memory-1",
+						content: "Issue #868 likely involves compare/install catalog key routing.",
+						type: "fact",
+						tags: "issue868,backend",
+						createdAt: "2026-06-28T00:00:00.000Z",
+					},
+				],
+				summaries: [],
+				transcripts: [],
+				graphFacts: [],
+				existingReflections: [],
+			},
+			1,
+		);
+
+		expect(prompt).toContain("mechanically selected bundle of recent user memories");
+		expect(prompt).toContain("You wrote/said X, and later Y showed up. How does that fit/feel now?");
+		expect(prompt).toContain("Do not ask what Signet, an agent, or a tool should do.");
+		expect(prompt).toContain("Recent saved memories:");
+		expect(prompt).toContain("QUESTION: <daily brief question>");
+	});
+
+	it("parses daily brief questions and preserves legacy insight output", () => {
+		const question =
+			"Nicholai, you wrote that AI work should keep humility because it is still AI slop next to real art. Later, Ant fixing broken CI felt hug-worthy. How do those truths sit together now?";
+		const insights = parseDailyBriefInsights(
+			[
+				`QUESTION: ${question}`,
+				"INSIGHT: Rust parity test ports are the release bottleneck; group the remaining work by harness surface before opening more feature threads.",
+				"FOCUS: rust-parity, release",
+			].join("\n"),
+			2,
+		);
+
+		expect(insights).toEqual([
+			{
+				summary: question,
+				question,
+				patterns: [],
+			},
+			{
+				summary:
+					"Rust parity test ports are the release bottleneck; group the remaining work by harness surface before opening more feature threads.",
+				question: undefined,
+				patterns: ["rust-parity", "release"],
+			},
+		]);
+		expect(parseDailyBriefInsights("QUESTION: Has the backend path been verified?\nFOCUS: backend", 1)).toEqual([
+			{
+				summary: "Has the backend path been verified?",
+				question: "Has the backend path been verified?",
+				patterns: ["backend"],
+			},
+		]);
+	});
+
+	it("persists generated brief questions", async () => {
 		const memoryId = seedMemory("default");
+		const question = "Nicholai, you wrote one thing and later another related thing showed up. How does that feel now?";
 		const worker = startReflectionWorker(config, {
 			getDbAccessor,
-			getInferenceProvider: () =>
-				provider("SUMMARY: Worker persisted.\nPATTERNS: persistence\nQUESTION: Should we keep it?"),
+			getInferenceProvider: () => provider(`QUESTION: ${question}`),
 			logger,
 		});
 
@@ -158,14 +226,16 @@ describe("reflection worker", () => {
 
 		const reflection = getDbAccessor().withReadDb(
 			(db) =>
-				db.prepare("SELECT summary, model, memory_ids FROM daily_reflections WHERE agent_id = ?").get("default") as {
+				db.prepare("SELECT summary, question, model, memory_ids FROM daily_reflections WHERE agent_id = ?").get("default") as {
 					summary: string;
+					question: string | null;
 					model: string;
 					memory_ids: string;
 				},
 		);
 		expect(reflection).toEqual({
-			summary: "Should we keep it?",
+			summary: question,
+			question,
 			model: "test-model",
 			memory_ids: JSON.stringify([memoryId]),
 		});
@@ -227,7 +297,7 @@ describe("reflection worker", () => {
 				waiting += 1;
 				if (waiting === 2) release?.();
 				await barrier;
-				return "INSIGHT: Should this duplicate be inserted once?\nFOCUS: race, dedupe";
+				return "QUESTION: Duplicate dashboard-open generations should insert one row?";
 			},
 		};
 		await Promise.all([
@@ -251,8 +321,8 @@ describe("reflection worker", () => {
 		});
 		expect(rows).toEqual([
 			{
-				summary: "Should this duplicate be inserted once?",
-				content_key: "should this duplicate be inserted once",
+				summary: "Duplicate dashboard-open generations should insert one row?",
+				content_key: "duplicate dashboard open generations should insert one row",
 			},
 		]);
 	});
