@@ -1,16 +1,17 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "../../../core/src/migrations";
-import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
+import { type DbAccessor, type ReadDb, type WriteDb, closeDbAccessor, initDbAccessor } from "../db-accessor";
 import { loadMemoryConfig } from "../memory-config";
-import { IMMUTABLE_ARTIFACT_ERROR_PREFIX } from "../memory-lineage";
+import { IMMUTABLE_ARTIFACT_ERROR_PREFIX, writeSummaryArtifact } from "../memory-lineage";
 import { RateLimitExceededError } from "./provider";
 import type { LlmProvider } from "./provider";
 import {
 	SUMMARY_WORKER_UPDATED_BY,
+	type SummaryJobRow,
 	type SummaryWorkerHandle,
 	canProcessSummaryJobs,
 	clearCommandStageRunning,
@@ -21,6 +22,7 @@ import {
 	leaseSummaryJobWhenAvailable,
 	markCommandStageCompleted,
 	markCommandStageRunning,
+	persistSessionSummaryArtifact,
 	recoverSummaryJobs,
 	resolveFailedSummaryJobStatus,
 	resolveSummaryHeadingDate,
@@ -1057,4 +1059,86 @@ wait
 			rmSync(root, { recursive: true, force: true });
 		}
 	}, 8000);
+});
+
+describe("persistSessionSummaryArtifact", () => {
+	let dir = "";
+	let prevSignetPath: string | undefined;
+
+	function resetWorkspace(): void {
+		closeDbAccessor();
+		rmSync(join(dir, "memory"), { recursive: true, force: true });
+		mkdirSync(join(dir, "memory"), { recursive: true });
+		initDbAccessor(join(dir, "memory", "memories.db"));
+	}
+
+	beforeAll(() => {
+		prevSignetPath = process.env.SIGNET_PATH;
+		dir = mkdtempSync(join(tmpdir(), "signet-summary-conflict-"));
+		process.env.SIGNET_PATH = dir;
+		writeFileSync(
+			join(dir, "agent.yaml"),
+			`memory:
+  pipelineV2:
+    enabled: false
+`,
+		);
+		resetWorkspace();
+	});
+
+	beforeEach(() => {
+		resetWorkspace();
+	});
+
+	afterAll(() => {
+		closeDbAccessor();
+		rmSync(dir, { recursive: true, force: true });
+		if (prevSignetPath === undefined) {
+			Reflect.deleteProperty(process.env, "SIGNET_PATH");
+			return;
+		}
+		process.env.SIGNET_PATH = prevSignetPath;
+	});
+
+	it("completes instead of throwing when a prior attempt already committed the artifact (#900)", async () => {
+		const job: SummaryJobRow = {
+			id: "job-conflict",
+			session_key: "session-conflict",
+			session_id: "session-conflict",
+			harness: "codex",
+			project: "/mnt/work/dev/project",
+			agent_id: "default",
+			transcript: "transcript",
+			trigger: "session_end",
+			boundary_reason: "session_closed",
+			captured_at: "2026-04-03T14:08:11.982Z",
+			started_at: "2026-04-03T14:00:00.000Z",
+			ended_at: "2026-04-03T15:00:00.000Z",
+			attempts: 2,
+			max_attempts: 3,
+			created_at: "2026-04-03T14:08:11.982Z",
+		};
+
+		// Simulate a prior attempt that already committed the summary artifact
+		// (daemon crashed between core commit and the 'completed' status update).
+		await writeSummaryArtifact({
+			agentId: job.agent_id,
+			sessionId: job.session_id ?? job.session_key ?? job.id,
+			sessionKey: job.session_key,
+			project: job.project,
+			harness: job.harness,
+			capturedAt: job.captured_at ?? job.created_at,
+			startedAt: job.started_at,
+			endedAt: job.ended_at,
+			summary: "Prior attempt already persisted this summary with different body content.",
+		});
+
+		// The retry produces a different summary body. Without the immutable-
+		// conflict catch this throws (content mismatch) and the worker would
+		// classify it terminal -> dead. With the fix it resolves cleanly so the
+		// caller can mark the job completed.
+		await expect(
+			persistSessionSummaryArtifact(job, "Retry produced a different summary body.", null),
+		).resolves.toBeUndefined();
+	});
 });

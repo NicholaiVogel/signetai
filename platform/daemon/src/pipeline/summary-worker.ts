@@ -562,6 +562,52 @@ export function markCommandStageCompleted(accessor: DbAccessor, jobId: string): 
 	});
 }
 
+/**
+ * Write the session summary artifact, tolerating an immutable-artifact
+ * conflict when a prior attempt already committed it (the daemon crashed
+ * between core commit and the final 'completed' status update). Core work
+ * already succeeded in that case, and fact insertion is content-hash
+ * idempotent, so the job should still complete instead of being classified
+ * terminal -> dead. Any other error propagates.
+ */
+export async function persistSessionSummaryArtifact(
+	job: SummaryJobRow,
+	summary: string,
+	provider: LlmProvider | null,
+): Promise<void> {
+	try {
+		const summaryWrite = await writeSummaryArtifact({
+			agentId: job.agent_id,
+			sessionId: job.session_id ?? job.session_key ?? job.id,
+			sessionKey: job.session_key,
+			project: job.project,
+			harness: job.harness,
+			capturedAt: job.captured_at ?? job.created_at,
+			startedAt: job.started_at,
+			endedAt: job.ended_at,
+			summary,
+			provider,
+		});
+		logger.info("summary-worker", "Wrote session summary artifact", {
+			path: summaryWrite.summaryPath,
+			sessionKey: job.session_key,
+			project: job.project,
+			summaryChars: summary.length,
+		});
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		if (message.startsWith(IMMUTABLE_ARTIFACT_ERROR_PREFIX)) {
+			logger.info("summary-worker", "Summary artifact already committed by prior attempt; completing job", {
+				sessionKey: job.session_key,
+				project: job.project,
+				attempt: job.attempts,
+			});
+		} else {
+			throw e;
+		}
+	}
+}
+
 export function tracksSessionSummaryArtifact(job: SummaryJobRow): boolean {
 	return (
 		job.trigger === "session_end" &&
@@ -703,24 +749,7 @@ async function processJob(
 			harness: job.harness,
 		})
 	) {
-		const summaryWrite = await writeSummaryArtifact({
-			agentId: job.agent_id,
-			sessionId: job.session_id ?? job.session_key ?? job.id,
-			sessionKey: job.session_key,
-			project: job.project,
-			harness: job.harness,
-			capturedAt: job.captured_at ?? job.created_at,
-			startedAt: job.started_at,
-			endedAt: job.ended_at,
-			summary: result.summary,
-			provider,
-		});
-		logger.info("summary-worker", "Wrote session summary artifact", {
-			path: summaryWrite.summaryPath,
-			sessionKey: job.session_key,
-			project: job.project,
-			summaryChars: result.summary.length,
-		});
+		await persistSessionSummaryArtifact(job, result.summary, provider);
 	}
 
 	if (commandMode) {
