@@ -6,30 +6,280 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
-### 2026-06-29
-- Bug fixes: align daily brief typography.
+### 2026-07-15
+- Bug fixes: centralize canonical recall requests.
 
-### 2026-06-28
-- Bug fixes: add daily brief refresh; make daily brief a single memory question; generate daily brief gaps from saved memories; stabilize skills catalog identity.
+### 2026-07-12
+- Bug fixes: tolerate immutable-artifact conflict on summary retry; add boundary reason semantics to session synthesis.
 
-### 2026-06-26
-- Bug fixes: surface Signet health diagnostics.
+### 2026-07-11
+- Bug fixes: thread native asset paths into extraction worker; await in-flight init before first embed to prevent warm-up race (#920); register WASM onnxruntime in embedding worker's isolated globalThis; bound and cancel LLM inference; isolate native embedding in a worker so it cannot block /health; reject transient operational content with a durability gate.
+- Docs: update changelog highlights for v0.147.10 stable promotion; update changelog highlights for v0.147.9 stable promotion.
 
-### 2026-06-24
-- Features: Rust daemon full parity effort.
-- Bug fixes: harden workspace backup commits.
+### 2026-07-10
+- Bug fixes: reject markdown-polluted entity labels; gate summary jobs on runnable synthesis; cancel extraction for forgotten memories; embed connector assets in native releases; initialize ONNX WASM embeddings in compiled binary.
+- Docs: update changelog highlights for v0.147.1 stable promotion.
 
-### 2026-06-21
-- Bug fixes: scope document chunk routes.
+### 2026-07-09
+- Features: support Codex CLI in Docker; add observed feedback loop.
+- Bug fixes: add integrity check and rebuild-derived-indexes repair actions; backfill extracted relations into entity_dependencies for graph traversal; persist startup import reconciliation state; repair memory lifecycle lineage; force exit after hook actions to prevent orphaned processes; support pi-mono session lifecycle events.
+- Docs: add noamsiegel and quannon to contributors list.
 
-### 2026-06-20
-- Features: add context traces to logs; add ForgeCode integration.
-- Bug fixes: harden session transcript capture; accept session summary agent_id; restore native vector runtime.
+### 2026-07-06
+- Features: capture harness skill usage (claude-code scan + opencode post).
+- Bug fixes: chunk and embed Obsidian source content after sync; queue rendered Codex transcripts.
 
-### 2026-06-19
-- Bug fixes: limit constellation entity types; render skills marketplace reliably.
+### 2026-07-01
+- Bug fixes: exclude aggregate memories from aggregate recall; recall source-backed ontology claims.
 
 ## Release Ledger
+
+## [0.147.15] - 2026-07-15
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.14..v0.147.15`.
+
+### Bug Fixes
+
+- **recall**: centralize canonical recall requests
+
+## [0.147.14] - 2026-07-12
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.13..v0.147.14`.
+
+### Bug Fixes
+
+- **pipeline**: tolerate immutable-artifact conflict on summary retry (#900)
+
+## [0.147.13] - 2026-07-12
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.12..v0.147.13`.
+
+### Bug Fixes
+
+- **pipeline**: add boundary reason semantics to session synthesis (#896)
+
+## [0.147.12] - 2026-07-11
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.11..v0.147.12`.
+
+### Bug Fixes
+
+- **embedding**: thread native asset paths into extraction worker (#922)
+
+## [0.147.11] - 2026-07-11
+
+Release summary: 1 bug fix and 1 docs update.
+Tag range: `v0.147.10..v0.147.11`.
+
+### Bug Fixes
+
+- **embedding**: await in-flight init before first embed to prevent warm-up race (#920) (#923)
+
+### Docs
+
+- update changelog highlights for v0.147.10 stable promotion
+
+## [0.147.10] - 2026-07-11
+
+Release summary: 1 bug fix and 1 docs update.
+Tag range: `v0.147.9..v0.147.10`.
+
+### Bug Fixes
+
+- **native**: register WASM onnxruntime in embedding worker's isolated globalThis
+
+### Docs
+
+- update changelog highlights for v0.147.9 stable promotion
+
+## [0.147.9] - 2026-07-11
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.8..v0.147.9`.
+
+### Bug Fixes
+
+- **pipeline**: bound and cancel LLM inference (#918)
+
+## [0.147.8] - 2026-07-11
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.7..v0.147.8`.
+
+### Bug Fixes
+
+- **daemon**: isolate native embedding in a worker so it cannot block /health (#916)
+
+## [0.147.7] - 2026-07-11
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.6..v0.147.7`.
+
+### Bug Fixes
+
+- **pipeline**: reject transient operational content with a durability gate (#917)
+
+## [0.147.6] - 2026-07-10
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.5..v0.147.6`.
+
+### Bug Fixes
+
+- reject markdown-polluted entity labels (#914)
+
+## [0.147.5] - 2026-07-10
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.4..v0.147.5`.
+
+### Bug Fixes
+
+- gate summary jobs on runnable synthesis (#912)
+
+## [0.147.4] - 2026-07-10
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.3..v0.147.4`.
+
+### Bug Fixes
+
+- **pipeline**: cancel extraction for forgotten memories (#910)
+
+## [0.147.3] - 2026-07-10
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.2..v0.147.3`.
+
+### Bug Fixes
+
+- **hermes**: embed connector assets in native releases (#909)
+
+## [0.147.2] - 2026-07-10
+
+Release summary: 1 bug fix and 1 docs update.
+Tag range: `v0.147.1..v0.147.2`.
+
+### Bug Fixes
+
+- **native**: initialize ONNX WASM embeddings in compiled binary (#911)
+
+### Docs
+
+- update changelog highlights for v0.147.1 stable promotion
+
+## [0.147.1] - 2026-07-09
+
+Release summary: 1 bug fix.
+Tag range: `v0.147.0..v0.147.1`.
+
+### Bug Fixes
+
+- **daemon**: add integrity check and rebuild-derived-indexes repair actions (#893)
+
+## [0.147.0] - 2026-07-09
+
+Release summary: 2 features, 2 bug fixes, and 1 docs update.
+Tag range: `v0.146.5..v0.147.0`.
+
+### Features
+
+- **inference**: support Codex CLI in Docker (#889)
+- **memory**: add observed feedback loop (#885)
+
+### Bug Fixes
+
+- **core**: backfill extracted relations into entity_dependencies for graph traversal (#892)
+- **daemon**: persist startup import reconciliation state (#871)
+
+### Docs
+
+- add noamsiegel and quannon to contributors list
+
+## [0.146.5] - 2026-07-09
+
+Release summary: 1 bug fix.
+Tag range: `v0.146.4..v0.146.5`.
+
+### Bug Fixes
+
+- **migrations**: repair memory lifecycle lineage (#886)
+
+## [0.146.4] - 2026-07-09
+
+Release summary: 1 bug fix.
+Tag range: `v0.146.3..v0.146.4`.
+
+### Bug Fixes
+
+- **cli**: force exit after hook actions to prevent orphaned processes (#891)
+
+## [0.146.3] - 2026-07-09
+
+Release summary: 1 bug fix.
+Tag range: `v0.146.2..v0.146.3`.
+
+### Bug Fixes
+
+- **pi**: support pi-mono session lifecycle events (#888)
+
+## [0.146.2] - 2026-07-06
+
+Release summary: 1 bug fix.
+Tag range: `v0.146.1..v0.146.2`.
+
+### Bug Fixes
+
+- **daemon**: chunk and embed Obsidian source content after sync (#881)
+
+## [0.146.1] - 2026-07-06
+
+Release summary: 1 bug fix.
+Tag range: `v0.146.0..v0.146.1`.
+
+### Bug Fixes
+
+- **hooks**: queue rendered Codex transcripts (#884)
+
+## [0.146.0] - 2026-07-06
+
+Release summary: 1 feature.
+Tag range: `v0.145.10..v0.146.0`.
+
+### Features
+
+- **skills**: capture harness skill usage (claude-code scan + opencode post) (#878)
+
+## [0.145.10] - 2026-07-01
+
+Release summary: 1 bug fix.
+Tag range: `v0.145.9..v0.145.10`.
+
+### Bug Fixes
+
+- **memory**: exclude aggregate memories from aggregate recall (#880)
+
+## [0.145.9] - 2026-07-01
+
+Release summary: 1 bug fix.
+Tag range: `v0.145.8..v0.145.9`.
+
+### Bug Fixes
+
+- **memory**: recall source-backed ontology claims (#879)
+
+## [0.145.8] - 2026-06-30
+
+Release summary: 1 bug fix.
+Tag range: `v0.145.7..v0.145.8`.
+
+### Bug Fixes
+
+- **memory**: prevent recursive aggregate recall evidence (#877)
 
 ## [0.145.7] - 2026-06-29
 

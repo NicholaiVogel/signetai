@@ -1,30 +1,53 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "../../../core/src/migrations";
-import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
+import { type DbAccessor, type ReadDb, type WriteDb, closeDbAccessor, initDbAccessor } from "../db-accessor";
 import { loadMemoryConfig } from "../memory-config";
-import { IMMUTABLE_ARTIFACT_ERROR_PREFIX } from "../memory-lineage";
+import { IMMUTABLE_ARTIFACT_ERROR_PREFIX, writeSummaryArtifact } from "../memory-lineage";
 import { RateLimitExceededError } from "./provider";
+import type { LlmProvider } from "./provider";
 import {
 	SUMMARY_WORKER_UPDATED_BY,
+	type SummaryJobRow,
 	type SummaryWorkerHandle,
+	canProcessSummaryJobs,
 	clearCommandStageRunning,
 	getCommandStageStatus,
 	hasCommandStageCompleted,
 	insertSummaryFacts,
 	isTerminalSummaryJobError,
+	leaseSummaryJobWhenAvailable,
 	markCommandStageCompleted,
 	markCommandStageRunning,
+	persistSessionSummaryArtifact,
 	recoverSummaryJobs,
 	resolveFailedSummaryJobStatus,
 	resolveSummaryHeadingDate,
 	runSummaryCommandProvider,
+	scoreContinuity,
 	shouldRunSignificanceGateForJob,
+	startSummaryRecovery,
 	startSummaryWorker,
 } from "./summary-worker";
+
+describe("canProcessSummaryJobs", () => {
+	it("preserves command extraction when synthesis is unavailable", () => {
+		expect(canProcessSummaryJobs(true, false)).toBe(true);
+	});
+
+	it("requires synthesis for non-command summary work", () => {
+		expect(canProcessSummaryJobs(false, true)).toBe(true);
+		expect(canProcessSummaryJobs(false, false)).toBe(false);
+	});
+
+	it("does not let command extraction bypass a pipeline pause", () => {
+		expect(canProcessSummaryJobs(true, false, true)).toBe(false);
+		expect(canProcessSummaryJobs(true, true, true)).toBe(false);
+	});
+});
 
 function makeAccessor(db: Database): DbAccessor {
 	return {
@@ -321,6 +344,98 @@ describe("insertSummaryFacts", () => {
 	});
 });
 
+describe("leaseSummaryJobWhenAvailable", () => {
+	let db: Database;
+	let accessor: DbAccessor;
+
+	beforeEach(() => {
+		db = new Database(":memory:");
+		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
+		accessor = makeAccessor(db);
+		db.prepare(
+			`INSERT INTO summary_jobs
+			 (id, session_key, session_id, harness, project, agent_id, transcript,
+			  trigger, status, attempts, max_attempts, created_at)
+			 VALUES ('job-gated', 'session-gated', 'session-gated', 'hermes', NULL,
+			         'default', 'User: hello', 'session_end', 'pending', 0, 3, ?)`,
+		).run(new Date().toISOString());
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("leaves pending jobs unchanged when synthesis is unavailable", async () => {
+		const job = await leaseSummaryJobWhenAvailable(accessor, async () => false);
+
+		expect(job).toBeNull();
+		const row = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = 'job-gated'").get() as {
+			status: string;
+			attempts: number;
+		};
+		expect(row).toEqual({ status: "pending", attempts: 0 });
+	});
+
+	it("restores an unchanged pending job when synthesis becomes unavailable after lease", async () => {
+		let checks = 0;
+		const job = await leaseSummaryJobWhenAvailable(accessor, async () => {
+			checks += 1;
+			return checks === 1;
+		});
+
+		expect(job).toBeNull();
+		expect(checks).toBe(2);
+		const row = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = 'job-gated'").get() as {
+			status: string;
+			attempts: number;
+		};
+		expect(row).toEqual({ status: "pending", attempts: 0 });
+	});
+
+	it("restores an unchanged pending job when the post-lease availability check errors", async () => {
+		let checks = 0;
+		await expect(
+			leaseSummaryJobWhenAvailable(accessor, async () => {
+				checks += 1;
+				if (checks === 2) throw new Error("routing refresh failed");
+				return true;
+			}),
+		).rejects.toThrow("routing refresh failed");
+
+		const row = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = 'job-gated'").get() as {
+			status: string;
+			attempts: number;
+		};
+		expect(row).toEqual({ status: "pending", attempts: 0 });
+	});
+
+	it("surfaces a failed lease restoration instead of silently stranding work", async () => {
+		let checks = 0;
+		await expect(
+			leaseSummaryJobWhenAvailable(accessor, async () => {
+				checks += 1;
+				if (checks === 2) {
+					db.prepare("UPDATE summary_jobs SET status = 'dead' WHERE id = 'job-gated'").run();
+					return false;
+				}
+				return true;
+			}),
+		).rejects.toThrow("Failed to restore unprocessed summary lease for job job-gated");
+	});
+
+	it("leases a pending job only while synthesis remains available", async () => {
+		const job = await leaseSummaryJobWhenAvailable(accessor, async () => true);
+
+		expect(job?.id).toBe("job-gated");
+		expect(job?.attempts).toBe(1);
+		const row = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = 'job-gated'").get() as {
+			status: string;
+			attempts: number;
+		};
+		expect(row).toEqual({ status: "processing", attempts: 1 });
+	});
+});
+
 describe("recoverSummaryJobs", () => {
 	let db: Database;
 	let accessor: DbAccessor;
@@ -438,9 +553,76 @@ describe("recoverSummaryJobs", () => {
 		const after = db.prepare("SELECT status FROM summary_jobs WHERE id = 'job-startup'").get() as { status: string };
 		expect(after.status).toBe("pending");
 	});
+
+	it("recovers stale leases without leasing pending work", async () => {
+		const now = new Date().toISOString();
+		const stmt = db.prepare(
+			`INSERT INTO summary_jobs
+			 (id, session_key, harness, project, transcript, status, attempts, max_attempts, created_at)
+			 VALUES (?, NULL, 'codex', NULL, 'transcript', ?, ?, 3, ?)`,
+		);
+		stmt.run("job-stale", "leased", 1, now);
+		stmt.run("job-pending", "pending", 0, now);
+
+		const stopRecovery = startSummaryRecovery(accessor);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		stopRecovery();
+
+		const rows = db.prepare("SELECT id, status, attempts FROM summary_jobs ORDER BY id").all();
+		expect(rows).toEqual([
+			{ id: "job-pending", status: "pending", attempts: 0 },
+			{ id: "job-stale", status: "pending", attempts: 1 },
+		]);
+	});
 });
 
 describe("summary job helpers", () => {
+	it("passes pipeline cancellation into continuity scoring generation", async () => {
+		const db = new Database(":memory:");
+		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
+		const accessor = makeAccessor(db);
+		const controller = new AbortController();
+		controller.abort();
+		let observedSignal: AbortSignal | undefined;
+		const provider: LlmProvider = {
+			async generate(_prompt, opts) {
+				observedSignal = opts?.signal;
+				throw new Error("aborted");
+			},
+		};
+
+		try {
+			await expect(
+				scoreContinuity(
+					accessor,
+					provider,
+					{
+						id: "job-continuity",
+						session_key: "session-continuity",
+						session_id: null,
+						harness: "codex",
+						project: "/tmp/project",
+						agent_id: "default",
+						transcript: "User: summarize continuity cancellation",
+						trigger: "test",
+						captured_at: null,
+						started_at: null,
+						ended_at: null,
+						attempts: 1,
+						max_attempts: 3,
+						created_at: new Date().toISOString(),
+					},
+					"summary",
+					loadMemoryConfig(makeAgentsDir("memory:\n")),
+					controller.signal,
+				),
+			).rejects.toThrow("aborted");
+			expect(observedSignal).toBe(controller.signal);
+		} finally {
+			db.close();
+		}
+	});
+
 	it("derives the summary heading date from persisted session timing instead of wall clock", () => {
 		expect(
 			resolveSummaryHeadingDate({
@@ -576,6 +758,25 @@ describe("command stage completion marker", () => {
 });
 
 describe("runSummaryCommandProvider", () => {
+	function summaryJob(id: string, transcript = "test") {
+		return {
+			id,
+			session_key: `session-${id}`,
+			session_id: null,
+			harness: "codex",
+			project: "/tmp/project",
+			agent_id: "default",
+			transcript,
+			trigger: "test",
+			captured_at: null,
+			started_at: null,
+			ended_at: null,
+			attempts: 1,
+			max_attempts: 3,
+			created_at: new Date().toISOString(),
+		};
+	}
+
 	it("executes argv-safe command mode with token substitution and temp cleanup", async () => {
 		const marker = join(tmpdir(), `signet-summary-marker-${Date.now()}-${Math.random()}.txt`);
 		const dir = makeAgentsDir("memory:\n  pipelineV2:\n    extraction:\n      provider: ollama\n");
@@ -740,4 +941,204 @@ setInterval(() => {}, 1000);
 		expect(existsSync(marker)).toBe(true);
 		rmSync(marker, { force: true });
 	}, 15_000);
+
+	it("aborts command mode promptly from the active worker signal", async () => {
+		const marker = join(tmpdir(), `signet-summary-abort-${Date.now()}-${Math.random()}.txt`);
+		const dir = makeAgentsDir("memory:\n  pipelineV2:\n    extraction:\n      provider: ollama\n");
+		const scriptPath = join(dir, "summary-command-abort.mjs");
+		writeFileSync(
+			scriptPath,
+			`import { writeFileSync } from "node:fs";
+writeFileSync(process.argv[2], String(process.pid), "utf8");
+setInterval(() => {}, 1000);
+`,
+			"utf8",
+		);
+		const cfg = loadMemoryConfig(dir);
+		const commandCfg = {
+			...cfg,
+			pipelineV2: {
+				...cfg.pipelineV2,
+				extraction: {
+					...cfg.pipelineV2.extraction,
+					timeout: 5000,
+					provider: "command" as const,
+					command: { bin: process.execPath, args: [scriptPath, marker] },
+				},
+			},
+		};
+		const controller = new AbortController();
+		const started = Date.now();
+		const run = runSummaryCommandProvider(summaryJob("job-abort"), commandCfg, controller.signal);
+
+		for (let i = 0; i < 40 && !existsSync(marker); i += 1) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		controller.abort();
+
+		await expect(run).rejects.toThrow(/aborted/i);
+		expect(Date.now() - started).toBeLessThan(2500);
+		rmSync(marker, { force: true });
+	}, 8000);
+
+	it("kills stubborn command descendants on abort", async () => {
+		if (process.platform === "win32") return;
+		const root = join(tmpdir(), `signet-summary-descendant-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const dir = makeAgentsDir("memory:\n  pipelineV2:\n    extraction:\n      provider: ollama\n");
+		const rootPidPath = join(root, "root.pid");
+		const childPidPath = join(root, "child.pid");
+		mkdirSync(root, { recursive: true });
+		const scriptPath = join(dir, "summary-command-descendant.sh");
+		writeFileSync(
+			scriptPath,
+			`#!/usr/bin/env bash
+trap '' TERM
+printf '%s' "$$" > ${JSON.stringify(rootPidPath)}
+sleep 30 &
+printf '%s' "$!" > ${JSON.stringify(childPidPath)}
+wait
+`,
+			"utf8",
+		);
+		chmodSync(scriptPath, 0o755);
+		const cfg = loadMemoryConfig(dir);
+		const commandCfg = {
+			...cfg,
+			pipelineV2: {
+				...cfg.pipelineV2,
+				extraction: {
+					...cfg.pipelineV2.extraction,
+					timeout: 5000,
+					provider: "command" as const,
+					command: { bin: scriptPath, args: [] },
+				},
+			},
+		};
+		const controller = new AbortController();
+
+		try {
+			const run = runSummaryCommandProvider(summaryJob("job-descendant"), commandCfg, controller.signal);
+			for (let i = 0; i < 40 && (!existsSync(rootPidPath) || !existsSync(childPidPath)); i += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			controller.abort();
+			await expect(run).rejects.toThrow(/aborted/i);
+
+			const rootPid = Number(readFileSync(rootPidPath, "utf8"));
+			const childPid = Number(readFileSync(childPidPath, "utf8"));
+			let rootAlive = true;
+			let childAlive = true;
+			for (let i = 0; i < 50; i += 1) {
+				try {
+					process.kill(rootPid, 0);
+				} catch {
+					rootAlive = false;
+				}
+				try {
+					process.kill(childPid, 0);
+				} catch {
+					childAlive = false;
+				}
+				if (!rootAlive && !childAlive) break;
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			expect(rootAlive).toBe(false);
+			expect(childAlive).toBe(false);
+		} finally {
+			for (const path of [rootPidPath, childPidPath]) {
+				if (!existsSync(path)) continue;
+				const pid = Number(readFileSync(path, "utf8"));
+				if (pid > 0) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {
+						// Already exited.
+					}
+				}
+			}
+			rmSync(root, { recursive: true, force: true });
+		}
+	}, 8000);
+});
+
+describe("persistSessionSummaryArtifact", () => {
+	let dir = "";
+	let prevSignetPath: string | undefined;
+
+	function resetWorkspace(): void {
+		closeDbAccessor();
+		rmSync(join(dir, "memory"), { recursive: true, force: true });
+		mkdirSync(join(dir, "memory"), { recursive: true });
+		initDbAccessor(join(dir, "memory", "memories.db"));
+	}
+
+	beforeAll(() => {
+		prevSignetPath = process.env.SIGNET_PATH;
+		dir = mkdtempSync(join(tmpdir(), "signet-summary-conflict-"));
+		process.env.SIGNET_PATH = dir;
+		writeFileSync(
+			join(dir, "agent.yaml"),
+			`memory:
+  pipelineV2:
+    enabled: false
+`,
+		);
+		resetWorkspace();
+	});
+
+	beforeEach(() => {
+		resetWorkspace();
+	});
+
+	afterAll(() => {
+		closeDbAccessor();
+		rmSync(dir, { recursive: true, force: true });
+		if (prevSignetPath === undefined) {
+			Reflect.deleteProperty(process.env, "SIGNET_PATH");
+			return;
+		}
+		process.env.SIGNET_PATH = prevSignetPath;
+	});
+
+	it("completes instead of throwing when a prior attempt already committed the artifact (#900)", async () => {
+		const job: SummaryJobRow = {
+			id: "job-conflict",
+			session_key: "session-conflict",
+			session_id: "session-conflict",
+			harness: "codex",
+			project: "/mnt/work/dev/project",
+			agent_id: "default",
+			transcript: "transcript",
+			trigger: "session_end",
+			boundary_reason: "session_closed",
+			captured_at: "2026-04-03T14:08:11.982Z",
+			started_at: "2026-04-03T14:00:00.000Z",
+			ended_at: "2026-04-03T15:00:00.000Z",
+			attempts: 2,
+			max_attempts: 3,
+			created_at: "2026-04-03T14:08:11.982Z",
+		};
+
+		// Simulate a prior attempt that already committed the summary artifact
+		// (daemon crashed between core commit and the 'completed' status update).
+		await writeSummaryArtifact({
+			agentId: job.agent_id,
+			sessionId: job.session_id ?? job.session_key ?? job.id,
+			sessionKey: job.session_key,
+			project: job.project,
+			harness: job.harness,
+			capturedAt: job.captured_at ?? job.created_at,
+			startedAt: job.started_at,
+			endedAt: job.ended_at,
+			summary: "Prior attempt already persisted this summary with different body content.",
+		});
+
+		// The retry produces a different summary body. Without the immutable-
+		// conflict catch this throws (content mismatch) and the worker would
+		// classify it terminal -> dead. With the fix it resolves cleanly so the
+		// caller can mark the job completed.
+		await expect(
+			persistSessionSummaryArtifact(job, "Retry produced a different summary body.", null),
+		).resolves.toBeUndefined();
+	});
 });

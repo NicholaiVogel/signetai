@@ -21,6 +21,7 @@ fn row(id: &str, content: &str) -> RecallResult {
         score: 0.9,
         source: "hybrid".to_string(),
         source_id: None,
+        source_path: None,
         memory_type: "semantic".to_string(),
         tags: None,
         pinned: false,
@@ -29,6 +30,30 @@ fn row(id: &str, content: &str) -> RecallResult {
         project: None,
         created_at: "2026-05-20T12:00:00.000Z".to_string(),
         visibility: Some("global".to_string()),
+        scope: None,
+    }
+}
+
+fn ontology_claim_row(id: &str, content: &str) -> RecallResult {
+    RecallResult {
+        id: format!("ontology-claim:{id}"),
+        content: content.to_string(),
+        content_length: content.len(),
+        truncated: false,
+        score: 1.3,
+        source: "ontology_claim".to_string(),
+        source_id: Some(id.to_string()),
+        source_path: Some(
+            "/home/nicholai/.agents/dreaming/2026-06-29-cron-2230/dreaming-log.md:32".to_string(),
+        ),
+        memory_type: "ontology_claim".to_string(),
+        tags: Some("ontology,claim,source-backed".to_string()),
+        pinned: false,
+        importance: 0.82,
+        who: "signet".to_string(),
+        project: None,
+        created_at: "2026-06-29T22:30:00.000Z".to_string(),
+        visibility: None,
         scope: None,
     }
 }
@@ -52,6 +77,7 @@ fn response(query: &str, results: Vec<RecallResult>) -> RecallResponse {
 #[derive(Default)]
 struct StaticRecall {
     calls: RefCell<Vec<String>>,
+    exclude_flags: RefCell<Vec<bool>>,
     by_query: HashMap<String, Vec<RecallResult>>,
 }
 
@@ -64,6 +90,10 @@ impl StaticRecall {
     fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
+
+    fn exclude_flags(&self) -> Vec<bool> {
+        self.exclude_flags.borrow().clone()
+    }
 }
 
 impl AggregateRecallProvider for StaticRecall {
@@ -74,6 +104,9 @@ impl AggregateRecallProvider for StaticRecall {
     ) -> BoxAggregateFuture<'a, Result<RecallResponse, AggregateRecallError>> {
         Box::pin(async move {
             self.calls.borrow_mut().push(params.query.clone());
+            self.exclude_flags
+                .borrow_mut()
+                .push(params.exclude_aggregate_recall_memories);
             let rows = self
                 .by_query
                 .get(&params.query)
@@ -224,6 +257,93 @@ async fn rejects_invalid_aggregate_budget() {
     .await
     .expect_err("invalid budgets should reject");
     assert!(matches!(err, AggregateRecallError::InvalidBudget));
+}
+
+#[tokio::test]
+async fn provider_recalls_are_marked_to_exclude_aggregate_created_memories() {
+    let conn = setup_conn();
+    let recall = StaticRecall::default()
+        .with("what happened", vec![row("mem-1", "First evidence")])
+        .with("follow up one", vec![row("mem-2", "Second evidence")])
+        .with("follow up two", vec![row("mem-3", "Third evidence")]);
+    let router = StaticRouter::default();
+
+    aggregate_recall(
+        &conn,
+        AggregateRecallParams {
+            query: "what happened".to_string(),
+            aggregate: true,
+            agent_id: Some("agent-a".to_string()),
+            ..AggregateRecallParams::default()
+        },
+        AggregateRecallDeps {
+            recall: Some(&recall),
+            router: Some(&router),
+            ..AggregateRecallDeps::default()
+        },
+    )
+    .await
+    .expect("aggregate result");
+
+    let flags = recall.exclude_flags();
+    assert!(!flags.is_empty());
+    assert!(flags.iter().all(|flag| *flag));
+}
+
+#[tokio::test]
+async fn default_aggregate_recall_excludes_aggregate_created_memories() {
+    let conn = setup_conn();
+    conn.execute(
+        "INSERT INTO memories (
+            id, content, type, source_type, source_id, agent_id, visibility, created_at, updated_at, updated_by, importance
+        ) VALUES (?1, ?2, 'fact', 'aggregate-recall', 'aggregate-recall:old', 'agent-a', 'global', datetime('now'), datetime('now'), 'test', 0.9)",
+        params!["aggregate-created-memory", "alpha stale aggregate-created summary"],
+    )
+    .expect("insert aggregate memory");
+    conn.execute(
+        "INSERT INTO memories (
+            id, content, type, agent_id, visibility, created_at, updated_at, updated_by, importance
+        ) VALUES (?1, ?2, 'fact', 'agent-a', 'global', datetime('now'), datetime('now'), 'test', 0.9)",
+        params!["ordinary-memory", "alpha ordinary source evidence"],
+    )
+    .expect("insert ordinary memory");
+
+    let router = StaticRouter::default();
+    let result = aggregate_recall(
+        &conn,
+        AggregateRecallParams {
+            query: "alpha".to_string(),
+            aggregate: true,
+            agent_id: Some("agent-a".to_string()),
+            read_policy: Some("isolated".to_string()),
+            ..AggregateRecallParams::default()
+        },
+        AggregateRecallDeps {
+            router: Some(&router),
+            ..AggregateRecallDeps::default()
+        },
+    )
+    .await
+    .expect("aggregate result");
+
+    assert_eq!(
+        result
+            .aggregate
+            .expect("aggregate metadata")
+            .source_memory_ids,
+        vec!["ordinary-memory"]
+    );
+    let prompts = router.prompts.borrow();
+    assert!(
+        prompts
+            .iter()
+            .any(|prompt| prompt.contains("ordinary source evidence"))
+    );
+    assert!(
+        !prompts
+            .iter()
+            .any(|prompt| prompt.contains("stale aggregate-created"))
+    );
 }
 
 #[tokio::test]
@@ -580,4 +700,126 @@ async fn synthesized_recall_rows_are_not_evidence_sources() {
         .collect::<Result<Vec<_>, _>>()
         .expect("read links");
     assert_eq!(links, vec!["mem-1"]);
+}
+
+#[tokio::test]
+async fn saved_aggregate_recall_rows_are_not_recursive_evidence_sources() {
+    let conn = setup_conn();
+    let mut aggregate_row = row(
+        "aggregate-memory",
+        "Stale synthesized aggregate should not be recursive evidence",
+    );
+    aggregate_row.source_id = Some("aggregate-recall:old-key".to_string());
+    aggregate_row.tags = Some("aggregate,recall".to_string());
+    let recall = StaticRecall::default().with(
+        "what happened",
+        vec![aggregate_row, row("mem-1", "Real evidence")],
+    );
+    let router = StaticRouter::default();
+    let now = || Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap();
+    let id = || "aggregate-source-filter".to_string();
+
+    let result = aggregate_recall(
+        &conn,
+        AggregateRecallParams {
+            query: "what happened".to_string(),
+            aggregate: true,
+            agent_id: Some("agent-a".to_string()),
+            ..AggregateRecallParams::default()
+        },
+        AggregateRecallDeps {
+            recall: Some(&recall),
+            router: Some(&router),
+            now: Some(&now),
+            id_factory: Some(&id),
+            ..AggregateRecallDeps::default()
+        },
+    )
+    .await
+    .expect("aggregate result");
+
+    assert_eq!(
+        result
+            .aggregate
+            .expect("aggregate metadata")
+            .source_memory_ids,
+        vec!["mem-1"]
+    );
+    let prompts = router.prompts.borrow();
+    assert!(prompts[0].contains("Real evidence"));
+    assert!(!prompts[0].contains("Stale synthesized aggregate"));
+    assert!(prompts[1].contains("Real evidence"));
+    assert!(!prompts[1].contains("Stale synthesized aggregate"));
+}
+
+#[tokio::test]
+async fn ontology_claim_rows_save_typed_evidence_without_memory_source_links() {
+    let conn = setup_conn();
+    let recall = StaticRecall::default().with(
+        "how much were the Artbat invoices for Maksym Getman?",
+        vec![ontology_claim_row(
+            "attr-artbat-invoice",
+            "Current ARTBAT invoice is €1,000 and the outstanding 2025 balance is €2,000.",
+        )],
+    );
+    let router = StaticRouter::default();
+
+    let result = aggregate_recall(
+        &conn,
+        AggregateRecallParams {
+            query: "how much were the Artbat invoices for Maksym Getman?".to_string(),
+            aggregate: true,
+            agent_id: Some("agent-a".to_string()),
+            ..AggregateRecallParams::default()
+        },
+        AggregateRecallDeps {
+            recall: Some(&recall),
+            router: Some(&router),
+            ..AggregateRecallDeps::default()
+        },
+    )
+    .await
+    .expect("aggregate result");
+
+    let aggregate = result.aggregate.expect("aggregate metadata");
+    assert!(aggregate.saved);
+    let saved_memory_id = aggregate.saved_memory_id.expect("saved aggregate id");
+    assert!(aggregate.source_memory_ids.is_empty());
+    let saved_visibility: String = conn
+        .query_row(
+            "SELECT visibility FROM memories WHERE id = ?1",
+            params![&saved_memory_id],
+            |row| row.get(0),
+        )
+        .expect("read saved visibility");
+    assert_eq!(saved_visibility, "private");
+    let memory_link_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM aggregate_memory_sources WHERE aggregate_memory_id = ?1",
+            params![&saved_memory_id],
+            |row| row.get(0),
+        )
+        .expect("count memory links");
+    assert_eq!(memory_link_count, 0);
+    let evidence_links = conn
+        .prepare(
+            "SELECT source_kind, source_id FROM aggregate_evidence_sources WHERE aggregate_memory_id = ?1",
+        )
+        .expect("prepare evidence links")
+        .query_map(params![&saved_memory_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("query evidence links")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read evidence links");
+    assert_eq!(
+        evidence_links,
+        vec![(
+            "ontology_claim".to_string(),
+            "attr-artbat-invoice".to_string()
+        )]
+    );
+    let prompts = router.prompts.borrow();
+    assert!(prompts[1].contains("ontology-claim:attr-artbat-invoice"));
+    assert!(prompts[1].contains("€1,000"));
 }

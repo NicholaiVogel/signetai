@@ -11,13 +11,13 @@
  */
 
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
+import type { LlmProvider } from "@signet/core";
 import type { AnalyticsCollector } from "../analytics";
 import { getDbAccessor } from "../db-accessor";
 import { initDbAccessorLite } from "../db-accessor";
 import { fetchEmbedding } from "../embedding-fetch";
-import { getOrCreateInferenceRouter } from "../inference-router";
-import { getInferenceProvider, initInferenceProviderResolver } from "../llm";
-import type { PipelineV2Config, EmbeddingConfig, MemorySearchConfig } from "../memory-config";
+import type { EmbeddingConfig, MemorySearchConfig, PipelineV2Config } from "../memory-config";
+import { configureNativeEmbeddingAssets } from "../native-embedding";
 import type { TelemetryCollector } from "../telemetry";
 import type { DecisionConfig } from "./decision";
 import type { MainToWorkerMessage, WorkerInit, WorkerToMainMessage } from "./extraction-thread-protocol";
@@ -34,6 +34,7 @@ if (isMainThread) {
 
 const port = parentPort;
 if (!port) throw new Error("parentPort unavailable");
+const workerPort = port;
 const init = workerData as WorkerInit;
 
 // ---------------------------------------------------------------------------
@@ -41,7 +42,44 @@ const init = workerData as WorkerInit;
 // ---------------------------------------------------------------------------
 
 function send(msg: WorkerToMainMessage): void {
-	port!.postMessage(msg);
+	workerPort.postMessage(msg);
+}
+
+const pendingGenerate = new Map<
+	string,
+	{ readonly resolve: (value: string) => void; readonly reject: (error: Error) => void }
+>();
+let generateSeq = 0;
+
+function createMainThreadProviderProxy(): LlmProvider {
+	return {
+		name: "main-thread-proxy",
+		generate(prompt, opts) {
+			const id = `generate-${++generateSeq}`;
+			return new Promise<string>((resolve, reject) => {
+				pendingGenerate.set(id, { resolve, reject });
+				send({
+					type: "generate",
+					id,
+					prompt,
+					options: {
+						timeoutMs: opts?.timeoutMs,
+						maxTokens: opts?.maxTokens,
+						temperature: opts?.temperature,
+						responseFormat: opts?.responseFormat,
+						think: opts?.think,
+					},
+				});
+			});
+		},
+		async generateWithUsage(prompt, opts) {
+			const text = await this.generate(prompt, opts);
+			return { text, usage: null };
+		},
+		async available() {
+			return true;
+		},
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -112,22 +150,30 @@ const STATS_INTERVAL_MS = 10_000;
 
 async function bootstrap(): Promise<void> {
 	try {
+		// Configure pre-resolved native embedding asset paths BEFORE any
+		// embedding can happen. The extraction worker thread has an isolated
+		// globalThis — `globalThis.__SIGNET_NATIVE_RUNTIME_ASSETS__` is not
+		// registered here, so resolveEmbeddedWorkerPath() returns null and
+		// the embedding worker crashes with ModuleNotFound when the
+		// extraction thread tries to spawn its own embedding sub-worker (#922).
+		// The main thread resolves these paths and passes them via WorkerInit.
+		if (
+			init.nativeEmbeddingWorkerPath !== undefined ||
+			init.nativeWasmDir !== undefined ||
+			init.nativeTransformersRuntimePath !== undefined
+		) {
+			configureNativeEmbeddingAssets({
+				embeddingWorkerPath: init.nativeEmbeddingWorkerPath ?? null,
+				wasmDir: init.nativeWasmDir ?? null,
+				transformersRuntimePath: init.nativeTransformersRuntimePath ?? null,
+			});
+		}
+
 		// 1. Init DB — opens own bun:sqlite WAL connection
 		initDbAccessorLite(init.dbPath, init.vecExtensionPath);
 		const accessor = getDbAccessor();
 
-		// 2. Create LLM provider via inference router
-		//    Mirrors daemon.ts:1069-1086 — reads inference.yaml from agentsDir
-		const router = getOrCreateInferenceRouter(init.agentsDir);
-		initInferenceProviderResolver((workload) => {
-			switch (workload) {
-				case "memoryExtraction":
-					return router.createWorkloadProvider("memory_extraction", init.agentId);
-				default:
-					return router.createWorkloadProvider("default", init.agentId);
-			}
-		});
-		const provider = getInferenceProvider("memoryExtraction");
+		const provider = createMainThreadProviderProxy();
 
 		// 3. Reconstruct typed configs from serialized workerData
 		const pipelineCfg = init.pipelineConfig as unknown as PipelineV2Config;
@@ -159,13 +205,27 @@ async function bootstrap(): Promise<void> {
 		}, STATS_INTERVAL_MS);
 
 		// 6. Listen for control messages from main thread
-		port!.on("message", async (msg: MainToWorkerMessage) => {
+		workerPort.on("message", async (msg: MainToWorkerMessage) => {
 			if (msg.type === "stop") {
+				for (const [id, pending] of pendingGenerate) {
+					pending.reject(new Error("extraction worker stopped"));
+					pendingGenerate.delete(id);
+				}
 				clearInterval(statsTimer);
 				await handle.stop();
 				send({ type: "stopped" });
 			} else if (msg.type === "nudge") {
 				handle.nudge();
+			} else if (msg.type === "generateResult") {
+				const pending = pendingGenerate.get(msg.id);
+				if (!pending) return;
+				pendingGenerate.delete(msg.id);
+				pending.resolve(msg.text);
+			} else if (msg.type === "generateError") {
+				const pending = pendingGenerate.get(msg.id);
+				if (!pending) return;
+				pendingGenerate.delete(msg.id);
+				pending.reject(new Error(msg.error));
 			}
 		});
 

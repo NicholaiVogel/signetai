@@ -18,6 +18,7 @@ import type { ExtractionThreadOpts } from "./extraction-thread-handle";
 import type { WorkerInit } from "./extraction-thread-protocol";
 import { type MaintenanceHandle, startMaintenanceWorker } from "./maintenance-worker";
 import { type HintsWorkerHandle, startHintsWorker } from "./prospective-index";
+import { configureLlmConcurrency, getClaudeCodeCircuitStatus, getLlmConcurrencyStatus } from "./provider";
 import type { ReflectionWorkerHandle } from "./reflection-worker";
 import {
 	DEFAULT_RETENTION,
@@ -27,7 +28,12 @@ import {
 } from "./retention-worker";
 import { type StructuralClassifyHandle, startStructuralClassifyWorker } from "./structural-classify";
 import { type StructuralDependencyHandle, startStructuralDependencyWorker } from "./structural-dependency";
-import { type SummaryWorkerHandle, startSummaryWorker } from "./summary-worker";
+import {
+	type SummaryWorkerHandle,
+	type SummaryWorkerOptions,
+	startSummaryRecovery,
+	startSummaryWorker,
+} from "./summary-worker";
 import { type SynthesisWorkerHandle, startSynthesisWorker } from "./synthesis-worker";
 import { type WorkerHandle, type WorkerProgressStats, type WorkerStats, startWorker } from "./worker";
 
@@ -68,10 +74,53 @@ export function setDreamingWorker(handle: DreamingWorkerHandle | null): void {
 
 /** Start the summary worker if not already running (used when dreaming
  *  is enabled but pipelineV2 is disabled — dreaming needs summaries). */
-export function ensureSummaryWorker(accessor: DbAccessor): void {
+export function ensureSummaryWorker(accessor: DbAccessor, options: SummaryWorkerOptions = {}): void {
 	if (!summaryWorkerHandle) {
-		summaryWorkerHandle = startSummaryWorker(accessor);
+		summaryRecoveryStop?.();
+		summaryRecoveryStop = null;
+		summaryWorkerHandle = startSummaryWorker(accessor, options);
 	}
+}
+
+/** Recover stale summary leases without starting the polling worker. */
+export function ensureSummaryRecovery(
+	accessor: DbAccessor,
+	options: {
+		readonly workerOptions?: SummaryWorkerOptions;
+		readonly shouldStartWorker?: () => Promise<boolean>;
+	} = {},
+): void {
+	if (summaryWorkerHandle || summaryRecoveryStop) return;
+
+	const stopRecovery = startSummaryRecovery(accessor);
+	let stopped = false;
+	let monitorTimer: ReturnType<typeof setTimeout> | null = null;
+	const stop = (): void => {
+		stopped = true;
+		stopRecovery();
+		if (monitorTimer) clearTimeout(monitorTimer);
+	};
+	summaryRecoveryStop = stop;
+
+	const shouldStartWorker = options.shouldStartWorker;
+	if (!shouldStartWorker) return;
+	const monitor = async (): Promise<void> => {
+		if (stopped) return;
+		try {
+			const promoted = await promoteSummaryWorkerIfAvailable(
+				shouldStartWorker,
+				() => stopped,
+				() => ensureSummaryWorker(accessor, options.workerOptions),
+			);
+			if (promoted || stopped) return;
+		} catch (error) {
+			logger.warn("pipeline", "Summary workload monitor failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		if (!stopped) monitorTimer = setTimeout(() => void monitor(), 5_000);
+	};
+	monitorTimer = setTimeout(() => void monitor(), 5_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +132,22 @@ let retentionHandle: RetentionHandle | null = null;
 let maintenanceHandle: MaintenanceHandle | null = null;
 let documentWorkerHandle: DocumentWorkerHandle | null = null;
 let summaryWorkerHandle: SummaryWorkerHandle | null = null;
+let summaryRecoveryStop: (() => void) | null = null;
+
+/**
+ * Promote recovery-only mode after an asynchronous availability check, unless
+ * shutdown occurred while the check was in flight.
+ */
+export async function promoteSummaryWorkerIfAvailable(
+	shouldStartWorker: () => Promise<boolean>,
+	isStopped: () => boolean,
+	promote: () => void,
+): Promise<boolean> {
+	const shouldStart = await shouldStartWorker();
+	if (isStopped() || !shouldStart) return false;
+	promote();
+	return true;
+}
 let synthesisWorkerHandle: SynthesisWorkerHandle | null = null;
 let structuralClassifyHandle: StructuralClassifyHandle | null = null;
 let structuralDependencyHandle: StructuralDependencyHandle | null = null;
@@ -92,9 +157,57 @@ let dreamingWorkerHandle: DreamingWorkerHandle | null = null;
 let reflectionWorkerHandle: ReflectionWorkerHandle | null = null;
 let pendingStartup: Promise<void> | null = null;
 
+type WorkerStatusEntry = {
+	readonly running: boolean;
+	readonly stats?: WorkerStats;
+};
+
+type LlmConcurrencyStatus = ReturnType<typeof getLlmConcurrencyStatus>;
+type ClaudeCodeCircuitStatus = ReturnType<typeof getClaudeCodeCircuitStatus>;
+
+export type PipelineWorkerStatus = {
+	readonly llmConcurrency: {
+		readonly running: boolean;
+		readonly concurrency: LlmConcurrencyStatus;
+		/** Backward-compatible alias for callers that read provider status from stats. */
+		readonly stats: LlmConcurrencyStatus;
+	};
+	readonly claudeCode: {
+		/** Claude Code has no daemon worker; circuit-open cooldown is reported under circuit. */
+		readonly running: false;
+		readonly circuit: ClaudeCodeCircuitStatus;
+		/** Backward-compatible alias for callers that read provider status from stats. */
+		readonly stats: ClaudeCodeCircuitStatus;
+	};
+	readonly extraction: WorkerStatusEntry;
+	readonly summary: WorkerStatusEntry;
+	readonly document: WorkerStatusEntry;
+	readonly retention: WorkerStatusEntry;
+	readonly maintenance: WorkerStatusEntry;
+	readonly synthesis: WorkerStatusEntry;
+	readonly structuralClassify: WorkerStatusEntry;
+	readonly structuralDependency: WorkerStatusEntry;
+	readonly dependencySynthesis: WorkerStatusEntry;
+	readonly hints: WorkerStatusEntry;
+	readonly dreaming: WorkerStatusEntry;
+	readonly reflections: WorkerStatusEntry;
+};
+
 /** Snapshot of running state for each worker — used by /api/pipeline/status */
-export function getPipelineWorkerStatus(): Record<string, { running: boolean; stats?: WorkerStats }> {
+export function getPipelineWorkerStatus(): PipelineWorkerStatus {
+	const llmConcurrency = getLlmConcurrencyStatus();
+	const claudeCodeCircuit = getClaudeCodeCircuitStatus();
 	return {
+		llmConcurrency: {
+			running: llmConcurrency.running > 0,
+			concurrency: llmConcurrency,
+			stats: llmConcurrency,
+		},
+		claudeCode: {
+			running: false,
+			circuit: claudeCodeCircuit,
+			stats: claudeCodeCircuit,
+		},
 		extraction: {
 			running: workerHandle !== null,
 			stats: workerHandle?.stats,
@@ -161,6 +274,7 @@ export function startPipeline(
 		logger.info("pipeline", "Pipeline paused; worker start skipped");
 		return;
 	}
+	configureLlmConcurrency(pipelineCfg.worker.maxLlmConcurrency);
 
 	if (pipelineCfg.extraction.provider === "command") {
 		ensureRetentionWorker(accessor, DEFAULT_RETENTION);
@@ -191,7 +305,7 @@ export function startPipeline(
 	};
 
 	if (pipelineCfg.worker.threadedExtraction && workerInit) {
-		pendingStartup = startExtractionThread({ init: workerInit, analytics, telemetry })
+		pendingStartup = startExtractionThread({ init: workerInit, provider, analytics, telemetry })
 			.then((handle) => {
 				workerHandle = handle;
 				logger.info("pipeline", "Extraction worker thread started");
@@ -327,8 +441,12 @@ export async function stopPipeline(): Promise<void> {
 		structuralClassifyHandle = null;
 	}
 	if (summaryWorkerHandle) {
-		summaryWorkerHandle.stop();
+		await summaryWorkerHandle.stop();
 		summaryWorkerHandle = null;
+	}
+	if (summaryRecoveryStop) {
+		summaryRecoveryStop();
+		summaryRecoveryStop = null;
 	}
 	if (documentWorkerHandle) {
 		await documentWorkerHandle.stop();

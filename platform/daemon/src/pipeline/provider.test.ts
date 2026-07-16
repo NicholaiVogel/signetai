@@ -5,9 +5,10 @@
  */
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import { spawn as nodeSpawn } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { getBypassedSessionKeys, resetSessions } from "../session-tracker";
 import {
 	DEFAULT_OLLAMA_FALLBACK_MAX_CONTEXT_TOKENS,
@@ -15,14 +16,19 @@ import {
 	type LlmProviderStreamEvent,
 	SemaphoreTimeoutError,
 	awaitSubprocessWithDeadline,
+	configureLlmConcurrency,
 	createAcpxProvider,
 	createClaudeCodeProvider,
 	createCodexProvider,
+	createCommandLineProvider,
 	createLlamaCppProvider,
 	createOllamaProvider,
 	createOpenAiCompatibleProvider,
 	createOpenCodeProvider,
 	createOpenRouterProvider,
+	getClaudeCodeCircuitStatus,
+	getLlmConcurrencyStatus,
+	resetClaudeCodeCircuit,
 	resolveDefaultOllamaFallbackMaxContextTokens,
 	resolveDefaultOllamaFallbackModel,
 } from "./provider";
@@ -33,6 +39,7 @@ import {
 
 const originalFetch = globalThis.fetch;
 const originalSpawn = Bun.spawn;
+const originalWhich = Bun.which;
 
 function mockFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>): void {
 	globalThis.fetch = mock(handler) as unknown as typeof fetch;
@@ -44,6 +51,7 @@ function restoreFetch(): void {
 
 function restoreSpawn(): void {
 	Bun.spawn = originalSpawn;
+	Bun.which = originalWhich;
 }
 
 function streamFromString(value: string): ReadableStream<Uint8Array> {
@@ -53,6 +61,43 @@ function streamFromString(value: string): ReadableStream<Uint8Array> {
 			controller.close();
 		},
 	});
+}
+
+function deferred<T = void>(): {
+	readonly promise: Promise<T>;
+	resolve(value: T | PromiseLike<T>): void;
+	reject(reason?: unknown): void;
+} {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
+async function waitForPidFile(path: string): Promise<number> {
+	for (let i = 0; i < 100; i += 1) {
+		if (existsSync(path)) {
+			const pid = Number(readFileSync(path, "utf-8"));
+			if (pid > 0) return pid;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(`pid file was not written: ${path}`);
+}
+
+async function waitForProcessExit(pid: number): Promise<boolean> {
+	for (let i = 0; i < 60; i += 1) {
+		try {
+			process.kill(pid, 0);
+		} catch {
+			return true;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	return false;
 }
 
 async function collectStreamEvents(stream: ReadableStream<LlmProviderStreamEvent>): Promise<LlmProviderStreamEvent[]> {
@@ -662,6 +707,27 @@ describe("createOllamaProvider", () => {
 		await expect(provider.generate("test prompt", { timeoutMs: 50 })).rejects.toThrow(/timeout/i);
 	});
 
+	it("generate() aborts promptly when the caller signal is cancelled", async () => {
+		mockFetch((_url, init) => {
+			return new Promise((_resolve, reject) => {
+				const signal = init?.signal;
+				if (signal) {
+					signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+				}
+			});
+		});
+
+		const provider = createOllamaProvider({
+			model: "slow-model",
+			defaultTimeoutMs: 1000,
+		});
+		const controller = new AbortController();
+		const result = provider.generate("test prompt", { timeoutMs: 1000, signal: controller.signal });
+		setTimeout(() => controller.abort(), 20);
+
+		await expect(result).rejects.toThrow(/aborted/i);
+	});
+
 	it("generate() sends maxTokens as num_predict", async () => {
 		let capturedBody: Record<string, unknown> = {};
 		mockFetch(async (_url, init) => {
@@ -689,6 +755,32 @@ describe("createOllamaProvider", () => {
 		await provider.generate("test");
 		const options = getObjectField(capturedBody, "options");
 		expect(options ? getNumberField(options, "num_ctx") : undefined).toBe(4096);
+	});
+
+	it("generate() maps requested structured non-thinking output to Ollama body fields", async () => {
+		let capturedBody: Record<string, unknown> = {};
+		mockFetch(async (_url, init) => {
+			capturedBody = parseJsonObjectBody(init?.body);
+			return Response.json({ response: "{}" });
+		});
+
+		const provider = createOllamaProvider({ model: "test-model" });
+		await provider.generate("test", { responseFormat: "json", think: false });
+		expect(capturedBody.format).toBe("json");
+		expect(capturedBody.think).toBe(false);
+	});
+
+	it("generate() preserves free-form Ollama body unless structured output is requested", async () => {
+		let capturedBody: Record<string, unknown> = {};
+		mockFetch(async (_url, init) => {
+			capturedBody = parseJsonObjectBody(init?.body);
+			return Response.json({ response: "ok" });
+		});
+
+		const provider = createOllamaProvider({ model: "test-model" });
+		await provider.generate("test");
+		expect(capturedBody.format).toBeUndefined();
+		expect(capturedBody.think).toBeUndefined();
 	});
 
 	it("generate() omits num_ctx when maxContextTokens is non-finite", async () => {
@@ -738,7 +830,10 @@ describe("createOllamaProvider", () => {
 // ---------------------------------------------------------------------------
 
 describe("createOpenAiCompatibleProvider", () => {
-	afterEach(() => restoreFetch());
+	afterEach(() => {
+		configureLlmConcurrency(2);
+		restoreFetch();
+	});
 
 	it("buffers streaming reasoning_content when content arrives later", async () => {
 		mockFetch(async (_url, init) => {
@@ -842,6 +937,251 @@ describe("createOpenAiCompatibleProvider", () => {
 			},
 		]);
 	});
+
+	it("generate() aborts promptly when the caller signal is cancelled", async () => {
+		mockFetch((_url, init) => {
+			return new Promise((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+			});
+		});
+
+		const provider = createOpenAiCompatibleProvider({
+			name: "openai-compatible",
+			model: "test-model",
+			baseUrl: "http://localhost:9999",
+			defaultTimeoutMs: 1000,
+		});
+		const controller = new AbortController();
+		const result = provider.generate("test", { timeoutMs: 1000, signal: controller.signal });
+		setTimeout(() => controller.abort(), 20);
+
+		await expect(result).rejects.toThrow(/aborted/i);
+	});
+
+	it("respects the global LLM concurrency cap", async () => {
+		configureLlmConcurrency(1);
+		let active = 0;
+		let peak = 0;
+		mockFetch(async () => {
+			active += 1;
+			peak = Math.max(peak, active);
+			await new Promise((resolve) => setTimeout(resolve, 40));
+			active -= 1;
+			return Response.json({
+				choices: [{ message: { content: "ok" } }],
+			});
+		});
+
+		const provider = createOpenAiCompatibleProvider({
+			name: "openai-compatible",
+			model: "test-model",
+			baseUrl: "http://localhost:9999",
+			defaultTimeoutMs: 1000,
+		});
+
+		await Promise.all([provider.generate("one"), provider.generate("two")]);
+
+		expect(peak).toBe(1);
+		expect(getLlmConcurrencyStatus().running).toBe(0);
+	});
+
+	it("streamWithUsage holds the global LLM concurrency permit until the body reaches DONE", async () => {
+		configureLlmConcurrency(1);
+		const firstChunk = deferred<void>();
+		const secondChunk = deferred<void>();
+		let streamingController: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+		mockFetch(async (_url, init) => {
+			const body = parseJsonObjectBody(init?.body);
+			if (body.stream === true) {
+				return new Response(
+					new ReadableStream({
+						start(controller) {
+							streamingController = controller;
+						},
+					}),
+				);
+			}
+			await firstChunk.promise;
+			secondChunk.resolve();
+			return Response.json({ choices: [{ message: { content: "generated" } }] });
+		});
+
+		const provider = createOpenAiCompatibleProvider({
+			name: "openai-compatible",
+			model: "test-model",
+			baseUrl: "http://localhost:9999",
+			defaultTimeoutMs: 1000,
+		});
+		if (!provider.streamWithUsage) {
+			throw new Error("expected streamWithUsage on OpenAI-compatible provider");
+		}
+
+		const streamResult = await provider.streamWithUsage("stream");
+		const generated = provider.generate("generate");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		expect(getLlmConcurrencyStatus().running).toBe(1);
+		expect(getLlmConcurrencyStatus().pending).toBe(1);
+		const streamEvents = collectStreamEvents(streamResult.stream);
+		streamingController?.enqueue(
+			new TextEncoder().encode(
+				['data: {"choices":[{"delta":{"content":"streamed"}}]}', "", "data: [DONE]", "", ""].join("\n"),
+			),
+		);
+		streamingController?.close();
+		expect((await streamEvents).some((event) => event.type === "done")).toBe(true);
+
+		expect(getLlmConcurrencyStatus().running).toBe(1);
+		expect(getLlmConcurrencyStatus().pending).toBe(0);
+		firstChunk.resolve();
+		expect(await generated).toBe("generated");
+		await secondChunk.promise;
+		expect(getLlmConcurrencyStatus().running).toBe(0);
+	});
+
+	it("streamWithUsage releases its permit exactly once when upstream EOF arrives before DONE", async () => {
+		configureLlmConcurrency(1);
+		let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+		mockFetch(async (_url, init) => {
+			const body = parseJsonObjectBody(init?.body);
+			if (body.stream === true) {
+				return new Response(new ReadableStream({ start: (c) => (controller = c) }));
+			}
+			return Response.json({ choices: [{ message: { content: "after eof" } }] });
+		});
+		const provider = createOpenAiCompatibleProvider({
+			name: "openai-compatible",
+			model: "test-model",
+			baseUrl: "http://localhost:9999",
+			defaultTimeoutMs: 1000,
+		});
+		const result = await provider.streamWithUsage?.("stream");
+		if (!result) throw new Error("expected stream result");
+
+		const events = collectStreamEvents(result.stream);
+		controller?.close();
+		await expect(events).rejects.toThrow(/ended unexpectedly/);
+		await expect(provider.generate("next")).resolves.toBe("after eof");
+		expect(getLlmConcurrencyStatus().running).toBe(0);
+	});
+
+	it("streamWithUsage releases its permit exactly once on reader errors", async () => {
+		configureLlmConcurrency(1);
+		let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+		mockFetch(async (_url, init) => {
+			const body = parseJsonObjectBody(init?.body);
+			if (body.stream === true) {
+				return new Response(new ReadableStream({ start: (c) => (controller = c) }));
+			}
+			return Response.json({ choices: [{ message: { content: "after reader error" } }] });
+		});
+		const provider = createOpenAiCompatibleProvider({
+			name: "openai-compatible",
+			model: "test-model",
+			baseUrl: "http://localhost:9999",
+			defaultTimeoutMs: 1000,
+		});
+		const result = await provider.streamWithUsage?.("stream");
+		if (!result) throw new Error("expected stream result");
+
+		const events = collectStreamEvents(result.stream);
+		controller?.error(new Error("reader failed"));
+		await expect(events).rejects.toThrow(/reader failed/);
+		await expect(provider.generate("next")).resolves.toBe("after reader error");
+		expect(getLlmConcurrencyStatus().running).toBe(0);
+	});
+
+	it("streamWithUsage releases its permit exactly once on explicit cancel", async () => {
+		configureLlmConcurrency(1);
+		let cancelCount = 0;
+		mockFetch(async (_url, init) => {
+			const body = parseJsonObjectBody(init?.body);
+			if (body.stream === true) {
+				return new Response(
+					new ReadableStream({
+						cancel() {
+							cancelCount += 1;
+						},
+					}),
+				);
+			}
+			return Response.json({ choices: [{ message: { content: "after cancel" } }] });
+		});
+		const provider = createOpenAiCompatibleProvider({
+			name: "openai-compatible",
+			model: "test-model",
+			baseUrl: "http://localhost:9999",
+			defaultTimeoutMs: 1000,
+		});
+		const result = await provider.streamWithUsage?.("stream");
+		if (!result) throw new Error("expected stream result");
+
+		result.cancel("test cancel");
+		result.cancel("duplicate cancel");
+		await expect(provider.generate("next")).resolves.toBe("after cancel");
+		expect(cancelCount).toBeLessThanOrEqual(1);
+		expect(getLlmConcurrencyStatus().running).toBe(0);
+	});
+
+	it("streamWithUsage releases its permit exactly once when caller aborts the open body", async () => {
+		configureLlmConcurrency(1);
+		let sawAbort = false;
+		mockFetch(async (_url, init) => {
+			const body = parseJsonObjectBody(init?.body);
+			if (body.stream === true) {
+				init?.signal?.addEventListener("abort", () => {
+					sawAbort = true;
+				});
+				return new Response(new ReadableStream());
+			}
+			return Response.json({ choices: [{ message: { content: "after abort" } }] });
+		});
+		const provider = createOpenAiCompatibleProvider({
+			name: "openai-compatible",
+			model: "test-model",
+			baseUrl: "http://localhost:9999",
+			defaultTimeoutMs: 1000,
+		});
+		const abort = new AbortController();
+		const result = await provider.streamWithUsage?.("stream", { signal: abort.signal, timeoutMs: 1000 });
+		if (!result) throw new Error("expected stream result");
+
+		abort.abort();
+		await expect(provider.generate("next")).resolves.toBe("after abort");
+		expect(sawAbort).toBe(true);
+		expect(getLlmConcurrencyStatus().running).toBe(0);
+	});
+
+	it("streamWithUsage releases its permit exactly once when the open body times out", async () => {
+		configureLlmConcurrency(1);
+		let sawAbort = false;
+		mockFetch(async (_url, init) => {
+			const body = parseJsonObjectBody(init?.body);
+			if (body.stream === true) {
+				init?.signal?.addEventListener("abort", () => {
+					sawAbort = true;
+				});
+				return new Response(new ReadableStream());
+			}
+			return Response.json({ choices: [{ message: { content: "after timeout" } }] });
+		});
+		const provider = createOpenAiCompatibleProvider({
+			name: "openai-compatible",
+			model: "test-model",
+			baseUrl: "http://localhost:9999",
+			defaultTimeoutMs: 25,
+		});
+		const result = await provider.streamWithUsage?.("stream", { timeoutMs: 25 });
+		if (!result) throw new Error("expected stream result");
+
+		for (let i = 0; i < 20 && getLlmConcurrencyStatus().running !== 0; i += 1) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		await expect(provider.generate("next")).resolves.toBe("after timeout");
+		expect(sawAbort).toBe(true);
+		expect(getLlmConcurrencyStatus().running).toBe(0);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -849,6 +1189,31 @@ describe("createOpenAiCompatibleProvider", () => {
 // ---------------------------------------------------------------------------
 
 describe("createClaudeCodeProvider", () => {
+	function withFakeClaudeOnPath(): () => void {
+		const root = join(tmpdir(), `signet-claude-code-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const binDir = join(root, "bin");
+		mkdirSync(binDir, { recursive: true });
+		const claudeBin = join(binDir, "claude");
+		writeFileSync(claudeBin, "#!/usr/bin/env sh\n");
+		chmodSync(claudeBin, 0o755);
+		const previousPath = process.env.PATH;
+		process.env.PATH = previousPath ? `${binDir}${delimiter}${previousPath}` : binDir;
+		Bun.which = mock((bin: string) =>
+			bin === "claude" ? claudeBin : originalWhich.call(Bun, bin),
+		) as typeof Bun.which;
+		return () => {
+			Bun.which = originalWhich;
+			if (previousPath === undefined) Reflect.deleteProperty(process.env, "PATH");
+			else process.env.PATH = previousPath;
+			rmSync(root, { recursive: true, force: true });
+		};
+	}
+
+	afterEach(() => {
+		restoreSpawn();
+		resetClaudeCodeCircuit();
+	});
+
 	it("returns a provider with the correct name", () => {
 		const provider = createClaudeCodeProvider({ model: "haiku" });
 		expect(provider.name).toBe("claude-code:haiku");
@@ -865,10 +1230,251 @@ describe("createClaudeCodeProvider", () => {
 		// This will be true in dev environments where claude is installed
 		expect(typeof result).toBe("boolean");
 	});
+
+	it("does not pass ambient Anthropic API credentials to background print-mode calls by default", async () => {
+		const previous = {
+			ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+			ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
+			CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+		};
+		process.env.ANTHROPIC_API_KEY = "sk-ant-secret";
+		process.env.ANTHROPIC_AUTH_TOKEN = "paid-console-token";
+		process.env.CLAUDE_CODE_OAUTH_TOKEN = "subscription-token";
+		const restorePath = withFakeClaudeOnPath();
+		try {
+			Bun.spawn = mock((args: string[], opts?: { env?: Record<string, string | undefined> }) => {
+				expect(args).toContain("-p");
+				expect(opts?.env?.ANTHROPIC_API_KEY).toBeUndefined();
+				expect(opts?.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+				expect(opts?.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe("subscription-token");
+				return {
+					pid: 12345,
+					stdout: streamFromString("ok\n"),
+					stderr: streamFromString(""),
+					exited: Promise.resolve(0),
+					kill() {},
+				};
+			}) as unknown as typeof Bun.spawn;
+
+			const provider = createClaudeCodeProvider({ model: "haiku" });
+			await expect(provider.generate("hello", { timeoutMs: 1000 })).resolves.toBe("ok");
+		} finally {
+			restorePath();
+			for (const [key, value] of Object.entries(previous)) {
+				if (value === undefined) Reflect.deleteProperty(process.env, key);
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	it("passes Anthropic API credentials only when API key env inheritance is explicit and maps maxBudgetUsd", async () => {
+		process.env.ANTHROPIC_API_KEY = "sk-ant-explicit";
+		const restorePath = withFakeClaudeOnPath();
+		try {
+			Bun.spawn = mock((args: string[], opts?: { env?: Record<string, string | undefined> }) => {
+				expect(args).toContain("--max-budget-usd");
+				expect(args[args.indexOf("--max-budget-usd") + 1]).toBe("0.25");
+				expect(opts?.env?.ANTHROPIC_API_KEY).toBe("sk-ant-explicit");
+				return {
+					pid: 12346,
+					stdout: streamFromString("ok\n"),
+					stderr: streamFromString(""),
+					exited: Promise.resolve(0),
+					kill() {},
+				};
+			}) as unknown as typeof Bun.spawn;
+
+			const provider = createClaudeCodeProvider({
+				model: "haiku",
+				allowApiKeyEnv: true,
+				maxBudgetUsd: 0.25,
+			});
+			await expect(provider.generate("hello", { timeoutMs: 1000 })).resolves.toBe("ok");
+		} finally {
+			restorePath();
+			Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
+		}
+	});
+
+	it("opens a daemon-wide cooldown on classified stderr failures and rejects without respawn", async () => {
+		const restorePath = withFakeClaudeOnPath();
+		let spawns = 0;
+		Bun.spawn = mock(() => {
+			spawns += 1;
+			return {
+				pid: 12347,
+				stdout: streamFromString(""),
+				stderr: streamFromString("Claude AI usage limit reached. Try again later.\n"),
+				exited: Promise.resolve(1),
+				kill() {},
+			};
+		}) as unknown as typeof Bun.spawn;
+
+		const provider = createClaudeCodeProvider({
+			model: "haiku",
+			cooldownMs: 60_000,
+		});
+		await expect(provider.generate("first", { timeoutMs: 1000 })).rejects.toThrow(/usage limit/i);
+		const status = getClaudeCodeCircuitStatus();
+		expect(status.open).toBe(true);
+		expect(status.reason).toBe("usage_limit");
+
+		await expect(provider.generate("second", { timeoutMs: 1000 })).rejects.toThrow(/cooldown/i);
+		expect(spawns).toBe(1);
+		restorePath();
+	});
+
+	it("opens the cooldown from JSON error subtype output", async () => {
+		const restorePath = withFakeClaudeOnPath();
+		Bun.spawn = mock(() => ({
+			pid: 12348,
+			stdout: streamFromString(
+				JSON.stringify({ type: "error", subtype: "billing_error", message: "credits exhausted" }),
+			),
+			stderr: streamFromString(""),
+			exited: Promise.resolve(0),
+			kill() {},
+		})) as unknown as typeof Bun.spawn;
+
+		const provider = createClaudeCodeProvider({ model: "haiku", cooldownMs: 60_000 });
+		await expect(provider.generateWithUsage?.("first", { timeoutMs: 1000 })).rejects.toThrow(/billing/i);
+		const status = getClaudeCodeCircuitStatus();
+		expect(status.open).toBe(true);
+		expect(status.reason).toBe("billing");
+		restorePath();
+	});
+
+	it("does not open daemon auth cooldown for generic local permission denied", async () => {
+		const restorePath = withFakeClaudeOnPath();
+		let spawns = 0;
+		try {
+			Bun.spawn = mock(() => {
+				spawns += 1;
+				return {
+					pid: 12349,
+					stdout: streamFromString(""),
+					stderr: streamFromString("bash: /tmp/local-script: Permission denied\n"),
+					exited: Promise.resolve(126),
+					kill() {},
+				};
+			}) as unknown as typeof Bun.spawn;
+
+			const provider = createClaudeCodeProvider({ model: "haiku", cooldownMs: 60_000 });
+			await expect(provider.generate("first", { timeoutMs: 1000 })).rejects.toThrow(/exit 126/i);
+			expect(getClaudeCodeCircuitStatus().open).toBe(false);
+			await expect(provider.generate("second", { timeoutMs: 1000 })).rejects.toThrow(/exit 126/i);
+			expect(spawns).toBe(2);
+		} finally {
+			restorePath();
+		}
+	});
+
+	it("keeps cooldown after a failed half-open probe with unclassified output", async () => {
+		const restorePath = withFakeClaudeOnPath();
+		let spawns = 0;
+		try {
+			Bun.spawn = mock(() => {
+				spawns += 1;
+				return {
+					pid: 12350,
+					stdout: streamFromString(""),
+					stderr:
+						spawns === 1
+							? streamFromString("Claude AI usage limit reached. Try again later.\n")
+							: streamFromString("temporary local failure\n"),
+					exited: Promise.resolve(1),
+					kill() {},
+				};
+			}) as unknown as typeof Bun.spawn;
+
+			const provider = createClaudeCodeProvider({ model: "haiku", cooldownMs: 1 });
+			await expect(provider.generate("first", { timeoutMs: 1000 })).rejects.toThrow(/usage limit/i);
+			await new Promise((resolve) => setTimeout(resolve, 1050));
+			await expect(provider.generate("probe", { timeoutMs: 1000 })).rejects.toThrow(/temporary local failure/i);
+
+			const status = getClaudeCodeCircuitStatus();
+			expect(status.open).toBe(true);
+			expect(status.status).toBe("open");
+			expect(status.reason).toBe("usage_limit");
+			await expect(provider.generate("blocked", { timeoutMs: 1000 })).rejects.toThrow(/cooldown/i);
+			expect(spawns).toBe(2);
+		} finally {
+			restorePath();
+		}
+	});
 });
 
 describe("createCodexProvider", () => {
-	afterEach(() => restoreSpawn());
+	let restoreCodexEnv: (() => void) | undefined;
+
+	afterEach(() => {
+		restoreSpawn();
+		restoreCodexEnv?.();
+		restoreCodexEnv = undefined;
+	});
+	function withTempCodexEnv(root: string, options: { auth?: boolean; apiKey?: string }): () => void {
+		const previous = {
+			HOME: process.env.HOME,
+			CODEX_HOME: process.env.CODEX_HOME,
+			OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+			PATH: process.env.PATH,
+			SIGNET_CODEX_RUNTIME_DIR: process.env.SIGNET_CODEX_RUNTIME_DIR,
+		};
+		const home = join(root, "home");
+		const codexHome = join(root, "codex-home");
+		const binDir = join(root, "bin");
+		mkdirSync(home, { recursive: true });
+		mkdirSync(codexHome, { recursive: true });
+		mkdirSync(binDir, { recursive: true });
+		const codexBin = join(binDir, "codex");
+		writeFileSync(codexBin, "#!/usr/bin/env sh\n");
+		chmodSync(codexBin, 0o755);
+		if (options.auth) writeFileSync(join(codexHome, "auth.json"), '{"provider":"test"}');
+		process.env.HOME = home;
+		process.env.CODEX_HOME = codexHome;
+		process.env.PATH = previous.PATH ? `${binDir}${delimiter}${previous.PATH}` : binDir;
+		process.env.SIGNET_CODEX_RUNTIME_DIR = join(root, "runtime");
+		if (options.apiKey === undefined) {
+			Reflect.deleteProperty(process.env, "OPENAI_API_KEY");
+		} else {
+			process.env.OPENAI_API_KEY = options.apiKey;
+		}
+
+		return () => {
+			for (const [key, value] of Object.entries(previous)) {
+				if (value === undefined) {
+					Reflect.deleteProperty(process.env, key);
+				} else {
+					process.env[key] = value;
+				}
+			}
+			rmSync(root, { recursive: true, force: true });
+		};
+	}
+
+	function useTempCodexEnv(options: { auth?: boolean; apiKey?: string } = { auth: true }): void {
+		const root = join(tmpdir(), `signet-codex-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		restoreCodexEnv = withTempCodexEnv(root, options);
+	}
+
+	function mockCodexVersion(exitCode: number, forbiddenSecret?: string): () => number {
+		let calls = 0;
+		Bun.spawn = mock((args: string[], opts?: { env?: Record<string, string | undefined> }) => {
+			calls += 1;
+			expect(args.at(-1)).toBe("--version");
+			if (forbiddenSecret) {
+				expect(args.join("\0")).not.toContain(forbiddenSecret);
+				expect(Object.values(opts?.env ?? {}).join("\0")).not.toContain(forbiddenSecret);
+			}
+			return {
+				stdout: streamFromString("codex 1.0.0\n"),
+				stderr: streamFromString(""),
+				exited: Promise.resolve(exitCode),
+				kill() {},
+			};
+		}) as unknown as typeof Bun.spawn;
+		return () => calls;
+	}
 
 	it("uses the default model (gpt-5.4-mini) when none is supplied", () => {
 		const provider = createCodexProvider();
@@ -880,7 +1486,61 @@ describe("createCodexProvider", () => {
 		expect(provider.name).toBe("codex:gpt-5.3-codex");
 	});
 
+	it("available() returns true when codex --version exits 0 and CODEX_HOME auth exists", async () => {
+		const root = join(tmpdir(), `signet-codex-available-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const restoreEnv = withTempCodexEnv(root, { auth: true });
+		const calls = mockCodexVersion(0);
+		try {
+			const provider = createCodexProvider();
+			expect(await provider.available()).toBe(true);
+			expect(calls()).toBe(1);
+		} finally {
+			restoreEnv();
+		}
+	});
+
+	it("available() returns true when codex --version exits 0 and OPENAI_API_KEY exists", async () => {
+		const root = join(tmpdir(), `signet-codex-available-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const apiKey = "test-openai-api-key";
+		const restoreEnv = withTempCodexEnv(root, { apiKey });
+		const calls = mockCodexVersion(0, apiKey);
+		try {
+			const provider = createCodexProvider();
+			expect(await provider.available()).toBe(true);
+			expect(calls()).toBe(1);
+		} finally {
+			restoreEnv();
+		}
+	});
+
+	it("available() returns false when codex --version exits 0 without auth or API key", async () => {
+		const root = join(tmpdir(), `signet-codex-available-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const restoreEnv = withTempCodexEnv(root, {});
+		const calls = mockCodexVersion(0);
+		try {
+			const provider = createCodexProvider();
+			expect(await provider.available()).toBe(false);
+			expect(calls()).toBe(1);
+		} finally {
+			restoreEnv();
+		}
+	});
+
+	it("available() returns false when codex --version fails", async () => {
+		const root = join(tmpdir(), `signet-codex-available-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const restoreEnv = withTempCodexEnv(root, { auth: true });
+		const calls = mockCodexVersion(1);
+		try {
+			const provider = createCodexProvider();
+			expect(await provider.available()).toBe(false);
+			expect(calls()).toBe(1);
+		} finally {
+			restoreEnv();
+		}
+	});
+
 	it("generateWithUsage() parses JSONL agent output and usage", async () => {
+		useTempCodexEnv();
 		let capturedArgs: string[] = [];
 		let capturedEnv: Record<string, string | undefined> | undefined;
 		Bun.spawn = mock((args: string[], opts?: { env?: Record<string, string | undefined> }) => {
@@ -914,6 +1574,7 @@ describe("createCodexProvider", () => {
 	});
 
 	it("does not disable Signet MCP through an incomplete Codex config override", async () => {
+		useTempCodexEnv();
 		let capturedArgs: string[] = [];
 		Bun.spawn = mock((args: string[]) => {
 			capturedArgs = args;
@@ -940,14 +1601,17 @@ describe("createCodexProvider", () => {
 		const root = join(tmpdir(), `signet-codex-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		const home = join(root, "home");
 		const liveCodex = join(root, "live-codex");
+		const runtimeRoot = join(root, "runtime");
 		mkdirSync(liveCodex, { recursive: true });
 		writeFileSync(join(liveCodex, "auth.json"), '{"provider":"test"}');
 		writeFileSync(join(liveCodex, "version.json"), '{"version":"1"}');
 
 		const prevHome = process.env.HOME;
 		const prevCodexHome = process.env.CODEX_HOME;
+		const prevCodexRuntimeDir = process.env.SIGNET_CODEX_RUNTIME_DIR;
 		process.env.HOME = home;
 		process.env.CODEX_HOME = liveCodex;
+		process.env.SIGNET_CODEX_RUNTIME_DIR = runtimeRoot;
 
 		let capturedEnv: Record<string, string | undefined> | undefined;
 		Bun.spawn = mock((args: string[], opts?: { env?: Record<string, string | undefined> }) => {
@@ -956,7 +1620,7 @@ describe("createCodexProvider", () => {
 			const srcVersion = join(liveCodex, "version.json");
 			const dstAuth = join(capturedEnv?.CODEX_HOME ?? "", "auth.json");
 			expect(capturedEnv?.CODEX_HOME).toBe(join(capturedEnv?.HOME ?? "", ".codex"));
-			expect(capturedEnv?.HOME?.startsWith(tmpdir())).toBe(true);
+			expect(capturedEnv?.HOME?.startsWith(runtimeRoot)).toBe(true);
 			expect(existsSync(dstAuth)).toBe(existsSync(srcAuth));
 			if (existsSync(srcAuth)) {
 				expect(lstatSync(dstAuth).isSymbolicLink()).toBe(false);
@@ -997,12 +1661,19 @@ describe("createCodexProvider", () => {
 			} else {
 				process.env.CODEX_HOME = prevCodexHome;
 			}
+			if (prevCodexRuntimeDir === undefined) {
+				Reflect.deleteProperty(process.env, "SIGNET_CODEX_RUNTIME_DIR");
+			} else {
+				process.env.SIGNET_CODEX_RUNTIME_DIR = prevCodexRuntimeDir;
+			}
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
 	it("does not delete sibling sterile homes while Codex is running", async () => {
+		useTempCodexEnv();
 		const root = join(tmpdir(), "signet-codex-home");
+		process.env.SIGNET_CODEX_RUNTIME_DIR = root;
 		mkdirSync(root, { recursive: true });
 		const sibling = join(root, `home-sibling-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		const marker = join(sibling, "marker.txt");
@@ -1039,6 +1710,7 @@ describe("createCodexProvider", () => {
 	});
 
 	it("generate() throws on non-zero exit", async () => {
+		useTempCodexEnv();
 		Bun.spawn = mock((_args: string[]) => ({
 			stdout: streamFromString(""),
 			stderr: streamFromString("boom"),
@@ -1051,6 +1723,7 @@ describe("createCodexProvider", () => {
 	});
 
 	it("generate() reports timeout when kill triggers a non-zero exit", async () => {
+		useTempCodexEnv();
 		Bun.spawn = mock((_args: string[]) => {
 			let resolveExit!: (code: number) => void;
 			const exited = new Promise<number>((resolve) => {
@@ -1104,7 +1777,10 @@ function openCodeResponse(text: string, tokens?: { input?: number; output?: numb
 }
 
 describe("createOpenCodeProvider", () => {
-	afterEach(() => restoreFetch());
+	afterEach(() => {
+		configureLlmConcurrency(2);
+		restoreFetch();
+	});
 
 	it("returns a provider with the correct name", () => {
 		const provider = createOpenCodeProvider({ model: "google/gemini-2.5-flash" });
@@ -1459,6 +2135,43 @@ describe("createOpenCodeProvider", () => {
 			defaultTimeoutMs: 50,
 		});
 		await expect(provider.generate("test", { timeoutMs: 50 })).rejects.toThrow(/timeout/i);
+	});
+
+	it("aborts an indefinitely pending message fetch when the caller signal is cancelled", async () => {
+		let messageSignal: AbortSignal | undefined;
+		mockFetch(
+			withParentSession(async (url, init) => {
+				if (url.includes("/session") && !url.includes("/message")) {
+					return Response.json({
+						id: "ses_abort",
+						slug: "test",
+						projectID: "p",
+						directory: "/tmp",
+						title: "test",
+						version: "1",
+					});
+				}
+				if (url.endsWith("/session/ses_abort/message") && init?.method === "POST") {
+					messageSignal = init.signal ?? undefined;
+					return new Promise((_resolve, reject) => {
+						init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+					});
+				}
+				return Response.json({});
+			}),
+		);
+
+		const provider = createOpenCodeProvider({ baseUrl: "http://localhost:9999" });
+		const controller = new AbortController();
+		const started = performance.now();
+		const result = provider.generate("test", { timeoutMs: 500, signal: controller.signal });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		controller.abort();
+
+		await expect(result).rejects.toThrow(/aborted/i);
+		expect(performance.now() - started).toBeLessThan(200);
+		expect(messageSignal?.aborted).toBe(true);
+		expect(getLlmConcurrencyStatus().running).toBe(0);
 	});
 
 	it("available() returns true when /global/health responds 200", async () => {
@@ -2202,7 +2915,7 @@ describe("createOpenCodeProvider", () => {
 
 		expect(results).toHaveLength(N);
 		for (const r of results) expect(r).toBe("ok");
-		expect(peak).toBeLessThanOrEqual(4);
+		expect(peak).toBeLessThanOrEqual(getLlmConcurrencyStatus().limit);
 		expect(peak).toBeGreaterThan(0);
 	});
 
@@ -2226,8 +2939,9 @@ describe("createOpenCodeProvider", () => {
 			}),
 		);
 
-		// Fill all 4 semaphore slots with blocked requests
-		const fillers = Array.from({ length: 4 }, (_, i) =>
+		const limit = getLlmConcurrencyStatus().limit;
+		// Fill all semaphore slots with blocked requests
+		const fillers = Array.from({ length: limit }, (_, i) =>
 			createOpenCodeProvider({ baseUrl: "http://localhost:9999", model: `filler${i}` }),
 		);
 		const fillerPromises = fillers.map((p) => p.generate("block"));
@@ -2685,6 +3399,21 @@ describe("LlmConcurrencySemaphore", () => {
 		sem.release();
 	});
 
+	it("external abort removes queued acquisition without waiting for timeout", async () => {
+		const sem = new LlmConcurrencySemaphore(1);
+		await sem.acquire();
+		const controller = new AbortController();
+		const wait = sem.acquireWithTimeout(500, controller.signal);
+		expect(sem.pending).toBe(1);
+		controller.abort();
+
+		await expect(wait).rejects.toThrow(/aborted/i);
+		expect(sem.pending).toBe(0);
+		expect(sem.activeTimers).toBe(0);
+
+		sem.release();
+	});
+
 	it("global cap: concurrent calls beyond max queue and resolve in order", async () => {
 		const sem = new LlmConcurrencySemaphore(2);
 
@@ -2714,6 +3443,75 @@ describe("LlmConcurrencySemaphore", () => {
 	it("rejects fractional SIGNET_MAX_LLM_CONCURRENCY", () => {
 		const parsed = Number("1.5");
 		expect(Number.isSafeInteger(parsed)).toBe(false);
+	});
+
+	it("reconfigures the global semaphore without stranding active or queued callers", async () => {
+		configureLlmConcurrency(1);
+		const gate = new AbortController();
+		let running = 0;
+		const waitForStatus = async (expected: { running: number; pending: number; limit: number }): Promise<void> => {
+			for (let i = 0; i < 40; i += 1) {
+				const status = getLlmConcurrencyStatus();
+				if (
+					status.running === expected.running &&
+					status.pending === expected.pending &&
+					status.limit === expected.limit
+				) {
+					return;
+				}
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			expect(getLlmConcurrencyStatus()).toMatchObject(expected);
+		};
+
+		mockFetch((_url, init) => {
+			running += 1;
+			return new Promise<Response>((resolve, reject) => {
+				let settled = false;
+				const finish = () => {
+					if (settled) return;
+					settled = true;
+					running -= 1;
+					resolve(Response.json({ response: "ok" }));
+				};
+				if (gate.signal.aborted) finish();
+				else gate.signal.addEventListener("abort", finish, { once: true });
+				init?.signal?.addEventListener("abort", () => {
+					if (settled) return;
+					settled = true;
+					running -= 1;
+					reject(new DOMException("aborted", "AbortError"));
+				});
+			});
+		});
+
+		let first: Promise<string> | undefined;
+		let second: Promise<string> | undefined;
+		try {
+			const provider = createOllamaProvider({
+				model: "test-model",
+				baseUrl: "http://localhost:9999",
+				defaultTimeoutMs: 1000,
+			});
+
+			first = provider.generate("first", { timeoutMs: 1000 });
+			await waitForStatus({ running: 1, pending: 0, limit: 1 });
+			second = provider.generate("second", { timeoutMs: 1000 });
+			await waitForStatus({ running: 1, pending: 1, limit: 1 });
+
+			configureLlmConcurrency(2);
+			await waitForStatus({ running: 2, pending: 0, limit: 2 });
+
+			gate.abort();
+			await expect(first).resolves.toBe("ok");
+			await expect(second).resolves.toBe("ok");
+			expect(getLlmConcurrencyStatus()).toMatchObject({ running: 0, pending: 0, limit: 2 });
+		} finally {
+			gate.abort();
+			await Promise.allSettled([first, second].filter((promise): promise is Promise<string> => promise !== undefined));
+			restoreFetch();
+			configureLlmConcurrency(2);
+		}
 	});
 });
 
@@ -2748,6 +3546,313 @@ describe("awaitSubprocessWithDeadline — success-after-timeout race", () => {
 		);
 
 		expect(killed).toBe(true);
+	});
+
+	it("arms SIGKILL while resultFn is still waiting for process exit", async () => {
+		let resolveExit: (code: number) => void = () => {};
+		const exitPromise = new Promise<number>((resolve) => {
+			resolveExit = resolve;
+		});
+		const signals: string[] = [];
+		const fakeProc = {
+			stdout: streamFromString(""),
+			stderr: streamFromString(""),
+			exited: exitPromise,
+			kill(signal?: string) {
+				signals.push(signal ?? "SIGTERM");
+				if (signal === "SIGKILL") resolveExit(143);
+			},
+		};
+
+		const resultFn = async (proc: typeof fakeProc) => {
+			await proc.exited;
+			return "late";
+		};
+
+		const outcome = await Promise.race([
+			awaitSubprocessWithDeadline(fakeProc, 20, "test", 20, resultFn).then(
+				() => "resolved",
+				(error) => error,
+			),
+			new Promise<Error>((resolve) => setTimeout(() => resolve(new Error("deadline helper did not settle")), 2600)),
+		]);
+
+		expect(outcome).toBeInstanceOf(SemaphoreTimeoutError);
+		expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+	});
+
+	it("SIGKILLs the process group when the leader exits before a SIGTERM-resistant descendant", async () => {
+		if (process.platform === "win32") return;
+		const root = join(tmpdir(), `signet-deadline-group-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(root, { recursive: true });
+		const bin = join(root, "leader-exits-descendant-ignores-term.sh");
+		const leaderPidPath = join(root, "leader.pid");
+		const childPidPath = join(root, "child.pid");
+		writeFileSync(
+			bin,
+			`#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$$" > ${JSON.stringify(leaderPidPath)}
+bash -c 'trap "" TERM; printf "%s" "$$" > "$1"; while true; do sleep 1; done' _ ${JSON.stringify(childPidPath)} &
+while [ ! -s ${JSON.stringify(childPidPath)} ]; do sleep 0.01; done
+trap 'exit 0' TERM
+wait
+`,
+		);
+		chmodSync(bin, 0o755);
+
+		const child = nodeSpawn(bin, [], {
+			stdio: ["ignore", "ignore", "ignore"],
+			detached: true,
+		});
+		const exited = new Promise<number>((resolve, reject) => {
+			child.on("error", reject);
+			child.on("close", (code) => resolve(code ?? 1));
+		});
+
+		try {
+			const childPid = await waitForPidFile(childPidPath);
+			const controller = new AbortController();
+			const wait = awaitSubprocessWithDeadline(
+				{
+					stdout: streamFromString(""),
+					stderr: streamFromString(""),
+					exited,
+					processGroupId: child.pid,
+					kill(signal?: string) {
+						const actualSignal = signal === "SIGKILL" ? "SIGKILL" : "SIGTERM";
+						if (typeof child.pid === "number") {
+							process.kill(-child.pid, actualSignal);
+							return;
+						}
+						child.kill(actualSignal);
+					},
+				},
+				10_000,
+				"test",
+				10_000,
+				async (proc) => {
+					await proc.exited;
+					return "done";
+				},
+				controller.signal,
+			);
+			controller.abort();
+
+			await expect(wait).rejects.toThrow("test aborted");
+			expect(await waitForProcessExit(childPid)).toBe(true);
+		} finally {
+			for (const path of [leaderPidPath, childPidPath]) {
+				if (!existsSync(path)) continue;
+				const pid = Number(readFileSync(path, "utf-8"));
+				if (pid > 0) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {
+						// Already exited.
+					}
+				}
+			}
+			if (typeof child.pid === "number") {
+				try {
+					process.kill(-child.pid, "SIGKILL");
+				} catch {
+					// Process group already gone.
+				}
+			}
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("createCommandLineProvider process lifecycle", () => {
+	afterEach(() => configureLlmConcurrency(2));
+
+	it("kills the process group on timeout and waits for descendants to exit", async () => {
+		if (process.platform === "win32") return;
+		const root = join(tmpdir(), `signet-command-timeout-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(root, { recursive: true });
+		const bin = join(root, "fake-command-leak.sh");
+		const rootPidPath = join(root, "root.pid");
+		const childPidPath = join(root, "child.pid");
+		writeFileSync(
+			bin,
+			`#!/usr/bin/env bash
+trap '' TERM
+printf '%s' "$$" > ${JSON.stringify(rootPidPath)}
+sleep 30 &
+printf '%s' "$!" > ${JSON.stringify(childPidPath)}
+wait
+`,
+		);
+		chmodSync(bin, 0o755);
+
+		try {
+			const provider = createCommandLineProvider({
+				name: "fake-command",
+				bin,
+				defaultTimeoutMs: 50,
+			});
+			await expect(provider.generate("hang")).rejects.toThrow("fake-command timeout after 50ms");
+
+			const rootPid = Number(readFileSync(rootPidPath, "utf-8"));
+			const childPid = Number(readFileSync(childPidPath, "utf-8"));
+			expect(rootPid).toBeGreaterThan(0);
+			expect(childPid).toBeGreaterThan(0);
+
+			let rootAlive = true;
+			let childAlive = true;
+			for (let i = 0; i < 40; i += 1) {
+				try {
+					process.kill(rootPid, 0);
+				} catch {
+					rootAlive = false;
+				}
+				try {
+					process.kill(childPid, 0);
+				} catch {
+					childAlive = false;
+				}
+				if (!rootAlive && !childAlive) break;
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			expect(rootAlive).toBe(false);
+			expect(childAlive).toBe(false);
+		} finally {
+			for (const path of [rootPidPath, childPidPath]) {
+				if (!existsSync(path)) continue;
+				const pid = Number(readFileSync(path, "utf-8"));
+				if (pid > 0) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {
+						// Already exited.
+					}
+				}
+			}
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("respects the global LLM concurrency cap", async () => {
+		if (process.platform === "win32") return;
+		configureLlmConcurrency(1);
+		const root = join(tmpdir(), `signet-command-concurrency-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(root, { recursive: true });
+		const bin = join(root, "fake-command-concurrency.sh");
+		const activePath = join(root, "active");
+		const peakPath = join(root, "peak");
+		const lockDir = join(root, "lock");
+		writeFileSync(
+			bin,
+			`#!/usr/bin/env bash
+set -euo pipefail
+lock() {
+  while ! mkdir ${JSON.stringify(lockDir)} 2>/dev/null; do sleep 0.005; done
+}
+unlock() {
+  rmdir ${JSON.stringify(lockDir)}
+}
+lock
+active=0
+if [ -s ${JSON.stringify(activePath)} ]; then active=$(cat ${JSON.stringify(activePath)}); fi
+active=$((active + 1))
+printf '%s' "$active" > ${JSON.stringify(activePath)}
+peak=0
+if [ -s ${JSON.stringify(peakPath)} ]; then peak=$(cat ${JSON.stringify(peakPath)}); fi
+if [ "$active" -gt "$peak" ]; then printf '%s' "$active" > ${JSON.stringify(peakPath)}; fi
+unlock
+sleep 0.05
+lock
+active=$(cat ${JSON.stringify(activePath)})
+active=$((active - 1))
+printf '%s' "$active" > ${JSON.stringify(activePath)}
+unlock
+printf 'ok\\n'
+`,
+		);
+		chmodSync(bin, 0o755);
+
+		try {
+			const provider = createCommandLineProvider({
+				name: "fake-command",
+				bin,
+				defaultTimeoutMs: 1000,
+			});
+			await Promise.all([provider.generate("one"), provider.generate("two")]);
+
+			expect(Number(readFileSync(peakPath, "utf-8"))).toBe(1);
+			expect(getLlmConcurrencyStatus().running).toBe(0);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("aborts a running command when the caller signal is cancelled", async () => {
+		if (process.platform === "win32") return;
+		const root = join(tmpdir(), `signet-command-abort-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(root, { recursive: true });
+		const bin = join(root, "fake-command-abort.sh");
+		const rootPidPath = join(root, "root.pid");
+		const childPidPath = join(root, "child.pid");
+		writeFileSync(
+			bin,
+			`#!/usr/bin/env bash
+trap '' TERM
+printf '%s' "$$" > ${JSON.stringify(rootPidPath)}
+sleep 30 &
+printf '%s' "$!" > ${JSON.stringify(childPidPath)}
+wait
+`,
+		);
+		chmodSync(bin, 0o755);
+
+		try {
+			const provider = createCommandLineProvider({
+				name: "fake-command",
+				bin,
+				defaultTimeoutMs: 1000,
+			});
+			const controller = new AbortController();
+			const result = provider.generate("hang", { timeoutMs: 1000, signal: controller.signal });
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			controller.abort();
+
+			await expect(result).rejects.toThrow(/aborted/i);
+			const rootPid = Number(readFileSync(rootPidPath, "utf-8"));
+			const childPid = Number(readFileSync(childPidPath, "utf-8"));
+			let rootAlive = true;
+			let childAlive = true;
+			for (let i = 0; i < 40; i += 1) {
+				try {
+					process.kill(rootPid, 0);
+				} catch {
+					rootAlive = false;
+				}
+				try {
+					process.kill(childPid, 0);
+				} catch {
+					childAlive = false;
+				}
+				if (!rootAlive && !childAlive) break;
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			expect(rootAlive).toBe(false);
+			expect(childAlive).toBe(false);
+		} finally {
+			for (const path of [rootPidPath, childPidPath]) {
+				if (!existsSync(path)) continue;
+				const pid = Number(readFileSync(path, "utf-8"));
+				if (pid > 0) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {
+						// Already exited.
+					}
+				}
+			}
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -2895,7 +4000,7 @@ describe("createOllamaProvider — concurrency semaphore enforcement", () => {
 
 		expect(results).toHaveLength(N);
 		for (const r of results) expect(r).toBe("test result");
-		expect(peak).toBeLessThanOrEqual(4);
+		expect(peak).toBeLessThanOrEqual(getLlmConcurrencyStatus().limit);
 		expect(peak).toBeGreaterThan(0);
 	});
 });
@@ -2939,7 +4044,7 @@ describe("createOpenCodeProvider — nested semaphore deadlock in fallback", () 
 		// 200 responses → triggers tryOllamaFallback. If the inner acquire is
 		// still present, the 4th worker (or earlier) will block waiting for a
 		// slot that never frees → test times out = FAIL.
-		const N = 4; // matches DEFAULT_MAX_LLM_CONCURRENCY
+		const N = getLlmConcurrencyStatus().limit;
 		let postCount = 0;
 
 		mockFetch(
@@ -3092,6 +4197,83 @@ describe("createOpenCodeProvider — fallback respects remaining deadline", () =
 	}, 15000);
 });
 
+describe("createOpenCodeProvider — fallback respects caller abort", () => {
+	afterEach(() => {
+		configureLlmConcurrency(2);
+		restoreFetch();
+	});
+
+	it("aborts the Ollama fallback request promptly when the caller aborts", async () => {
+		configureLlmConcurrency(1);
+		let fallbackStarted = false;
+		let fallbackAborted = false;
+		let releaseFallback: (() => void) | undefined;
+
+		mockFetch(
+			withParentSession(async (url, init) => {
+				if (url.includes("/session") && !url.includes("/message")) {
+					return Response.json({
+						id: "ses_abort_fallback",
+						slug: "test",
+						projectID: "p",
+						directory: "/tmp",
+						title: "test",
+						version: "1",
+					});
+				}
+				if (url.includes("/api/tags")) {
+					return Response.json({ models: [{ name: "qwen3:4b" }] });
+				}
+				if (url.includes("/api/generate")) {
+					fallbackStarted = true;
+					await new Promise<void>((resolve, reject) => {
+						releaseFallback = resolve;
+						init?.signal?.addEventListener("abort", () => {
+							fallbackAborted = true;
+							reject(new DOMException("Aborted", "AbortError"));
+						});
+					});
+					return Response.json({
+						response: JSON.stringify({ result: "late" }),
+						prompt_eval_count: 1,
+						eval_count: 1,
+					});
+				}
+				if (init?.method === "POST" && url.includes("/message")) {
+					return new Response("", {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				return Response.json([]);
+			}),
+		);
+
+		const provider = createOpenCodeProvider({
+			baseUrl: "http://localhost:9999",
+			enableOllamaFallback: true,
+			ollamaFallbackBaseUrl: "http://localhost:11434",
+			ollamaFallbackModel: "qwen3:4b",
+			defaultTimeoutMs: 3000,
+		});
+
+		const controller = new AbortController();
+		const call = provider.generate("test", { signal: controller.signal, timeoutMs: 3000 });
+		for (let i = 0; i < 100 && !fallbackStarted; i += 1) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		expect(fallbackStarted).toBe(true);
+
+		const start = performance.now();
+		controller.abort();
+		await expect(call).rejects.toThrow(/aborted|fallback/i);
+		expect(performance.now() - start).toBeLessThan(500);
+		expect(fallbackAborted).toBe(true);
+		expect(getLlmConcurrencyStatus().running).toBe(0);
+		releaseFallback?.();
+	});
+});
+
 describe("createLlamaCppProvider — concurrency semaphore enforcement", () => {
 	afterEach(() => restoreFetch());
 
@@ -3121,7 +4303,7 @@ describe("createLlamaCppProvider — concurrency semaphore enforcement", () => {
 
 		expect(results).toHaveLength(N);
 		for (const r of results) expect(r).toBe("test result");
-		expect(peak).toBeLessThanOrEqual(4);
+		expect(peak).toBeLessThanOrEqual(getLlmConcurrencyStatus().limit);
 		expect(peak).toBeGreaterThan(0);
 	});
 });

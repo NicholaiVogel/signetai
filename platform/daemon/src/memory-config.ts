@@ -74,7 +74,7 @@ export const DEFAULT_PIPELINE_V2: ResolvedPipelineV2Config = {
 	allowRemoteProviders: true,
 	extraction: {
 		provider: "llama-cpp",
-		fallbackProvider: "llama-cpp",
+		fallbackProvider: "none",
 		allowRemoteProviders: true,
 		model: defaultPipelineModel("llama-cpp"),
 		strength: "low",
@@ -94,7 +94,12 @@ export const DEFAULT_PIPELINE_V2: ResolvedPipelineV2Config = {
 		leaseTimeoutMs: 300000,
 		maxLoadPerCpu: 0.8,
 		overloadBackoffMs: 30000,
+		maxLlmConcurrency: 2,
 		threadedExtraction: true,
+	},
+	claudeCode: {
+		allowApiKeyEnv: false,
+		cooldownMs: 300000,
 	},
 	graph: {
 		enabled: true,
@@ -126,7 +131,7 @@ export const DEFAULT_PIPELINE_V2: ResolvedPipelineV2Config = {
 	autonomous: {
 		enabled: true,
 		frozen: false,
-		allowUpdateDelete: true,
+		allowUpdateDelete: false,
 		maintenanceIntervalMs: 30 * 60 * 1000, // 30 min
 		maintenanceMode: "execute",
 	},
@@ -219,8 +224,8 @@ export const DEFAULT_PIPELINE_V2: ResolvedPipelineV2Config = {
 		ftsWeightDelta: 0.02,
 		maxAspectWeight: 1.0,
 		minAspectWeight: 0.1,
-		decayEnabled: true,
-		decayRate: 0.005,
+		decayEnabled: false,
+		decayRate: 0,
 		staleDays: 14,
 		decayIntervalSessions: 10,
 	},
@@ -234,6 +239,9 @@ export const DEFAULT_PIPELINE_V2: ResolvedPipelineV2Config = {
 		enabled: true,
 		threshold: 0.4,
 		continuityDiscount: 0.15,
+	},
+	durability: {
+		enabled: true,
 	},
 	modelRegistry: {
 		enabled: true,
@@ -347,6 +355,37 @@ function parseRateLimitConfig(raw: unknown): PipelineV2Config["extraction"]["rat
 	};
 }
 
+function resolveMaxLlmConcurrency(rawValue: unknown, defaultValue: number): number {
+	const env = process.env.SIGNET_MAX_LLM_CONCURRENCY;
+	const candidate = env !== undefined ? Number(env) : rawValue;
+	if (env !== undefined && (!Number.isSafeInteger(candidate) || candidate < 1)) {
+		logger.warn("pipeline", "SIGNET_MAX_LLM_CONCURRENCY is not a valid positive integer, using config/default", {
+			value: env,
+		});
+		return clampPositive(rawValue, 1, 16, defaultValue);
+	}
+	return clampPositive(candidate, 1, 16, defaultValue);
+}
+
+function parseClaudeCodeConfig(raw: unknown, fallback: PipelineV2Config["claudeCode"]): PipelineV2Config["claudeCode"] {
+	if (!isRecord(raw)) return fallback;
+	const allowApiKeyEnv =
+		typeof raw.allowApiKeyEnv === "boolean"
+			? raw.allowApiKeyEnv
+			: raw.billingMode === "api-key"
+				? true
+				: raw.billingMode === "subscription"
+					? false
+					: fallback.allowApiKeyEnv;
+	const maxBudgetUsd = parseOptionalPositive(raw.maxBudgetUsd, 0.01, 1000);
+	const cooldownMs = clampPositive(raw.cooldownMs, 1000, 3600000, fallback.cooldownMs);
+	return {
+		allowApiKeyEnv,
+		...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
+		cooldownMs,
+	};
+}
+
 function parseCommandArgv(raw: string): { bin: string; args: string[] } | null {
 	const tokens = raw.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
 	if (!tokens || tokens.length === 0) return null;
@@ -418,6 +457,7 @@ export function loadPipelineConfig(yaml: Record<string, unknown>): ResolvedPipel
 	const extractionRaw = raw.extraction as Record<string, unknown> | undefined;
 	const escalationRaw = extractionRaw?.escalation as Record<string, unknown> | undefined;
 	const workerRaw = raw.worker as Record<string, unknown> | undefined;
+	const claudeCodeRaw = raw.claudeCode as Record<string, unknown> | undefined;
 	const graphRaw = raw.graph as Record<string, unknown> | undefined;
 	const traversalRaw = raw.traversal as Record<string, unknown> | undefined;
 	const rerankerRaw = raw.reranker as Record<string, unknown> | undefined;
@@ -436,6 +476,7 @@ export function loadPipelineConfig(yaml: Record<string, unknown>): ResolvedPipel
 	const feedbackRaw = raw.feedback as Record<string, unknown> | undefined;
 	const significanceRaw = raw.significance as Record<string, unknown> | undefined;
 	const writeGateRaw = raw.writeGate as Record<string, unknown> | undefined;
+	const durabilityRaw = raw.durability as Record<string, unknown> | undefined;
 	const modelRegistryRaw = raw.modelRegistry as Record<string, unknown> | undefined;
 	const hintsRaw = raw.hints as Record<string, unknown> | undefined;
 	const reflectionsRaw = raw.reflections as Record<string, unknown> | undefined;
@@ -520,7 +561,11 @@ export function loadPipelineConfig(yaml: Record<string, unknown>): ResolvedPipel
 	}
 	const effectiveProvider =
 		!allowRemoteProviders && isRemotePipelineProviderForEndpoint(resolvedProvider, resolvedEndpoint)
-			? providerFallbackForLock(resolvedProvider, resolvedFallbackProvider, resolvedEndpoint)
+			? providerFallbackForLock(
+					resolvedProvider,
+					resolvedFallbackProvider === "none" ? "llama-cpp" : resolvedFallbackProvider,
+					resolvedEndpoint,
+				)
 			: resolvedProvider;
 	const effectiveModel =
 		effectiveProvider === resolvedProvider ? resolvedModel : defaultPipelineModel(effectiveProvider);
@@ -666,8 +711,10 @@ export function loadPipelineConfig(yaml: Record<string, unknown>): ResolvedPipel
 				300000,
 				d.worker.overloadBackoffMs,
 			),
+			maxLlmConcurrency: resolveMaxLlmConcurrency(workerRaw?.maxLlmConcurrency, d.worker.maxLlmConcurrency),
 			threadedExtraction: workerRaw?.threadedExtraction !== false,
 		},
+		claudeCode: parseClaudeCodeConfig(claudeCodeRaw, d.claudeCode),
 
 		graph: {
 			enabled: resolveBool(graphRaw?.enabled, raw.graphEnabled, d.graph.enabled),
@@ -998,6 +1045,9 @@ export function loadPipelineConfig(yaml: Record<string, unknown>): ResolvedPipel
 				writeGateRaw?.continuityDiscount ?? raw.writeGateContinuityDiscount,
 				d.writeGate?.continuityDiscount ?? 0.15,
 			),
+		},
+		durability: {
+			enabled: resolveBool(durabilityRaw?.enabled, undefined, d.durability?.enabled ?? true),
 		},
 
 		modelRegistry: {

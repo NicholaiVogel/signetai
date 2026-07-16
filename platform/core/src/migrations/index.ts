@@ -86,6 +86,13 @@ import { up as entityAliases } from "./077-entity-aliases";
 import { up as apiKeys } from "./078-api-keys";
 import { up as transcriptCaptureJobs } from "./079-transcript-capture-jobs";
 import { up as documentScopeColumns } from "./080-document-scope-columns";
+import { up as aggregateEvidenceSources } from "./081-aggregate-evidence-sources";
+import { up as skillInvocationsHarness } from "./082-skill-invocations-harness";
+import { up as memoryLifecycleRepair } from "./083-memory-lifecycle-repair";
+import { up as legacyMarkdownImportState } from "./084-legacy-markdown-import-state";
+import { up as backfillRelationsToDependencies } from "./085-backfill-relations-to-dependencies";
+import { up as summaryJobsContentHash } from "./086-summary-jobs-content-hash";
+import { up as summaryJobsBoundaryReason } from "./087-summary-jobs-boundary-reason";
 
 // -- Public interface consumed by Database.init() --
 
@@ -763,6 +770,72 @@ export const MIGRATIONS: readonly Migration[] = [
 				{ table: "documents", column: "agent_id" },
 				{ table: "documents", column: "project" },
 			],
+		},
+	},
+	{
+		version: 81,
+		name: "aggregate-evidence-sources",
+		up: aggregateEvidenceSources,
+		artifacts: {
+			tables: ["aggregate_evidence_sources"],
+		},
+	},
+	{
+		version: 82,
+		name: "skill-invocations-harness",
+		up: skillInvocationsHarness,
+		artifacts: {
+			columns: [
+				{ table: "skill_invocations", column: "harness" },
+				{ table: "skill_invocations", column: "tool_use_id" },
+			],
+		},
+	},
+	{
+		version: 83,
+		name: "memory-lifecycle-repair",
+		up: memoryLifecycleRepair,
+		artifacts: {
+			tables: ["transcript_capture_jobs", "aggregate_evidence_sources", "entity_dependencies"],
+			columns: [
+				{ table: "documents", column: "agent_id" },
+				{ table: "documents", column: "project" },
+				{ table: "memories", column: "superseded_by" },
+				{ table: "memories", column: "superseded_at" },
+				{ table: "memories", column: "superseded_reason" },
+			],
+		},
+	},
+	{
+		version: 84,
+		name: "legacy-markdown-import-state",
+		up: legacyMarkdownImportState,
+		artifacts: {
+			tables: ["legacy_markdown_imports", "legacy_markdown_chunks"],
+		},
+	},
+	{
+		version: 85,
+		name: "backfill-relations-to-dependencies",
+		up: backfillRelationsToDependencies,
+		artifacts: {
+			tables: ["entity_dependencies"],
+		},
+	},
+	{
+		version: 86,
+		name: "summary-jobs-content-hash",
+		up: summaryJobsContentHash,
+		artifacts: {
+			columns: [{ table: "summary_jobs", column: "content_hash" }],
+		},
+	},
+	{
+		version: 87,
+		name: "summary-jobs-boundary-reason",
+		up: summaryJobsBoundaryReason,
+		artifacts: {
+			columns: [{ table: "summary_jobs", column: "boundary_reason" }],
 		},
 	},
 ];

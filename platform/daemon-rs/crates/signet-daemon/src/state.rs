@@ -7,7 +7,9 @@ use signet_core::config::DaemonConfig;
 use signet_core::db::DbPool;
 use signet_pipeline::document::DocumentHandle;
 use signet_pipeline::embedding::EmbeddingProvider;
-use signet_pipeline::provider::LlmProvider;
+use signet_pipeline::provider::{
+    GenerateOpts, GenerateResult, LlmProvider, LlmSemaphore, ProviderError,
+};
 use signet_pipeline::summary::SummaryHandle;
 use signet_pipeline::synthesis::SynthesisHandle;
 use signet_pipeline::worker::{SharedWorkerRuntimeStats, WorkerHandle};
@@ -440,6 +442,7 @@ pub struct AppState {
     pub embedding: RwLock<Option<Arc<dyn EmbeddingProvider>>>,
     /// LLM provider for reranking and recall summary synthesis.
     pub llm: RwLock<Option<Arc<dyn LlmProvider>>>,
+    pub llm_semaphore: Arc<LlmSemaphore>,
     pub pipeline_paused: AtomicBool,
     pub pipeline_transition: AtomicBool,
     pub extraction_worker_handle: Mutex<Option<WorkerHandle>>,
@@ -529,11 +532,21 @@ impl AppState {
         let update_state =
             UpdateRuntimeState::new(&config.base_path, env!("CARGO_PKG_VERSION").to_string());
 
+        let max_llm_concurrency = config
+            .manifest
+            .memory
+            .as_ref()
+            .and_then(|m| m.pipeline_v2.as_ref())
+            .map(|pipeline| pipeline.worker.max_llm_concurrency)
+            .unwrap_or(2)
+            .clamp(1, 16) as usize;
+
         Self {
             config,
             pool,
             embedding: RwLock::new(embedding),
             llm: RwLock::new(llm),
+            llm_semaphore: Arc::new(LlmSemaphore::new(max_llm_concurrency)),
             pipeline_paused: AtomicBool::new(paused),
             pipeline_transition: AtomicBool::new(false),
             extraction_worker_handle: Mutex::new(None),
@@ -600,6 +613,36 @@ impl AppState {
 
     pub async fn harness_last_seen(&self, harness: &str) -> Option<String> {
         self.harness_last_seen.read().await.get(harness).cloned()
+    }
+
+    pub async fn llm_provider(&self) -> Option<Arc<dyn LlmProvider>> {
+        self.llm.read().await.clone()
+    }
+
+    pub async fn generate_llm(
+        &self,
+        prompt: &str,
+        opts: &GenerateOpts,
+    ) -> Result<Option<GenerateResult>, ProviderError> {
+        let Some(provider) = self.llm_provider().await else {
+            return Ok(None);
+        };
+        let result = self
+            .llm_semaphore
+            .run(async { provider.generate(prompt, opts).await })
+            .await?;
+        Ok(Some(result))
+    }
+
+    pub async fn generate_with_provider(
+        &self,
+        provider: &Arc<dyn LlmProvider>,
+        prompt: &str,
+        opts: &GenerateOpts,
+    ) -> Result<GenerateResult, ProviderError> {
+        self.llm_semaphore
+            .run(async { provider.generate(prompt, opts).await })
+            .await
     }
 }
 

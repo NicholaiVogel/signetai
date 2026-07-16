@@ -140,33 +140,15 @@ export async function recallMemories(
 		saveAggregate?: boolean;
 	} = {},
 ): Promise<RecallPayload> {
-	const {
-		limit = 10,
-		agentId,
-		sessionKey,
-		includeRecalled,
-		scope,
-		aggregate,
-		aggregateBudget,
-		saveAggregate,
-	} = options;
-
 	const response = await fetch(`${daemonUrl}/api/memory/recall`, {
 		method: "POST",
 		headers: daemonHeaders({ "Content-Type": "application/json" }),
 		body: JSON.stringify(
 			buildRecallRequestBody(query, {
-				limit,
-				agentId,
-				sessionKey,
-				includeRecalled,
-				scope,
-				aggregate,
-				aggregateBudget,
-				saveAggregate,
+				...options,
 			}),
 		),
-		signal: AbortSignal.timeout(aggregate ? Math.max(READ_TIMEOUT * 6, 30_000) : READ_TIMEOUT),
+		signal: AbortSignal.timeout(options.aggregate ? Math.max(READ_TIMEOUT * 6, 30_000) : READ_TIMEOUT),
 	});
 
 	if (!response.ok) {
@@ -219,7 +201,7 @@ export async function searchSourceArtifacts(
 		project?: string;
 	} = {},
 ): Promise<RecallPayload> {
-	const { limit = 10, agentId, sessionKey, includeRecalled, project } = options;
+	const { limit, agentId, sessionKey, includeRecalled, project } = options;
 
 	const response = await fetch(`${daemonUrl}/api/memory/recall`, {
 		method: "POST",
@@ -301,13 +283,38 @@ function registerSessionLifecycleHandlers(pi: PiExtensionApi, deps: LifecycleDep
 		await refreshSessionStart(deps, ctx);
 	});
 
-	pi.on("session_switch", async (event, ctx) => {
-		await endPreviousSession(deps, event, event.type);
-		await refreshSessionStart(deps, ctx);
+	// Session switches/forks are split across the before- and post-events so the
+	// same handlers work under both current pi and pi-mono (the older monorepo
+	// fork, v0.66.x). See https://github.com/Signet-AI/signetai/issues/887.
+	//
+	// - `endPreviousSession` runs on the BEFORE-events. Both variants emit these
+	//   while the previous session is still the active one (its file is on disk and
+	//   most up to date), the most reliable point to capture its transcript.
+	// - `refreshSessionStart` runs on the POST-events, which only current pi
+	//   emits; pi-mono establishes the new-session context via `session_start`
+	//   (reason fork/new/resume) instead, so exactly one path refreshes.
+	//
+	// endPreviousSession is deliberately on ONLY the before-events (not also the
+	// post-events): current pi emits the before-event only once an extension
+	// registers a handler for it (hasHandlers guard), so registering here activates
+	// it under current pi too, and the not-loaded branch of endPreviousSession is
+	// not idempotent — wiring it to both events would double-call it for the same
+	// switch/fork. (The separate, pre-existing pending-queue re-POST behavior of
+	// endPreviousSession is unchanged by this split.) The before-event is awaited
+	// by pi, so the end POST runs as part of the pre-switch step; like session_start
+	// it is a bounded local-daemon call. Reason is normalized to the post-event
+	// names so the daemon records the same value per variant.
+	pi.on("session_before_switch", async () => {
+		await endPreviousSession(deps, {}, "session_switch");
+	});
+	pi.on("session_before_fork", async () => {
+		await endPreviousSession(deps, {}, "session_fork");
 	});
 
-	pi.on("session_fork", async (event, ctx) => {
-		await endPreviousSession(deps, event, event.type);
+	pi.on("session_switch", async (_event, ctx) => {
+		await refreshSessionStart(deps, ctx);
+	});
+	pi.on("session_fork", async (_event, ctx) => {
 		await refreshSessionStart(deps, ctx);
 	});
 
@@ -440,7 +447,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 			ctx.ui.notify(`Recalling: "${args}"...`, "info");
 
 			try {
-				const recall = await recallMemories(daemonUrl, args, { limit: 5, agentId });
+				const recall = await recallMemories(daemonUrl, args, { agentId });
 				const parsed = parseRecallPayload(recall);
 
 				if (parsed.rows.length === 0) {
@@ -528,8 +535,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 		label: "Signet Recall",
 		description:
 			"Search SignetAI persistent memory for relevant context from previous sessions. Use aggregate=true for multi-query synthesis that consolidates scattered memories into a single summary.",
-		promptSnippet:
-			"Search past memories when user asks about previous decisions, preferences, or project context",
+		promptSnippet: "Search past memories when user asks about previous decisions, preferences, or project context",
 		promptGuidelines: [
 			"Use aggregate=true when the user asks a broad question that likely spans many memories (e.g. 'who is X', 'what happened with Y', 'summarize the history of Z')",
 			"Use aggregate=false (default) for targeted lookups of specific facts or single memories",
@@ -541,8 +547,24 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 			}),
 			limit: Type.Optional(
 				Type.Number({
-					description: "Maximum number of memories to return (default: 5)",
-					default: 5,
+					description: "Maximum number of memories to return (default: 10)",
+					default: 10,
+				}),
+			),
+			sessionKey: Type.Optional(
+				Type.String({
+					description: "Session key for per-context recall dedupe",
+				}),
+			),
+			includeRecalled: Type.Optional(
+				Type.Boolean({
+					description: "Include rows already recalled in this context",
+					default: false,
+				}),
+			),
+			scope: Type.Optional(
+				Type.Union([Type.Literal("global"), Type.Literal("agent"), Type.Literal("session")], {
+					description: "Recall scope constraint",
 				}),
 			),
 			aggregate: Type.Optional(
@@ -554,7 +576,8 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 			),
 			aggregateBudget: Type.Optional(
 				Type.String({
-					description: "Aggregate synthesis budget: 'small', 'medium', or 'large'. Controls depth of multi-query recall and synthesis. (default: medium)",
+					description:
+						"Aggregate synthesis budget: 'small', 'medium', or 'large'. Controls depth of multi-query recall and synthesis. (default: medium)",
 				}),
 			),
 		}),
@@ -569,17 +592,24 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 
 			try {
 				const query = String(params.query || "");
-				const limit = typeof params.limit === "number" ? params.limit : 5;
+				const limit = typeof params.limit === "number" ? params.limit : undefined;
+				const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey : undefined;
+				const scope =
+					typeof params.scope === "string" && ["global", "agent", "session"].includes(params.scope)
+						? (params.scope as "global" | "agent" | "session")
+						: undefined;
 				const isAggregate = params.aggregate === true;
 				const aggregateBudget =
-					typeof params.aggregateBudget === "string" &&
-					["small", "medium", "large"].includes(params.aggregateBudget)
+					typeof params.aggregateBudget === "string" && ["small", "medium", "large"].includes(params.aggregateBudget)
 						? (params.aggregateBudget as "small" | "medium" | "large")
 						: undefined;
 
 				const recall = await recallMemories(daemonUrl, query, {
 					limit,
 					agentId,
+					sessionKey,
+					includeRecalled: params.includeRecalled === true,
+					scope,
 					aggregate: isAggregate,
 					aggregateBudget,
 				});
@@ -599,7 +629,11 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 					state.memoryCount = aggregateRows.length;
 					updateStatus(ctx);
 
-					const parts = [`[Aggregate Recall] Query: ${query}`];
+					const degraded = recall.aggregate.partial === true;
+					const parts = [
+						degraded ? `[Aggregate Recall degraded] Query: ${query}` : `[Aggregate Recall] Query: ${query}`,
+					];
+					if (degraded && typeof recall.aggregate.message === "string") parts.push(recall.aggregate.message);
 					for (const row of aggregateRows) {
 						if (typeof row.content === "string") parts.push(row.content);
 					}
@@ -857,7 +891,6 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 			}
 		},
 	});
-
 }
 
 // ============================================================================

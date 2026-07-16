@@ -14,7 +14,7 @@ import {
 } from "@signet/core";
 import { classifyEntityQuality, concreteEntityTypesForPrompt, normalizeEntityType } from "../entity-quality";
 import { logger } from "../logger";
-import { type LlmProvider, RateLimitExceededError } from "./provider";
+import { ClaudeCodeCircuitOpenError, type LlmProvider, RateLimitExceededError } from "./provider";
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -467,7 +467,7 @@ export function parseRawExtractionOutput(rawOutput: string): ExtractionResult {
 export async function extractFactsAndEntities(
 	input: string,
 	provider: LlmProvider,
-	opts?: { timeoutMs?: number; maxTokens?: number },
+	opts?: { timeoutMs?: number; maxTokens?: number; signal?: AbortSignal; responseFormat?: "json"; think?: boolean },
 ): Promise<ExtractionResult> {
 	const trimmed = input.trim().replace(/\s+/g, " ");
 	if (trimmed.length < MIN_FACT_LENGTH) {
@@ -487,6 +487,9 @@ export async function extractFactsAndEntities(
 		rawOutput = await provider.generate(prompt, {
 			timeoutMs: opts?.timeoutMs,
 			maxTokens: opts?.maxTokens,
+			signal: opts?.signal,
+			responseFormat: opts?.responseFormat ?? "json",
+			think: opts?.think ?? false,
 		});
 	} catch (e) {
 		if (e instanceof RateLimitExceededError) {
@@ -494,6 +497,14 @@ export async function extractFactsAndEntities(
 				error: e.message,
 				provider: e.providerName,
 				maxCallsPerHour: e.maxCallsPerHour,
+			});
+			throw e;
+		}
+		if (e instanceof ClaudeCodeCircuitOpenError) {
+			logger.warn("pipeline", "Extraction LLM call deferred by Claude Code circuit", {
+				error: e.message,
+				reason: e.reason,
+				retryAt: e.retryAt,
 			});
 			throw e;
 		}

@@ -1793,6 +1793,10 @@ function deleteEntityGraphRows(db: WriteDb, ids: readonly string[]): void {
 	db.prepare(
 		`DELETE FROM entity_dependencies WHERE source_entity_id IN (${placeholders}) OR target_entity_id IN (${placeholders})`,
 	).run(...ids, ...ids);
+	db.prepare(`DELETE FROM entity_retrieval_stats WHERE entity_id IN (${placeholders})`).run(...ids);
+	db.prepare(
+		`DELETE FROM entity_cooccurrence WHERE source_entity_id IN (${placeholders}) OR target_entity_id IN (${placeholders})`,
+	).run(...ids, ...ids);
 	db.prepare(`DELETE FROM entity_aspects WHERE entity_id IN (${placeholders})`).run(...ids);
 	db.prepare(`DELETE FROM entities WHERE id IN (${placeholders})`).run(...ids);
 }
@@ -2198,4 +2202,86 @@ export function forgetDeadMemories(accessor: DbAccessor, ids: readonly string[])
 		);
 		return total;
 	});
+}
+
+// ---------------------------------------------------------------------------
+// SQLite integrity check
+// ---------------------------------------------------------------------------
+
+export interface IntegrityCheckResult {
+	readonly ok: boolean;
+	readonly messages: readonly string[];
+}
+
+/**
+ * Run PRAGMA integrity_check on the SQLite database.
+ *
+ * Returns ok=true when the check passes (single row: "ok").
+ * Returns ok=false with the list of integrity violations when it fails.
+ */
+export function integrityCheck(accessor: DbAccessor): IntegrityCheckResult {
+	return accessor.withReadDb((db) => {
+		const rows = db.prepare("PRAGMA integrity_check").all() as ReadonlyArray<Record<string, unknown>>;
+		const messages = rows.map((r) => String(r["integrity_check"] ?? ""));
+		if (messages.length === 1 && messages[0] === "ok") {
+			return { ok: true, messages: [] };
+		}
+		return { ok: false, messages };
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Rebuild derived search indexes
+// ---------------------------------------------------------------------------
+
+export interface RebuildIndexesResult {
+	readonly integrity: { ok: boolean; messages: readonly string[] };
+	readonly fts: { repaired: boolean; message: string };
+	readonly embeddings: { reembedded: number; totalMissing: number };
+	readonly summary: string;
+}
+
+/**
+ * Run a coordinated repair of all derived search indexes in sequence:
+ * 1. PRAGMA integrity_check — fail fast if DB is corrupt
+ * 2. FTS consistency check + rebuild if needed
+ * 3. Re-embed memories missing vector embeddings
+ *
+ * Intended for recovery after SQLite repair or schema migration.
+ */
+export async function rebuildDerivedIndexes(
+	accessor: DbAccessor,
+	cfg: PipelineV2Config,
+	ctx: RepairContext,
+	limiter: RateLimiter,
+	embeddingFn: (content: string, cfg: EmbeddingConfig) => Promise<number[] | null>,
+	embeddingCfg: EmbeddingConfig,
+): Promise<RebuildIndexesResult> {
+	const integrity = integrityCheck(accessor);
+
+	// Step 1: FTS rebuild
+	const ftsResult = checkFtsConsistency(accessor, cfg, ctx, limiter, true);
+
+	// Step 2: Re-embed missing memories (batch of 200, not full sweep)
+	const reembedResult = await reembedMissingMemoriesBatch(accessor, embeddingFn, embeddingCfg, 200);
+
+	const parts: string[] = [];
+	if (!integrity.ok) {
+		parts.push(`integrity: ${integrity.messages.length} issue(s)`);
+	} else {
+		parts.push("integrity: ok");
+	}
+	if (ftsResult.affected > 0) {
+		parts.push(`FTS: repaired`);
+	} else {
+		parts.push("FTS: consistent");
+	}
+	parts.push(`embeddings: re-embedded ${reembedResult.written} of ${reembedResult.selected} missing`);
+
+	return {
+		integrity,
+		fts: { repaired: ftsResult.affected > 0, message: ftsResult.message },
+		embeddings: { reembedded: reembedResult.written, totalMissing: reembedResult.selected - reembedResult.written },
+		summary: parts.join(" · "),
+	};
 }

@@ -251,6 +251,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/memories", get(routes::memory::list))
         .route("/api/memories/most-used", get(routes::memory::most_used))
         .route(
+            "/api/memories/curator-slices",
+            get(routes::memory::curator_slices),
+        )
+        .route(
+            "/api/memories/{id}/tombstone",
+            axum::routing::post(routes::memory::tombstone),
+        )
+        .route(
+            "/api/memories/{id}/supersede",
+            axum::routing::post(routes::memory::supersede),
+        )
+        .route(
             "/api/memory/{id}",
             get(routes::memory::get)
                 .patch(routes::write::patch)
@@ -420,6 +432,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/hooks/synthesis/complete",
             axum::routing::post(routes::hooks::synthesis_complete),
+        )
+        .route(
+            "/api/hooks/skill-invocation",
+            axum::routing::post(routes::hooks::skill_invocation),
         )
         .route(
             "/api/hooks/synthesis/config",
@@ -1485,7 +1501,7 @@ async fn start_extraction_worker_inner(state: &AppState, dead_letter_on_blocked:
     let provider = signet_pipeline::provider::from_config(&provider_cfg);
     // Share the same provider with the recall handler for LLM reranking.
     *state.llm.write().await = Some(provider.clone());
-    let semaphore = Arc::new(signet_pipeline::provider::LlmSemaphore::default());
+    let semaphore = state.llm_semaphore.clone();
     let worker_config = signet_pipeline::worker::WorkerConfig {
         poll_ms: pipeline.worker.poll_ms,
         max_retries: pipeline.worker.max_retries,
@@ -1637,10 +1653,9 @@ pub(crate) async fn start_summary_worker(state: &AppState) -> bool {
     if (!pipeline.enabled && !pipeline.shadow_mode) || pipeline.paused || state.pipeline_paused() {
         return false;
     }
-    // Summary worker gates only on pipeline being active — session-end always
-    // enqueues summary jobs and they must be consumed to write canonical
-    // --summary.md artifacts. When no explicit provider is configured,
-    // from_config falls back to Ollama so jobs are never stranded.
+    if !pipeline.summary_workload_enabled() {
+        return false;
+    }
 
     let provider =
         signet_pipeline::provider::from_config(&signet_pipeline::provider::LlmProviderConfig {
@@ -1653,7 +1668,7 @@ pub(crate) async fn start_summary_worker(state: &AppState) -> bool {
                 signet_pipeline::provider::resolve_ollama_max_context_tokens(),
             ),
         });
-    let semaphore = Arc::new(signet_pipeline::provider::LlmSemaphore::default());
+    let semaphore = state.llm_semaphore.clone();
     let handle = signet_pipeline::summary::start(
         state.pool.clone(),
         provider,
@@ -1728,7 +1743,7 @@ pub(crate) async fn start_synthesis_worker(state: &AppState) -> bool {
             timeout_ms: Some(pipeline.synthesis.timeout),
             max_context_tokens: None,
         });
-    let semaphore = Arc::new(signet_pipeline::provider::LlmSemaphore::default());
+    let semaphore = state.llm_semaphore.clone();
     let handle = signet_pipeline::synthesis::start(
         state.pool.clone(),
         provider,
@@ -3254,5 +3269,19 @@ mod tests {
         assert!(provider_is_unsupported_for_daemon_startup_preflight(
             "openrouter"
         ));
+    }
+
+    #[test]
+    fn daemon_workers_do_not_construct_per_worker_default_llm_semaphores() {
+        let source = include_str!("main.rs");
+        let forbidden = [
+            "Arc::new(signet_pipeline::provider::",
+            "LlmSemaphore::default())",
+        ]
+        .concat();
+        assert!(
+            !source.contains(&forbidden),
+            "daemon workers must use one shared semaphore configured from pipeline.worker.max_llm_concurrency"
+        );
     }
 }

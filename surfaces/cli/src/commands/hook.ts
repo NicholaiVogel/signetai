@@ -19,6 +19,7 @@ interface HookDeps {
 const SESSION_START_TIMEOUT_MS = resolveSessionStartTimeout();
 const PROMPT_SUBMIT_TIMEOUT_MS = resolvePromptSubmitTimeout();
 const LEGACY_RUNTIME_PATH = "legacy" as const;
+const STDIN_TIMEOUT_MS = 2000;
 
 function legacyHookHeaders(headers?: HeadersInit): Headers {
 	const merged = new Headers(headers);
@@ -122,6 +123,18 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		if (process.env.SIGNET_NO_HOOKS === "1" || process.env.SIGNET_BYPASS === "1") {
 			process.exit(0);
 		}
+	});
+
+	// Hook subcommands read stdin via async iteration in readJson(), which
+	// registers a persistent listener on process.stdin. If the harness keeps
+	// its end of the stdin pipe open (rather than closing it or killing us),
+	// that listener keeps the event loop alive indefinitely — Node never exits
+	// on its own. Most action handlers only call process.exit() on error/fallback
+	// paths, not on success, so the happy path relied on natural event-loop drain
+	// and could hang. Force a clean exit once every action settles so these
+	// one-shot IPC processes can never outlive their single request/response.
+	hookCmd.hook("postAction", () => {
+		process.exit(0);
 	});
 
 	hookCmd
@@ -253,12 +266,26 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		.description("Get summary instructions before session compaction")
 		.requiredOption("-H, --harness <harness>", "Harness name")
 		.option("--project <project>", "Project path")
+		.option("--agent-id <id>", "Agent ID")
 		.option("--message-count <count>", "Number of messages in session", Number.parseInt)
 		.option("--json", "Output as JSON")
 		.action(async (options) => {
 			const input = await readJson();
 			const sessionKey = pickSessionKey(input);
 			const sessionContext = pickString(input?.session_context, input?.sessionContext);
+			// Forward the transcript path so the daemon can run its skill scan at
+			// compaction as a crash-resilient checkpoint (SessionEnd does the same).
+			// Re-scanning the same transcript is deduped on (agent_id, harness,
+			// session_id, tool_use_id), so the checkpoint can't double-count.
+			const transcriptPath = pickString(input?.transcript_path, input?.transcriptPath);
+			const nativeAgentId = options.harness === "claude-code" ? pickString(input?.agent_id) : "";
+			const agentId = pickString(
+				options.agentId,
+				input?.signet_agent_id,
+				input?.signetAgentId,
+				input?.agentId,
+				nativeAgentId ? "" : input?.agent_id,
+			);
 			const data = await fetchHookData<{ summaryPrompt?: string; guidelines?: string; error?: string }>(
 				deps,
 				"pre-compaction",
@@ -270,6 +297,8 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 						messageCount: options.messageCount,
 						sessionKey,
 						sessionContext,
+						transcriptPath,
+						...(agentId ? { agentId } : {}),
 						runtimePath: LEGACY_RUNTIME_PATH,
 					}),
 				},
@@ -393,9 +422,16 @@ async function readJson(): Promise<Record<string, unknown> | null> {
 	try {
 		if (process.stdin.isTTY) return null;
 		const chunks: Buffer[] = [];
-		for await (const chunk of process.stdin) {
-			chunks.push(chunk);
-		}
+		const stdinDone = (async (): Promise<void> => {
+			for await (const chunk of process.stdin) {
+				chunks.push(chunk);
+			}
+		})();
+		const timedOut = new Promise<never>((_, reject) => {
+			const timer = setTimeout(() => reject(new Error("stdin timeout")), STDIN_TIMEOUT_MS);
+			timer.unref();
+		});
+		await Promise.race([stdinDone, timedOut]);
 		const input = Buffer.concat(chunks).toString("utf-8").trim();
 		if (!input) return null;
 		const parsed = JSON.parse(input);

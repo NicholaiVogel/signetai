@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const TEST_DIR = join(tmpdir(), `signet-hooks-test-${Date.now()}`);
+const PREV_SIGNET_AGENT_ID_FOR_HOOKS = process.env.SIGNET_AGENT_ID;
+process.env.SIGNET_AGENT_ID = "default";
 process.env.SIGNET_PATH = TEST_DIR;
 
 const { initDbAccessor, closeDbAccessor, getDbAccessor } = await import("./db-accessor");
@@ -221,7 +223,8 @@ function createMemoryDb(
 			attempts INTEGER DEFAULT 0,
 			max_attempts INTEGER DEFAULT 3,
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
-			completed_at TEXT
+			completed_at TEXT,
+			content_hash TEXT
 		)
 	`);
 
@@ -1844,8 +1847,8 @@ describe("handleSessionEnd", () => {
 				.get("sess-long-retention") as { transcript: string } | undefined;
 
 			expect(stored?.content).toContain(tailMarker);
-			expect(queued?.transcript).toContain("[truncated]");
-			expect(queued?.transcript).not.toContain(tailMarker);
+			expect(queued?.transcript).toContain(tailMarker);
+			expect(queued?.transcript).not.toContain("[truncated]");
 		} finally {
 			db.close();
 		}
@@ -3569,7 +3572,7 @@ describe("summary worker tick gate", () => {
 			const jobId = enq.jobId;
 
 			const { startSummaryWorker } = await import("./pipeline/summary-worker");
-			const handle = startSummaryWorker(getDbAccessor());
+			const handle = startSummaryWorker(getDbAccessor(), { isSynthesisAvailable: async () => true });
 
 			// First tick fires after POLL_INTERVAL_MS (5s)
 			await new Promise((resolve) => setTimeout(resolve, 5500));
@@ -3585,6 +3588,216 @@ describe("summary worker tick gate", () => {
 			// Gate allowed tick through → job was leased → attempts incremented.
 			// Without LLM the processing will fail, but that doesn't matter.
 			expect(job?.attempts).toBeGreaterThan(0);
+		},
+		15_000,
+	);
+
+	test.serial(
+		"leaves jobs unchanged when direct worker startup has no route check",
+		async () => {
+			writeAgentYaml(`memory:
+  pipelineV2:
+    enabled: false
+  dreaming:
+    enabled: true
+`);
+			createMemoryDb([]);
+			const enq = handleCheckpointExtract({
+				harness: "test",
+				sessionKey: "ckpt-worker-no-route",
+				transcript: "x".repeat(600),
+			});
+			if (!enq.jobId) throw new Error("expected checkpoint enqueue to return a job id");
+
+			const { startSummaryWorker } = await import("./pipeline/summary-worker");
+			const handle = startSummaryWorker(getDbAccessor());
+			await new Promise((resolve) => setTimeout(resolve, 5500));
+			handle.stop();
+
+			const db = openTestDb();
+			const job = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = ?").get(enq.jobId) as {
+				status: string;
+				attempts: number;
+			};
+			db.close();
+			expect(job).toEqual({ status: "pending", attempts: 0 });
+		},
+		15_000,
+	);
+
+	test.serial(
+		"does not activate retained command config when pipeline V2 is disabled",
+		async () => {
+			const marker = join(TEST_DIR, "disabled-pipeline-command-ran");
+			writeAgentYaml(`memory:
+  pipelineV2:
+    enabled: false
+    allowRemoteProviders: true
+    extraction:
+      provider: command
+      command:
+        bin: node
+        args:
+          - -e
+          - "require('node:fs').writeFileSync('${marker}', 'unexpected')"
+    synthesis:
+      enabled: false
+      provider: none
+  dreaming:
+    enabled: true
+`);
+			createMemoryDb([]);
+			const enq = handleCheckpointExtract({
+				harness: "test",
+				sessionKey: "ckpt-worker-disabled-command",
+				transcript: "x".repeat(600),
+			});
+			if (!enq.jobId) throw new Error("expected checkpoint enqueue to return a job id");
+
+			const { startSummaryWorker } = await import("./pipeline/summary-worker");
+			const handle = startSummaryWorker(getDbAccessor(), { isSynthesisAvailable: async () => false });
+			try {
+				await new Promise((resolve) => setTimeout(resolve, 5500));
+			} finally {
+				handle.stop();
+			}
+
+			const db = openTestDb();
+			const job = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = ?").get(enq.jobId) as {
+				status: string;
+				attempts: number;
+			};
+			db.close();
+			expect(existsSync(marker)).toBe(false);
+			expect(job).toEqual({ status: "pending", attempts: 0 });
+		},
+		15_000,
+	);
+
+	test.serial(
+		"uses synthesis instead of retained command config when pipeline V2 is disabled",
+		async () => {
+			const marker = join(TEST_DIR, "disabled-pipeline-available-command-ran");
+			writeAgentYaml(`memory:
+  pipelineV2:
+    enabled: false
+    allowRemoteProviders: true
+    extraction:
+      provider: command
+      command:
+        bin: node
+        args:
+          - -e
+          - "require('node:fs').writeFileSync('${marker}', 'unexpected')"
+  dreaming:
+    enabled: true
+`);
+			createMemoryDb([]);
+			const schemaDb = openTestDb();
+			schemaDb.exec("ALTER TABLE summary_jobs ADD COLUMN error TEXT");
+			schemaDb.close();
+			const enq = handleCheckpointExtract({
+				harness: "test",
+				sessionKey: "ckpt-worker-disabled-command-with-synthesis",
+				transcript: "x".repeat(600),
+			});
+			if (!enq.jobId) throw new Error("expected checkpoint enqueue to return a job id");
+
+			let resolverCalls = 0;
+			let generateCalls = 0;
+			const { initInferenceProviderResolver, closeInferenceProviderResolver } = await import("./llm");
+			initInferenceProviderResolver(() => {
+				resolverCalls += 1;
+				return {
+					name: "test-synthesis",
+					async available() {
+						return true;
+					},
+					async generate() {
+						generateCalls += 1;
+						throw new Error("expected synthesis attempt");
+					},
+				};
+			});
+			const { startSummaryWorker } = await import("./pipeline/summary-worker");
+			const handle = startSummaryWorker(getDbAccessor(), { isSynthesisAvailable: async () => true });
+			try {
+				await new Promise((resolve) => setTimeout(resolve, 5500));
+			} finally {
+				handle.stop();
+				closeInferenceProviderResolver();
+			}
+
+			const db = openTestDb();
+			const job = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = ?").get(enq.jobId) as {
+				status: string;
+				attempts: number;
+			};
+			db.close();
+			expect(existsSync(marker)).toBe(false);
+			expect(resolverCalls).toBe(1);
+			expect(generateCalls).toBe(1);
+			expect(job).toEqual({ status: "pending", attempts: 1 });
+		},
+		15_000,
+	);
+
+	test.serial(
+		"completes command-only extraction without resolving synthesis",
+		async () => {
+			const marker = join(TEST_DIR, "command-only-ran");
+			writeAgentYaml(`memory:
+  pipelineV2:
+    enabled: true
+    allowRemoteProviders: true
+    significance:
+      enabled: false
+    extraction:
+      provider: command
+      command:
+        bin: node
+        args:
+          - -e
+          - "require('node:fs').writeFileSync('${marker}', 'ok')"
+    synthesis:
+      enabled: false
+      provider: none
+`);
+			createMemoryDb([]);
+			const schemaDb = openTestDb();
+			schemaDb.exec("ALTER TABLE summary_jobs ADD COLUMN result TEXT");
+			schemaDb.close();
+			const enq = handleCheckpointExtract({
+				harness: "test",
+				sessionKey: "ckpt-worker-command-only",
+				transcript: "x".repeat(600),
+			});
+			if (!enq.jobId) throw new Error("expected checkpoint enqueue to return a job id");
+
+			let resolverCalls = 0;
+			const { initInferenceProviderResolver, closeInferenceProviderResolver } = await import("./llm");
+			initInferenceProviderResolver(() => {
+				resolverCalls += 1;
+				throw new Error("synthesis resolver must not be called");
+			});
+			const { startSummaryWorker } = await import("./pipeline/summary-worker");
+			const handle = startSummaryWorker(getDbAccessor(), { isSynthesisAvailable: async () => false });
+			try {
+				await new Promise((resolve) => setTimeout(resolve, 5500));
+			} finally {
+				handle.stop();
+				closeInferenceProviderResolver();
+			}
+
+			const db = openTestDb();
+			const job = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = ?").get(enq.jobId) as {
+				status: string;
+				attempts: number;
+			};
+			db.close();
+			expect(existsSync(marker)).toBe(true);
+			expect(resolverCalls).toBe(0);
+			expect(job).toEqual({ status: "completed", attempts: 1 });
 		},
 		15_000,
 	);
@@ -3805,6 +4018,106 @@ describe("queryAnchorsMissingFromRecall", () => {
 	});
 });
 
+test.serial("session-end queues stored transcript and content-hash summary job", async () => {
+	createMemoryDb([]);
+	const transcript =
+		"User: session end should store transcript and queue summary job.\nAssistant: summary queue should receive session_end trigger.\n".repeat(
+			8,
+		);
+
+	const result = await handleSessionEnd({
+		harness: "test",
+		transcript,
+		sessionKey: "sess-content-hash",
+		sessionId: "sess-content-hash",
+		agentId: "noam",
+		cwd: "/home/user/signetai",
+	});
+
+	expect(result.queued).toBe(true);
+	const db = openTestDb();
+	try {
+		const stored = db
+			.prepare("SELECT content FROM session_transcripts WHERE session_key = ? AND agent_id = ?")
+			.get("sess-content-hash", "noam") as { content: string } | undefined;
+		const jobs = db
+			.prepare("SELECT trigger, content_hash FROM summary_jobs WHERE session_key = ? AND agent_id = ?")
+			.all("sess-content-hash", "noam") as Array<{ trigger: string; content_hash: string | null }>;
+		expect(stored?.content).toContain("session end should store transcript");
+		expect(jobs).toHaveLength(1);
+		expect(jobs[0]?.trigger).toBe("session_end");
+		expect(jobs[0]?.content_hash).toBe(createHash("sha256").update(transcript).digest("hex"));
+	} finally {
+		db.close();
+	}
+});
+
+test.serial("session-end skips duplicate summary job for identical content hash", async () => {
+	createMemoryDb([]);
+	const transcript =
+		"User: identical transcript should dedupe summary queue.\nAssistant: same content should not queue twice.\n".repeat(
+			8,
+		);
+	const req = {
+		harness: "test",
+		transcript,
+		sessionKey: "sess-dedupe-hash",
+		sessionId: "sess-dedupe-hash",
+		agentId: "noam",
+		cwd: "/home/user/signetai",
+	} as const;
+
+	const first = await handleSessionEnd(req);
+	const second = await handleSessionEnd(req);
+
+	expect(first.queued).toBe(true);
+	expect(second.queued).toBe(false);
+	const db = openTestDb();
+	try {
+		const row = db
+			.prepare("SELECT COUNT(*) count FROM summary_jobs WHERE session_key = ? AND agent_id = ?")
+			.get("sess-dedupe-hash", "noam") as { count: number };
+		expect(row.count).toBe(1);
+	} finally {
+		db.close();
+	}
+});
+
+test.serial("session-end queues second job when transcript content changes", async () => {
+	createMemoryDb([]);
+	const firstTranscript = "User: first transcript content for hash one.\nAssistant: first response.\n".repeat(8);
+	const secondTranscript = `${firstTranscript}User: added later OMP content.\nAssistant: second response.\n`;
+
+	await handleSessionEnd({
+		harness: "test",
+		transcript: firstTranscript,
+		sessionKey: "sess-changed-hash",
+		sessionId: "sess-changed-hash",
+		agentId: "noam",
+		cwd: "/home/user/signetai",
+	});
+	const second = await handleSessionEnd({
+		harness: "test",
+		transcript: secondTranscript,
+		sessionKey: "sess-changed-hash",
+		sessionId: "sess-changed-hash",
+		agentId: "noam",
+		cwd: "/home/user/signetai",
+	});
+
+	expect(second.queued).toBe(true);
+	const db = openTestDb();
+	try {
+		const rows = db
+			.prepare("SELECT content_hash FROM summary_jobs WHERE session_key = ? AND agent_id = ? ORDER BY created_at ASC")
+			.all("sess-changed-hash", "noam") as Array<{ content_hash: string | null }>;
+		expect(rows).toHaveLength(2);
+		expect(new Set(rows.map((row) => row.content_hash)).size).toBe(2);
+	} finally {
+		db.close();
+	}
+});
+
 describe("normalizeSessionTranscript", () => {
 	it("routes codex harness to normalizeCodexTranscript", () => {
 		const raw = [
@@ -3928,4 +4241,12 @@ describe("applyTokenBudget", () => {
 			expect(countTokens(result)).toBeLessThanOrEqual(budget);
 		}
 	});
+});
+
+afterAll(() => {
+	if (PREV_SIGNET_AGENT_ID_FOR_HOOKS === undefined) {
+		process.env.SIGNET_AGENT_ID = undefined;
+	} else {
+		process.env.SIGNET_AGENT_ID = PREV_SIGNET_AGENT_ID_FOR_HOOKS;
+	}
 });

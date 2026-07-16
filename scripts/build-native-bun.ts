@@ -91,10 +91,17 @@ if (!existsSync(join(dashboardDir, "index.html"))) {
 }
 const templatesDir = join(root, "surfaces", "cli", "templates");
 const skillsDir = join(root, "skills");
+const hermesPluginDir = join(root, "integrations", "hermes-agent", "connector", "hermes-plugin");
 
 const workerEntries = [
 	["synthesis-render-worker", "platform/daemon/src/synthesis-render-worker.ts"],
 	["extraction-thread", "platform/daemon/src/pipeline/extraction-thread.ts"],
+	// Native ONNX embedding runs in a worker so model download / WASM compile /
+	// inference can never block the daemon's main event loop (see
+	// embedding-worker.ts). Transformers is bundled into this asset; the ONNX
+	// .wasm is embedded separately (wasmAssets) and the main thread passes the
+	// materialized wasmDir to the worker via workerData.
+	["embedding-worker", "platform/daemon/src/embedding-worker.ts"],
 ] as const;
 const nativeExternalArgs = ["--external", "better-sqlite3"] as const;
 
@@ -117,33 +124,109 @@ const dashboardAssets = walkFiles(dashboardDir).map((path) => {
 		contentBase64: readFileSync(path).toString("base64"),
 	};
 });
-const fileAssetsFor = (dir: string) =>
+const fileAssetsFor = (dir: string, prefix = "") =>
 	walkFiles(dir).map((path) => {
 		const relative = path.slice(dir.length).replaceAll("\\", "/");
+		const normalized = relative.startsWith("/") ? relative.slice(1) : relative;
 		return {
-			path: relative.startsWith("/") ? relative.slice(1) : relative,
+			path: prefix ? `${prefix}/${normalized}` : normalized,
 			contentBase64: readFileSync(path).toString("base64"),
 			mode: statSync(path).mode & 0o777,
 		};
 	});
 const templateAssets = fileAssetsFor(templatesDir);
 const skillAssets = fileAssetsFor(skillsDir);
+const connectorAssets = fileAssetsFor(hermesPluginDir, "hermes-agent/hermes-plugin");
 
-const workerAssets = workerEntries.map(([name]) => ({
-	name,
-	contentBase64: readFileSync(join(workerDir, `${name}.mjs`)).toString("base64"),
-}));
+const workerAssets: { name: string; contentBase64: string }[] = [
+	...workerEntries.map(([name]) => ({
+		name,
+		contentBase64: readFileSync(join(workerDir, `${name}.mjs`)).toString("base64"),
+	})),
+];
 const transformersPackageJson = daemonRequire.resolve("@huggingface/transformers/package.json");
 const transformersDir = dirname(transformersPackageJson);
+const transformersRequire = createRequire(transformersPackageJson);
+const onnxRuntimeWebPackageJson = transformersRequire.resolve("onnxruntime-web/package.json");
+const onnxRuntimeWebDir = dirname(onnxRuntimeWebPackageJson);
+const onnxRuntimeWebWasmPath = join(onnxRuntimeWebDir, "dist", "ort.wasm.bundle.min.mjs");
+const onnxRuntimeWebRequire = createRequire(onnxRuntimeWebPackageJson);
+const onnxRuntimeCommonPackageJson = onnxRuntimeWebRequire.resolve("onnxruntime-common/package.json");
+const onnxRuntimeCommonEsmPath = join(dirname(onnxRuntimeCommonPackageJson), "dist", "esm", "index.js");
 const transformersWebRuntimePath = join(transformersDir, "dist", "transformers.web.js");
-const wasmAssets = ["ort-wasm-simd-threaded.jsep.wasm"].map((name) => ({
+
+// Bun's compiled executable reports a Node-like environment, so Transformers.js
+// selects its native ONNX branch even though this release embeds the web/WASM
+// runtime. Patch only the generated build copy, with unique-anchor guards so a
+// dependency upgrade fails loudly instead of silently producing a broken binary.
+let patchedTransformersWebRuntimeSource = readFileSync(transformersWebRuntimePath, "utf8");
+for (const [specifier, resolved] of [
+	["onnxruntime-common", onnxRuntimeCommonEsmPath],
+	["onnxruntime-web", onnxRuntimeWebWasmPath],
+] as const) {
+	const externalImport = `from ${JSON.stringify(specifier)};`;
+	if (patchedTransformersWebRuntimeSource.split(externalImport).length !== 2) {
+		throw new Error(`Unsupported @huggingface/transformers web runtime: ${specifier} import changed`);
+	}
+	patchedTransformersWebRuntimeSource = patchedTransformersWebRuntimeSource.replace(
+		externalImport,
+		`from ${JSON.stringify(resolved)};`,
+	);
+}
+const customRuntimeAnchor = "    ONNX = globalThis[ORT_SYMBOL];\n";
+if (patchedTransformersWebRuntimeSource.split(customRuntimeAnchor).length !== 2) {
+	throw new Error("Unsupported @huggingface/transformers web runtime: custom ONNX runtime anchor changed");
+}
+patchedTransformersWebRuntimeSource = patchedTransformersWebRuntimeSource.replace(
+	customRuntimeAnchor,
+	`${customRuntimeAnchor}\n    // Transformers.js 3.8.1 does not populate device defaults for a custom runtime.\n    supportedDevices.push('wasm');\n    defaultDevices = ['wasm'];\n`,
+);
+const nodeDeviceDefault = /device \?\? \([^\n)]+\.apis\.IS_NODE_ENV \? 'cpu' : 'wasm'\)/g;
+if ((patchedTransformersWebRuntimeSource.match(nodeDeviceDefault) ?? []).length !== 1) {
+	throw new Error("Unsupported @huggingface/transformers web runtime: Node device default changed");
+}
+patchedTransformersWebRuntimeSource = patchedTransformersWebRuntimeSource.replace(
+	nodeDeviceDefault,
+	"device ?? 'wasm'",
+);
+const patchedTransformersWebRuntimePath = join(buildDir, "transformers.web.js");
+writeFileSync(patchedTransformersWebRuntimePath, patchedTransformersWebRuntimeSource);
+const wasmAssets = ["ort-wasm-simd-threaded.mjs", "ort-wasm-simd-threaded.wasm"].map((name) => ({
 	name,
-	contentBase64: readFileSync(join(transformersDir, "dist", name)).toString("base64"),
+	contentBase64: readFileSync(join(onnxRuntimeWebDir, "dist", name)).toString("base64"),
 }));
+
+// The embedding worker has an isolated globalThis (worker_threads), so the
+// main thread's globalThis[Symbol.for("onnxruntime")] registration does NOT
+// propagate. We generate a standalone runtime that the worker can import to
+// register the WASM ONNX runtime on its own globalThis before transformers
+// loads. This must be bun-bundled separately so onnxruntime-web and the
+// patched transformers.web.js are inlined (the materialized .mjs is imported
+// at runtime and cannot resolve node_modules paths in a compiled binary).
+writeFileSync(
+	join(buildDir, "embedding-worker-transformers-runtime.ts"),
+	`import * as onnxRuntime from ${JSON.stringify(onnxRuntimeWebWasmPath)};\n` +
+		`globalThis[Symbol.for("onnxruntime")] = onnxRuntime.default ?? onnxRuntime;\n` +
+		`const transformers = await import(${JSON.stringify(patchedTransformersWebRuntimePath)});\n` +
+		`export const { env, pipeline } = transformers;\n`,
+);
+runBunBuild([
+	"--target=bun",
+	"--format=esm",
+	"--outfile",
+	join(workerDir, "embedding-worker-transformers-runtime.mjs"),
+	...nativeExternalArgs,
+	join(buildDir, "embedding-worker-transformers-runtime.ts"),
+]);
+workerAssets.push({
+	name: "embedding-worker-transformers-runtime",
+	contentBase64: readFileSync(join(workerDir, "embedding-worker-transformers-runtime.mjs")).toString("base64"),
+});
 
 writeFileSync(
 	join(buildDir, "native-assets.ts"),
 	`export const dashboardAssets = ${JSON.stringify(dashboardAssets)} as const;\n` +
+		`export const connectorAssets = ${JSON.stringify(connectorAssets)} as const;\n` +
 		`export const skillAssets = ${JSON.stringify(skillAssets)} as const;\n` +
 		`export const templateAssets = ${JSON.stringify(templateAssets)} as const;\n` +
 		`export const workerAssets = ${JSON.stringify(workerAssets)} as const;\n` +
@@ -152,22 +235,27 @@ writeFileSync(
 
 writeFileSync(
 	join(buildDir, "transformers-web-runtime.ts"),
-	`export { env, pipeline } from ${JSON.stringify(transformersWebRuntimePath)};\n`,
+	`import * as onnxRuntime from ${JSON.stringify(onnxRuntimeWebWasmPath)};
+globalThis[Symbol.for("onnxruntime")] = onnxRuntime.default ?? onnxRuntime;
+const transformers = await import(${JSON.stringify(patchedTransformersWebRuntimePath)});
+export const { env, pipeline } = transformers;
+`,
 );
 
 writeFileSync(
 	join(buildDir, "cli-native.ts"),
 	`import { materializeEmbeddedAssetTree, registerNativeAssets, registerNativeTransformersBindings } from "../platform/daemon/src/native-runtime-assets";
-import { dashboardAssets, skillAssets, templateAssets, wasmAssets, workerAssets } from "./native-assets";
+import { connectorAssets, dashboardAssets, skillAssets, templateAssets, wasmAssets, workerAssets } from "./native-assets";
 import * as transformersWebRuntime from "./transformers-web-runtime";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-registerNativeAssets({ dashboard: dashboardAssets, skills: skillAssets, templates: templateAssets, workers: workerAssets, wasm: wasmAssets });
+registerNativeAssets({ connectors: connectorAssets, dashboard: dashboardAssets, skills: skillAssets, templates: templateAssets, workers: workerAssets, wasm: wasmAssets });
 registerNativeTransformersBindings(transformersWebRuntime);
 process.env.SIGNET_VERSION = process.env.SIGNET_VERSION?.trim() || ${JSON.stringify(nativeVersion)};
 process.env.SIGNET_TEMPLATES_DIR ??= materializeEmbeddedAssetTree("templates") ?? "";
 process.env.SIGNET_SKILLS_SOURCE ??= materializeEmbeddedAssetTree("skills") ?? "";
+process.env.SIGNET_CONNECTOR_ASSETS_DIR ??= materializeEmbeddedAssetTree("connectors") ?? "";
 
 // When the binary is invoked directly (curl-install + signet install,
 // raw binary from PATH) without a parent process setting SIGNET_DIR,

@@ -20,6 +20,20 @@ describe("transcript normalization", () => {
 		expect(normalizeSessionTranscript("test", "User: plain text")).toBe("User: plain text");
 	});
 
+	it("falls back to raw text for rendered Codex transcripts", () => {
+		const raw = "User: plain Codex transcript\nAssistant: queued";
+		expect(normalizeSessionTranscript("codex", raw)).toBe(raw);
+	});
+
+	it("uses generic JSONL turns when Codex-specific events are absent", () => {
+		const raw = [
+			JSON.stringify({ role: "user", content: "generic question" }),
+			JSON.stringify({ role: "assistant", content: "generic answer" }),
+		].join("\n");
+
+		expect(normalizeSessionTranscript("codex", raw)).toBe("User: generic question\nAssistant: generic answer");
+	});
+
 	it("normalizes generic JSON-line conversations", () => {
 		const raw = [
 			JSON.stringify({ role: "user", content: "question" }),

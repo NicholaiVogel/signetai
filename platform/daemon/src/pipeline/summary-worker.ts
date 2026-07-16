@@ -23,19 +23,26 @@ import { countChanges } from "../db-helpers";
 import { getInferenceProvider } from "../llm";
 import { logger } from "../logger";
 import { inferType, isDuplicate } from "../memory-classification";
-import { loadMemoryConfig } from "../memory-config";
+import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
 import {
 	IMMUTABLE_ARTIFACT_ERROR_PREFIX,
 	ensureCanonicalManifest,
 	updateManifest,
 	writeSummaryArtifact,
 } from "../memory-lineage";
+import { recordPathFeedback } from "../path-feedback";
 import { isNoiseSession } from "../session-noise";
 import { upsertSessionTranscript } from "../session-transcripts";
 import { upsertThreadHead } from "../thread-heads";
+import { isDurableBoundary, normalizeBoundaryReason } from "./boundary-reason";
 import { addDreamingTokens } from "./dreaming";
 import { enqueueExtractionJobInTx } from "./extraction-queue";
-import { RateLimitExceededError } from "./provider";
+import {
+	ClaudeCodeCircuitOpenError,
+	RateLimitExceededError,
+	SemaphoreTimeoutError,
+	awaitSubprocessWithDeadline,
+} from "./provider";
 import { type SignificanceConfig, assessSignificance } from "./significance-gate";
 import { countTokens } from "./tokenizer";
 
@@ -44,8 +51,21 @@ import { countTokens } from "./tokenizer";
 // ---------------------------------------------------------------------------
 
 export interface SummaryWorkerHandle {
-	stop(): void;
+	stop(): Promise<void>;
 	readonly running: boolean;
+}
+
+export interface SummaryWorkerOptions {
+	/** Must perform a live route check. Omitted means synthesis is unavailable. */
+	readonly isSynthesisAvailable?: () => Promise<boolean>;
+}
+
+export function canProcessSummaryJobs(
+	commandExtractionMode: boolean,
+	synthesisAvailable: boolean,
+	paused = false,
+): boolean {
+	return !paused && (commandExtractionMode || synthesisAvailable);
 }
 
 const RECOVER_BATCH = 100;
@@ -56,7 +76,7 @@ interface SummaryRecoveryBatch {
 	readonly updated: number;
 }
 
-interface SummaryJobRow {
+export interface SummaryJobRow {
 	readonly id: string;
 	readonly session_key: string | null;
 	readonly session_id: string | null;
@@ -65,6 +85,7 @@ interface SummaryJobRow {
 	readonly agent_id: string;
 	readonly transcript: string;
 	readonly trigger: string;
+	readonly boundary_reason: string | null;
 	readonly captured_at: string | null;
 	readonly started_at: string | null;
 	readonly ended_at: string | null;
@@ -345,11 +366,7 @@ function parseLlmResponse(raw: string): LlmSummaryResult | null {
 // Core processing
 // ---------------------------------------------------------------------------
 
-function passesSignificanceGate(
-	accessor: DbAccessor,
-	job: SummaryJobRow,
-	memoryCfg: ReturnType<typeof loadMemoryConfig>,
-): boolean {
+function passesSignificanceGate(accessor: DbAccessor, job: SummaryJobRow, memoryCfg: ResolvedMemoryConfig): boolean {
 	const significanceCfg: SignificanceConfig = memoryCfg.pipelineV2.significance ?? {
 		enabled: true,
 		minTurns: 5,
@@ -383,9 +400,34 @@ function substituteCommandTokens(input: string, replacements: Record<string, str
 	return output;
 }
 
+const emptyByteStream = (): ReadableStream<Uint8Array> =>
+	new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.close();
+		},
+	});
+
+function terminateSummaryCommand(child: ReturnType<typeof nodeSpawn>, signal: NodeJS.Signals): void {
+	const pid = child.pid;
+	if (process.platform !== "win32" && typeof pid === "number") {
+		try {
+			process.kill(-pid, signal);
+			return;
+		} catch {
+			// Fall through to direct child signaling when the group is already gone.
+		}
+	}
+	try {
+		child.kill(signal);
+	} catch {
+		// Child is already gone.
+	}
+}
+
 export async function runSummaryCommandProvider(
 	job: SummaryJobRow,
-	cfg: ReturnType<typeof loadMemoryConfig>,
+	cfg: ResolvedMemoryConfig,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const command = cfg.pipelineV2.extraction.command;
 	if (!command) {
@@ -423,70 +465,49 @@ export async function runSummaryCommandProvider(
 	}
 
 	try {
-		await new Promise<void>((resolve, reject) => {
-			const child = nodeSpawn(bin, args, {
-				cwd: cwd && cwd.length > 0 ? cwd : undefined,
-				env: {
-					...process.env,
-					...envFromConfig,
-					SIGNET_PATH: AGENTS_DIR,
-				},
-				stdio: ["ignore", "ignore", "ignore"],
-				windowsHide: true,
-			});
-
-			let settled = false;
-			let timedOut = false;
-			let killTimer: ReturnType<typeof setTimeout> | null = null;
-			const clearKillTimer = (): void => {
-				if (killTimer) {
-					clearTimeout(killTimer);
-					killTimer = null;
-				}
-			};
-			const timeoutError = new Error(`summary command timed out after ${timeoutMs}ms`);
-			const timeout = setTimeout(() => {
-				if (settled) return;
-				timedOut = true;
-				child.kill("SIGTERM");
-				killTimer = setTimeout(() => {
-					try {
-						child.kill("SIGKILL");
-					} catch {
-						// Child is already gone.
-					}
-				}, 2000);
-			}, timeoutMs);
-
-			child.on("error", (err) => {
-				clearKillTimer();
-				if (settled) return;
-				settled = true;
-				clearTimeout(timeout);
-				if (timedOut) {
-					reject(timeoutError);
-					return;
-				}
-				reject(err);
-			});
-
-			child.on("close", (code) => {
-				clearKillTimer();
-				if (settled) return;
-				settled = true;
-				clearTimeout(timeout);
-				if (timedOut) {
-					reject(timeoutError);
-					return;
-				}
-				const exitCode = code ?? 1;
-				if (exitCode !== 0) {
-					reject(new Error(`summary command exited with code ${exitCode}`));
-					return;
-				}
-				resolve();
-			});
+		const child = nodeSpawn(bin, args, {
+			cwd: cwd && cwd.length > 0 ? cwd : undefined,
+			env: {
+				...process.env,
+				...envFromConfig,
+				SIGNET_PATH: AGENTS_DIR,
+			},
+			stdio: ["ignore", "ignore", "ignore"],
+			windowsHide: true,
+			detached: process.platform !== "win32",
 		});
+		const exited = new Promise<number>((resolve, reject) => {
+			child.on("error", reject);
+			child.on("close", (code) => resolve(code ?? 1));
+		});
+		try {
+			await awaitSubprocessWithDeadline(
+				{
+					stdout: emptyByteStream(),
+					stderr: emptyByteStream(),
+					exited,
+					processGroupId: process.platform !== "win32" ? child.pid : undefined,
+					kill(signalName?: string) {
+						terminateSummaryCommand(child, signalName === "SIGKILL" ? "SIGKILL" : "SIGTERM");
+					},
+				},
+				timeoutMs,
+				"summary command",
+				timeoutMs,
+				async (proc) => {
+					const exitCode = await proc.exited;
+					if (exitCode !== 0) {
+						throw new Error(`summary command exited with code ${exitCode}`);
+					}
+				},
+				signal,
+			);
+		} catch (error) {
+			if (error instanceof SemaphoreTimeoutError) {
+				throw new Error(`summary command timed out after ${timeoutMs}ms`);
+			}
+			throw error;
+		}
 	} finally {
 		rmSync(tempDir, { recursive: true, force: true });
 	}
@@ -541,9 +562,56 @@ export function markCommandStageCompleted(accessor: DbAccessor, jobId: string): 
 	});
 }
 
-function tracksSessionSummaryArtifact(job: SummaryJobRow): boolean {
+/**
+ * Write the session summary artifact, tolerating an immutable-artifact
+ * conflict when a prior attempt already committed it (the daemon crashed
+ * between core commit and the final 'completed' status update). Core work
+ * already succeeded in that case, and fact insertion is content-hash
+ * idempotent, so the job should still complete instead of being classified
+ * terminal -> dead. Any other error propagates.
+ */
+export async function persistSessionSummaryArtifact(
+	job: SummaryJobRow,
+	summary: string,
+	provider: LlmProvider | null,
+): Promise<void> {
+	try {
+		const summaryWrite = await writeSummaryArtifact({
+			agentId: job.agent_id,
+			sessionId: job.session_id ?? job.session_key ?? job.id,
+			sessionKey: job.session_key,
+			project: job.project,
+			harness: job.harness,
+			capturedAt: job.captured_at ?? job.created_at,
+			startedAt: job.started_at,
+			endedAt: job.ended_at,
+			summary,
+			provider,
+		});
+		logger.info("summary-worker", "Wrote session summary artifact", {
+			path: summaryWrite.summaryPath,
+			sessionKey: job.session_key,
+			project: job.project,
+			summaryChars: summary.length,
+		});
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		if (message.startsWith(IMMUTABLE_ARTIFACT_ERROR_PREFIX)) {
+			logger.info("summary-worker", "Summary artifact already committed by prior attempt; completing job", {
+				sessionKey: job.session_key,
+				project: job.project,
+				attempt: job.attempts,
+			});
+		} else {
+			throw e;
+		}
+	}
+}
+
+export function tracksSessionSummaryArtifact(job: SummaryJobRow): boolean {
 	return (
 		job.trigger === "session_end" &&
+		isDurableBoundary(job.boundary_reason) &&
 		!isNoiseSession({
 			project: job.project,
 			sessionKey: job.session_key,
@@ -594,9 +662,10 @@ async function processJob(
 	accessor: DbAccessor,
 	provider: LlmProvider | null,
 	job: SummaryJobRow,
-	memoryCfg: ReturnType<typeof loadMemoryConfig>,
+	memoryCfg: ResolvedMemoryConfig,
+	signal?: AbortSignal,
 ): Promise<void> {
-	const commandMode = memoryCfg.pipelineV2.extraction.provider === "command";
+	const commandMode = memoryCfg.pipelineV2.enabled && memoryCfg.pipelineV2.extraction.provider === "command";
 	const commandStageStatus: CommandStageStatus = commandMode ? getCommandStageStatus(accessor, job.id) : "none";
 
 	if (
@@ -611,7 +680,7 @@ async function processJob(
 		if (commandStageStatus === "none") {
 			markCommandStageRunning(accessor, job.id);
 			try {
-				await runSummaryCommandProvider(job, memoryCfg);
+				await runSummaryCommandProvider(job, memoryCfg, signal);
 			} catch (error) {
 				clearCommandStageRunning(accessor, job.id);
 				throw error;
@@ -651,6 +720,8 @@ async function processJob(
 	const genOpts = {
 		timeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
 		maxTokens: memoryCfg.pipelineV2.synthesis.maxTokens,
+		signal,
+		refresh: true,
 	};
 	const result =
 		job.transcript.length > CHUNK_TARGET_CHARS
@@ -659,8 +730,17 @@ async function processJob(
 
 	if (!result) throw new Error("Failed to parse LLM summary response");
 
+	// Boundary-reason gating: only durable boundaries (session_closed,
+	// new_session) produce durable summary artifacts and extracted facts.
+	// Non-durable boundaries (compaction, checkpoint) still produce the LLM
+	// summary for DAG/continuity but skip durable fact extraction to prevent
+	// duplicate facts from overlapping transcript ranges.
+	const boundaryReason = normalizeBoundaryReason(job.boundary_reason);
+	const durable = isDurableBoundary(boundaryReason);
+
 	if (
 		!commandMode &&
+		durable &&
 		job.trigger === "session_end" &&
 		!isNoiseSession({
 			project: job.project,
@@ -669,30 +749,24 @@ async function processJob(
 			harness: job.harness,
 		})
 	) {
-		const summaryWrite = await writeSummaryArtifact({
-			agentId: job.agent_id,
-			sessionId: job.session_id ?? job.session_key ?? job.id,
-			sessionKey: job.session_key,
-			project: job.project,
-			harness: job.harness,
-			capturedAt: job.captured_at ?? job.created_at,
-			startedAt: job.started_at,
-			endedAt: job.ended_at,
-			summary: result.summary,
-			provider,
-		});
-		logger.info("summary-worker", "Wrote session summary artifact", {
-			path: summaryWrite.summaryPath,
-			sessionKey: job.session_key,
-			project: job.project,
-			summaryChars: result.summary.length,
-		});
+		await persistSessionSummaryArtifact(job, result.summary, provider);
 	}
 
 	if (commandMode) {
 		logger.info("summary-worker", "Command extraction mode: skipping summary markdown + fact insertion", {
 			sessionKey: job.session_key,
 			project: job.project,
+		});
+		markSummaryArtifactSkipped(job);
+	} else if (!durable) {
+		// Non-durable boundary (compaction/checkpoint): skip durable fact
+		// extraction to prevent duplicate facts from overlapping ranges.
+		// The LLM summary was still computed for DAG continuity above.
+		logger.info("summary-worker", "Skipping durable fact extraction for non-durable boundary", {
+			sessionKey: job.session_key,
+			project: job.project,
+			boundaryReason,
+			trigger: job.trigger,
 		});
 		markSummaryArtifactSkipped(job);
 	} else {
@@ -723,7 +797,7 @@ async function processJob(
 	}
 
 	try {
-		await scoreContinuity(accessor, provider, job, result.summary, memoryCfg);
+		await scoreContinuity(accessor, provider, job, result.summary, memoryCfg, signal);
 	} catch (e) {
 		logger.warn("summary-worker", "Continuity scoring failed (non-fatal)", {
 			error: e instanceof Error ? e.message : String(e),
@@ -763,6 +837,7 @@ async function processJob(
 interface GenerateOpts {
 	readonly timeoutMs: number;
 	readonly maxTokens: number;
+	readonly signal?: AbortSignal;
 }
 
 async function processSingle(
@@ -890,14 +965,25 @@ function loadInjectedMemories(
 }
 
 /**
- * Write per-memory relevance scores back to session_memories.
+ * Write observed per-memory verdicts back to session_memories and path feedback.
  * Maps LLM's 8-char ID prefixes to full memory IDs.
  */
-function writePerMemoryRelevance(
+function verdictScore(verdict: "USED" | "IGNORED" | "CONTRADICTED" | undefined, relevance: number): number {
+	if (verdict === "USED") return 1;
+	if (verdict === "IGNORED") return 0;
+	if (verdict === "CONTRADICTED") return -1;
+	return Math.max(0, Math.min(1, relevance));
+}
+
+function writePerMemoryVerdicts(
 	accessor: DbAccessor,
 	sessionKey: string,
 	agentId: string,
-	perMemory: ReadonlyArray<{ readonly id: string; readonly relevance: number }>,
+	perMemory: ReadonlyArray<{
+		readonly id: string;
+		readonly relevance: number;
+		readonly verdict?: "USED" | "IGNORED" | "CONTRADICTED";
+	}>,
 	injectedMemories: ReadonlyArray<InjectedMemoryPreview>,
 ): void {
 	if (perMemory.length === 0) return;
@@ -908,18 +994,36 @@ function writePerMemoryRelevance(
 		prefixMap.set(mem.memoryId.slice(0, 8), mem.memoryId);
 	}
 
+	const ratings: Record<string, number> = {};
+	const preferences: Record<string, string> = {};
+	const relevanceScores: Record<string, number> = {};
+	for (const entry of perMemory) {
+		const fullId = prefixMap.get(entry.id);
+		if (!fullId) continue;
+		ratings[fullId] = verdictScore(entry.verdict, entry.relevance);
+		preferences[fullId] = entry.verdict ?? "IGNORED";
+		relevanceScores[fullId] = ratings[fullId];
+	}
+	if (Object.keys(ratings).length === 0) return;
+
+	try {
+		recordPathFeedback(accessor, { sessionKey, agentId, ratings });
+	} catch (e) {
+		logger.warn("summary-worker", "Failed to write path feedback verdicts", {
+			error: e instanceof Error ? e.message : String(e),
+		});
+	}
+
 	try {
 		accessor.withWriteTx((db) => {
 			const stmt = db.prepare(
-				`UPDATE session_memories SET relevance_score = ?
+				`UPDATE session_memories
+				 SET relevance_score = ?,
+				     agent_preference = ?
 				 WHERE session_key = ? AND agent_id = ? AND memory_id = ?`,
 			);
-
-			for (const entry of perMemory) {
-				const fullId = prefixMap.get(entry.id);
-				if (!fullId) continue;
-				const score = Math.max(0, Math.min(1, entry.relevance));
-				stmt.run(score, sessionKey, agentId, fullId);
+			for (const [memoryId, score] of Object.entries(relevanceScores)) {
+				stmt.run(score, preferences[memoryId] ?? "IGNORED", sessionKey, agentId, memoryId);
 			}
 		});
 	} catch (e) {
@@ -954,7 +1058,7 @@ function buildContinuityPrompt(
 Consider:
 - Were the memories relevant to what was discussed?
 - Did the user have to re-explain things that memory should have known?
-- Were there gaps where prior context would have helped?
+- Did a memory materially shape an answer, get ignored, or conflict with the transcript?
 
 Pre-loaded memories (${injectedMemories.length} total):
 ${memorySection}
@@ -963,16 +1067,20 @@ Return ONLY a JSON object (no markdown fences):
 {
   "score": 0.0-1.0,
   "confidence": 0.0-1.0,
-  "memories_used": <number of pre-loaded memories that were actually relevant>,
+  "memories_used": <number of pre-loaded memories with verdict USED>,
   "novel_context_count": <number of times user had to re-explain something>,
   "reasoning": "Brief explanation of the score",
-  "per_memory": [{"id": "<8-char prefix>", "relevance": 0.0-1.0}]
+  "per_memory": [{"id": "<8-char prefix>", "relevance": 0.0-1.0, "verdict": "USED|IGNORED|CONTRADICTED"}]
 }
+
+Verdicts:
+- USED: the memory materially shaped an answer or decision in the transcript.
+- IGNORED: the memory was injected but did not matter.
+- CONTRADICTED: the transcript shows the memory is wrong or stale.
+Use the 8-char ID prefix shown in brackets. Include one per_memory item for every injected memory.
 
 Score guide: 1.0 = memories perfectly covered all needed context, 0.0 = memories were useless and everything was re-explained.
 Confidence: how certain you are in your scoring (1.0 = very confident, 0.0 = basically guessing).
-per_memory: rate each injected memory's relevance to the session. Use the 8-char ID prefix shown in brackets above.
-
 Session summary:
 ${summaryPreview}
 
@@ -989,15 +1097,17 @@ interface ContinuityResult {
 	readonly per_memory: ReadonlyArray<{
 		readonly id: string;
 		readonly relevance: number;
+		readonly verdict?: "USED" | "IGNORED" | "CONTRADICTED";
 	}>;
 }
 
-async function scoreContinuity(
+export async function scoreContinuity(
 	accessor: DbAccessor,
 	provider: LlmProvider,
 	job: SummaryJobRow,
 	summary: string,
-	memoryCfg: ReturnType<typeof loadMemoryConfig>,
+	memoryCfg: ResolvedMemoryConfig,
+	signal?: AbortSignal,
 ): Promise<void> {
 	// Load injected memories for this session (empty array for old sessions)
 	const injectedMemories = loadInjectedMemories(accessor, job.session_key, job.agent_id);
@@ -1007,6 +1117,7 @@ async function scoreContinuity(
 	const raw = await provider.generate(prompt, {
 		timeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
 		maxTokens: memoryCfg.pipelineV2.synthesis.maxTokens,
+		signal,
 	});
 
 	let jsonStr = raw.trim();
@@ -1024,14 +1135,16 @@ async function scoreContinuity(
 
 	const perMemoryRaw = Array.isArray(parsed.per_memory) ? parsed.per_memory : [];
 	const perMemory = perMemoryRaw
-		.filter(
-			(e: unknown): e is { id: string; relevance: number } =>
-				typeof e === "object" &&
-				e !== null &&
-				typeof (e as Record<string, unknown>).id === "string" &&
-				typeof (e as Record<string, unknown>).relevance === "number",
-		)
-		.map((e) => ({ id: e.id, relevance: e.relevance }));
+		.filter((e: unknown): e is { id: string; relevance: number; verdict?: string } => {
+			if (typeof e !== "object" || e === null) return false;
+			const row = e as Record<string, unknown>;
+			return typeof row.id === "string" && typeof row.relevance === "number";
+		})
+		.map((e) => {
+			const verdict: "USED" | "IGNORED" | "CONTRADICTED" | undefined =
+				e.verdict === "USED" || e.verdict === "IGNORED" || e.verdict === "CONTRADICTED" ? e.verdict : undefined;
+			return { id: e.id, relevance: e.relevance, verdict };
+		});
 
 	const result: ContinuityResult = {
 		score: Math.max(0, Math.min(1, parsed.score)),
@@ -1042,9 +1155,9 @@ async function scoreContinuity(
 		per_memory: perMemory,
 	};
 
-	// Write per-memory relevance scores back to session_memories
+	// Write observed usage verdicts back to session_memories + path feedback.
 	if (job.session_key && result.per_memory.length > 0) {
-		writePerMemoryRelevance(accessor, job.session_key, job.agent_id, result.per_memory, injectedMemories);
+		writePerMemoryVerdicts(accessor, job.session_key, job.agent_id, result.per_memory, injectedMemories);
 	}
 
 	const id = crypto.randomUUID();
@@ -1359,7 +1472,7 @@ export function recoverSummaryJobs(accessor: DbAccessor, limit: number = RECOVER
 		const rows = db
 			.prepare(
 				`SELECT id, session_key, session_id, harness, project, transcript,
-				        agent_id, trigger, captured_at, started_at, ended_at,
+				        agent_id, trigger, boundary_reason, captured_at, started_at, ended_at,
 				        attempts, max_attempts, created_at
 				 FROM summary_jobs
 				 WHERE status IN ('processing', 'leased')
@@ -1397,10 +1510,120 @@ export function recoverSummaryJobs(accessor: DbAccessor, limit: number = RECOVER
 	return result;
 }
 
-export function startSummaryWorker(accessor: DbAccessor): SummaryWorkerHandle {
+export async function leaseSummaryJobWhenAvailable(
+	accessor: DbAccessor,
+	isWorkloadAvailable: () => Promise<boolean>,
+): Promise<SummaryJobRow | null> {
+	if (!(await isWorkloadAvailable())) return null;
+
+	const job = accessor.withWriteTx((db) => {
+		let row: SummaryJobRow | undefined;
+		try {
+			row = db
+				.prepare(
+					`SELECT id, session_key, session_id, harness, project, transcript,
+					        agent_id, trigger, boundary_reason, captured_at, started_at, ended_at,
+					        attempts, max_attempts, created_at
+					 FROM summary_jobs
+					 WHERE status = 'pending' AND attempts < max_attempts
+					 ORDER BY created_at ASC
+					 LIMIT 1`,
+				)
+				.get() as SummaryJobRow | undefined;
+		} catch {
+			row = db
+				.prepare(
+					`SELECT id, session_key, session_key AS session_id, harness, project, transcript,
+					        'default' AS agent_id, 'session_end' AS trigger,
+					        NULL AS boundary_reason,
+					        created_at AS captured_at, NULL AS started_at, completed_at AS ended_at,
+					        attempts, max_attempts, created_at
+					 FROM summary_jobs
+					 WHERE status = 'pending' AND attempts < max_attempts
+					 ORDER BY created_at ASC
+					 LIMIT 1`,
+				)
+				.get() as SummaryJobRow | undefined;
+		}
+
+		if (!row) return null;
+
+		const updated = countChanges(
+			db
+				.prepare(
+					`UPDATE summary_jobs
+					 SET status = 'processing', attempts = attempts + 1
+					 WHERE id = ? AND status = 'pending' AND attempts = ?`,
+				)
+				.run(row.id, row.attempts),
+		);
+		return updated === 1 ? { ...row, attempts: row.attempts + 1 } : null;
+	});
+
+	if (!job) return null;
+
+	try {
+		if (await isWorkloadAvailable()) return job;
+	} catch (error) {
+		restoreUnprocessedSummaryLease(accessor, job);
+		throw error;
+	}
+
+	restoreUnprocessedSummaryLease(accessor, job);
+	return null;
+}
+
+function restoreUnprocessedSummaryLease(accessor: DbAccessor, job: SummaryJobRow): void {
+	const restored = accessor.withWriteTx((db) =>
+		countChanges(
+			db
+				.prepare(
+					`UPDATE summary_jobs
+					 SET status = 'pending', attempts = attempts - 1
+					 WHERE id = ? AND status = 'processing' AND attempts = ?`,
+				)
+				.run(job.id, job.attempts),
+		),
+	);
+	if (restored !== 1) {
+		throw new Error(`Failed to restore unprocessed summary lease for job ${job.id}`);
+	}
+}
+
+export function startSummaryRecovery(accessor: DbAccessor): () => void {
 	let timer: ReturnType<typeof setTimeout> | null = null;
-	let recoverTimer: ReturnType<typeof setTimeout> | null = null;
 	let stopped = false;
+
+	function schedule(delay: number): void {
+		if (stopped) return;
+		timer = setTimeout(() => {
+			try {
+				const batch = recoverSummaryJobs(accessor);
+				if (batch.updated > 0) {
+					logger.info("summary-worker", `Crash recovery: reset ${batch.updated} stuck job(s) to pending/dead`);
+				}
+				if (batch.selected >= RECOVER_BATCH) schedule(0);
+			} catch (e) {
+				logger.warn("summary-worker", "Crash recovery failed (non-fatal)", {
+					error: e instanceof Error ? e.message : String(e),
+				});
+			}
+		}, delay);
+	}
+
+	schedule(0);
+	return () => {
+		stopped = true;
+		if (timer) clearTimeout(timer);
+	};
+}
+
+export function startSummaryWorker(accessor: DbAccessor, options: SummaryWorkerOptions = {}): SummaryWorkerHandle {
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	let stopped = false;
+	let activeTick: Promise<void> | null = null;
+	let activeAbort: AbortController | null = null;
+	const stopRecovery = startSummaryRecovery(accessor);
 
 	let cachedProvider: LlmProvider | null = null;
 
@@ -1415,48 +1638,19 @@ export function startSummaryWorker(accessor: DbAccessor): SummaryWorkerHandle {
 		}
 
 		let jobId: string | null = null;
+		let leasedJob: SummaryJobRow | null = null;
 
 		try {
-			// Lease a pending job
-			const job = accessor.withWriteTx((db) => {
-				let row: SummaryJobRow | undefined;
-				try {
-					row = db
-						.prepare(
-							`SELECT id, session_key, session_id, harness, project, transcript,
-							        agent_id, trigger, captured_at, started_at, ended_at,
-							        attempts, max_attempts, created_at
-							 FROM summary_jobs
-							 WHERE status = 'pending' AND attempts < max_attempts
-							 ORDER BY created_at ASC
-							 LIMIT 1`,
-						)
-						.get() as SummaryJobRow | undefined;
-				} catch {
-					row = db
-						.prepare(
-							`SELECT id, session_key, session_key AS session_id, harness, project, transcript,
-							        'default' AS agent_id, 'session_end' AS trigger,
-							        created_at AS captured_at, NULL AS started_at, completed_at AS ended_at,
-							        attempts, max_attempts, created_at
-							 FROM summary_jobs
-							 WHERE status = 'pending' AND attempts < max_attempts
-							 ORDER BY created_at ASC
-							 LIMIT 1`,
-						)
-						.get() as SummaryJobRow | undefined;
-				}
-
-				if (!row) return null;
-
-				db.prepare(
-					`UPDATE summary_jobs
-					 SET status = 'processing', attempts = attempts + 1
-					 WHERE id = ?`,
-				).run(row.id);
-
-				return { ...row, attempts: row.attempts + 1 };
-			});
+			const isSynthesisAvailable = options.isSynthesisAvailable ?? (async () => false);
+			const isWorkloadAvailable = async (): Promise<boolean> => {
+				const latest = loadMemoryConfig(AGENTS_DIR);
+				return canProcessSummaryJobs(
+					latest.pipelineV2.enabled && latest.pipelineV2.extraction.provider === "command",
+					await isSynthesisAvailable(),
+					latest.pipelineV2.paused,
+				);
+			};
+			const job = await leaseSummaryJobWhenAvailable(accessor, isWorkloadAvailable);
 
 			if (!job) {
 				scheduleTick(POLL_INTERVAL_MS);
@@ -1464,6 +1658,22 @@ export function startSummaryWorker(accessor: DbAccessor): SummaryWorkerHandle {
 			}
 
 			jobId = job.id;
+			leasedJob = job;
+			activeAbort = new AbortController();
+			const memoryCfg = loadMemoryConfig(AGENTS_DIR);
+			const commandMode = memoryCfg.pipelineV2.enabled && memoryCfg.pipelineV2.extraction.provider === "command";
+			let synthesisAvailable = false;
+			try {
+				synthesisAvailable = await isSynthesisAvailable();
+			} catch (error) {
+				if (!commandMode) restoreUnprocessedSummaryLease(accessor, job);
+				throw error;
+			}
+			if (!commandMode && !synthesisAvailable) {
+				restoreUnprocessedSummaryLease(accessor, job);
+				scheduleTick(POLL_INTERVAL_MS);
+				return;
+			}
 
 			logger.info("summary-worker", "Processing session summary", {
 				jobId: job.id,
@@ -1473,10 +1683,15 @@ export function startSummaryWorker(accessor: DbAccessor): SummaryWorkerHandle {
 				project: job.project,
 			});
 
-			if (!cachedProvider) {
-				cachedProvider = getInferenceProvider("sessionSynthesis");
+			// Command-only extraction must not resolve or call session synthesis.
+			if (synthesisAvailable && !cachedProvider) {
+				try {
+					cachedProvider = getInferenceProvider("sessionSynthesis");
+				} catch (error) {
+					if (!commandMode) throw error;
+				}
 			}
-			await processJob(accessor, cachedProvider, job, cfg);
+			await processJob(accessor, synthesisAvailable ? cachedProvider : null, job, memoryCfg, activeAbort.signal);
 
 			// Mark complete
 			accessor.withWriteTx((db) => {
@@ -1494,6 +1709,13 @@ export function startSummaryWorker(accessor: DbAccessor): SummaryWorkerHandle {
 		} catch (e) {
 			const terminal = isTerminalSummaryJobError(e instanceof Error ? e : String(e));
 			const errorMessage = e instanceof Error ? e.message : String(e);
+			if (
+				leasedJob &&
+				(e instanceof ClaudeCodeCircuitOpenError || (stopped && /aborted|cancelled|canceled/i.test(errorMessage)))
+			) {
+				restoreUnprocessedSummaryLease(accessor, leasedJob);
+				return;
+			}
 			logger.error("summary-worker", "Job failed", e instanceof Error ? e : undefined, { error: errorMessage });
 
 			// Try to mark the job as failed/pending for retry.
@@ -1526,51 +1748,36 @@ export function startSummaryWorker(accessor: DbAccessor): SummaryWorkerHandle {
 			}
 
 			scheduleTick(terminal ? 500 : POLL_INTERVAL_MS * 3);
+		} finally {
+			activeAbort = null;
 		}
 	}
 
 	function scheduleTick(delay: number): void {
 		if (stopped) return;
 		timer = setTimeout(() => {
-			tick().catch((err) => {
-				logger.error("summary-worker", "Unhandled tick error", err instanceof Error ? err : undefined, {
-					error: err instanceof Error ? err.message : String(err),
+			activeTick = tick()
+				.catch((err) => {
+					logger.error("summary-worker", "Unhandled tick error", err instanceof Error ? err : undefined, {
+						error: err instanceof Error ? err.message : String(err),
+					});
+				})
+				.finally(() => {
+					activeTick = null;
 				});
-			});
 		}, delay);
 	}
-
-	function scheduleRecovery(delay: number): void {
-		if (stopped) return;
-		recoverTimer = setTimeout(() => {
-			try {
-				const batch = recoverSummaryJobs(accessor);
-				if (batch.updated > 0) {
-					logger.info("summary-worker", `Crash recovery: reset ${batch.updated} stuck job(s) to pending/dead`);
-				}
-				if (batch.selected >= RECOVER_BATCH) {
-					scheduleRecovery(0);
-				}
-			} catch (e) {
-				logger.warn("summary-worker", "Crash recovery failed (non-fatal)", {
-					error: e instanceof Error ? e.message : String(e),
-				});
-			}
-		}, delay);
-	}
-
-	// Crash recovery runs in small async batches so daemon startup and HTTP
-	// readiness are not blocked by large summary_jobs tables.
-	scheduleRecovery(0);
 
 	// Start polling
 	scheduleTick(POLL_INTERVAL_MS);
 
 	return {
-		stop() {
+		async stop() {
 			stopped = true;
+			activeAbort?.abort();
 			if (timer) clearTimeout(timer);
-			if (recoverTimer) clearTimeout(recoverTimer);
+			stopRecovery();
+			if (activeTick) await activeTick;
 		},
 		get running() {
 			return !stopped;
@@ -1592,6 +1799,7 @@ export function enqueueSummaryJob(
 		readonly project?: string;
 		readonly agentId: string;
 		readonly trigger?: string;
+		readonly boundaryReason?: string;
 		readonly capturedAt?: string;
 		readonly startedAt?: string;
 		readonly endedAt?: string;
@@ -1605,8 +1813,8 @@ export function enqueueSummaryJob(
 			db.prepare(
 				`INSERT INTO summary_jobs
 				 (id, session_key, session_id, harness, project, agent_id, transcript,
-				  trigger, captured_at, started_at, ended_at, status, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+				  trigger, boundary_reason, captured_at, started_at, ended_at, status, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
 			).run(
 				id,
 				params.sessionKey || null,
@@ -1616,6 +1824,7 @@ export function enqueueSummaryJob(
 				params.agentId,
 				params.transcript,
 				params.trigger || "session_end",
+				params.boundaryReason || null,
 				params.capturedAt || now,
 				params.startedAt || null,
 				params.endedAt || null,
@@ -1643,6 +1852,7 @@ export function enqueueSummaryJob(
 		harness: params.harness,
 		sessionKey: params.sessionKey,
 		project: params.project,
+		boundaryReason: params.boundaryReason || null,
 		transcriptChars: params.transcript.length,
 	});
 

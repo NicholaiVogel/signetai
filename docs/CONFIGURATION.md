@@ -507,6 +507,32 @@ inference:
           toolUse: true
 ```
 
+Direct Codex CLI targets use the `codex` binary in the daemon runtime. The Docker image includes the CLI;
+mount a logged-in Codex config directory only when you opt into this executor:
+
+```bash
+SIGNET_CODEX_HOME="$HOME/.codex" docker compose -f compose.yml -f compose.codex.yml up -d
+```
+
+```yaml
+inference:
+  targets:
+    codex-cli:
+      executor: codex
+      models:
+        default:
+          model: gpt-5.4-mini
+          reasoning: medium
+  workloads:
+    sessionSynthesis:
+      target: codex-cli/default
+      taskClass: session_synthesis
+```
+
+Signet marks the target unavailable unless `codex --version` works and either `CODEX_HOME/auth.json`
+is mounted or `OPENAI_API_KEY` is present. The auth cache is copied into a sterile temporary home for
+each call; the mounted Codex config stays read-only.
+
 Model fields:
 
 | Field | Type | Description |
@@ -796,6 +822,49 @@ disabled. Set at least one sub-field to opt in.
 Rate-limited synthesis jobs that fail are sent to dead-letter without
 retry. See the extraction `rateLimit` docs above for the full warning.
 
+### Claude Code background environment (`claudeCode`)
+
+Applies whenever legacy pipeline extraction, synthesis, or an explicit
+inference route uses the `claude-code` provider.
+
+| Field | Default | Range | Description |
+|-------|---------|-------|-------------|
+| `allowApiKeyEnv` | `false` | — | When `false`, daemon-spawned `claude -p` calls strip ambient `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`. Set `true` only when background pipeline jobs should inherit those env credentials. Legacy unshipped `billingMode: api-key` is accepted as an alias for `true`; `billingMode: subscription` maps to `false`. |
+| `maxBudgetUsd` | unset | 0.01-1000 | Optional per-invocation spend cap passed to Claude Code print mode as `--max-budget-usd`. Omitted by default because Claude Code documents no default limit for this flag and forcing one could change CLI behavior. |
+| `cooldownMs` | `300000` | 1000-3600000 ms | Daemon-wide Claude Code circuit cooldown opened after Claude Code reports quota, usage-limit, credit, billing, or auth failures. Calls during cooldown fail before spawning `claude`. Interactive and background `claude-code` providers in the daemon share this circuit and config snapshot. |
+
+```yaml
+memory:
+  pipelineV2:
+    claudeCode:
+      allowApiKeyEnv: false
+      cooldownMs: 300000
+```
+
+Only opt into ambient API-key/token inheritance when you intentionally want
+background pipeline jobs to use the Anthropic credentials already present in
+the daemon environment:
+
+```yaml
+memory:
+  pipelineV2:
+    claudeCode:
+      allowApiKeyEnv: true
+      maxBudgetUsd: 0.25
+```
+
+Anthropic's Claude Code CLI reference lists `--max-budget-usd` as a
+print-mode-only API-call budget flag:
+<https://docs.anthropic.com/en/docs/claude-code/cli-reference>. Anthropic's
+Claude Code cost docs describe Claude Code charges in terms of API token
+consumption and subscription plan pricing separately:
+<https://docs.anthropic.com/en/docs/claude-code/costs>. Anthropic support docs
+also state that paid Claude subscriptions and Claude Console/API usage are
+separate products:
+<https://support.anthropic.com/en/articles/9876003-i-subscribe-to-claude-pro-why-do-i-have-to-pay-separately-for-api-usage-on-console>.
+Signet does not verify the billing account selected by a persisted
+`claude auth login --console` session; it only controls whether the daemon
+subprocess inherits ambient Anthropic API key/token environment variables.
 
 ### Worker (`worker`)
 
@@ -809,6 +878,7 @@ control.
 | `leaseTimeoutMs` | `300000` | 10000-600000 ms | Time before an uncompleted job lease expires |
 | `maxLoadPerCpu` | `0.8` | 0.1-8.0 | Load-per-CPU threshold above which extraction polling is deferred |
 | `overloadBackoffMs` | `30000` | 1000-300000 ms | Delay between poll attempts while host load stays above threshold |
+| `maxLlmConcurrency` | `2` | 1-16 | Shared cap for live LLM calls across extraction, synthesis, reranking, inference streaming, and daemon route provider calls such as skills, ontology consolidation, and diagnostics greetings. `SIGNET_MAX_LLM_CONCURRENCY` overrides YAML when set, matching the TypeScript daemon and Rust daemon runtime behavior for wired provider paths. |
 
 A job that exceeds `maxRetries` moves to dead-letter status and is
 eventually purged by the retention worker.

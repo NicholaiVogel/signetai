@@ -197,6 +197,7 @@ fn normalize_manifest(
     let raw_pipeline = raw_child(raw, "memory").and_then(|value| raw_child(value, "pipelineV2"));
     normalize_pipeline_extraction(pipeline, raw_pipeline)?;
     normalize_pipeline_worker(pipeline, raw_pipeline);
+    normalize_pipeline_claude_code(pipeline, raw_pipeline);
     normalize_pipeline_reranker(pipeline, raw_pipeline);
     normalize_pipeline_synthesis(pipeline, raw_pipeline)?;
     normalize_pipeline_structural(pipeline, raw_pipeline);
@@ -302,6 +303,39 @@ fn normalize_pipeline_worker(pipeline: &mut PipelineV2Config, raw: Option<&serde
         .or_else(|| raw.and_then(|value| raw_u64(value, "workerOverloadBackoffMs")));
     if let Some(value) = overload_backoff_ms {
         pipeline.worker.overload_backoff_ms = value.clamp(1_000, 300_000);
+    }
+
+    let max_llm_concurrency = raw
+        .and_then(|value| raw_child(value, "worker"))
+        .and_then(|value| raw_u64(value, "maxLlmConcurrency"));
+    let env_max_llm_concurrency = std::env::var("SIGNET_MAX_LLM_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value >= 1);
+    if let Some(value) = env_max_llm_concurrency.or(max_llm_concurrency) {
+        pipeline.worker.max_llm_concurrency = value.clamp(1, 16);
+    }
+}
+
+fn normalize_pipeline_claude_code(pipeline: &mut PipelineV2Config, raw: Option<&serde_yml::Value>) {
+    let Some(claude_code) = raw.and_then(|value| raw_child(value, "claudeCode")) else {
+        return;
+    };
+
+    if let Some(value) = raw_bool(claude_code, "allowApiKeyEnv") {
+        pipeline.claude_code.allow_api_key_env = value;
+    } else if let Some(value) = raw_string(claude_code, "billingMode") {
+        if value == "api-key" {
+            pipeline.claude_code.allow_api_key_env = true;
+        } else if value == "subscription" {
+            pipeline.claude_code.allow_api_key_env = false;
+        }
+    }
+    if let Some(value) = raw_f64(claude_code, "maxBudgetUsd") {
+        pipeline.claude_code.max_budget_usd = Some(value.clamp(0.01, 1000.0));
+    }
+    if let Some(value) = raw_u64(claude_code, "cooldownMs") {
+        pipeline.claude_code.cooldown_ms = value.clamp(1_000, 3_600_000);
     }
 }
 
@@ -414,6 +448,10 @@ fn raw_string<'a>(value: &'a serde_yml::Value, key: &str) -> Option<&'a str> {
         .as_str()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn raw_bool(value: &serde_yml::Value, key: &str) -> Option<bool> {
+    raw_child(value, key)?.as_bool()
 }
 
 fn raw_optional_string_strict<'a>(
@@ -716,6 +754,50 @@ memory:
     }
 
     #[test]
+    fn claude_code_config_parses_budget_and_api_key_env() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    claudeCode:
+      allowApiKeyEnv: true
+      maxBudgetUsd: 0.5
+      cooldownMs: 120000
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+
+        assert!(pipeline.claude_code.allow_api_key_env);
+        assert_eq!(pipeline.claude_code.max_budget_usd, Some(0.5));
+        assert_eq!(pipeline.claude_code.cooldown_ms, 120_000);
+    }
+
+    #[test]
+    fn claude_code_config_maps_legacy_billing_mode_to_api_key_env() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    claudeCode:
+      billingMode: api-key
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+
+        assert!(pipeline.claude_code.allow_api_key_env);
+    }
+
+    #[test]
     fn synthesis_enabled_only_keeps_inheriting_extraction_values() {
         let manifest = parse_manifest(
             r#"
@@ -787,6 +869,20 @@ memory:
 
         assert_eq!(pipeline.synthesis.provider, "none");
         assert!(!pipeline.synthesis.enabled);
+        assert!(!pipeline.summary_workload_enabled());
+    }
+
+    #[test]
+    fn summary_workload_requires_enabled_non_none_provider() {
+        let mut pipeline = PipelineV2Config::default();
+        assert!(pipeline.summary_workload_enabled());
+
+        pipeline.synthesis.enabled = false;
+        assert!(!pipeline.summary_workload_enabled());
+
+        pipeline.synthesis.enabled = true;
+        pipeline.synthesis.provider = "NONE".to_string();
+        assert!(!pipeline.summary_workload_enabled());
     }
 
     #[test]
@@ -1073,6 +1169,72 @@ memory:
             .expect("pipeline config");
         assert_eq!(flat_pipeline.worker.max_load_per_cpu, 0.55);
         assert_eq!(flat_pipeline.worker.overload_backoff_ms, 42_000);
+    }
+
+    #[test]
+    fn worker_max_llm_concurrency_loads_with_bounded_default() {
+        let previous = std::env::var_os("SIGNET_MAX_LLM_CONCURRENCY");
+        unsafe {
+            std::env::remove_var("SIGNET_MAX_LLM_CONCURRENCY");
+        }
+
+        let default_pipeline = PipelineV2Config::default();
+        assert_eq!(default_pipeline.worker.max_llm_concurrency, 2);
+
+        let low = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    worker:
+      maxLlmConcurrency: 0
+"#,
+        )
+        .expect("manifest parses")
+        .memory
+        .unwrap()
+        .pipeline_v2
+        .unwrap();
+        assert_eq!(low.worker.max_llm_concurrency, 1);
+
+        let high = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    worker:
+      maxLlmConcurrency: 99
+"#,
+        )
+        .expect("manifest parses")
+        .memory
+        .unwrap()
+        .pipeline_v2
+        .unwrap();
+        assert_eq!(high.worker.max_llm_concurrency, 16);
+
+        unsafe {
+            std::env::set_var("SIGNET_MAX_LLM_CONCURRENCY", "7");
+        }
+        let env_override = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    worker:
+      maxLlmConcurrency: 3
+"#,
+        )
+        .expect("manifest parses")
+        .memory
+        .unwrap()
+        .pipeline_v2
+        .unwrap();
+        assert_eq!(env_override.worker.max_llm_concurrency, 7);
+
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("SIGNET_MAX_LLM_CONCURRENCY", value),
+                None => std::env::remove_var("SIGNET_MAX_LLM_CONCURRENCY"),
+            }
+        }
     }
 
     #[test]
@@ -1391,6 +1553,7 @@ pub struct PipelineV2Config {
     pub telemetry_enabled: bool,
     pub extraction: ExtractionConfig,
     pub worker: WorkerConfig,
+    pub claude_code: ClaudeCodeConfig,
     pub graph: GraphConfig,
     pub traversal: Option<TraversalConfig>,
     pub reranker: RerankerConfig,
@@ -1415,6 +1578,12 @@ pub struct PipelineV2Config {
     pub model_registry: ModelRegistryConfig,
 }
 
+impl PipelineV2Config {
+    pub fn summary_workload_enabled(&self) -> bool {
+        self.synthesis.enabled && !self.synthesis.provider.eq_ignore_ascii_case("none")
+    }
+}
+
 impl Default for PipelineV2Config {
     fn default() -> Self {
         Self {
@@ -1428,6 +1597,7 @@ impl Default for PipelineV2Config {
             telemetry_enabled: false,
             extraction: ExtractionConfig::default(),
             worker: WorkerConfig::default(),
+            claude_code: ClaudeCodeConfig::default(),
             graph: GraphConfig::default(),
             traversal: Some(TraversalConfig::default()),
             reranker: RerankerConfig::default(),
@@ -1447,6 +1617,24 @@ impl Default for PipelineV2Config {
             predictor: None,
             predictor_pipeline: PredictorPipelineConfig::default(), // legacy manifest compatibility only; hard-deprecated in 0.112.0
             model_registry: ModelRegistryConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ClaudeCodeConfig {
+    pub allow_api_key_env: bool,
+    pub max_budget_usd: Option<f64>,
+    pub cooldown_ms: u64,
+}
+
+impl Default for ClaudeCodeConfig {
+    fn default() -> Self {
+        Self {
+            allow_api_key_env: false,
+            max_budget_usd: None,
+            cooldown_ms: 300_000,
         }
     }
 }
@@ -1527,6 +1715,7 @@ pub struct WorkerConfig {
     pub lease_timeout_ms: u64,
     pub max_load_per_cpu: f64,
     pub overload_backoff_ms: u64,
+    pub max_llm_concurrency: u64,
 }
 
 impl Default for WorkerConfig {
@@ -1537,6 +1726,7 @@ impl Default for WorkerConfig {
             lease_timeout_ms: 60_000,
             max_load_per_cpu: 0.8,
             overload_backoff_ms: 30_000,
+            max_llm_concurrency: 2,
         }
     }
 }

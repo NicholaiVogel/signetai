@@ -20,13 +20,19 @@ export interface LlmGenerateResult {
 	readonly usage: LlmUsage | null;
 }
 
+export interface LlmGenerateOptions {
+	readonly timeoutMs?: number;
+	readonly maxTokens?: number;
+	readonly temperature?: number;
+	readonly signal?: AbortSignal;
+	readonly responseFormat?: "json";
+	readonly think?: boolean;
+}
+
 export interface LlmProvider {
 	readonly name: string;
-	generate(prompt: string, opts?: { timeoutMs?: number; maxTokens?: number; temperature?: number }): Promise<string>;
-	generateWithUsage?(
-		prompt: string,
-		opts?: { timeoutMs?: number; maxTokens?: number; temperature?: number },
-	): Promise<LlmGenerateResult>;
+	generate(prompt: string, opts?: LlmGenerateOptions): Promise<string>;
+	generateWithUsage?(prompt: string, opts?: LlmGenerateOptions): Promise<LlmGenerateResult>;
 	available(): Promise<boolean>;
 }
 
@@ -263,8 +269,16 @@ export interface PipelineWorkerConfig {
 	readonly leaseTimeoutMs: number;
 	readonly maxLoadPerCpu: number;
 	readonly overloadBackoffMs: number;
+	readonly maxLlmConcurrency: number;
 	/** Run extraction pipeline in a dedicated worker thread (default: false). */
 	readonly threadedExtraction: boolean;
+}
+
+export interface PipelineClaudeCodeConfig {
+	/** Allow daemon-spawned Claude Code calls to inherit ambient Anthropic API-key env vars. */
+	readonly allowApiKeyEnv: boolean;
+	readonly maxBudgetUsd?: number;
+	readonly cooldownMs: number;
 }
 
 export interface PipelineGraphConfig {
@@ -359,6 +373,10 @@ export interface PipelineWriteGateConfig {
 	readonly continuityDiscount: number;
 }
 
+export interface PipelineDurabilityConfig {
+	readonly enabled: boolean;
+}
+
 export interface PipelineV2Config {
 	// Master switches (flat)
 	readonly enabled: boolean;
@@ -374,6 +392,7 @@ export interface PipelineV2Config {
 	// Grouped sub-objects
 	readonly extraction: PipelineExtractionConfig;
 	readonly worker: PipelineWorkerConfig;
+	readonly claudeCode: PipelineClaudeCodeConfig;
 	readonly graph: PipelineGraphConfig;
 	readonly traversal?: PipelineTraversalConfig;
 	readonly reranker: PipelineRerankerConfig;
@@ -391,6 +410,7 @@ export interface PipelineV2Config {
 	readonly feedback: PipelineFeedbackConfig;
 	readonly significance?: PipelineSignificanceConfig;
 	readonly writeGate?: PipelineWriteGateConfig;
+	readonly durability?: PipelineDurabilityConfig;
 	readonly modelRegistry: PipelineModelRegistryConfig;
 	readonly hints?: PipelineHintsConfig;
 	readonly reflections: PipelineReflectionsConfig;

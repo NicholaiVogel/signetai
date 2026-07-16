@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker, type WorkerOptions } from "node:worker_threads";
+import type { LlmProvider } from "@signet/core";
 import type { AnalyticsCollector } from "../analytics";
 import { logger } from "../logger";
 import type { LogCategory } from "../logger";
@@ -38,6 +39,7 @@ export type ExtractionWorkerFactory = (
 
 export interface ExtractionThreadOpts {
 	readonly init: WorkerInit;
+	readonly provider?: LlmProvider;
 	readonly analytics?: AnalyticsCollector;
 	readonly telemetry?: TelemetryCollector;
 	readonly workerFactory?: ExtractionWorkerFactory;
@@ -46,7 +48,7 @@ export interface ExtractionThreadOpts {
 }
 
 export function startExtractionThread(opts: ExtractionThreadOpts): Promise<WorkerHandle> {
-	const { init, analytics, telemetry } = opts;
+	const { init, analytics, telemetry, provider } = opts;
 	const __dirname = dirname(fileURLToPath(import.meta.url));
 	return new Promise<WorkerHandle>((resolve, reject) => {
 		const bundled = join(__dirname, "extraction-thread.js");
@@ -58,6 +60,10 @@ export function startExtractionThread(opts: ExtractionThreadOpts): Promise<Worke
 
 		let running = true;
 		let settled = false;
+		const pendingGenerate = new Map<string, { readonly controller: AbortController; readonly done: Promise<void> }>();
+		const abortPendingGenerate = (): void => {
+			for (const pending of pendingGenerate.values()) pending.controller.abort();
+		};
 		let latestStats: WorkerStats = {
 			failures: 0,
 			lastProgressAt: Date.now(),
@@ -75,6 +81,7 @@ export function startExtractionThread(opts: ExtractionThreadOpts): Promise<Worke
 		const readyTimer = setTimeout(() => {
 			if (settled) return;
 			settled = true;
+			abortPendingGenerate();
 			reject(
 				new Error(
 					`Extraction worker thread failed to become ready within ${opts.readyTimeoutMs ?? READY_TIMEOUT_MS}ms`,
@@ -100,6 +107,31 @@ export function startExtractionThread(opts: ExtractionThreadOpts): Promise<Worke
 				case "stats":
 					latestStats = msg.stats;
 					break;
+
+				case "generate": {
+					if (!provider) {
+						worker.postMessage({ type: "generateError", id: msg.id, error: "main-thread provider unavailable" });
+						break;
+					}
+					const controller = new AbortController();
+					const done = provider
+						.generate(msg.prompt, { ...msg.options, signal: controller.signal })
+						.then((text) => {
+							worker.postMessage({ type: "generateResult", id: msg.id, text });
+						})
+						.catch((error) => {
+							worker.postMessage({
+								type: "generateError",
+								id: msg.id,
+								error: error instanceof Error ? error.message : String(error),
+							});
+						})
+						.finally(() => {
+							pendingGenerate.delete(msg.id);
+						});
+					pendingGenerate.set(msg.id, { controller, done });
+					break;
+				}
 
 				case "log": {
 					const cat = msg.category as LogCategory;
@@ -138,6 +170,7 @@ export function startExtractionThread(opts: ExtractionThreadOpts): Promise<Worke
 			clearTimeout(readyTimer);
 			logger.error("pipeline", "Extraction worker thread crashed", err);
 			running = false;
+			abortPendingGenerate();
 			if (!settled) {
 				settled = true;
 				reject(err);
@@ -147,6 +180,7 @@ export function startExtractionThread(opts: ExtractionThreadOpts): Promise<Worke
 		worker.on("exit", (code: number) => {
 			clearTimeout(readyTimer);
 			running = false;
+			abortPendingGenerate();
 			if (code !== 0) {
 				logger.warn("pipeline", "Extraction worker thread exited with non-zero code", { code });
 			}
@@ -169,6 +203,11 @@ export function startExtractionThread(opts: ExtractionThreadOpts): Promise<Worke
 			},
 			async stop(): Promise<void> {
 				if (!running) return;
+				const activeGenerate = Array.from(pendingGenerate.values());
+				for (const pending of activeGenerate) pending.controller.abort();
+				if (activeGenerate.length > 0) {
+					await Promise.allSettled(activeGenerate.map((pending) => pending.done));
+				}
 				worker.postMessage({ type: "stop" });
 				await new Promise<void>((res) => {
 					const stopTimer = setTimeout(() => {

@@ -51,11 +51,16 @@ import { closeInferenceProviderResolver, getInferenceProvider, initInferenceProv
 import { logger } from "./logger";
 import { type ResolvedMemoryConfig, loadMemoryConfig, shouldWarnGraphExtractionWritesDisabled } from "./memory-config";
 import { registerGlobalMiddleware } from "./middleware";
-import { type NativeMemoryBridgeHandle, startNativeMemoryBridge } from "./native-memory-sources";
-import { resolveEmbeddedWorkerPath } from "./native-runtime-assets";
+import {
+	type NativeMemoryBridgeHandle,
+	resolveEmbeddingBridgeOptions,
+	startNativeMemoryBridge,
+} from "./native-memory-sources";
+import { materializeEmbeddedWasmAssets, resolveEmbeddedWorkerPath } from "./native-runtime-assets";
 import {
 	DEFAULT_RETENTION,
 	ensureRetentionWorker,
+	ensureSummaryRecovery,
 	ensureSummaryWorker,
 	setDreamingWorker,
 	startPipeline,
@@ -65,7 +70,7 @@ import { type DreamingWorkerHandle, startDreamingWorker } from "./pipeline/dream
 import type { WorkerInit } from "./pipeline/extraction-thread-protocol";
 import { invalidateTraversalCache } from "./pipeline/graph-traversal";
 import { stopModelRegistry } from "./pipeline/model-registry";
-import { stopOpenCodeServer } from "./pipeline/provider";
+import { configureLlmConcurrency, stopOpenCodeServer } from "./pipeline/provider";
 import { startReconciler } from "./pipeline/skill-reconciler";
 import { type RepairContext, structuralBackfill } from "./repair-actions";
 import { logFdSnapshot, startEventLoopMonitor, startFdPollMonitor, stopResourceMonitors } from "./resource-monitor";
@@ -240,10 +245,12 @@ mountInferenceRoutes(app, {
 // ============================================================================
 
 setFetchEmbedding(fetchEmbedding);
+// Mount the literal /api/skills/analytics before mountSkillsRoutes, whose
+// /api/skills/:name route would otherwise match "analytics" as a skill name.
+mountSkillAnalyticsRoutes(app);
 mountSkillsRoutes(app);
 mountMarketplaceRoutes(app);
 mountMcpAnalyticsRoutes(app);
-mountSkillAnalyticsRoutes(app);
 mountAppTrayRoutes(app);
 mountWidgetRoutes(app);
 mountEventBusRoutes(app);
@@ -260,8 +267,11 @@ setupDashboardRoutes(app);
 let watcher: ReturnType<typeof watch> | null = null;
 let nativeMemoryBridge: NativeMemoryBridgeHandle | null = null;
 
-// Track ingested files to avoid re-processing (path -> content hash)
+// Fast in-process cache layered on top of the persistent legacy_markdown_imports
+// manifest. The DB manifest is the authoritative restart-safe skip state;
+// this map only avoids duplicate work within a single daemon lifetime.
 const ingestedMemoryFiles = new Map<string, string>();
+const LEGACY_MARKDOWN_IMPORTER_VERSION = 1;
 const MEMORY_IMPORT_POLL_MS = 30_000;
 const MEMORY_IMPORT_FILE_DELAY_MS = 50;
 let memoryImportTimer: ReturnType<typeof setInterval> | null = null;
@@ -595,11 +605,171 @@ function chunkMarkdownHierarchically(
 export const ARTIFACT_FILENAME_RE = /--(?:summary|transcript|compaction|manifest)\.md$/;
 export const MEMORY_BACKUP_FILENAME_RE = /^MEMORY\.(?:backup|bak|pre)-.+\.md$/;
 
+interface LegacyMarkdownFileState {
+	readonly mtimeMs: number;
+	readonly ctimeMs: number;
+	readonly size: number;
+}
+
+function legacyMarkdownFileState(filePath: string): LegacyMarkdownFileState | null {
+	try {
+		const stat = statSync(filePath);
+		return { mtimeMs: Math.round(stat.mtimeMs), ctimeMs: Math.round(stat.ctimeMs), size: stat.size };
+	} catch {
+		return null;
+	}
+}
+
+function readLegacyMarkdownImportState(filePath: string): {
+	readonly mtime_ms: number;
+	readonly ctime_ms: number;
+	readonly size: number;
+	readonly content_hash: string;
+	readonly importer_version: number;
+	readonly chunk_count: number;
+	readonly status: string;
+} | null {
+	try {
+		return getDbAccessor().withReadDb((db) => {
+			const row = db
+				.prepare(
+					`SELECT mtime_ms, ctime_ms, size, content_hash, importer_version, chunk_count, status
+					 FROM legacy_markdown_imports
+					 WHERE path = ?`,
+				)
+				.get(filePath) as
+				| {
+						mtime_ms: number;
+						ctime_ms: number;
+						size: number;
+						content_hash: string;
+						importer_version: number;
+						chunk_count: number;
+						status: string;
+				  }
+				| undefined;
+			return row ?? null;
+		});
+	} catch {
+		// Older/unmigrated DBs fall back to the legacy importer behavior.
+		return null;
+	}
+}
+
+function legacyMarkdownImportIsCurrent(
+	row: ReturnType<typeof readLegacyMarkdownImportState>,
+	state: LegacyMarkdownFileState,
+): boolean {
+	return (
+		row !== null &&
+		row.importer_version === LEGACY_MARKDOWN_IMPORTER_VERSION &&
+		row.mtime_ms === state.mtimeMs &&
+		row.ctime_ms === state.ctimeMs &&
+		row.size === state.size &&
+		(row.status === "imported" || row.status === "empty")
+	);
+}
+
+function writeLegacyMarkdownImportState(args: {
+	readonly filePath: string;
+	readonly state: LegacyMarkdownFileState;
+	readonly contentHash: string;
+	readonly chunkCount: number;
+	readonly status: "imported" | "empty" | "failed";
+	readonly error?: string | null;
+}): void {
+	try {
+		const now = new Date().toISOString();
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO legacy_markdown_imports
+				 (path, mtime_ms, ctime_ms, size, content_hash, importer_version, chunk_count,
+				  last_imported_at, last_seen_at, status, error)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(path) DO UPDATE SET
+				   mtime_ms = excluded.mtime_ms,
+				   ctime_ms = excluded.ctime_ms,
+				   size = excluded.size,
+				   content_hash = excluded.content_hash,
+				   importer_version = excluded.importer_version,
+				   chunk_count = excluded.chunk_count,
+				   last_imported_at = excluded.last_imported_at,
+				   last_seen_at = excluded.last_seen_at,
+				   status = excluded.status,
+				   error = excluded.error`,
+			).run(
+				args.filePath,
+				args.state.mtimeMs,
+				args.state.ctimeMs,
+				args.state.size,
+				args.contentHash,
+				LEGACY_MARKDOWN_IMPORTER_VERSION,
+				args.chunkCount,
+				now,
+				now,
+				args.status,
+				args.error ?? null,
+			);
+		});
+	} catch {
+		// Non-fatal: importer correctness still falls back to idempotency/source dedupe.
+	}
+}
+
+function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): boolean {
+	try {
+		return getDbAccessor().withReadDb((db) => {
+			const row = db
+				.prepare("SELECT 1 FROM legacy_markdown_chunks WHERE file_path = ? AND chunk_hash = ?")
+				.get(filePath, chunkHash);
+			return row !== undefined;
+		});
+	} catch {
+		return false;
+	}
+}
+
+function recordLegacyMarkdownChunk(args: {
+	readonly filePath: string;
+	readonly chunkHash: string;
+	readonly chunkIndex: number;
+	readonly memoryId: string | null;
+	readonly sourceId: string;
+}): void {
+	try {
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO legacy_markdown_chunks
+				 (file_path, chunk_hash, chunk_index, memory_id, source_id, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(file_path, chunk_hash) DO UPDATE SET
+				   chunk_index = excluded.chunk_index,
+				   memory_id = COALESCE(excluded.memory_id, legacy_markdown_chunks.memory_id),
+				   source_id = excluded.source_id`,
+			).run(args.filePath, args.chunkHash, args.chunkIndex, args.memoryId, args.sourceId, new Date().toISOString());
+		});
+	} catch {
+		// Non-fatal.
+	}
+}
+
+function memoryIdFromRememberResponse(value: unknown): string | null {
+	if (typeof value !== "object" || value === null) return null;
+	const id = (value as { id?: unknown }).id;
+	return typeof id === "string" && id.length > 0 ? id : null;
+}
+
 async function ingestMemoryMarkdown(filePath: string): Promise<number> {
 	if (filePath.endsWith("MEMORY.md")) return 0;
 
 	const filenameWithExt = basename(filePath);
 	if (MEMORY_BACKUP_FILENAME_RE.test(filenameWithExt) || ARTIFACT_FILENAME_RE.test(filenameWithExt)) return 0;
+
+	const fileState = legacyMarkdownFileState(filePath);
+	if (fileState === null) return 0;
+
+	const priorState = readLegacyMarkdownImportState(filePath);
+	if (legacyMarkdownImportIsCurrent(priorState, fileState)) return 0;
 
 	let content: string;
 	try {
@@ -612,23 +782,41 @@ async function ingestMemoryMarkdown(filePath: string): Promise<number> {
 		return 0;
 	}
 
-	if (!content.trim()) return 0;
-
 	const hash = createHash("sha256").update(content).digest("hex").slice(0, 16);
-	if (ingestedMemoryFiles.get(filePath) === hash) {
-		logger.debug("watcher", "Memory file unchanged, skipping", {
-			path: filePath,
+	if (
+		priorState?.content_hash === hash &&
+		priorState.importer_version === LEGACY_MARKDOWN_IMPORTER_VERSION &&
+		(priorState.status === "imported" || priorState.status === "empty")
+	) {
+		writeLegacyMarkdownImportState({
+			filePath,
+			state: fileState,
+			contentHash: hash,
+			chunkCount: priorState.chunk_count,
+			status: priorState.status === "empty" ? "empty" : "imported",
 		});
 		return 0;
 	}
-	ingestedMemoryFiles.set(filePath, hash);
+
+	if (!content.trim()) {
+		writeLegacyMarkdownImportState({
+			filePath,
+			state: fileState,
+			contentHash: hash,
+			chunkCount: 0,
+			status: "empty",
+		});
+		return 0;
+	}
 
 	const filename = basename(filePath, ".md");
 	const dateMatch = filename.match(/^(\d{4}-\d{2}-\d{2})/);
 	const date = dateMatch ? dateMatch[1] : null;
 
 	const chunks = chunkMarkdownHierarchically(content, 512);
-	let inserted = 0;
+	let imported = 0;
+	let transientFailures = 0;
+	let eligibleChunks = 0;
 	const yielder = yieldEvery(1);
 
 	for (let i = 0; i < chunks.length; i++) {
@@ -642,8 +830,16 @@ async function ingestMemoryMarkdown(filePath: string): Promise<number> {
 			await yielder();
 			continue;
 		}
+		eligibleChunks++;
 
-		const chunkKey = `openclaw:${filename}:${createHash("sha256").update(chunk.text).digest("hex").slice(0, 16)}`;
+		const chunkHash = createHash("sha256").update(chunk.text).digest("hex").slice(0, 16);
+		const chunkKey = `openclaw:${filename}:${chunkHash}`;
+		if (legacyMarkdownChunkKnown(filePath, chunkHash)) {
+			imported++;
+			await yielder();
+			continue;
+		}
+
 		try {
 			const response = await fetch(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
 				method: "POST",
@@ -668,8 +864,23 @@ async function ingestMemoryMarkdown(filePath: string): Promise<number> {
 			});
 
 			if (response.ok) {
-				inserted++;
+				let memoryId: string | null = null;
+				try {
+					memoryId = memoryIdFromRememberResponse(await response.json());
+				} catch {
+					memoryId = null;
+				}
+				recordLegacyMarkdownChunk({ filePath, chunkHash, chunkIndex: i, memoryId, sourceId: chunkKey });
+				imported++;
+			} else if (response.status === 409) {
+				// Existing historical imports can predate this manifest table. A 409 still
+				// proves this deterministic chunk should not be posted again on every
+				// daemon restart, so persist a manifest row without a memory id.
+				recordLegacyMarkdownChunk({ filePath, chunkHash, chunkIndex: i, memoryId: null, sourceId: chunkKey });
+				imported++;
+				logger.debug("watcher", "Legacy memory chunk already exists", { path: filePath, chunkIndex: i });
 			} else {
+				transientFailures++;
 				logger.warn("watcher", "Failed to ingest memory chunk", {
 					path: filePath,
 					chunkIndex: i,
@@ -677,6 +888,7 @@ async function ingestMemoryMarkdown(filePath: string): Promise<number> {
 				});
 			}
 		} catch (e) {
+			transientFailures++;
 			const errDetails = e instanceof Error ? { message: e.message } : { error: String(e) };
 			logger.error("watcher", "Failed to ingest memory chunk", undefined, {
 				path: filePath,
@@ -687,15 +899,36 @@ async function ingestMemoryMarkdown(filePath: string): Promise<number> {
 		await yielder();
 	}
 
-	if (inserted > 0) {
+	if (transientFailures > 0) {
+		ingestedMemoryFiles.delete(filePath);
+		writeLegacyMarkdownImportState({
+			filePath,
+			state: fileState,
+			contentHash: hash,
+			chunkCount: imported,
+			status: "failed",
+			error: `${transientFailures} transient chunk import failure(s)`,
+		});
+	} else {
+		ingestedMemoryFiles.set(filePath, hash);
+		writeLegacyMarkdownImportState({
+			filePath,
+			state: fileState,
+			contentHash: hash,
+			chunkCount: imported,
+			status: eligibleChunks === 0 ? "empty" : "imported",
+		});
+	}
+
+	if (imported > 0) {
 		logger.info("watcher", "Ingested memory file", {
 			path: filePath,
-			chunks: inserted,
+			chunks: imported,
 			sections: chunks.filter((c) => c.level === "section").length,
 			filename,
 		});
 	}
-	return inserted;
+	return imported;
 }
 
 async function importExistingMemoryFiles(): Promise<number> {
@@ -727,7 +960,7 @@ async function importExistingMemoryFiles(): Promise<number> {
 		const count = await ingestMemoryMarkdown(join(memoryDir, file));
 		totalChunks += count;
 		await yielder();
-		await sleep(MEMORY_IMPORT_FILE_DELAY_MS);
+		if (count > 0) await sleep(MEMORY_IMPORT_FILE_DELAY_MS);
 	}
 
 	if (totalChunks > 0) {
@@ -1074,6 +1307,7 @@ function syncAgentRoster(agentsDir: string): void {
 
 async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?: TelemetryCollector): Promise<void> {
 	const pipelinePaused = memoryCfg.pipelineV2.paused;
+	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	clearStructuralBackfillTimer();
 	if (shouldWarnGraphExtractionWritesDisabled(memoryCfg)) {
 		logger.warn("pipeline", "Graph extraction writes are disabled while graph reads are enabled", {
@@ -1115,7 +1349,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 	const routerStatus = await router.status(false);
 	const statusValue = routerStatus.ok ? routerStatus.value : null;
 	const explicitInference = statusValue?.source === "explicit";
-	const commandExtractionMode = memoryCfg.pipelineV2.extraction.provider === "command";
+	const commandExtractionMode = memoryCfg.pipelineV2.enabled && memoryCfg.pipelineV2.extraction.provider === "command";
 	const extractionWorkloadConfigured =
 		!pipelinePaused && (commandExtractionMode || (await router.hasWorkload("memory_extraction")));
 	const synthesisWorkloadConfigured = !pipelinePaused && (await router.hasWorkload("session_synthesis"));
@@ -1202,9 +1436,29 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 	});
 
 	// Summary worker — shared infrastructure, owned here not by startPipeline.
-	// Both pipelineV2 and dreaming consume session summaries.
-	if ((memoryCfg.pipelineV2.enabled || memoryCfg.dreaming.enabled) && !pipelinePaused) {
-		ensureSummaryWorker(getDbAccessor());
+	// Both pipelineV2 and dreaming consume session summaries. Command-mode
+	// extraction also checkpoints through summary_jobs and remains runnable
+	// without synthesis; all other queued work requires an effective route.
+	const isSummarySynthesisAvailable = async (): Promise<boolean> =>
+		(await router.explain({ agentId: defaultAgentId, operation: "session_synthesis" }, true)).ok;
+	const hasSummaryConsumers = memoryCfg.pipelineV2.enabled || memoryCfg.dreaming.enabled;
+	const summarySynthesisAvailable = hasSummaryConsumers ? await isSummarySynthesisAvailable() : false;
+	if (hasSummaryConsumers && !pipelinePaused && (commandExtractionMode || summarySynthesisAvailable)) {
+		ensureSummaryWorker(getDbAccessor(), {
+			isSynthesisAvailable: isSummarySynthesisAvailable,
+		});
+	} else if (hasSummaryConsumers) {
+		ensureSummaryRecovery(getDbAccessor(), {
+			workerOptions: { isSynthesisAvailable: isSummarySynthesisAvailable },
+			shouldStartWorker: async () => {
+				const liveCfg = loadMemoryConfig(AGENTS_DIR);
+				if ((!liveCfg.pipelineV2.enabled && !liveCfg.dreaming.enabled) || liveCfg.pipelineV2.paused) return false;
+				return (
+					(liveCfg.pipelineV2.enabled && liveCfg.pipelineV2.extraction.provider === "command") ||
+					(await isSummarySynthesisAvailable())
+				);
+			},
+		});
 	}
 
 	if (memoryCfg.pipelineV2.enabled && !pipelinePaused && extractionAvailable) {
@@ -1223,6 +1477,13 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 					},
 					pipelineConfig: memoryCfg.pipelineV2 as unknown as Record<string, unknown>,
 					searchConfig: memoryCfg.search as unknown as Record<string, unknown>,
+					// Resolve native asset paths on the main thread, where
+					// globalThis.__SIGNET_NATIVE_RUNTIME_ASSETS__ is registered.
+					// The extraction worker thread has an isolated globalThis
+					// and cannot resolve these itself (#922). Null in source mode.
+					nativeEmbeddingWorkerPath: resolveEmbeddedWorkerPath("embedding-worker"),
+					nativeWasmDir: materializeEmbeddedWasmAssets(),
+					nativeTransformersRuntimePath: resolveEmbeddedWorkerPath("embedding-worker-transformers-runtime"),
 				}
 			: undefined;
 
@@ -1238,6 +1499,18 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 			telemetry,
 			workerInit,
 		);
+
+		// Configure the main thread's own native embedding handle with the
+		// same pre-resolved asset paths. This is not strictly necessary on
+		// the main thread (it has the asset globals), but it ensures
+		// consistency and makes the main thread path identical to the
+		// extraction-thread path (#922).
+		const { configureNativeEmbeddingAssets } = await import("./native-embedding");
+		configureNativeEmbeddingAssets({
+			embeddingWorkerPath: resolveEmbeddedWorkerPath("embedding-worker"),
+			wasmDir: materializeEmbeddedWasmAssets(),
+			transformersRuntimePath: resolveEmbeddedWorkerPath("embedding-worker-transformers-runtime"),
+		});
 	} else {
 		ensureRetentionWorker(getDbAccessor(), DEFAULT_RETENTION);
 	}
@@ -1768,6 +2041,7 @@ async function main() {
 				pollIntervalMs: 0,
 				sourceCleanupEnabled: false,
 				sourceGraphEnabled: false,
+				...resolveEmbeddingBridgeOptions(memoryCfg.embedding, fetchEmbedding),
 				onFileIndexed: (event) => {
 					const sourceId = event.source.sourceId;
 					if (!sourceId) return;

@@ -702,6 +702,46 @@ describe("loadPipelineConfig", () => {
 		expect(result.synthesis.timeout).toBe(180000);
 	});
 
+	it("loads explicit Claude Code API key env inheritance and budget controls", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					claudeCode: {
+						allowApiKeyEnv: true,
+						maxBudgetUsd: 0.5,
+						cooldownMs: 120000,
+					},
+				},
+			},
+		});
+
+		expect(result.claudeCode.allowApiKeyEnv).toBe(true);
+		expect(result.claudeCode.maxBudgetUsd).toBe(0.5);
+		expect(result.claudeCode.cooldownMs).toBe(120000);
+	});
+
+	it("maps legacy Claude Code billingMode to API key env inheritance", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					claudeCode: {
+						billingMode: "api-key",
+					},
+				},
+			},
+		});
+
+		expect(result.claudeCode.allowApiKeyEnv).toBe(true);
+	});
+
+	it("defaults Claude Code background calls to strip ambient Anthropic env without a spend cap", () => {
+		const result = loadPipelineConfig({});
+
+		expect(result.claudeCode.allowApiKeyEnv).toBe(false);
+		expect(result.claudeCode.maxBudgetUsd).toBeUndefined();
+		expect(result.claudeCode.cooldownMs).toBeGreaterThan(0);
+	});
+
 	it("flat model without flat provider is honoured (not silently discarded)", () => {
 		const result = loadPipelineConfig({
 			memory: {
@@ -1374,6 +1414,30 @@ describe("loadPipelineConfig", () => {
 
 		expect(result.worker.maxLoadPerCpu).toBe(DEFAULT_PIPELINE_V2.worker.maxLoadPerCpu);
 		expect(result.worker.overloadBackoffMs).toBe(DEFAULT_PIPELINE_V2.worker.overloadBackoffMs);
+	});
+
+	it("loads canonical worker maxLlmConcurrency with bounded defaults and env override", () => {
+		const previous = process.env.SIGNET_MAX_LLM_CONCURRENCY;
+		try {
+			process.env.SIGNET_MAX_LLM_CONCURRENCY = undefined;
+			expect(loadPipelineConfig({ memory: { pipelineV2: { enabled: true } } }).worker.maxLlmConcurrency).toBe(2);
+			expect(
+				loadPipelineConfig({ memory: { pipelineV2: { enabled: true, worker: { maxLlmConcurrency: 0 } } } }).worker
+					.maxLlmConcurrency,
+			).toBe(1);
+			expect(
+				loadPipelineConfig({ memory: { pipelineV2: { enabled: true, worker: { maxLlmConcurrency: 99 } } } }).worker
+					.maxLlmConcurrency,
+			).toBe(16);
+			process.env.SIGNET_MAX_LLM_CONCURRENCY = "7";
+			expect(
+				loadPipelineConfig({ memory: { pipelineV2: { enabled: true, worker: { maxLlmConcurrency: 3 } } } }).worker
+					.maxLlmConcurrency,
+			).toBe(7);
+		} finally {
+			if (previous === undefined) process.env.SIGNET_MAX_LLM_CONCURRENCY = undefined;
+			else process.env.SIGNET_MAX_LLM_CONCURRENCY = previous;
+		}
 	});
 
 	it("defaults threadedExtraction to true when absent", () => {

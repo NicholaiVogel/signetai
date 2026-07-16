@@ -39,7 +39,12 @@ import {
 	shapeByFacetCoverage,
 	shapeStructuredEvidence,
 } from "./pipeline/structured-evidence";
-import { findStructuredPathCandidates, scoreStructuredPathEvidence } from "./pipeline/structured-path-evidence";
+import {
+	type StructuredClaimCandidate,
+	findStructuredClaimCandidates,
+	findStructuredPathCandidates,
+	scoreStructuredPathEvidence,
+} from "./pipeline/structured-path-evidence";
 import { type RecallDedupeMeta, applyRecallDedupe } from "./session-recall-dedupe";
 import { escapeLike } from "./sql-utils";
 import { type TemporalTimeOptions, resolveTemporalRecall } from "./temporal-recall";
@@ -85,6 +90,8 @@ export interface RecallParams {
 	recallMode?: string;
 	/** Internal escape hatch for hooks that must claim only injected rows. */
 	claimRecallResults?: boolean;
+	/** Internal aggregate-recall guard: derived aggregate memories may be returned by normal recall, but never as aggregate evidence. */
+	excludeAggregateRecallMemories?: boolean;
 	/** Internal escape hatch for hooks that must track only injected rows elsewhere. */
 	trackRecallAccess?: boolean;
 }
@@ -132,6 +139,8 @@ export interface RecallResponse {
 		queries: readonly string[];
 		sourceMemoryIds: readonly string[];
 		stoppedReason: "complete" | "no_evidence" | "router_unavailable" | "synthesis_failed";
+		partial?: boolean;
+		message?: string;
 		usage?: AggregateRecallUsage;
 	};
 	entities?: Array<{
@@ -267,6 +276,9 @@ function buildFilterClause(params: RecallParams): FilterClause {
 		parts.push("m.importance >= ?");
 		args.push(params.importance_min);
 	}
+	if (params.aggregate === true || params.excludeAggregateRecallMemories === true) {
+		parts.push("COALESCE(m.source_type, '') != 'aggregate-recall'");
+	}
 	if (params.since) {
 		parts.push("m.created_at >= ?");
 		args.push(params.since);
@@ -311,6 +323,97 @@ function hasMemoryMetadataFilters(params: RecallParams): boolean {
 		params.until !== undefined ||
 		params.scope !== undefined
 	);
+}
+
+function canUseOntologyClaimRecall(params: RecallParams): boolean {
+	return params.sourceOnly !== true && !params.project && !hasMemoryMetadataFilters(params);
+}
+
+interface ClaimEvidencePointer {
+	readonly source_kind?: string;
+	readonly source_id?: string;
+	readonly source_path?: string;
+	readonly quote?: string;
+}
+
+function readEvidenceString(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
+	for (const key of keys) {
+		const value = record[key];
+		if (typeof value === "string" && value.trim().length > 0) return value;
+	}
+	return undefined;
+}
+
+function parseClaimEvidence(raw: string | null): ClaimEvidencePointer[] {
+	if (!raw) return [];
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		if (!Array.isArray(parsed)) return [];
+		return parsed.flatMap((item): ClaimEvidencePointer[] => {
+			if (!item || typeof item !== "object") return [];
+			const record = item as Record<string, unknown>;
+			const sourceKind = readEvidenceString(record, ["source_kind", "source"]);
+			const sourceId = readEvidenceString(record, ["source_id", "transcript_id", "session_key", "memory_id", "source"]);
+			const sourcePath = readEvidenceString(record, ["source_path"]);
+			if (!sourceKind && !sourceId && !sourcePath && typeof record.quote !== "string") return [];
+			return [
+				{
+					source_kind: sourceKind,
+					source_id: sourceId,
+					source_path: sourcePath,
+					quote: typeof record.quote === "string" ? record.quote : undefined,
+				},
+			];
+		});
+	} catch {
+		return [];
+	}
+}
+
+function ontologyClaimSourcePath(candidate: StructuredClaimCandidate): string | undefined {
+	if (candidate.sourcePath) return candidate.sourcePath;
+	return parseClaimEvidence(candidate.proposalEvidence).find((item) => item.source_path)?.source_path;
+}
+
+function ontologyClaimContent(candidate: StructuredClaimCandidate): string {
+	const path = [candidate.entityName, candidate.aspect, candidate.groupKey, candidate.claimKey]
+		.filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+		.join(" › ");
+	const evidence = parseClaimEvidence(candidate.proposalEvidence).slice(0, 2);
+	const evidenceLines = evidence.flatMap((item): string[] => {
+		const source = [item.source_kind, item.source_path ?? item.source_id].filter(Boolean).join(": ");
+		if (!source && !item.quote) return [];
+		const quote = item.quote ? ` — ${item.quote.replace(/\s+/g, " ").trim()}` : "";
+		return [`Evidence: ${source || "source"}${quote}`];
+	});
+	return [`[Ontology claim: ${path}]`, candidate.content, ...evidenceLines].join("\n");
+}
+
+function ontologyClaimToRecallResult(candidate: StructuredClaimCandidate, truncateChars: number): RecallResult {
+	const content = ontologyClaimContent(candidate);
+	const truncated = content.length > truncateChars;
+	const sourcePath = ontologyClaimSourcePath(candidate);
+	return {
+		id: `ontology-claim:${candidate.id}`,
+		content: truncated ? `${content.slice(0, truncateChars)} [truncated]` : content,
+		content_length: content.length,
+		truncated,
+		// Source-provenanced active ontology claims represent Dreaming's current
+		// structured truth. Only high-overlap claims are admitted upstream; keep
+		// them prominent enough to beat stale synthesized memories without letting
+		// low-overlap entity context into the result set.
+		score: Math.round(Math.max(0.01, Math.min(1.45, 1 + candidate.score * 0.45)) * 100) / 100,
+		source: "ontology_claim",
+		source_id: candidate.id,
+		type: "ontology_claim",
+		tags: "ontology,claim,source-backed",
+		pinned: false,
+		importance: candidate.importance,
+		who: "signet",
+		project: null,
+		created_at: candidate.updatedAt || candidate.createdAt,
+		...(sourcePath ? { source_path: sourcePath } : {}),
+	};
 }
 
 function normalizeRecallLimit(raw: number | undefined): number {
@@ -517,6 +620,18 @@ function mergeCandidate(
 	}
 }
 
+function hasColumn(db: { prepare: (sql: string) => { all: () => Array<{ name?: unknown }> } }, table: string, column: string): boolean {
+	try {
+		return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column);
+	} catch {
+		return false;
+	}
+}
+
+function memorySupersessionSql(db: { prepare: (sql: string) => { all: () => Array<{ name?: unknown }> } }, alias = "m"): string {
+	return hasColumn(db, "memories", "superseded_by") ? ` AND ${alias}.superseded_by IS NULL` : "";
+}
+
 function authorizeScoredCandidates(
 	scored: ReadonlyArray<{ id: string; score: number; source: string }>,
 	filter: FilterClause,
@@ -533,12 +648,31 @@ function authorizeScoredCandidates(
 				`SELECT m.id
 				 FROM memories m
 				 WHERE m.id IN (${placeholders})
-				   AND m.is_deleted = 0${filter.sql}`,
+				   AND m.is_deleted = 0
+				   ${memorySupersessionSql(db)}${filter.sql}`,
 			)
 			.all(...ids, ...filter.args) as Array<{ id: string }>;
 		return new Set(rows.map((row) => row.id));
 	});
 	return scored.filter((row) => allowed.has(row.id));
+}
+
+function loadObservedScores(ids: readonly string[], agentId: string): Map<string, number> {
+	if (ids.length === 0) return new Map();
+	const placeholders = ids.map(() => "?").join(", ");
+	return getDbAccessor().withReadDb((db) => {
+		const rows = db
+			.prepare(
+				`SELECT memory_id, AVG(agent_relevance_score) AS score
+				 FROM session_memories
+				 WHERE agent_id = ?
+				   AND memory_id IN (${placeholders})
+				   AND agent_relevance_score IS NOT NULL
+				 GROUP BY memory_id`,
+			)
+			.all(agentId, ...ids) as Array<{ memory_id: string; score: number }>;
+		return new Map(rows.map((row) => [row.memory_id, row.score]));
+	});
 }
 
 interface CurrentnessInfo {
@@ -1175,7 +1309,8 @@ export async function hybridRecall(
         FROM memories_fts
         CROSS JOIN memories m ON memories_fts.rowid = m.rowid
         WHERE memories_fts MATCH ?
-          AND m.is_deleted = 0${filter.sql}
+          AND m.is_deleted = 0
+          ${memorySupersessionSql(db)}${filter.sql}
         ORDER BY raw_score
         LIMIT ?
       `) as any
@@ -1216,7 +1351,8 @@ export async function hybridRecall(
 					   CROSS JOIN memories m ON m.id = h.memory_id
 					   WHERE memory_hints_fts MATCH ?
 					     AND h.agent_id = ?
-					     AND m.is_deleted = 0${filter.sql}
+					     AND m.is_deleted = 0
+					     ${memorySupersessionSql(db)}${filter.sql}
 					   ORDER BY raw_score LIMIT ?`;
 
 					const agentId = params.agentId ?? "default";
@@ -1266,13 +1402,15 @@ export async function hybridRecall(
 	const vectorMap = new Map<string, number>();
 	if (queryVecF32) {
 		const queryVector = queryVecF32;
-		const vecLimit = needsPostFilter ? cfg.search.top_k * 2 : cfg.search.top_k;
+		const excludeAggregateRecall = params.aggregate === true || params.excludeAggregateRecallMemories === true;
+		const vecLimit = needsPostFilter || excludeAggregateRecall ? cfg.search.top_k * 2 : cfg.search.top_k;
 		try {
 			timings.time("vector_search", () => {
 				getDbAccessor().withReadDb((db) => {
 					const vecResults = vectorSearch(db as any, queryVector, {
 						limit: vecLimit,
 						type: params.type as "fact" | "preference" | "decision" | undefined,
+						excludeAggregateRecall,
 					});
 					for (const r of vecResults) {
 						vectorMap.set(r.id, r.score);
@@ -1293,6 +1431,7 @@ export async function hybridRecall(
 	// memories can be recalled even when their raw prose does not share enough
 	// surface text with the question.
 	const structuredCandidateMap = new Map<string, number>();
+	let ontologyClaimCandidates: StructuredClaimCandidate[] = [];
 	if (cfg.pipelineV2.graph.enabled) {
 		try {
 			const agentId = params.agentId ?? "default";
@@ -1311,6 +1450,23 @@ export async function hybridRecall(
 			logger.warn("memory", "Structured path candidate search failed (non-fatal)", {
 				error: e instanceof Error ? e.message : String(e),
 			});
+		}
+		if (canUseOntologyClaimRecall(params) && temporalCandidateSet.size === 0 && !temporal.meta) {
+			try {
+				const agentId = params.agentId ?? "default";
+				ontologyClaimCandidates = timings.time("ontology_claim_candidates", () =>
+					getDbAccessor().withReadDb((db) =>
+						findStructuredClaimCandidates(db, query, agentId, {
+							limit: cfg.search.top_k,
+							minScore,
+						}),
+					),
+				);
+			} catch (e) {
+				logger.warn("memory", "Ontology claim candidate search failed (non-fatal)", {
+					error: e instanceof Error ? e.message : String(e),
+				});
+			}
 		}
 	}
 
@@ -1578,6 +1734,7 @@ export async function hybridRecall(
 											  AND ea.status = 'active'
 											 WHERE m.id IN (${placeholders})
 											   AND m.is_deleted = 0
+											   ${memorySupersessionSql(db)}
 											 ${filter.sql}
 											 GROUP BY m.id, m.importance`,
 											)
@@ -1985,7 +2142,15 @@ export async function hybridRecall(
 				(structuredEvidenceMap.get(row.id) ?? 0) > 0;
 			if (row.source === "hint" && !hasDirectEvidence) row.score = Math.min(row.score, HINT_ONLY_SCORE_CAP);
 		}
-		scored.sort((a, b) => b.score - a.score);
+		const observedScores = loadObservedScores(
+			scored.map((row) => row.id),
+			params.agentId ?? "default",
+		);
+		scored.sort((a, b) => {
+			const aObserved = observedScores.get(a.id);
+			const bObserved = observedScores.get(b.id);
+			return (bObserved ?? b.score) - (aObserved ?? a.score);
+		});
 	});
 
 	// Over-fetch before hydration for constrained searches. Broad candidate
@@ -1998,9 +2163,13 @@ export async function hybridRecall(
 			: limit;
 	const topIds = params.sourceOnly === true ? [] : scored.slice(0, preHydrate).map((s) => s.id);
 	const recallTruncate = cfg.pipelineV2.guardrails.recallTruncateChars;
+	const ontologyClaimResults = ontologyClaimCandidates.map((candidate) =>
+		ontologyClaimToRecallResult(candidate, recallTruncate),
+	);
 	const allowSourceFallbacks = temporalCandidateSet.size === 0 && !hasMemoryMetadataFilters(params);
 
 	if (topIds.length === 0) {
+		const results = suppressPreviouslyRecalledForSelection(ontologyClaimResults).slice(0, limit);
 		const fallbackLimit = selectionDedupeEnabled ? Math.max(limit * 3, limit + 10) : limit;
 		const sourceChunkHits = allowSourceFallbacks
 			? timings.time("source_chunk_vector_fallback", () =>
@@ -2013,8 +2182,8 @@ export async function hybridRecall(
 					),
 				)
 			: [];
-		if (sourceChunkHits.length > 0) {
-			const results = suppressPreviouslyRecalledForSelection(
+		if (sourceChunkHits.length > 0 && results.length < limit) {
+			const sourceResults = suppressPreviouslyRecalledForSelection(
 				sourceChunkHits.slice(0, fallbackLimit).map((hit): RecallResult => {
 					const content = `[Source chunk: ${hit.sourcePath}]\n${hit.chunkText}`;
 					const truncated = content.length > recallTruncate;
@@ -2038,25 +2207,17 @@ export async function hybridRecall(
 						supplementary: true,
 					};
 				}),
-			).slice(0, limit);
-			if (results.length > 0) {
-				return await finish({
-					results,
-					query,
-					method: "hybrid",
-					meta: {
-						totalReturned: results.length,
-						hasSupplementary: true,
-						noHits: false,
-					},
-				});
+			);
+			for (const row of sourceResults) {
+				if (results.length >= limit) break;
+				results.push(row);
 			}
 		}
 		const nativeHits = allowSourceFallbacks
 			? timings.time("native_artifact_fallback", () => buildNativeArtifactRecallHits(params, expandedQuery, new Set()))
 			: [];
-		if (nativeHits.length > 0) {
-			const results = suppressPreviouslyRecalledForSelection(
+		if (nativeHits.length > 0 && results.length < limit) {
+			const nativeResults = suppressPreviouslyRecalledForSelection(
 				nativeHits.slice(0, fallbackLimit).map((hit): RecallResult => {
 					const content = nativeArtifactRecallContent(hit);
 					const truncated = content.length > recallTruncate;
@@ -2081,28 +2242,20 @@ export async function hybridRecall(
 						supplementary: true,
 					};
 				}),
-			).slice(0, limit);
-			if (results.length > 0) {
-				return await finish({
-					results,
-					query,
-					method: "keyword",
-					meta: {
-						totalReturned: results.length,
-						hasSupplementary: true,
-						noHits: false,
-					},
-				});
+			);
+			for (const row of nativeResults) {
+				if (results.length >= limit) break;
+				results.push(row);
 			}
 		}
 		return await finish({
-			results: [],
+			results,
 			query,
-			method: "hybrid",
+			method: queryVecF32 ? "hybrid" : "keyword",
 			meta: {
-				totalReturned: 0,
-				hasSupplementary: false,
-				noHits: true,
+				totalReturned: results.length,
+				hasSupplementary: results.some((row) => row.supplementary === true),
+				noHits: results.length === 0,
 			},
 		});
 	}
@@ -2119,7 +2272,7 @@ export async function hybridRecall(
 					.prepare(
 						`SELECT m.id, m.content, m.source_id, m.type, m.tags, m.pinned, m.importance, m.who, m.project, m.created_at, m.visibility, m.scope
         FROM memories m
-        WHERE m.id IN (${placeholders}) AND m.is_deleted = 0${filter.sql}`,
+        WHERE m.id IN (${placeholders}) AND m.is_deleted = 0${memorySupersessionSql(db)}${filter.sql}`,
 					)
 					.all(...topIds, ...filter.args) as Array<{
 					id: string;
@@ -2172,8 +2325,16 @@ export async function hybridRecall(
 						},
 					];
 				}),
-		).slice(0, limit),
+		),
 	);
+
+	if (ontologyClaimResults.length > 0) {
+		results = suppressPreviouslyRecalledForSelection([...results, ...ontologyClaimResults])
+			.sort((a, b) => b.score - a.score)
+			.slice(0, limit);
+	} else if (results.length > limit) {
+		results = results.slice(0, limit);
+	}
 
 	if (results.length < limit) {
 		const existingSourceIds = new Set(results.map((row) => row.source_id).filter((id): id is string => !!id));
@@ -2334,6 +2495,7 @@ export async function hybridRecall(
 							 WHERE mem.entity_id IN (${ePlaceholders})
 							   AND m.type = 'rationale'
 							   AND m.is_deleted = 0
+							   ${memorySupersessionSql(db)}
 							   ${filter.sql}
 							 LIMIT 10`,
 					)
@@ -2410,7 +2572,7 @@ export async function hybridRecall(
 								 FROM memory_entity_mentions mem
 								 JOIN memories m ON m.id = mem.memory_id
 								 WHERE mem.entity_id IN (${ph})
-								   AND m.is_deleted = 0${filter.sql}`,
+								   AND m.is_deleted = 0${memorySupersessionSql(db)}${filter.sql}`,
 							)
 							.all(...eids, ...filter.args) as Array<{ entity_id: string }>;
 						eids = sr.map((r) => r.entity_id);

@@ -60,6 +60,8 @@ import {
 	releaseSession,
 	renewSession,
 } from "../session-tracker.js";
+import { recordSkillInvocation } from "../skill-invocations";
+import { recordSkillsFromTranscript } from "../skill-transcript-scan";
 import { validateTemporalTimeOptions } from "../temporal-recall";
 import { upsertThreadHead } from "../thread-heads";
 import { autoConnectGraphiq } from "./graphiq-routes.js";
@@ -176,6 +178,28 @@ function skipConflictingSessionEnd(
 		duplicateRuntimePath: true,
 		claimedBy: owner,
 	};
+}
+
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function parseIsoTimestamp(value: unknown): { value?: string; error?: string } {
+	const text = parseOptionalString(value);
+	if (!text) return {};
+	if (!ISO_TIMESTAMP_RE.test(text)) return { error: "createdAt must be an ISO timestamp" };
+	const ms = Date.parse(text);
+	if (!Number.isFinite(ms)) return { error: "createdAt must be a valid timestamp" };
+	return { value: new Date(ms).toISOString() };
+}
+
+function parseOptionalNonNegativeInt(value: unknown): number | undefined {
+	if (typeof value === "number") {
+		return Number.isInteger(value) && value >= 0 ? value : undefined;
+	}
+	if (typeof value !== "string") return undefined;
+	const text = value.trim();
+	if (!/^\d+$/.test(text)) return undefined;
+	const parsed = Number(text);
+	return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 // Guard against recursive hook calls from spawned agent contexts
@@ -377,15 +401,24 @@ function registerSessionEnd(app: Hono): void {
 			const sessionKey = body.sessionKey || body.sessionId;
 			const conflict = skipConflictingSessionEnd(sessionKey, runtimePath);
 			if (conflict) return c.json(conflict);
-			const duplicate = claimAutomaticSessionOrSkip(
-				sessionKey,
-				runtimePath,
-				parseOptionalString(body.agentId) ?? "default",
-				"session-end",
-				{
-					memoriesSaved: 0,
-				},
-			);
+			const transcriptPath = parseOptionalString(body.transcriptPath);
+			let agentId = resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey });
+			if (transcriptPath) {
+				const denied = await requirePermission("remember", authConfig)(c, () => Promise.resolve());
+				if (denied) return denied;
+				const scopedAgent = resolveScopedAgentId(c, agentId);
+				if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+				const sessionError = validateSessionAgentBinding(c, sessionKey, scopedAgent.agentId, {
+					requireExisting: false,
+					context: "sessionKey",
+				});
+				if (sessionError) return c.json({ error: sessionError }, 403);
+				agentId = scopedAgent.agentId;
+				body.agentId = agentId;
+			}
+			const duplicate = claimAutomaticSessionOrSkip(sessionKey, runtimePath, agentId, "session-end", {
+				memoriesSaved: 0,
+			});
 			if (duplicate) return c.json(duplicate);
 
 			if (sessionKey && isSessionBypassed(sessionKey)) {
@@ -400,6 +433,18 @@ function registerSessionEnd(app: Hono): void {
 					markSessionEnded(sessionKey, runtimePath);
 					removeAgentPresence(sessionKey);
 				}
+				if (transcriptPath) {
+					// recordSkillsFromTranscript is throw-proof by contract — safe in setImmediate.
+					setImmediate(() =>
+						recordSkillsFromTranscript({
+							transcriptPath,
+							harness: body.harness,
+							agentId,
+							origin: "scan",
+							expectedSessionId: sessionKey,
+						}),
+					);
+				}
 				return c.json(result);
 			} catch (e) {
 				if (sessionKey) {
@@ -410,6 +455,70 @@ function registerSessionEnd(app: Hono): void {
 			}
 		} catch (e) {
 			logger.error("hooks", "Session end hook failed", e as Error);
+			return c.json({ error: "Hook execution failed" }, 500);
+		}
+	});
+}
+
+// Harness-emitted skill invocations (claude-code PostToolUse, opencode
+// tool.execute.after, ...). Records source='agent' rows deduped on
+// (agentId, harness, sessionId, toolUseId) so a re-fired hook records once.
+function registerSkillInvocation(app: Hono): void {
+	app.post("/api/hooks/skill-invocation", async (c) => {
+		if (isInternalCall(c)) {
+			return c.json({ recorded: false });
+		}
+		try {
+			const body = toRecord(await c.req.json()) ?? {};
+			const harness = parseOptionalString(body.harness);
+			const skillName = parseOptionalString(body.skillName ?? body.skill);
+			if (!harness) return c.json({ error: "harness is required" }, 400);
+			if (!skillName) return c.json({ error: "skillName is required" }, 400);
+
+			stampHarness(harness);
+
+			const createdAt = parseIsoTimestamp(body.createdAt);
+			if (createdAt.error) return c.json({ error: createdAt.error }, 400);
+			const sessionKey = parseOptionalString(body.sessionKey ?? body.sessionId);
+			const runtimePath = resolveRuntimePath(c, { runtimePath: parseOptionalString(body.runtimePath) });
+			const conflict = checkSessionClaim(c, sessionKey, runtimePath);
+			if (conflict) return conflict;
+			const requestedAgentId = resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey });
+			const denied = await requirePermission("remember", authConfig)(c, () => Promise.resolve());
+			if (denied) return denied;
+			const scopedAgent = resolveScopedAgentId(c, requestedAgentId);
+			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+			const sessionError = validateSessionAgentBinding(c, sessionKey, scopedAgent.agentId, {
+				requireExisting: false,
+				context: "sessionKey",
+			});
+			if (sessionError) return c.json({ error: sessionError }, 403);
+
+			const rawLatencyMs = body.latencyMs;
+			const latencyMs =
+				rawLatencyMs === undefined || rawLatencyMs === null ? 0 : parseOptionalNonNegativeInt(rawLatencyMs);
+			if (latencyMs === undefined) {
+				return c.json({ error: "latencyMs must be a non-negative integer" }, 400);
+			}
+
+			recordSkillInvocation({
+				skillName,
+				agentId: scopedAgent.agentId,
+				source: "agent",
+				latencyMs,
+				success: parseOptionalBoolean(body.success) ?? true,
+				errorText: parseOptionalString(body.errorText),
+				harness,
+				sessionId: sessionKey,
+				toolUseId: parseOptionalString(body.toolUseId),
+				cwd: parseOptionalString(body.cwd),
+				origin: parseOptionalString(body.origin),
+				args: parseOptionalString(body.args),
+				createdAt: createdAt.value,
+			});
+			return c.json({ recorded: true });
+		} catch (e) {
+			logger.error("hooks", "Skill invocation hook failed", e as Error);
 			return c.json({ error: "Hook execution failed" }, 500);
 		}
 	});
@@ -484,7 +593,7 @@ function registerRemember(app: Hono): void {
 
 			const headers: Record<string, string> = { "Content-Type": "application/json" };
 			const auth = c.req.header("authorization");
-			if (auth) headers["Authorization"] = auth;
+			if (auth) headers.Authorization = auth;
 			const sessionKey = c.req.header("x-signet-session-key") ?? body.sessionKey;
 			if (sessionKey) headers["x-signet-session-key"] = sessionKey;
 			return fetch(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
@@ -619,7 +728,10 @@ function registerRecall(app: Hono): void {
 function registerPreCompaction(app: Hono): void {
 	app.post("/api/hooks/pre-compaction", async (c) => {
 		try {
-			const body = (await c.req.json()) as PreCompactionRequest;
+			const rawBody = toRecord(await c.req.json()) ?? {};
+			const transcriptPath =
+				parseOptionalString(rawBody.transcriptPath) ?? parseOptionalString(rawBody.transcript_path);
+			const body = rawBody as unknown as PreCompactionRequest;
 
 			if (!body.harness) {
 				return c.json({ error: "harness is required" }, 400);
@@ -628,17 +740,25 @@ function registerPreCompaction(app: Hono): void {
 			const runtimePath = resolveRuntimePath(c, body);
 			if (runtimePath) body.runtimePath = runtimePath;
 
-			const duplicate = claimAutomaticSessionOrSkip(
-				body.sessionKey,
-				runtimePath,
-				resolveAgentId({ sessionKey: body.sessionKey }),
-				"pre-compaction",
-				{
-					guidelines: "",
-					instructions: "",
-					summaryPrompt: "",
-				},
-			);
+			let agentId = resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey: body.sessionKey });
+			if (transcriptPath) {
+				const denied = await requirePermission("remember", authConfig)(c, () => Promise.resolve());
+				if (denied) return denied;
+				const scopedAgent = resolveScopedAgentId(c, agentId);
+				if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+				const sessionError = validateSessionAgentBinding(c, body.sessionKey, scopedAgent.agentId, {
+					requireExisting: false,
+					context: "sessionKey",
+				});
+				if (sessionError) return c.json({ error: sessionError }, 403);
+				agentId = scopedAgent.agentId;
+				body.agentId = agentId;
+			}
+			const duplicate = claimAutomaticSessionOrSkip(body.sessionKey, runtimePath, agentId, "pre-compaction", {
+				guidelines: "",
+				instructions: "",
+				summaryPrompt: "",
+			});
 			if (duplicate) return c.json(duplicate);
 
 			if (checkBypass(body)) {
@@ -646,6 +766,17 @@ function registerPreCompaction(app: Hono): void {
 			}
 
 			const result = handlePreCompaction(body);
+			if (transcriptPath) {
+				setImmediate(() =>
+					recordSkillsFromTranscript({
+						transcriptPath,
+						harness: body.harness,
+						agentId,
+						origin: "scan",
+						expectedSessionId: body.sessionKey,
+					}),
+				);
+			}
 			return c.json(result);
 		} catch (e) {
 			logger.error("hooks", "Pre-compaction hook failed", e as Error);
@@ -1409,6 +1540,7 @@ export function registerHooksRoutes(app: Hono): void {
 	registerSessionStart(app);
 	registerUserPromptSubmit(app);
 	registerSessionEnd(app);
+	registerSkillInvocation(app);
 	registerCheckpointExtract(app);
 	registerRemember(app);
 	registerRecall(app);

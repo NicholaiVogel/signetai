@@ -565,6 +565,11 @@ For live prompt harness commands, see
 The default model is `haiku`. Timeout is 60,000 ms. This provider is
 available as a fallback when no local LLM server is running but the
 Claude Code CLI is present on PATH.
+Daemon-spawned calls strip ambient `ANTHROPIC_API_KEY` and
+`ANTHROPIC_AUTH_TOKEN` by default. Set `claudeCode.allowApiKeyEnv: true`
+only when those environment credentials should be inherited. The Claude Code
+circuit breaker is daemon-wide, so interactive and background `claude-code`
+providers share cooldown state.
 
 The interface is intentionally minimal — no streaming, no chat history, no
 tool use. Future providers can be added by implementing `LlmProvider` and
@@ -1081,12 +1086,18 @@ synthesis:
   # when omitted entirely, synthesis falls back to extraction provider/model
   # explicit top-level inference.workloads bindings override legacy provider selection
 
+claudeCode:
+  allowApiKeyEnv: false          # true explicitly inherits ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
+  # maxBudgetUsd: 0.25           # optional; maps to claude -p --max-budget-usd
+  cooldownMs: 300000             # ms, range 1000–3600000
+
 worker:
   pollMs: 2000                   # ms, range 100–60000
   maxRetries: 3                  # range 1–10
   leaseTimeoutMs: 300000         # ms, range 10000–600000
   maxLoadPerCpu: 0.8             # load-per-CPU threshold, range 0.1–8.0
   overloadBackoffMs: 30000       # ms, range 1000–300000
+  maxLlmConcurrency: 2           # shared cap for live LLM calls, range 1–16; SIGNET_MAX_LLM_CONCURRENCY overrides YAML when set
 
 graph:
   enabled: true

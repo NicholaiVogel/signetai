@@ -52,6 +52,7 @@ export type {
 	PipelineEscalationConfig,
 	PipelineExtractionConfig,
 	PipelineWorkerConfig,
+	PipelineClaudeCodeConfig,
 	PipelineGraphConfig,
 	PipelineTraversalConfig,
 	PipelineRerankerConfig,
@@ -151,6 +152,7 @@ export {
 	withHookRecallCompat,
 } from "./recall";
 export type {
+	AggregateRecallMeta,
 	AggregateRecallUsage,
 	AggregateRecallUsageStage,
 	RecallMeta,
@@ -159,7 +161,10 @@ export type {
 	RecallRequestOptions,
 	RecallRow,
 	RecallScoreFilterRow,
+	RecallTemporalMeta,
+	RecallTimeOptions,
 	RememberRequestOptions,
+	TemporalFacet,
 } from "./recall";
 export {
 	createMemoriesFts,
@@ -394,6 +399,10 @@ export type {
 	SkillsConfig,
 	SkillsResult,
 } from "./skills";
+
+// Skill transcript parsing (pure — no fs)
+export { parseTranscriptSkills } from "./skill-transcript";
+export type { ParsedSkillInvocation } from "./skill-transcript";
 
 // Memory import
 export {

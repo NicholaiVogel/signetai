@@ -38,7 +38,7 @@ import { trimTrailingSlash } from "./url";
 // Without this, 10+ concurrent calls can cause memory bloat, API rate
 // limiting, and timeout cascades.
 
-const DEFAULT_MAX_LLM_CONCURRENCY = 4;
+const DEFAULT_MAX_LLM_CONCURRENCY = 2;
 
 export class SemaphoreTimeoutError extends Error {
 	readonly timeoutMs: number;
@@ -51,29 +51,52 @@ export class SemaphoreTimeoutError extends Error {
 }
 
 export class LlmConcurrencySemaphore {
-	private readonly max: number;
+	private max: number;
 	private active = 0;
-	private readonly queue: Array<() => void> = [];
+	private readonly queue: Array<{
+		readonly start: () => void;
+	}> = [];
 	private timers = 0;
 
 	constructor(max: number) {
 		this.max = max;
 	}
 
-	async acquire(): Promise<void> {
+	setLimit(max: number): void {
+		this.max = max;
+		this.drain();
+	}
+
+	async acquire(signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) {
+			throw new Error("semaphore acquisition aborted");
+		}
 		if (this.active < this.max) {
 			this.active++;
 			return;
 		}
-		return new Promise<void>((resolve) => {
-			this.queue.push(() => {
-				this.active++;
-				resolve();
-			});
+		return new Promise<void>((resolve, reject) => {
+			const onAbort = (): void => {
+				const idx = this.queue.indexOf(entry);
+				if (idx !== -1) this.queue.splice(idx, 1);
+				reject(new Error("semaphore acquisition aborted"));
+			};
+			const entry = {
+				start: (): void => {
+					signal?.removeEventListener("abort", onAbort);
+					this.active++;
+					resolve();
+				},
+			};
+			signal?.addEventListener("abort", onAbort, { once: true });
+			this.queue.push(entry);
 		});
 	}
 
-	async acquireWithTimeout(ms: number): Promise<void> {
+	async acquireWithTimeout(ms: number, signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) {
+			throw new Error("semaphore acquisition aborted");
+		}
 		if (ms <= 0) {
 			throw new SemaphoreTimeoutError(ms, "timeout must be positive");
 		}
@@ -83,23 +106,30 @@ export class LlmConcurrencySemaphore {
 		}
 		return new Promise<void>((resolve, reject) => {
 			let settled = false;
-			this.timers++;
-			const timer = setTimeout(() => {
-				if (settled) return;
-				settled = true;
-				this.timers--;
-				const idx = this.queue.indexOf(entry);
-				if (idx !== -1) this.queue.splice(idx, 1);
-				reject(new SemaphoreTimeoutError(ms));
-			}, ms);
-			const entry = (): void => {
+			const settle = (fn: () => void): void => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
 				this.timers--;
-				this.active++;
-				resolve();
+				signal?.removeEventListener("abort", onAbort);
+				const idx = this.queue.indexOf(entry);
+				if (idx !== -1) this.queue.splice(idx, 1);
+				fn();
 			};
+			const onAbort = (): void => settle(() => reject(new Error("semaphore acquisition aborted")));
+			this.timers++;
+			const timer = setTimeout(() => {
+				settle(() => reject(new SemaphoreTimeoutError(ms)));
+			}, ms);
+			const entry = {
+				start: (): void => {
+					settle(() => {
+						this.active++;
+						resolve();
+					});
+				},
+			};
+			signal?.addEventListener("abort", onAbort, { once: true });
 			this.queue.push(entry);
 		});
 	}
@@ -109,8 +139,7 @@ export class LlmConcurrencySemaphore {
 			throw new Error("LlmConcurrencySemaphore.release(): no active acquisitions to release");
 		}
 		this.active--;
-		const next = this.queue.shift();
-		if (next) next();
+		this.drain();
 	}
 
 	get pending(): number {
@@ -121,8 +150,20 @@ export class LlmConcurrencySemaphore {
 		return this.active;
 	}
 
+	get limit(): number {
+		return this.max;
+	}
+
 	get activeTimers(): number {
 		return this.timers;
+	}
+
+	private drain(): void {
+		while (this.active < this.max) {
+			const next = this.queue.shift();
+			if (!next) return;
+			next.start();
+		}
 	}
 }
 
@@ -140,6 +181,23 @@ const llmSemaphore = new LlmConcurrencySemaphore(
 			})()
 		: DEFAULT_MAX_LLM_CONCURRENCY,
 );
+
+export function configureLlmConcurrency(limit: number): void {
+	const normalized = Number.isSafeInteger(limit) ? Math.min(16, Math.max(1, limit)) : DEFAULT_MAX_LLM_CONCURRENCY;
+	llmSemaphore.setLimit(normalized);
+}
+
+export function getLlmConcurrencyStatus(): {
+	readonly running: number;
+	readonly pending: number;
+	readonly limit: number;
+} {
+	return {
+		running: llmSemaphore.running,
+		pending: llmSemaphore.pending,
+		limit: llmSemaphore.limit,
+	};
+}
 
 // ---------------------------------------------------------------------------
 // Token-bucket rate limiter for provider-level call throttling
@@ -313,12 +371,37 @@ export function withRateLimit(provider: LlmProvider, config?: ProviderRateLimitC
  * Run an async function guarded by the global LLM concurrency semaphore.
  * Ensures no more than N concurrent LLM calls across all providers and workers.
  */
-async function withLlmConcurrency<T>(fn: () => Promise<T>, timeoutMs?: number, label?: string): Promise<T> {
+function generateSignal(opts?: { readonly signal?: AbortSignal; readonly abortSignal?: AbortSignal }):
+	| AbortSignal
+	| undefined {
+	return opts?.signal ?? opts?.abortSignal;
+}
+
+async function withLlmConcurrency<T>(
+	fn: () => Promise<T>,
+	timeoutMs?: number,
+	label?: string,
+	signal?: AbortSignal,
+): Promise<T> {
+	const release = await acquireLlmConcurrencyPermit(timeoutMs, label, signal);
+	try {
+		return await fn();
+	} finally {
+		release();
+	}
+}
+
+async function acquireLlmConcurrencyPermit(
+	timeoutMs?: number,
+	label?: string,
+	signal?: AbortSignal,
+): Promise<() => void> {
+	const semaphore = llmSemaphore;
 	try {
 		if (timeoutMs !== undefined) {
-			await llmSemaphore.acquireWithTimeout(timeoutMs);
+			await semaphore.acquireWithTimeout(timeoutMs, signal);
 		} else {
-			await llmSemaphore.acquire();
+			await semaphore.acquire(signal);
 		}
 	} catch (err) {
 		if (err instanceof SemaphoreTimeoutError && label) {
@@ -329,11 +412,12 @@ async function withLlmConcurrency<T>(fn: () => Promise<T>, timeoutMs?: number, l
 		}
 		throw err;
 	}
-	try {
-		return await fn();
-	} finally {
-		llmSemaphore.release();
-	}
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		semaphore.release();
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +487,7 @@ interface HttpRetryConfig {
 	readonly label: string;
 	readonly timeoutMs: number;
 	readonly maxRetries: number;
+	readonly signal?: AbortSignal;
 }
 
 interface HttpAttemptContext {
@@ -431,7 +516,22 @@ async function httpProviderCall<T>(
 				throw new Error(`${label} timeout after ${timeoutMs}ms (deadline exceeded before retry backoff; ${reason})`);
 			}
 			const backoffMs = Math.min(1000 * 2 ** (attempt - 1), 8000, remainingBudget);
-			await new Promise((r) => setTimeout(r, backoffMs));
+			await new Promise<void>((resolve, reject) => {
+				if (config.signal?.aborted) {
+					reject(new Error(`${label} aborted`));
+					return;
+				}
+				const finish = (fn: () => void): void => {
+					clearTimeout(timer);
+					config.signal?.removeEventListener("abort", onAbort);
+					fn();
+				};
+				const timer = setTimeout(() => finish(resolve), backoffMs);
+				const onAbort = (): void => {
+					finish(() => reject(new Error(`${label} aborted`)));
+				};
+				config.signal?.addEventListener("abort", onAbort, { once: true });
+			});
 			logger.debug("pipeline", `${label} API retry`, {
 				attempt,
 				maxRetries,
@@ -452,6 +552,11 @@ async function httpProviderCall<T>(
 					throw new Error(`${label} timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore; ${reason})`);
 				}
 				const controller = new AbortController();
+				if (config.signal?.aborted) {
+					throw new Error(`${label} aborted`);
+				}
+				const onAbort = (): void => controller.abort();
+				config.signal?.addEventListener("abort", onAbort, { once: true });
 				const timer = setTimeout(() => controller.abort(), remainingMs);
 				try {
 					return await attemptFn({
@@ -464,6 +569,7 @@ async function httpProviderCall<T>(
 					});
 				} catch (e) {
 					if (e instanceof DOMException && e.name === "AbortError") {
+						if (config.signal?.aborted) throw new NonRetryableError(`${label} aborted`);
 						throw new NonRetryableError(`${label} timeout after ${timeoutMs}ms`);
 					}
 					if (e instanceof NonRetryableError) throw e;
@@ -478,10 +584,12 @@ async function httpProviderCall<T>(
 					throw state.lastError;
 				} finally {
 					clearTimeout(timer);
+					config.signal?.removeEventListener("abort", onAbort);
 				}
 			},
 			Math.max(1, deadline - performance.now()),
 			label.toLowerCase(),
+			config.signal,
 		);
 
 		if ("value" in result) return result.value;
@@ -530,6 +638,7 @@ interface SpawnResult {
 	readonly stdout: ReadableStream<Uint8Array>;
 	readonly stderr: ReadableStream<Uint8Array>;
 	readonly exited: Promise<number>;
+	readonly processGroupId?: number;
 	kill(signal?: string): void;
 }
 
@@ -610,17 +719,24 @@ function spawnHidden(cmd: string[], options?: { env?: Record<string, string | un
 		stdout: "pipe",
 		stderr: "pipe",
 		env: options?.env ? sanitizedEnv : undefined,
+		detached: process.platform !== "win32",
 	});
 	return {
 		stdout: child.stdout,
 		stderr: child.stderr,
 		exited: child.exited,
+		processGroupId: process.platform !== "win32" ? child.pid : undefined,
 		kill(signal?: string) {
-			if (signal === "SIGKILL") {
-				child.kill("SIGKILL");
-			} else {
-				child.kill("SIGTERM");
+			const actualSignal = signal === "SIGKILL" ? "SIGKILL" : "SIGTERM";
+			if (process.platform !== "win32") {
+				try {
+					process.kill(-child.pid, actualSignal);
+					return;
+				} catch {
+					// Fall back to the direct child below when it has already exited.
+				}
 			}
+			child.kill(actualSignal);
 		},
 	};
 }
@@ -636,6 +752,68 @@ function spawnHidden(cmd: string[], options?: { env?: Record<string, string | un
 // until the child process is actually dead.
 
 const SUBPROCESS_KILL_GRACE_MS = 2000;
+const SUBPROCESS_KILL_REAP_MS = 1000;
+
+function unixProcessGroupExists(processGroupId: number): boolean {
+	try {
+		process.kill(-processGroupId, 0);
+		return true;
+	} catch (error) {
+		if (
+			error instanceof Error &&
+			"code" in error &&
+			(error as NodeJS.ErrnoException).code !== undefined &&
+			(error as NodeJS.ErrnoException).code !== "ESRCH"
+		) {
+			return true;
+		}
+		return false;
+	}
+}
+
+async function waitForUnixProcessGroupExit(processGroupId: number, timeoutMs: number): Promise<boolean> {
+	const deadline = performance.now() + timeoutMs;
+	while (unixProcessGroupExists(processGroupId)) {
+		if (performance.now() >= deadline) return false;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	return true;
+}
+
+function signalSubprocess(proc: SpawnResult, signal: "SIGTERM" | "SIGKILL"): void {
+	const processGroupId = proc.processGroupId;
+	if (process.platform !== "win32" && typeof processGroupId === "number") {
+		try {
+			process.kill(-processGroupId, signal);
+			return;
+		} catch {
+			// Fall back to the proc-specific kill hook below. The group may have
+			// already drained, or the hook may know how to terminate this process.
+		}
+	}
+	try {
+		proc.kill(signal);
+	} catch {
+		// The process may already be gone.
+	}
+}
+
+async function terminateSubprocessWithEscalation(proc: SpawnResult): Promise<void> {
+	signalSubprocess(proc, "SIGTERM");
+	const processGroupId = proc.processGroupId;
+	if (process.platform !== "win32" && typeof processGroupId === "number") {
+		const groupExited = await waitForUnixProcessGroupExit(processGroupId, SUBPROCESS_KILL_GRACE_MS);
+		if (!groupExited) {
+			signalSubprocess(proc, "SIGKILL");
+			await waitForUnixProcessGroupExit(processGroupId, SUBPROCESS_KILL_REAP_MS);
+		}
+		await proc.exited.catch(() => {});
+		return;
+	}
+	const graceTimer = setTimeout(() => signalSubprocess(proc, "SIGKILL"), SUBPROCESS_KILL_GRACE_MS);
+	await proc.exited.catch(() => {});
+	clearTimeout(graceTimer);
+}
 
 export async function awaitSubprocessWithDeadline<T>(
 	proc: SpawnResult,
@@ -643,52 +821,89 @@ export async function awaitSubprocessWithDeadline<T>(
 	label: string,
 	originalTimeoutMs: number,
 	resultFn: (p: SpawnResult) => Promise<T>,
+	signal?: AbortSignal,
 ): Promise<T> {
+	if (signal?.aborted) {
+		await terminateSubprocessWithEscalation(proc);
+		throw new Error(`${label} aborted`);
+	}
 	if (remainingMs <= 0) {
-		proc.kill("SIGTERM");
-		await proc.exited.catch(() => {});
+		await terminateSubprocessWithEscalation(proc);
 		throw new SemaphoreTimeoutError(
 			originalTimeoutMs,
 			`${label} timeout after ${originalTimeoutMs}ms (deadline exceeded before subprocess work)`,
 		);
 	}
 
-	let timedOut = false;
-	const deadlineTimer = setTimeout(() => {
-		timedOut = true;
-		proc.kill("SIGTERM");
-	}, remainingMs);
-	let graceTimer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = Symbol("timeout");
+	const aborted = Symbol("aborted");
+	let terminationPromise: Promise<void> | undefined;
+	let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+	let abortListener: (() => void) | undefined;
+	const terminate = (): void => {
+		terminationPromise ??= terminateSubprocessWithEscalation(proc);
+	};
+	const timeoutPromise = new Promise<typeof timeout>((resolve) => {
+		deadlineTimer = setTimeout(() => {
+			terminate();
+			resolve(timeout);
+		}, remainingMs);
+	});
+	const abortPromise = new Promise<typeof aborted>((resolve) => {
+		if (!signal) return;
+		abortListener = () => {
+			terminate();
+			resolve(aborted);
+		};
+		signal.addEventListener("abort", abortListener, { once: true });
+	});
+	const resultPromise = resultFn(proc).then(
+		(value) => ({ ok: true as const, value }),
+		(error) => ({ ok: false as const, error }),
+	);
 
-	try {
-		const result = await resultFn(proc);
-		clearTimeout(deadlineTimer);
-		if (timedOut) {
-			graceTimer = setTimeout(() => proc.kill("SIGKILL"), SUBPROCESS_KILL_GRACE_MS);
-			await proc.exited.catch(() => {});
-			clearTimeout(graceTimer);
-			throw new SemaphoreTimeoutError(
-				originalTimeoutMs,
-				`${label} timeout after ${originalTimeoutMs}ms (result arrived after deadline)`,
-			);
+	const result = await Promise.race([resultPromise, timeoutPromise, abortPromise]);
+	if (result === timeout || result === aborted) {
+		if (deadlineTimer) clearTimeout(deadlineTimer);
+		await (terminationPromise ?? proc.exited.catch(() => {}));
+		if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+		if (result === aborted) {
+			throw new Error(`${label} aborted`);
 		}
-		return result;
-	} catch (err) {
-		clearTimeout(deadlineTimer);
-		if (!timedOut) throw err;
-		// Timeout fired — SIGTERM sent. Wait for exit with SIGKILL backstop.
-		graceTimer = setTimeout(() => proc.kill("SIGKILL"), SUBPROCESS_KILL_GRACE_MS);
-		await proc.exited.catch(() => {});
-		clearTimeout(graceTimer);
 		throw new SemaphoreTimeoutError(originalTimeoutMs, `${label} timeout after ${originalTimeoutMs}ms`);
 	}
+
+	if (deadlineTimer) clearTimeout(deadlineTimer);
+	if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+	if (result.ok) {
+		return result.value;
+	}
+	throw result.error;
+}
+
+function codexAuthPaths(baseEnv: Record<string, string | undefined>): string[] {
+	const liveHome = baseEnv.HOME ?? homedir();
+	const homeAuth = join(liveHome, ".codex", "auth.json");
+	const codexHomeAuth = baseEnv.CODEX_HOME ? join(baseEnv.CODEX_HOME, "auth.json") : homeAuth;
+	return codexHomeAuth === homeAuth ? [homeAuth] : [codexHomeAuth, homeAuth];
+}
+
+function hasCodexCredential(baseEnv: Record<string, string | undefined>): boolean {
+	const apiKey = baseEnv.OPENAI_API_KEY?.trim();
+	return Boolean(apiKey) || codexAuthPaths(baseEnv).some((path) => existsSync(path));
+}
+
+function resolveCodexRuntimeRoot(baseEnv: Record<string, string | undefined>): string {
+	const configured = baseEnv.SIGNET_CODEX_RUNTIME_DIR?.trim();
+	if (configured) return configured;
+	return join(resolveDefaultBasePath(), ".daemon", "codex-home");
 }
 
 function createSterileCodexEnv(baseEnv: Record<string, string | undefined>): {
 	readonly env: Record<string, string | undefined>;
 	cleanup(): void;
 } {
-	const root = join(tmpdir(), "signet-codex-home");
+	const root = resolveCodexRuntimeRoot(baseEnv);
 	mkdirSync(root, { recursive: true });
 	const home = mkdtempSync(join(root, "home-"));
 	const codexHome = join(home, ".codex");
@@ -731,6 +946,7 @@ export type LlmProviderCallOptions = {
 	readonly timeoutMs?: number;
 	readonly maxTokens?: number;
 	readonly temperature?: number;
+	readonly signal?: AbortSignal;
 	readonly abortSignal?: AbortSignal;
 };
 
@@ -807,7 +1023,11 @@ function extractOpenAiLikeText(content: unknown): string {
 		.join("");
 }
 
-function createOpenAiLikeStreamResult(res: Response, cancel: () => void): LlmProviderStreamResult {
+function createOpenAiLikeStreamResult(
+	res: Response,
+	cancel: () => void,
+	onTerminal: () => void = () => {},
+): LlmProviderStreamResult {
 	if (!res.body) {
 		throw new Error("streaming response body was missing");
 	}
@@ -910,10 +1130,12 @@ function createOpenAiLikeStreamResult(res: Response, cancel: () => void): LlmPro
 				controller.error(error);
 			} finally {
 				reader.releaseLock();
+				onTerminal();
 			}
 		},
 		cancel() {
 			cancel();
+			onTerminal();
 		},
 	});
 
@@ -922,6 +1144,7 @@ function createOpenAiLikeStreamResult(res: Response, cancel: () => void): LlmPro
 		cancel(reason?: string) {
 			logger.debug("pipeline", "Cancelling streaming provider call", { reason: reason ?? "unspecified" });
 			cancel();
+			onTerminal();
 		},
 	};
 }
@@ -1260,62 +1483,92 @@ export function createAcpxProvider(config: AcpxProviderConfig): LlmProvider {
 		name: `acpx:${config.agent}${config.model ? `:${config.model}` : ""}`,
 		async generate(prompt, opts): Promise<string> {
 			const timeoutMs = opts?.timeoutMs ?? config.timeoutMs ?? 60_000;
-			const { bin, args, cwd } = buildAcpxCommand(config, timeoutMs);
-			const outputFormat = resolveAcpxFormat(config);
-			const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-			return new Promise<string>((resolve, reject) => {
-				let stdout = "";
-				let stderr = "";
-				let settled = false;
-				const child = nodeSpawn(bin, args, {
-					cwd,
-					env: acpxEnv(config.hooks, runId),
-					stdio: ["pipe", "pipe", "pipe"],
-					detached: process.platform !== "win32",
-					windowsHide: true,
-				});
-				const finish = (fn: () => void): void => {
-					if (settled) return;
-					settled = true;
-					clearTimeout(timer);
-					cleanupAcpxAgentProcesses(config.agent, runId);
-					fn();
-				};
-				const timer = setTimeout(() => {
-					terminateChildProcessTreeWithEscalation(child);
-					finish(() => reject(new Error(`${config.agent} via ACPX timeout after ${timeoutMs}ms`)));
-				}, timeoutMs);
-				child.stdout?.setEncoding("utf8");
-				child.stderr?.setEncoding("utf8");
-				child.stdout?.on("data", (chunk) => {
-					stdout += String(chunk);
-				});
-				child.stderr?.on("data", (chunk) => {
-					stderr += String(chunk);
-				});
-				child.on("error", (error) => finish(() => reject(error)));
-				child.on("close", (code) =>
-					finish(() => {
-						if (code !== 0) {
-							reject(new Error(`${config.agent} via ACPX exited ${code}: ${stderr.slice(0, 300)}`));
-							return;
+			const deadline = performance.now() + timeoutMs;
+			const signal = generateSignal(opts);
+			return withLlmConcurrency(
+				async () => {
+					const remainingMs = deadline - performance.now();
+					if (remainingMs <= 0) {
+						throw new Error(
+							`${config.agent} via ACPX timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore)`,
+						);
+					}
+					const { bin, args, cwd } = buildAcpxCommand(config, remainingMs);
+					const outputFormat = resolveAcpxFormat(config);
+					const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+					return new Promise<string>((resolve, reject) => {
+						let stdout = "";
+						let stderr = "";
+						let settled = false;
+						let aborted = false;
+						const child = nodeSpawn(bin, args, {
+							cwd,
+							env: acpxEnv(config.hooks, runId),
+							stdio: ["pipe", "pipe", "pipe"],
+							detached: process.platform !== "win32",
+							windowsHide: true,
+						});
+						const finish = (fn: () => void): void => {
+							if (settled) return;
+							settled = true;
+							clearTimeout(timer);
+							signal?.removeEventListener("abort", onAbort);
+							cleanupAcpxAgentProcesses(config.agent, runId);
+							fn();
+						};
+						const onAbort = (): void => {
+							aborted = true;
+							terminateChildProcessTreeWithEscalation(child);
+						};
+						if (signal?.aborted) {
+							onAbort();
+						} else {
+							signal?.addEventListener("abort", onAbort, { once: true });
 						}
-						let text: string;
-						try {
-							text = outputFormat === "json" ? parseAcpxJsonOutput(stdout, config) : stdout.trim();
-						} catch (error) {
-							reject(error);
-							return;
-						}
-						if (!text) {
-							reject(new Error(`${config.agent} via ACPX returned empty response`));
-							return;
-						}
-						resolve(text);
-					}),
-				);
-				child.stdin?.end(prompt);
-			});
+						const timer = setTimeout(() => {
+							terminateChildProcessTreeWithEscalation(child);
+							finish(() => reject(new Error(`${config.agent} via ACPX timeout after ${timeoutMs}ms`)));
+						}, remainingMs);
+						child.stdout?.setEncoding("utf8");
+						child.stderr?.setEncoding("utf8");
+						child.stdout?.on("data", (chunk) => {
+							stdout += String(chunk);
+						});
+						child.stderr?.on("data", (chunk) => {
+							stderr += String(chunk);
+						});
+						child.on("error", (error) => finish(() => reject(error)));
+						child.on("close", (code) =>
+							finish(() => {
+								if (aborted) {
+									reject(new Error(`${config.agent} via ACPX aborted`));
+									return;
+								}
+								if (code !== 0) {
+									reject(new Error(`${config.agent} via ACPX exited ${code}: ${stderr.slice(0, 300)}`));
+									return;
+								}
+								let text: string;
+								try {
+									text = outputFormat === "json" ? parseAcpxJsonOutput(stdout, config) : stdout.trim();
+								} catch (error) {
+									reject(error);
+									return;
+								}
+								if (!text) {
+									reject(new Error(`${config.agent} via ACPX returned empty response`));
+									return;
+								}
+								resolve(text);
+							}),
+						);
+						child.stdin?.end(prompt);
+					});
+				},
+				timeoutMs,
+				"acpx",
+				signal,
+			);
 		},
 		async available(): Promise<boolean> {
 			const bin = config.bin ?? "npx";
@@ -1330,63 +1583,101 @@ export function createCommandLineProvider(config: CommandLineProviderConfig): Ll
 		name: config.name,
 		async generate(prompt, opts): Promise<string> {
 			const timeoutMs = opts?.timeoutMs ?? config.defaultTimeoutMs;
-			return new Promise<string>((resolve, reject) => {
-				let stdout = "";
-				let stderr = "";
-				let settled = false;
-				const child = nodeSpawn(
-					config.bin,
-					args.map((arg) => replacePromptTokens(arg, prompt)),
-					{
-						cwd: config.cwd,
-						env: {
-							...process.env,
-							...Object.fromEntries(
-								Object.entries(config.env ?? {}).map(([key, value]) => [key, replacePromptTokens(value, prompt)]),
-							),
-							SIGNET_PROMPT: prompt,
-						},
-						stdio: ["pipe", "pipe", "pipe"],
-						windowsHide: true,
-					},
-				);
-				const timer = setTimeout(() => {
-					if (settled) return;
-					settled = true;
-					child.kill("SIGTERM");
-					reject(new Error(`${config.name} timeout after ${timeoutMs}ms`));
-				}, timeoutMs);
-				child.stdout?.setEncoding("utf8");
-				child.stderr?.setEncoding("utf8");
-				child.stdout?.on("data", (chunk) => {
-					stdout += String(chunk);
-				});
-				child.stderr?.on("data", (chunk) => {
-					stderr += String(chunk);
-				});
-				child.on("error", (error) => {
-					if (settled) return;
-					settled = true;
-					clearTimeout(timer);
-					reject(error);
-				});
-				child.on("close", (code) => {
-					if (settled) return;
-					settled = true;
-					clearTimeout(timer);
-					if (code !== 0) {
-						reject(new Error(`${config.name} exited ${code}: ${stderr.slice(0, 300)}`));
-						return;
+			const deadline = performance.now() + timeoutMs;
+			const signal = generateSignal(opts);
+			return withLlmConcurrency(
+				async () => {
+					const remainingMs = deadline - performance.now();
+					if (remainingMs <= 0) {
+						throw new Error(`${config.name} timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore)`);
 					}
-					const text = stdout.trim();
-					if (!text) {
-						reject(new Error(`${config.name} returned empty response`));
-						return;
-					}
-					resolve(text);
-				});
-				child.stdin?.end(prompt);
-			});
+					return new Promise<string>((resolve, reject) => {
+						let stdout = "";
+						let stderr = "";
+						let settled = false;
+						let aborted = false;
+						const child = nodeSpawn(
+							config.bin,
+							args.map((arg) => replacePromptTokens(arg, prompt)),
+							{
+								cwd: config.cwd,
+								env: {
+									...process.env,
+									...Object.fromEntries(
+										Object.entries(config.env ?? {}).map(([key, value]) => [key, replacePromptTokens(value, prompt)]),
+									),
+									SIGNET_PROMPT: prompt,
+								},
+								stdio: ["pipe", "pipe", "pipe"],
+								detached: process.platform !== "win32",
+								windowsHide: true,
+							},
+						);
+						let timedOut = false;
+						const onAbort = (): void => {
+							if (settled) return;
+							aborted = true;
+							terminateChildProcessTreeWithEscalation(child);
+						};
+						if (signal?.aborted) {
+							aborted = true;
+						} else {
+							signal?.addEventListener("abort", onAbort, { once: true });
+						}
+						const timer = setTimeout(() => {
+							if (settled) return;
+							timedOut = true;
+							terminateChildProcessTreeWithEscalation(child);
+						}, remainingMs);
+						if (aborted) {
+							onAbort();
+						}
+						child.stdout?.setEncoding("utf8");
+						child.stderr?.setEncoding("utf8");
+						child.stdout?.on("data", (chunk) => {
+							stdout += String(chunk);
+						});
+						child.stderr?.on("data", (chunk) => {
+							stderr += String(chunk);
+						});
+						child.on("error", (error) => {
+							if (settled) return;
+							settled = true;
+							clearTimeout(timer);
+							signal?.removeEventListener("abort", onAbort);
+							reject(error);
+						});
+						child.on("close", (code) => {
+							if (settled) return;
+							settled = true;
+							clearTimeout(timer);
+							signal?.removeEventListener("abort", onAbort);
+							if (aborted) {
+								reject(new Error(`${config.name} aborted`));
+								return;
+							}
+							if (timedOut) {
+								reject(new Error(`${config.name} timeout after ${timeoutMs}ms`));
+								return;
+							}
+							if (code !== 0) {
+								reject(new Error(`${config.name} exited ${code}: ${stderr.slice(0, 300)}`));
+								return;
+							}
+							const text = stdout.trim();
+							if (!text) {
+								reject(new Error(`${config.name} returned empty response`));
+								return;
+							}
+							resolve(text);
+						});
+						child.stdin?.end(prompt);
+					});
+				},
+				timeoutMs,
+				config.name,
+				signal,
+			);
 		},
 		async available(): Promise<boolean> {
 			return which(config.bin) !== null;
@@ -1418,70 +1709,86 @@ export function createOpenAiCompatibleProvider(config: OpenAiCompatibleProviderC
 
 	async function call(prompt: string, opts?: LlmProviderCallOptions): Promise<LlmGenerateResult> {
 		const timeoutMs = opts?.timeoutMs ?? config.defaultTimeoutMs;
-		const abort = createAbortBundle(timeoutMs, opts?.abortSignal);
-		try {
-			const bodyObj: Record<string, unknown> = {
-				model: config.model,
-				messages: [{ role: "user", content: prompt }],
-				max_tokens: opts?.maxTokens ?? 4096,
-			};
-			if (config.disableThinking) {
-				bodyObj.thinking = { type: "disabled" };
-			}
-			const res = await fetch(`${baseUrl}/chat/completions`, {
-				method: "POST",
-				headers: headers(),
-				body: JSON.stringify(bodyObj),
-				signal: abort.signal,
-			});
-			if (!res.ok) {
-				const detail = (await res.text().catch(() => "")).slice(0, 300);
-				throw new Error(`${config.name} HTTP ${res.status}: ${detail}`);
-			}
-			const body = (await res.json()) as {
-				choices?: Array<{
-					message?: {
-						content?: string | Array<{ text?: string; type?: string }>;
-						reasoning_content?: string;
+		const deadline = performance.now() + timeoutMs;
+		const signal = generateSignal(opts);
+		return withLlmConcurrency(
+			async () => {
+				const remainingMs = deadline - performance.now();
+				if (remainingMs <= 0) {
+					throw new Error(`${config.name} timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore)`);
+				}
+				const abort = createAbortBundle(remainingMs, signal);
+				try {
+					const bodyObj: Record<string, unknown> = {
+						model: config.model,
+						messages: [{ role: "user", content: prompt }],
+						max_tokens: opts?.maxTokens ?? 4096,
 					};
-				}>;
-				usage?: {
-					prompt_tokens?: number;
-					completion_tokens?: number;
-					total_tokens?: number;
-					cached_tokens?: number;
-				};
-			};
-			let text = extractOpenAiLikeText(body.choices?.[0]?.message?.content);
-			if (!text.trim()) {
-				// Reasoning models may exhaust the max_tokens budget on
-				// reasoning_content before emitting content. Fall back to
-				// reasoning_content so the caller gets usable output instead
-				// of "returned empty response".
-				text = (body.choices?.[0]?.message?.reasoning_content ?? "").trim();
-				if (!text) throw new Error(`${config.name} returned empty response`);
-			}
-			return {
-				text,
-				usage: body.usage
-					? {
-							inputTokens: body.usage.prompt_tokens ?? null,
-							outputTokens: body.usage.completion_tokens ?? null,
-							cacheReadTokens: body.usage.cached_tokens ?? null,
-							cacheCreationTokens: null,
-							totalCost: null,
-							totalDurationMs: null,
-						}
-					: null,
-			};
-		} catch (error) {
-			if (abort.timedOut()) {
-				throw new Error(`${config.name} timeout after ${timeoutMs}ms`);
-			}
-			throw error;
-		} finally {
-			abort.cleanup();
-		}
+					if (config.disableThinking) {
+						bodyObj.thinking = { type: "disabled" };
+					}
+					const res = await fetch(`${baseUrl}/chat/completions`, {
+						method: "POST",
+						headers: headers(),
+						body: JSON.stringify(bodyObj),
+						signal: abort.signal,
+					});
+					if (!res.ok) {
+						const detail = (await res.text().catch(() => "")).slice(0, 300);
+						throw new Error(`${config.name} HTTP ${res.status}: ${detail}`);
+					}
+					const body = (await res.json()) as {
+						choices?: Array<{
+							message?: {
+								content?: string | Array<{ text?: string; type?: string }>;
+								reasoning_content?: string;
+							};
+						}>;
+						usage?: {
+							prompt_tokens?: number;
+							completion_tokens?: number;
+							total_tokens?: number;
+							cached_tokens?: number;
+						};
+					};
+					let text = extractOpenAiLikeText(body.choices?.[0]?.message?.content);
+					if (!text.trim()) {
+						// Reasoning models may exhaust the max_tokens budget on
+						// reasoning_content before emitting content. Fall back to
+						// reasoning_content so the caller gets usable output instead
+						// of "returned empty response".
+						text = (body.choices?.[0]?.message?.reasoning_content ?? "").trim();
+						if (!text) throw new Error(`${config.name} returned empty response`);
+					}
+					return {
+						text,
+						usage: body.usage
+							? {
+									inputTokens: body.usage.prompt_tokens ?? null,
+									outputTokens: body.usage.completion_tokens ?? null,
+									cacheReadTokens: body.usage.cached_tokens ?? null,
+									cacheCreationTokens: null,
+									totalCost: null,
+									totalDurationMs: null,
+								}
+							: null,
+					};
+				} catch (error) {
+					if (abort.timedOut()) {
+						throw new Error(`${config.name} timeout after ${timeoutMs}ms`);
+					}
+					if (error instanceof DOMException && error.name === "AbortError") {
+						throw new Error(`${config.name} aborted`);
+					}
+					throw error;
+				} finally {
+					abort.cleanup();
+				}
+			},
+			timeoutMs,
+			config.name,
+			signal,
+		);
 	}
 
 	return {
@@ -1495,7 +1802,25 @@ export function createOpenAiCompatibleProvider(config: OpenAiCompatibleProviderC
 		},
 		async streamWithUsage(prompt, opts): Promise<LlmProviderStreamResult> {
 			const timeoutMs = opts?.timeoutMs ?? config.defaultTimeoutMs;
-			const abort = createAbortBundle(timeoutMs, opts?.abortSignal);
+			const deadline = performance.now() + timeoutMs;
+			const signal = generateSignal(opts);
+			const release = await acquireLlmConcurrencyPermit(timeoutMs, config.name, signal);
+			const remainingMs = deadline - performance.now();
+			if (remainingMs <= 0) {
+				release();
+				throw new Error(`${config.name} timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore)`);
+			}
+			const abort = createAbortBundle(remainingMs, signal);
+			let responseBody: ReadableStream<Uint8Array> | null = null;
+			let abortListener: (() => void) | undefined;
+			const terminal = (): void => {
+				if (abortListener) {
+					abort.signal.removeEventListener("abort", abortListener);
+					abortListener = undefined;
+				}
+				abort.cleanup();
+				release();
+			};
 			try {
 				const streamBody: Record<string, unknown> = {
 					model: config.model,
@@ -1517,25 +1842,30 @@ export function createOpenAiCompatibleProvider(config: OpenAiCompatibleProviderC
 					const detail = (await res.text().catch(() => "")).slice(0, 300);
 					throw new Error(`${config.name} HTTP ${res.status}: ${detail}`);
 				}
-				const result = createOpenAiLikeStreamResult(res, () => {
-					abort.abort("stream cancelled");
-					abort.cleanup();
-				});
-				return {
-					stream: result.stream,
-					cancel(reason?: string) {
-						logger.debug("pipeline", "Cancelling openai-compatible stream", {
-							provider: config.name,
-							reason: reason ?? "unspecified",
-						});
-						abort.abort(reason);
-						abort.cleanup();
-					},
+				responseBody = res.body;
+				abortListener = () => {
+					responseBody?.cancel().catch(() => {});
+					terminal();
 				};
+				abort.signal.addEventListener("abort", abortListener, { once: true });
+				if (abort.signal.aborted) {
+					abortListener();
+				}
+				return createOpenAiLikeStreamResult(
+					res,
+					() => {
+						responseBody?.cancel().catch(() => {});
+						abort.abort("stream cancelled");
+					},
+					terminal,
+				);
 			} catch (error) {
-				abort.cleanup();
+				terminal();
 				if (abort.timedOut()) {
 					throw new Error(`${config.name} timeout after ${timeoutMs}ms`);
+				}
+				if (error instanceof DOMException && error.name === "AbortError") {
+					throw new Error(`${config.name} aborted`);
 				}
 				throw error;
 			}
@@ -1659,16 +1989,12 @@ export function createOllamaProvider(config?: Partial<OllamaProviderConfig>): Ll
 		model,
 	};
 
-	async function callOllama(
-		prompt: string,
-		opts?: { timeoutMs?: number; maxTokens?: number },
-	): Promise<OllamaGenerateResponse> {
+	async function callOllama(prompt: string, opts?: LlmProviderCallOptions): Promise<OllamaGenerateResponse> {
 		const timeoutMs = opts?.timeoutMs ?? cfg.defaultTimeoutMs;
 
 		return withLlmConcurrency(
 			async () => {
-				const controller = new AbortController();
-				const timer = setTimeout(() => controller.abort(), timeoutMs);
+				const abort = createAbortBundle(timeoutMs, generateSignal(opts));
 
 				try {
 					const options: Record<string, number> = {};
@@ -1681,20 +2007,28 @@ export function createOllamaProvider(config?: Partial<OllamaProviderConfig>): Ll
 						model: cfg.model,
 						prompt,
 						timeoutMs,
-						signal: controller.signal,
+						signal: abort.signal,
 						options,
+						extraBody: {
+							...(opts?.responseFormat === "json" ? { format: "json" } : {}),
+							...(opts?.think !== undefined ? { think: opts.think } : {}),
+						},
 					});
 				} catch (e) {
 					if (e instanceof DOMException && e.name === "AbortError") {
+						if (!abort.timedOut()) {
+							throw new Error("Ollama aborted");
+						}
 						throw new Error(`Ollama timeout after ${timeoutMs}ms`);
 					}
 					throw e;
 				} finally {
-					clearTimeout(timer);
+					abort.cleanup();
 				}
 			},
 			timeoutMs,
 			"ollama",
+			generateSignal(opts),
 		);
 	}
 
@@ -1790,7 +2124,7 @@ export function createLlamaCppProvider(config?: Partial<LlamaCppProviderConfig>)
 
 	async function callLlamaCpp(
 		prompt: string,
-		opts?: { timeoutMs?: number; maxTokens?: number },
+		opts?: LlmProviderCallOptions,
 	): Promise<{ text: string; usage: LlamaCppUsage | null }> {
 		const timeoutMs = opts?.timeoutMs ?? cfg.defaultTimeoutMs;
 		const maxTokens = opts?.maxTokens ?? 4096;
@@ -1808,8 +2142,7 @@ export function createLlamaCppProvider(config?: Partial<LlamaCppProviderConfig>)
 
 		return withLlmConcurrency(
 			async () => {
-				const controller = new AbortController();
-				const timer = setTimeout(() => controller.abort(), timeoutMs);
+				const abort = createAbortBundle(timeoutMs, generateSignal(opts));
 
 				try {
 					const options: Record<string, number> = {};
@@ -1819,7 +2152,7 @@ export function createLlamaCppProvider(config?: Partial<LlamaCppProviderConfig>)
 						method: "POST",
 						headers: { "Content-Type": "application/json" },
 						body,
-						signal: controller.signal,
+						signal: abort.signal,
 					});
 
 					if (!res.ok) {
@@ -1836,15 +2169,19 @@ export function createLlamaCppProvider(config?: Partial<LlamaCppProviderConfig>)
 					return { text, usage: data.usage ?? null };
 				} catch (e) {
 					if (e instanceof DOMException && e.name === "AbortError") {
+						if (!abort.timedOut()) {
+							throw new Error("llama.cpp aborted");
+						}
 						throw new Error(`llama.cpp timeout after ${timeoutMs}ms`);
 					}
 					throw e;
 				} finally {
-					clearTimeout(timer);
+					abort.cleanup();
 				}
 			},
 			timeoutMs,
 			"llama-cpp",
+			generateSignal(opts),
 		);
 	}
 
@@ -1894,15 +2231,28 @@ export function createLlamaCppProvider(config?: Partial<LlamaCppProviderConfig>)
 export interface ClaudeCodeProviderConfig {
 	readonly model: string;
 	readonly defaultTimeoutMs: number;
+	readonly allowApiKeyEnv: boolean;
+	readonly maxBudgetUsd?: number;
+	readonly cooldownMs: number;
 }
 
 const DEFAULT_CLAUDE_CODE_CONFIG: ClaudeCodeProviderConfig = {
 	model: "haiku",
 	defaultTimeoutMs: 60000,
+	allowApiKeyEnv: false,
+	cooldownMs: 300000,
 };
 
 interface ClaudeCodeJsonResponse {
 	readonly result?: string;
+	readonly type?: string;
+	readonly subtype?: string;
+	readonly message?: string;
+	readonly error?: {
+		readonly type?: string;
+		readonly subtype?: string;
+		readonly message?: string;
+	};
 	readonly usage?: {
 		readonly input_tokens?: number;
 		readonly output_tokens?: number;
@@ -1912,69 +2262,279 @@ interface ClaudeCodeJsonResponse {
 	readonly cost_usd?: number;
 }
 
+export type ClaudeCodeCircuitReason = "quota" | "usage_limit" | "credit" | "billing" | "auth";
+
+export class ClaudeCodeCircuitOpenError extends Error {
+	constructor(
+		message: string,
+		public readonly reason: ClaudeCodeCircuitReason,
+		public readonly retryAt: string,
+	) {
+		super(message);
+		this.name = "ClaudeCodeCircuitOpenError";
+	}
+}
+
+interface ClaudeCodeCircuitState {
+	readonly reason: ClaudeCodeCircuitReason;
+	readonly retryAtMs: number;
+	readonly openedAtMs: number;
+	readonly message: string;
+	probeInFlight: boolean;
+}
+
+let claudeCodeCircuit: ClaudeCodeCircuitState | null = null;
+let lastClaudeCodeRuntimeConfig: Pick<ClaudeCodeProviderConfig, "allowApiKeyEnv" | "maxBudgetUsd" | "cooldownMs"> = {
+	allowApiKeyEnv: DEFAULT_CLAUDE_CODE_CONFIG.allowApiKeyEnv,
+	cooldownMs: DEFAULT_CLAUDE_CODE_CONFIG.cooldownMs,
+};
+
+function classifyClaudeCodeFailure(text: string): ClaudeCodeCircuitReason | null {
+	const lower = text.toLowerCase();
+	const authEvidence =
+		/\b(unauthorized|invalid api key|invalid x-api-key|authentication|not authenticated|login required)\b/.test(lower);
+	const apiPermissionDenied =
+		/\bpermission denied\b/.test(lower) &&
+		/\b(anthropic|claude|api key|x-api-key|oauth|token|credential|auth)\b/.test(lower);
+	if (authEvidence || apiPermissionDenied) {
+		return "auth";
+	}
+	if (lower.includes("billing") || /\b(payment|invoice|pay-as-you-go|pay as you go)\b/.test(lower)) return "billing";
+	if (lower.includes("credit") || /\b(prepaid|balance|insufficient funds)\b/.test(lower)) return "credit";
+	if (/\b(usage limit|usage limits|rate limit|quota exceeded|limit reached|capacity exceeded)\b/.test(lower)) {
+		return lower.includes("quota") ? "quota" : "usage_limit";
+	}
+	if (/\bquota\b/.test(lower)) return "quota";
+	return null;
+}
+
+function classifyClaudeCodeJson(raw: string): ClaudeCodeCircuitReason | null {
+	try {
+		const parsed = JSON.parse(raw) as ClaudeCodeJsonResponse;
+		const fields = [
+			parsed.type,
+			parsed.subtype,
+			parsed.message,
+			parsed.error?.type,
+			parsed.error?.subtype,
+			parsed.error?.message,
+		]
+			.filter((value): value is string => typeof value === "string")
+			.join(" ");
+		return classifyClaudeCodeFailure(fields);
+	} catch {
+		return null;
+	}
+}
+
+function openClaudeCodeCircuit(
+	reason: ClaudeCodeCircuitReason,
+	message: string,
+	cooldownMs: number,
+): ClaudeCodeCircuitOpenError {
+	const now = Date.now();
+	const retryAtMs = now + Math.max(1000, cooldownMs);
+	claudeCodeCircuit = {
+		reason,
+		message: message.slice(0, 300),
+		openedAtMs: now,
+		retryAtMs,
+		probeInFlight: false,
+	};
+	return new ClaudeCodeCircuitOpenError(
+		`claude-code ${reason} failure; cooldown active until ${new Date(retryAtMs).toISOString()}: ${message.slice(0, 300)}`,
+		reason,
+		new Date(retryAtMs).toISOString(),
+	);
+}
+
+function enterClaudeCodeCircuitProbe(): boolean {
+	const state = claudeCodeCircuit;
+	if (!state) return false;
+	const now = Date.now();
+	if (now < state.retryAtMs) {
+		throw new ClaudeCodeCircuitOpenError(
+			`claude-code cooldown active until ${new Date(state.retryAtMs).toISOString()}: ${state.message}`,
+			state.reason,
+			new Date(state.retryAtMs).toISOString(),
+		);
+	}
+	if (state.probeInFlight) {
+		throw new ClaudeCodeCircuitOpenError(
+			`claude-code cooldown half-open probe already in flight until ${new Date(state.retryAtMs).toISOString()}`,
+			state.reason,
+			new Date(state.retryAtMs).toISOString(),
+		);
+	}
+	state.probeInFlight = true;
+	return true;
+}
+
+export function resetClaudeCodeCircuit(): void {
+	claudeCodeCircuit = null;
+}
+
+export function getClaudeCodeCircuitStatus(): {
+	readonly open: boolean;
+	readonly status: "closed" | "open" | "half-open";
+	readonly reason: ClaudeCodeCircuitReason | null;
+	readonly retryAt: string | null;
+	readonly halfOpen: boolean;
+	readonly scope: "daemon";
+	readonly allowApiKeyEnv: boolean;
+	readonly maxBudgetUsd: number | null;
+	readonly cooldownMs: number;
+} {
+	if (!claudeCodeCircuit) {
+		return {
+			open: false,
+			status: "closed",
+			reason: null,
+			retryAt: null,
+			halfOpen: false,
+			scope: "daemon",
+			allowApiKeyEnv: lastClaudeCodeRuntimeConfig.allowApiKeyEnv,
+			maxBudgetUsd: lastClaudeCodeRuntimeConfig.maxBudgetUsd ?? null,
+			cooldownMs: lastClaudeCodeRuntimeConfig.cooldownMs,
+		};
+	}
+	const halfOpen = Date.now() >= claudeCodeCircuit.retryAtMs;
+	const open = !halfOpen || claudeCodeCircuit.probeInFlight;
+	return {
+		open,
+		status: halfOpen ? "half-open" : "open",
+		reason: claudeCodeCircuit.reason,
+		retryAt: new Date(claudeCodeCircuit.retryAtMs).toISOString(),
+		halfOpen,
+		scope: "daemon",
+		allowApiKeyEnv: lastClaudeCodeRuntimeConfig.allowApiKeyEnv,
+		maxBudgetUsd: lastClaudeCodeRuntimeConfig.maxBudgetUsd ?? null,
+		cooldownMs: lastClaudeCodeRuntimeConfig.cooldownMs,
+	};
+}
+
+function buildClaudeCodeEnv(allowApiKeyEnv: boolean): Record<string, string> {
+	const cleanEnv: Record<string, string> = {};
+	for (const [k, v] of Object.entries(process.env)) {
+		if (v === undefined) continue;
+		if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_") || k === "SIGNET_NO_HOOKS") continue;
+		if (!allowApiKeyEnv && (k === "ANTHROPIC_API_KEY" || k === "ANTHROPIC_AUTH_TOKEN")) continue;
+		cleanEnv[k] = v;
+	}
+	if (process.env.CLAUDE_CODE_OAUTH_TOKEN !== undefined) {
+		cleanEnv.CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+	}
+	return { ...cleanEnv, NO_COLOR: "1", SIGNET_NO_HOOKS: "1" };
+}
+
 export function createClaudeCodeProvider(config?: Partial<ClaudeCodeProviderConfig>): LlmProvider {
 	const cfg = { ...DEFAULT_CLAUDE_CODE_CONFIG, ...config };
+	lastClaudeCodeRuntimeConfig = {
+		allowApiKeyEnv: cfg.allowApiKeyEnv,
+		...(cfg.maxBudgetUsd !== undefined ? { maxBudgetUsd: cfg.maxBudgetUsd } : {}),
+		cooldownMs: cfg.cooldownMs,
+	};
 
 	async function callClaude(
 		prompt: string,
 		outputFormat: "text" | "json",
-		opts?: { timeoutMs?: number; maxTokens?: number },
+		opts?: LlmProviderCallOptions,
 	): Promise<string> {
 		const timeoutMs = opts?.timeoutMs ?? cfg.defaultTimeoutMs;
 		const deadline = performance.now() + timeoutMs;
+		const halfOpenProbe = enterClaudeCodeCircuitProbe();
 
-		return withLlmConcurrency(
-			async () => {
-				const remainingMs = deadline - performance.now();
-				if (remainingMs <= 0) {
-					throw new Error(`claude-code timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore)`);
-				}
-
-				const args = ["-p", prompt, "--model", cfg.model, "--no-session-persistence", "--output-format", outputFormat];
-
-				// Strip ALL Claude Code env vars to prevent nested-session
-				// detection when the daemon is launched from a CC session.
-				// Also inject SIGNET_NO_HOOKS to prevent recursive hook loops.
-				const cleanEnv: Record<string, string> = {};
-				for (const [k, v] of Object.entries(process.env)) {
-					if (v === undefined) continue;
-					if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_") || k === "SIGNET_NO_HOOKS") continue;
-					cleanEnv[k] = v;
-				}
-
-				logger.debug("pipeline", "Spawning claude-code subprocess", {
-					model: cfg.model,
-					outputFormat,
-					promptLen: prompt.length,
-					timeoutMs,
-				});
-
-				const proc = spawnHidden(["claude", ...args], {
-					env: { ...cleanEnv, NO_COLOR: "1", SIGNET_NO_HOOKS: "1" },
-				});
-
-				return awaitSubprocessWithDeadline(proc, remainingMs, "claude-code", timeoutMs, async (p) => {
-					const [stdout, stderr, exitCode] = await Promise.all([
-						new Response(p.stdout).text().catch(() => ""),
-						new Response(p.stderr).text().catch(() => ""),
-						p.exited.catch(() => -1),
-					]);
-
-					if (exitCode !== 0) {
-						throw new Error(`claude-code exit ${exitCode}: ${stderr.slice(0, 300)}`);
+		try {
+			return await withLlmConcurrency(
+				async () => {
+					const remainingMs = deadline - performance.now();
+					if (remainingMs <= 0) {
+						throw new Error(`claude-code timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore)`);
 					}
 
-					const result = stdout.trim();
-					if (result.length === 0) {
-						throw new Error("claude-code returned empty output");
+					const args = [
+						"-p",
+						prompt,
+						"--model",
+						cfg.model,
+						"--no-session-persistence",
+						"--output-format",
+						outputFormat,
+					];
+					if (cfg.maxBudgetUsd !== undefined) {
+						args.push("--max-budget-usd", String(cfg.maxBudgetUsd));
 					}
 
-					return result;
-				});
-			},
-			timeoutMs,
-			"claude-code",
-		);
+					logger.debug("pipeline", "Spawning claude-code subprocess", {
+						model: cfg.model,
+						outputFormat,
+						promptLen: prompt.length,
+						timeoutMs,
+						allowApiKeyEnv: cfg.allowApiKeyEnv,
+						maxBudgetUsd: cfg.maxBudgetUsd ?? null,
+					});
+
+					const proc = spawnHidden(["claude", ...args], {
+						env: buildClaudeCodeEnv(cfg.allowApiKeyEnv),
+					});
+
+					try {
+						const result = await awaitSubprocessWithDeadline(
+							proc,
+							remainingMs,
+							"claude-code",
+							timeoutMs,
+							async (p) => {
+								const [stdout, stderr, exitCode] = await Promise.all([
+									new Response(p.stdout).text().catch(() => ""),
+									new Response(p.stderr).text().catch(() => ""),
+									p.exited.catch(() => -1),
+								]);
+
+								if (exitCode !== 0) {
+									const detail = stderr.trim() || stdout.trim();
+									const reason = classifyClaudeCodeFailure(detail) ?? classifyClaudeCodeJson(detail);
+									if (reason) throw openClaudeCodeCircuit(reason, detail, cfg.cooldownMs);
+									throw new Error(`claude-code exit ${exitCode}: ${stderr.slice(0, 300)}`);
+								}
+
+								const result = stdout.trim();
+								if (result.length === 0) {
+									throw new Error("claude-code returned empty output");
+								}
+								const reason = classifyClaudeCodeJson(result);
+								if (reason) throw openClaudeCodeCircuit(reason, result, cfg.cooldownMs);
+
+								return result;
+							},
+							generateSignal(opts),
+						);
+						if (halfOpenProbe) resetClaudeCodeCircuit();
+						return result;
+					} catch (error) {
+						if (halfOpenProbe && !(error instanceof ClaudeCodeCircuitOpenError) && claudeCodeCircuit) {
+							claudeCodeCircuit.probeInFlight = false;
+							claudeCodeCircuit = {
+								...claudeCodeCircuit,
+								openedAtMs: Date.now(),
+								retryAtMs: Date.now() + Math.max(1000, cfg.cooldownMs),
+								message: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300),
+								probeInFlight: false,
+							};
+						}
+						throw error;
+					}
+				},
+				timeoutMs,
+				"claude-code",
+				generateSignal(opts),
+			);
+		} catch (error) {
+			if (halfOpenProbe && claudeCodeCircuit?.probeInFlight) {
+				claudeCodeCircuit.probeInFlight = false;
+			}
+			throw error;
+		}
 	}
 
 	return {
@@ -2094,7 +2654,7 @@ export function createAnthropicProvider(config?: Partial<AnthropicProviderConfig
 
 	async function callAnthropic(
 		prompt: string,
-		opts?: { timeoutMs?: number; maxTokens?: number },
+		opts?: LlmProviderCallOptions,
 	): Promise<{ text: string; usage: AnthropicUsage | null }> {
 		const timeoutMs = opts?.timeoutMs ?? cfg.defaultTimeoutMs;
 		const maxTokens = opts?.maxTokens || 4096;
@@ -2106,7 +2666,7 @@ export function createAnthropicProvider(config?: Partial<AnthropicProviderConfig
 		});
 
 		return httpProviderCall<{ text: string; usage: AnthropicUsage | null }>(
-			{ label: "Anthropic", timeoutMs, maxRetries: cfg.maxRetries },
+			{ label: "Anthropic", timeoutMs, maxRetries: cfg.maxRetries, signal: generateSignal(opts) },
 			async ({ attempt, maxRetries, controller, setLastError }) => {
 				const res = await fetch(url, {
 					method: "POST",
@@ -2266,7 +2826,7 @@ export function createOpenRouterProvider(config?: Partial<OpenRouterProviderConf
 
 	async function callOpenRouter(
 		prompt: string,
-		opts?: { timeoutMs?: number; maxTokens?: number },
+		opts?: LlmProviderCallOptions,
 	): Promise<{ text: string; usage: OpenRouterUsage | null }> {
 		const timeoutMs = opts?.timeoutMs ?? cfg.defaultTimeoutMs;
 		const maxTokens = opts?.maxTokens ?? 4096;
@@ -2286,7 +2846,7 @@ export function createOpenRouterProvider(config?: Partial<OpenRouterProviderConf
 		});
 
 		return httpProviderCall<{ text: string; usage: OpenRouterUsage | null }>(
-			{ label: "OpenRouter", timeoutMs, maxRetries: cfg.maxRetries },
+			{ label: "OpenRouter", timeoutMs, maxRetries: cfg.maxRetries, signal: generateSignal(opts) },
 			async ({ attempt, maxRetries, controller, setLastError }) => {
 				const headers: Record<string, string> = {
 					"Content-Type": "application/json",
@@ -2473,12 +3033,12 @@ function parseCodexJsonl(raw: string): LlmGenerateResult {
 export function createCodexProvider(config?: Partial<CodexProviderConfig>): LlmProvider {
 	const cfg = { ...DEFAULT_CODEX_CONFIG, ...config };
 
-	async function callCodex(
-		prompt: string,
-		opts?: { timeoutMs?: number; maxTokens?: number },
-	): Promise<LlmGenerateResult> {
+	async function callCodex(prompt: string, opts?: LlmProviderCallOptions): Promise<LlmGenerateResult> {
 		const timeoutMs = opts?.timeoutMs ?? cfg.defaultTimeoutMs;
 		const deadline = performance.now() + timeoutMs;
+		if (!hasCodexCredential(process.env)) {
+			throw new Error("Codex CLI auth unavailable: set OPENAI_API_KEY or mount CODEX_HOME with auth.json");
+		}
 
 		return withLlmConcurrency(
 			async () => {
@@ -2518,22 +3078,30 @@ export function createCodexProvider(config?: Partial<CodexProviderConfig>): LlmP
 				}
 				proc.exited.finally(() => sterile.cleanup());
 
-				return awaitSubprocessWithDeadline(proc, remainingMs, "codex", timeoutMs, async (p) => {
-					const [stdout, stderr, exitCode] = await Promise.all([
-						new Response(p.stdout).text().catch(() => ""),
-						new Response(p.stderr).text().catch(() => ""),
-						p.exited.catch(() => -1),
-					]);
+				return awaitSubprocessWithDeadline(
+					proc,
+					remainingMs,
+					"codex",
+					timeoutMs,
+					async (p) => {
+						const [stdout, stderr, exitCode] = await Promise.all([
+							new Response(p.stdout).text().catch(() => ""),
+							new Response(p.stderr).text().catch(() => ""),
+							p.exited.catch(() => -1),
+						]);
 
-					if (exitCode !== 0) {
-						const detail = stderr.trim() || stdout.trim();
-						throw new Error(`codex exit ${exitCode}: ${detail.slice(0, 500)}`);
-					}
-					return parseCodexJsonl(stdout);
-				});
+						if (exitCode !== 0) {
+							const detail = stderr.trim() || stdout.trim();
+							throw new Error(`codex exit ${exitCode}: ${detail.slice(0, 500)}`);
+						}
+						return parseCodexJsonl(stdout);
+					},
+					generateSignal(opts),
+				);
 			},
 			timeoutMs,
 			"codex",
+			generateSignal(opts),
 		);
 	}
 
@@ -2551,15 +3119,17 @@ export function createCodexProvider(config?: Partial<CodexProviderConfig>): LlmP
 
 		async available(): Promise<boolean> {
 			try {
+				const versionEnv = { ...process.env };
+				Reflect.deleteProperty(versionEnv, "OPENAI_API_KEY");
 				const proc = spawnHidden(["codex", "--version"], {
 					env: {
-						...process.env,
+						...versionEnv,
 						SIGNET_NO_HOOKS: "1",
 						SIGNET_CODEX_BYPASS_WRAPPER: "1",
 					},
 				});
 				const exitCode = await proc.exited;
-				return exitCode === 0;
+				return exitCode === 0 && hasCodexCredential(process.env);
 			} catch {
 				logger.debug("pipeline", "Codex CLI not available");
 				return false;
@@ -2905,6 +3475,7 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 		remainingMs: number,
 		opts: { maxTokens?: number } | undefined,
 		reason: string,
+		signal?: AbortSignal,
 	): Promise<OpenCodeMessageResponse | null> {
 		if (!cfg.enableOllamaFallback) return null;
 		if (remainingMs <= 0) return null;
@@ -2922,8 +3493,7 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 			const timeoutMs = Math.min(remainingMs, 20_000);
 			const maxTokens = opts?.maxTokens ?? 512;
 
-			const controller = new AbortController();
-			const timer = setTimeout(() => controller.abort(), timeoutMs);
+			const abort = createAbortBundle(timeoutMs, signal);
 			let resultText = "";
 			let inputTokens: number | null = null;
 			let outputTokens: number | null = null;
@@ -2939,7 +3509,7 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 					model: cfg.ollamaFallbackModel,
 					prompt,
 					timeoutMs,
-					signal: controller.signal,
+					signal: abort.signal,
 					options,
 					extraBody: { format: "json", think: false },
 				});
@@ -2947,7 +3517,7 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 				inputTokens = typeof data.prompt_eval_count === "number" ? data.prompt_eval_count : null;
 				outputTokens = typeof data.eval_count === "number" ? data.eval_count : null;
 			} finally {
-				clearTimeout(timer);
+				abort.cleanup();
 			}
 
 			logger.warn("pipeline", "OpenCode fallback to Ollama used", {
@@ -2965,6 +3535,9 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 				parts: [{ type: "text", text: resultText }],
 			} as OpenCodeMessageResponse;
 		} catch (e) {
+			if (signal?.aborted || (e instanceof DOMException && e.name === "AbortError")) {
+				throw e;
+			}
 			logger.warn("pipeline", "OpenCode fallback to Ollama failed", {
 				reason,
 				model: cfg.ollamaFallbackModel,
@@ -2974,12 +3547,26 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 		}
 	}
 
-	async function createSession(remainingMs?: number): Promise<string> {
+	async function fetchWithBudget(
+		url: string,
+		init: RequestInit,
+		timeoutMs: number,
+		signal?: AbortSignal,
+	): Promise<Response> {
+		const abort = createAbortBundle(Math.max(1, timeoutMs), signal);
+		try {
+			return await fetch(url, { ...init, signal: abort.signal });
+		} finally {
+			abort.cleanup();
+		}
+	}
+
+	async function createSession(remainingMs?: number, signal?: AbortSignal): Promise<string> {
 		// Attach parentID so OpenCode treats extraction sessions as children.
 		// Child sessions are hidden from the root session list and, crucially,
 		// skipped by the desktop notification handler.
 		const started = performance.now();
-		const parentId = await getOrCreateParentSession(remainingMs);
+		const parentId = await getOrCreateParentSession(remainingMs, signal);
 
 		// Subtract time spent creating the parent session so the child
 		// creation timeout stays within the caller's overall budget.
@@ -2991,12 +3578,16 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 		const payload: Record<string, unknown> = { title: "signet-extraction" };
 		if (parentId) payload.parentID = parentId;
 
-		let res = await fetch(`${cfg.baseUrl}/session`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(payload),
-			signal: AbortSignal.timeout(childTimeoutMs()),
-		});
+		let res = await fetchWithBudget(
+			`${cfg.baseUrl}/session`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(payload),
+			},
+			childTimeoutMs(),
+			signal,
+		);
 
 		if (!res.ok && parentId) {
 			logger.warn("pipeline", "Child session creation failed with parentID, retrying unparented", {
@@ -3004,12 +3595,16 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 				parentId,
 			});
 			parentSessionId = null;
-			res = await fetch(`${cfg.baseUrl}/session`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ title: "signet-extraction" }),
-				signal: AbortSignal.timeout(childTimeoutMs()),
-			});
+			res = await fetchWithBudget(
+				`${cfg.baseUrl}/session`,
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ title: "signet-extraction" }),
+				},
+				childTimeoutMs(),
+				signal,
+			);
 		}
 
 		if (!res.ok) {
@@ -3039,16 +3634,20 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 	 *  for pipeline work.  Returns null on failure so extraction can
 	 *  proceed unparented (notifications will fire but extraction still
 	 *  works). */
-	async function getOrCreateParentSession(remainingMs?: number): Promise<string | null> {
+	async function getOrCreateParentSession(remainingMs?: number, signal?: AbortSignal): Promise<string | null> {
 		if (parentSessionId) return parentSessionId;
 		try {
 			const timeout = Math.min(5_000, Math.max(1, remainingMs ?? 5_000));
-			const res = await fetch(`${cfg.baseUrl}/session`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ title: "signet-system" }),
-				signal: AbortSignal.timeout(timeout),
-			});
+			const res = await fetchWithBudget(
+				`${cfg.baseUrl}/session`,
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ title: "signet-system" }),
+				},
+				timeout,
+				signal,
+			);
 			if (!res.ok) {
 				logger.warn("pipeline", "OpenCode parent session creation failed", {
 					status: res.status,
@@ -3066,6 +3665,7 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 			logger.debug("pipeline", "OpenCode parent session created", { id });
 			return id;
 		} catch (e) {
+			if (signal?.aborted) throw e;
 			logger.warn("pipeline", "OpenCode parent session creation error", {
 				error: e instanceof Error ? e.message : String(e),
 			});
@@ -3120,10 +3720,11 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 
 	async function sendMessage(
 		prompt: string,
-		opts?: { timeoutMs?: number; maxTokens?: number },
+		opts?: Pick<LlmProviderCallOptions, "timeoutMs" | "maxTokens" | "signal" | "abortSignal">,
 	): Promise<OpenCodeMessageResponse> {
 		const timeoutMs = opts?.timeoutMs ?? cfg.defaultTimeoutMs;
 		const deadline = performance.now() + timeoutMs;
+		const callerSignal = generateSignal(opts);
 
 		return withLlmConcurrency(
 			async () => {
@@ -3131,10 +3732,11 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 				if (remaining <= 0) {
 					throw new Error(`OpenCode timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore)`);
 				}
+				const abort = createAbortBundle(remaining, callerSignal);
 
 				// Session creation is inside the semaphore so concurrent
 				// generate() calls cannot share and then race-delete a session.
-				const sid = await createSession(deadline - performance.now());
+				const sid = await createSession(deadline - performance.now(), abort.signal);
 				bypassSession(sid, { allowUnknown: true });
 
 				// Track every session created during this call so the finally
@@ -3142,22 +3744,19 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 				const allSids = new Set<string | null>([sid]);
 				let activeSid = sid;
 
-				const controller = new AbortController();
-				const timer = setTimeout(() => controller.abort(), deadline - performance.now());
-
 				try {
 					const postMessage = async (sid: string): Promise<Response> =>
 						fetch(`${cfg.baseUrl}/session/${sid}/message`, {
 							method: "POST",
 							headers: { "Content-Type": "application/json" },
 							body: buildMessageBody(prompt, true),
-							signal: controller.signal,
+							signal: abort.signal,
 						});
 
 					const listMessages = async (sid: string): Promise<Response> =>
 						fetch(`${cfg.baseUrl}/session/${sid}/message`, {
 							method: "GET",
-							signal: controller.signal,
+							signal: abort.signal,
 						});
 
 					const parseResponsePayload = async (res: Response): Promise<unknown> => {
@@ -3208,15 +3807,31 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 					// Use remaining time after semaphore acquisition for poll deadline
 					const pollForAssistantMessage = async (forSessionId: string): Promise<OpenCodeMessageResponse | null> => {
 						const pollRemaining = deadline - performance.now();
-						const pollDeadline = performance.now() + Math.max(1000, Math.min(pollRemaining, 20000));
+						const pollDeadline = performance.now() + Math.max(0, Math.min(pollRemaining, 50));
 						while (performance.now() < pollDeadline) {
+							if (abort.signal.aborted) throw new DOMException("aborted", "AbortError");
 							const res = await listMessages(forSessionId);
 							if (res.ok) {
 								const payload = await parseResponsePayload(res);
 								const parsed = parseMessagePayload(payload, forSessionId, "poll");
 								if (parsed) return parsed;
 							}
-							await new Promise((resolve) => setTimeout(resolve, 250));
+							const delayMs = Math.min(25, Math.max(0, pollDeadline - performance.now()));
+							if (delayMs <= 0) break;
+							await new Promise<void>((resolve, reject) => {
+								if (abort.signal.aborted) {
+									reject(new DOMException("aborted", "AbortError"));
+									return;
+								}
+								const onAbort = (): void => finish(() => reject(new DOMException("aborted", "AbortError")));
+								const finish = (fn: () => void): void => {
+									clearTimeout(timer);
+									abort.signal.removeEventListener("abort", onAbort);
+									fn();
+								};
+								const timer = setTimeout(() => finish(resolve), delayMs);
+								abort.signal.addEventListener("abort", onAbort, { once: true });
+							});
 						}
 						return null;
 					};
@@ -3228,11 +3843,12 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 						const payload = await parseResponsePayload(res);
 						const parsed = parseMessagePayload(payload, forSessionId, "post");
 						if (parsed) return parsed;
+						if (payload !== null) return null;
 						return pollForAssistantMessage(forSessionId);
 					};
 
 					const retryWithNewSession = async (): Promise<OpenCodeMessageResponse | null> => {
-						const retrySid = await createSession(deadline - performance.now());
+						const retrySid = await createSession(deadline - performance.now(), abort.signal);
 						allSids.add(retrySid);
 						activeSid = retrySid;
 						const retryRes = await postMessage(retrySid);
@@ -3266,14 +3882,14 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 								structuredOutputSupported = false;
 							}
 							consumedBody = null;
-							const retrySid = await createSession(deadline - performance.now());
+							const retrySid = await createSession(deadline - performance.now(), abort.signal);
 							allSids.add(retrySid);
 							activeSid = retrySid;
 							res = await fetch(`${cfg.baseUrl}/session/${retrySid}/message`, {
 								method: "POST",
 								headers: { "Content-Type": "application/json" },
 								body: buildMessageBody(prompt, false),
-								signal: controller.signal,
+								signal: abort.signal,
 							});
 						}
 					}
@@ -3291,6 +3907,7 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 								deadline - performance.now(),
 								opts,
 								"post-response-malformed-after-http-retry",
+								abort.signal,
 							);
 							if (ollamaFallback) return ollamaFallback;
 							return buildOpenCodeFallbackResponse();
@@ -3301,13 +3918,13 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 								status: res.status,
 								agent: cfg.agent,
 							});
-							const retrySid = await createSession(deadline - performance.now());
+							const retrySid = await createSession(deadline - performance.now(), abort.signal);
 							allSids.add(retrySid);
 							const retryRes = await fetch(`${cfg.baseUrl}/session/${retrySid}/message`, {
 								method: "POST",
 								headers: { "Content-Type": "application/json" },
 								body: buildMessageBody(prompt, true),
-								signal: controller.signal,
+								signal: abort.signal,
 							});
 							if (retryRes.ok) {
 								activeSid = retrySid;
@@ -3320,6 +3937,7 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 								deadline - performance.now(),
 								opts,
 								"agent-not-found-retry-failed",
+								abort.signal,
 							);
 							if (ollamaFallback) return ollamaFallback;
 							return buildOpenCodeFallbackResponse();
@@ -3333,6 +3951,7 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 								deadline - performance.now(),
 								opts,
 								"concurrent-agent-rejection",
+								abort.signal,
 							);
 							if (ollamaFallback) return ollamaFallback;
 							return buildOpenCodeFallbackResponse();
@@ -3351,14 +3970,14 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 							sessionId: activeSid,
 						});
 						structuredOutputSupported = false;
-						const fallbackSid = await createSession(deadline - performance.now());
+						const fallbackSid = await createSession(deadline - performance.now(), abort.signal);
 						allSids.add(fallbackSid);
 						activeSid = fallbackSid;
 						const fallbackRes = await fetch(`${cfg.baseUrl}/session/${fallbackSid}/message`, {
 							method: "POST",
 							headers: { "Content-Type": "application/json" },
 							body: buildMessageBody(prompt, false),
-							signal: controller.signal,
+							signal: abort.signal,
 						});
 						if (fallbackRes.ok) {
 							const fallbackParsed = await parsePostResponse(fallbackRes, fallbackSid);
@@ -3374,13 +3993,18 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 						deadline - performance.now(),
 						opts,
 						"post-response-malformed-after-session-reset",
+						abort.signal,
 					);
 					if (ollamaFallback) return ollamaFallback;
 					return buildOpenCodeFallbackResponse();
 				} catch (e) {
 					const err =
 						e instanceof DOMException && e.name === "AbortError"
-							? new Error(`OpenCode timeout after ${timeoutMs}ms`)
+							? new Error(
+									callerSignal?.aborted && !abort.timedOut()
+										? "OpenCode aborted"
+										: `OpenCode timeout after ${timeoutMs}ms`,
+								)
 							: e;
 					// NOTE(changed-behavior): This warn-level error alerting is unique
 					// to the OpenCode provider.  Other providers (Ollama, Claude Code,
@@ -3395,12 +4019,13 @@ export function createOpenCodeProvider(config?: Partial<OpenCodeProviderConfig>)
 					});
 					throw err;
 				} finally {
-					clearTimeout(timer);
+					abort.cleanup();
 					for (const s of allSids) void deleteSession(s);
 				}
 			},
 			timeoutMs,
 			"opencode",
+			callerSignal,
 		);
 	}
 

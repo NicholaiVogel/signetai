@@ -20,13 +20,14 @@ import { PROSPECTIVE_ANTONYM_PAIRS, hasAntonymConflict, hasNegation, overlapCoun
 import { detectSemanticContradiction } from "./contradiction";
 import type { DecisionConfig, FactDecisionProposal } from "./decision";
 import { runShadowDecisions } from "./decision";
+import { type DurabilityConfig, assessDurability } from "./durability-gate";
 import { extractFactsAndEntities } from "./extraction";
 import { escalate } from "./extraction-escalation";
-import { enqueueExtractionJob, enqueueExtractionJobInTx } from "./extraction-queue";
+import { cancelExtractionJobForForgottenMemory } from "./extraction-queue";
 import { txPersistEntities } from "./graph-transactions";
 import { invalidateTraversalCache } from "./graph-traversal";
 import { enqueueHintsJob } from "./prospective-index";
-import { type LlmProvider, RateLimitExceededError, generateWithTracking } from "./provider";
+import { ClaudeCodeCircuitOpenError, type LlmProvider, RateLimitExceededError, generateWithTracking } from "./provider";
 import { archiveToCold } from "./retention-worker";
 import { type SignificanceConfig, assessSignificance } from "./significance-gate";
 import { type StaleLeaseRecovery, recoverStaleLeases } from "./stale-leases";
@@ -71,6 +72,7 @@ interface JobRow {
 interface MemoryContentRow {
 	content: string;
 	extraction_status: string | null;
+	is_deleted: number;
 	agent_id: string | null;
 	project: string | null;
 	scope: string | null;
@@ -104,6 +106,7 @@ interface AppliedWriteStats {
 	deleted: number;
 	deduped: number;
 	skippedLowConfidence: number;
+	skippedTransient: number;
 	blockedDestructive: number;
 	reviewNeeded: number;
 	embeddingsAdded: number;
@@ -144,6 +147,7 @@ function zeroWriteStats(): AppliedWriteStats {
 		deleted: 0,
 		deduped: 0,
 		skippedLowConfidence: 0,
+		skippedTransient: 0,
 		blockedDestructive: 0,
 		reviewNeeded: 0,
 		embeddingsAdded: 0,
@@ -205,7 +209,8 @@ function completeJob(db: WriteDb, jobId: string, result: string | null): void {
 	db.prepare(
 		`UPDATE memory_jobs
 		 SET status = 'completed', result = ?, completed_at = ?, updated_at = ?
-		 WHERE id = ?`,
+		 WHERE id = ?
+		   AND status IN ('pending', 'leased')`,
 	).run(result, now, now, jobId);
 }
 
@@ -219,8 +224,27 @@ function failJob(db: WriteDb, jobId: string, error: string, attempts: number, ma
 	db.prepare(
 		`UPDATE memory_jobs
 		 SET status = ?, error = ?, failed_at = ?, updated_at = ?
-		 WHERE id = ?`,
+		 WHERE id = ?
+		   AND status IN ('pending', 'leased')`,
 	).run(nextStatus, error, now, now, jobId);
+}
+
+function restoreCancelledJobLease(db: WriteDb, job: JobRow): void {
+	const now = new Date().toISOString();
+	db.prepare(
+		`UPDATE memory_jobs
+		 SET status = 'pending',
+		     attempts = MAX(attempts - 1, 0),
+		     leased_at = NULL,
+		     error = NULL,
+		     updated_at = ?
+		 WHERE id = ? AND status = 'leased'`,
+	).run(now, job.id);
+}
+
+function isCancellationError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /aborted|cancelled|canceled/i.test(message);
 }
 
 // deadLetterJob writes status='dead' directly via SQL, bypassing failJob.
@@ -233,8 +257,13 @@ function deadLetterJob(db: WriteDb, jobId: string, error: string): void {
 	db.prepare(
 		`UPDATE memory_jobs
 		 SET status = 'dead', error = ?, failed_at = ?, updated_at = ?
-		 WHERE id = ?`,
+		 WHERE id = ?
+		   AND status IN ('pending', 'leased')`,
 	).run(error, now, now, jobId);
+}
+
+function memoryIsActive(db: WriteDb, memoryId: string): boolean {
+	return Boolean(db.prepare("SELECT 1 FROM memories WHERE id = ? AND is_deleted = 0 LIMIT 1").get(memoryId));
 }
 
 function updateExtractionStatus(db: WriteDb, memoryId: string, status: string, extractionModel?: string): void {
@@ -392,6 +421,7 @@ function applyPhaseCWrites(
 		readonly sourceScope: string | null;
 		readonly sourceVisibility: "global" | "private" | "archived";
 		readonly writeGate: WriteGateConfig;
+		readonly durability: DurabilityConfig;
 		readonly semanticContradictions?: ReadonlyMap<number, { detected: boolean; confidence: number; reasoning: string }>;
 	},
 	embeddingByHash: ReadonlyMap<string, readonly number[]>,
@@ -446,6 +476,19 @@ function applyPhaseCWrites(
 					factCount: meta.factCount,
 					entityCount: meta.entityCount,
 					skippedReason: "empty_fact_content",
+				});
+				continue;
+			}
+
+			const durability = assessDurability(proposal.fact.content, proposal.fact.type, meta.durability);
+			if (!durability.durable) {
+				stats.skippedTransient++;
+				recordDecisionHistory(db, sourceMemoryId, proposal, {
+					shadow: false,
+					extractionModel: meta.extractionModel,
+					factCount: meta.factCount,
+					entityCount: meta.entityCount,
+					skippedReason: "transient_operational",
 				});
 				continue;
 			}
@@ -994,6 +1037,7 @@ export function startWorker(
 	};
 	const log: LogSink = logSink ?? logger;
 	let running = true;
+	const runtimeAbort = new AbortController();
 	let inflight: Promise<void> | null = null;
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 	let reapTimer: ReturnType<typeof setInterval> | null = null;
@@ -1022,7 +1066,7 @@ export function startWorker(
 			(db) =>
 				db
 					.prepare(
-						`SELECT content, extraction_status, agent_id, project, scope, visibility, source_type, source_id
+						`SELECT content, extraction_status, is_deleted, agent_id, project, scope, visibility, source_type, source_id
 						 FROM memories
 						 WHERE id = ?`,
 					)
@@ -1032,6 +1076,12 @@ export function startWorker(
 		if (!row) {
 			accessor.withWriteTx((db) => {
 				completeJob(db, job.id, JSON.stringify({ skipped: "memory_not_found" }));
+			});
+			return;
+		}
+		if (row.is_deleted === 1) {
+			accessor.withWriteTx((db) => {
+				completeJob(db, job.id, JSON.stringify({ skipped: "memory_forgotten" }));
 			});
 			return;
 		}
@@ -1150,6 +1200,7 @@ export function startWorker(
 		const rawExtraction = await extractFactsAndEntities(row.content, instrumentedProvider, {
 			timeoutMs: extractionTimeout,
 			maxTokens: extractionMaxTokens,
+			signal: runtimeAbort.signal,
 		});
 		const extractionMs = Date.now() - extractionStart;
 
@@ -1167,7 +1218,7 @@ export function startWorker(
 			accessor,
 			agentId,
 			escalationThresholds,
-			{ timeoutMs: extractionTimeout, maxTokens: extractionMaxTokens },
+			{ timeoutMs: extractionTimeout, maxTokens: extractionMaxTokens, signal: runtimeAbort.signal },
 		);
 
 		const extraction = escalated.result;
@@ -1206,6 +1257,7 @@ export function startWorker(
 			threshold: 0.4,
 			continuityDiscount: 0.15,
 		};
+		const durabilityCfg: DurabilityConfig = pipelineCfg.durability ?? { enabled: true };
 
 		const embeddingByHash = new Map<string, readonly number[]>();
 		const prefetchWarnings: string[] = [];
@@ -1287,8 +1339,15 @@ export function startWorker(
 
 		let writeStats = zeroWriteStats();
 
-		// Record everything atomically.
+		// Record everything atomically. Re-check source liveness inside the
+		// write transaction so a concurrent forget cannot race Phase C writes.
+		let sourceForgotten = false;
 		accessor.withWriteTx((db) => {
+			if (!memoryIsActive(db, job.memory_id)) {
+				cancelExtractionJobForForgottenMemory(db, job.id);
+				sourceForgotten = true;
+				return;
+			}
 			if (controlledWritesEnabled) {
 				writeStats = applyPhaseCWrites(
 					db,
@@ -1307,6 +1366,7 @@ export function startWorker(
 						sourceScope,
 						sourceVisibility,
 						writeGate: writeGateCfg,
+						durability: durabilityCfg,
 						semanticContradictions: contradictionFlags,
 					},
 					embeddingByHash,
@@ -1334,6 +1394,13 @@ export function startWorker(
 			completeJob(db, job.id, resultPayload);
 			updateExtractionStatus(db, job.memory_id, "completed", extractionCfg.model);
 		});
+		if (sourceForgotten) {
+			log.info("pipeline", "Source memory forgotten before extraction persistence", {
+				jobId: job.id,
+				memoryId: job.memory_id,
+			});
+			return;
+		}
 
 		if (controlledWritesEnabled && writeStats.writeGateConsidered > 0) {
 			const blockRate = writeStats.writeGateBlocked / writeStats.writeGateConsidered;
@@ -1369,14 +1436,20 @@ export function startWorker(
 		};
 		if (shouldPersistExtractionGraph(pipelineCfg, extraction.entities.length)) {
 			try {
-				graphStats = accessor.withWriteTx((db) =>
-					txPersistEntities(db, {
+				let sourceForgottenBeforeGraph = false;
+				graphStats = accessor.withWriteTx((db) => {
+					if (!memoryIsActive(db, job.memory_id)) {
+						sourceForgottenBeforeGraph = true;
+						return graphStats;
+					}
+					return txPersistEntities(db, {
 						entities: extraction.entities,
 						sourceMemoryId: job.memory_id,
 						extractedAt: new Date().toISOString(),
 						agentId,
-					}),
-				);
+					});
+				});
+				if (sourceForgottenBeforeGraph) return;
 				// New entities/relations invalidate traversal table cache
 				invalidateTraversalCache();
 			} catch (e) {
@@ -1531,6 +1604,11 @@ export function startWorker(
 				analytics?.recordLatency("jobs", runtime.now() - jobStart);
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
+				if ((!running && isCancellationError(e)) || e instanceof ClaudeCodeCircuitOpenError) {
+					accessor.withWriteTx((db) => restoreCancelledJobLease(db, job));
+					lastAttempt = runtime.now();
+					return;
+				}
 				const nonRetryable = e instanceof RateLimitExceededError;
 				log.warn("pipeline", "Job failed", {
 					jobId: job.id,
@@ -1768,6 +1846,7 @@ export function startWorker(
 		},
 		async stop() {
 			running = false;
+			runtimeAbort.abort();
 			if (pollTimer) clearTimeout(pollTimer);
 			if (reapTimer) clearInterval(reapTimer);
 			if (watchdog) clearInterval(watchdog);

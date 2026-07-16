@@ -361,6 +361,7 @@ async function processClassifyBatch(deps: StructuralClassifyDeps, jobs: readonly
 export function startStructuralClassifyWorker(deps: StructuralClassifyDeps): StructuralClassifyHandle {
 	let running = true;
 	let timer: ReturnType<typeof setInterval> | null = null;
+	let inFlight: Promise<void> | null = null;
 
 	async function tick(): Promise<void> {
 		if (!running) return;
@@ -385,11 +386,16 @@ export function startStructuralClassifyWorker(deps: StructuralClassifyDeps): Str
 
 	timer = setInterval(() => {
 		if (!running) return;
-		tick().catch((e) => {
-			logger.warn("structural-classify", "Tick error", {
-				error: String(e),
+		if (inFlight) return;
+		inFlight = tick()
+			.catch((e) => {
+				logger.warn("structural-classify", "Tick error", {
+					error: String(e),
+				});
+			})
+			.finally(() => {
+				inFlight = null;
 			});
-		});
 	}, deps.pipelineCfg.structural.pollIntervalMs);
 
 	logger.info("structural-classify", "Worker started", {
@@ -401,6 +407,7 @@ export function startStructuralClassifyWorker(deps: StructuralClassifyDeps): Str
 		async stop() {
 			running = false;
 			if (timer) clearInterval(timer);
+			if (inFlight) await inFlight;
 			logger.info("structural-classify", "Worker stopped");
 		},
 		get running() {
