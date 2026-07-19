@@ -1189,7 +1189,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		}
 
 		ensureAgentRegistered(agentId);
-		const visibility = body.visibility === "private" ? "private" : "global";
+		const visibility = (body.visibility === "private" ? "private" : "global") as "global" | "private" | "archived";
 		const dedupeScope = { agentId, visibility, project: body.project ?? null, scope };
 		const hasBodyTags = Object.hasOwn(body, "tags");
 		const bodyTags = hasBodyTags ? parseTagsMutation(body.tags) : undefined;
