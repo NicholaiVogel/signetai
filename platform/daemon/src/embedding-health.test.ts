@@ -22,7 +22,7 @@ describe("buildEmbeddingHealth", () => {
 		`);
 
 		const report = buildEmbeddingHealth(
-			db,
+			db as unknown as ReadDb,
 			{
 				provider: "ollama",
 				model: "nomic-embed-text",
@@ -82,7 +82,7 @@ describe("buildEmbeddingHealth", () => {
 		`);
 
 		const report = buildEmbeddingHealth(
-			db,
+			db as unknown as ReadDb,
 			{
 				provider: "ollama",
 				model: "nomic-embed-text",

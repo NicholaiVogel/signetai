@@ -30,18 +30,18 @@ describe("task scope helpers", () => {
 	});
 
 	it("hides out-of-scope tasks when scope enforcement is active", () => {
-		const row = readScopedTask(db, "task-1", "agent-a", true);
+		const row = readScopedTask(db as unknown as ReadDb, "task-1", "agent-a", true);
 		expect(row).toBeUndefined();
 	});
 
 	it("returns the owning agent when the task is in scope", () => {
-		const row = readScopedTask(db, "task-1", "agent-b", true);
+		const row = readScopedTask(db as unknown as ReadDb, "task-1", "agent-b", true);
 		expect(row).toBeDefined();
 		expect(readTaskAgentId(row ?? {}, "default")).toBe("agent-b");
 	});
 
 	it("allows bare id lookup when scope enforcement is disabled", () => {
-		const row = readScopedTask(db, "task-1", "agent-a", false);
+		const row = readScopedTask(db as unknown as ReadDb, "task-1", "agent-a", false);
 		expect(row).toBeDefined();
 		expect(readTaskAgentId(row ?? {}, "agent-a")).toBe("agent-b");
 	});

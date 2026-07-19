@@ -35,8 +35,8 @@ describe("embedding coverage queries", () => {
 		).run(now, now);
 		insertEmbedding(db, { id: "emb-a", sourceId: "mem-a", contentHash: "hash-same" });
 
-		expect(countUnembeddedMemories(db)).toBe(0);
-		expect(listUnembeddedMemories(db, 10)).toHaveLength(0);
+		expect(countUnembeddedMemories(db as unknown as ReadDb)).toBe(0);
+		expect(listUnembeddedMemories(db as unknown as ReadDb, 10)).toHaveLength(0);
 	});
 
 	it("still flags stale source-linked embeddings when the content hash changed", () => {
@@ -47,7 +47,7 @@ describe("embedding coverage queries", () => {
 		).run(now, now);
 		insertEmbedding(db, { id: "emb-stale", sourceId: "mem-stale", contentHash: "hash-old" });
 
-		const rows = listStaleEmbeddingRows(db, "text-embedding-3-small", 10);
+		const rows = listStaleEmbeddingRows(db as unknown as ReadDb, "text-embedding-3-small", 10);
 		expect(rows).toHaveLength(1);
 		expect(rows[0]?.id).toBe("mem-stale");
 	});

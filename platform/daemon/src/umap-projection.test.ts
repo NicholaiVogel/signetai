@@ -44,15 +44,15 @@ describe("hasMore pagination regression", () => {
 				).run(`mem-${i}`, fakeBlob, now);
 			}
 
-			const result = computeProjectionForQuery(db, 2, { limit: 3, offset: 0 });
+			const result = computeProjectionForQuery(db as unknown as ReadDb, 2, { limit: 3, offset: 0 });
 			expect(result.count).toBe(3);
 			expect(result.hasMore).toBe(true);
 
-			const page2 = computeProjectionForQuery(db, 2, { limit: 3, offset: 3 });
+			const page2 = computeProjectionForQuery(db as unknown as ReadDb, 2, { limit: 3, offset: 3 });
 			expect(page2.count).toBe(2);
 			expect(page2.hasMore).toBe(false);
 
-			const allAtOnce = computeProjectionForQuery(db, 2, { limit: 5, offset: 0 });
+			const allAtOnce = computeProjectionForQuery(db as unknown as ReadDb, 2, { limit: 5, offset: 0 });
 			expect(allAtOnce.count).toBe(5);
 			expect(allAtOnce.hasMore).toBe(false);
 		} finally {
@@ -77,7 +77,7 @@ describe("hasMore pagination regression", () => {
 				"INSERT INTO embeddings (source_id, source_type, vector, dimensions, created_at) VALUES (?, 'memory', ?, ?, ?)",
 			).run("mem-percent", fakeBlob, 4, now);
 
-			const result = computeProjectionForQuery(db, 2, {
+			const result = computeProjectionForQuery(db as unknown as ReadDb, 2, {
 				limit: 10,
 				filters: { query: "%" },
 			});
@@ -105,7 +105,7 @@ describe("hasMore pagination regression", () => {
 				"INSERT INTO embeddings (source_id, source_type, vector, dimensions, created_at) VALUES (?, 'memory', ?, ?, ?)",
 			).run("mem-tagged", fakeBlob, 4, now);
 
-			const result = computeProjectionForQuery(db, 2, {
+			const result = computeProjectionForQuery(db as unknown as ReadDb, 2, {
 				limit: 10,
 				filters: { tags: ["%"] },
 			});
@@ -145,17 +145,17 @@ describe("hasMore pagination regression", () => {
 				}
 			}
 
-			const page1 = computeProjectionForQuery(db, 2, { limit: 2, offset: 0 });
+			const page1 = computeProjectionForQuery(db as unknown as ReadDb, 2, { limit: 2, offset: 0 });
 			expect(page1.total).toBe(5);
 			expect(page1.count).toBe(2);
 			expect(page1.hasMore).toBe(true);
 
-			const page2 = computeProjectionForQuery(db, 2, { limit: 2, offset: 2 });
+			const page2 = computeProjectionForQuery(db as unknown as ReadDb, 2, { limit: 2, offset: 2 });
 			expect(page2.total).toBe(5);
 			expect(page2.count).toBe(2);
 			expect(page2.hasMore).toBe(true);
 
-			const allRows = computeProjectionForQuery(db, 2, { limit: 10, offset: 0 });
+			const allRows = computeProjectionForQuery(db as unknown as ReadDb, 2, { limit: 10, offset: 0 });
 			expect(allRows.count).toBe(5);
 			expect(allRows.hasMore).toBe(false);
 		} finally {

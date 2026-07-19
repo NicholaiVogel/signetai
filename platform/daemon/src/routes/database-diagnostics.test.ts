@@ -7,7 +7,7 @@ import { readDatabaseSchema, readTableSample, registerDatabaseDiagnosticsRoutes 
 function makeAccessor(db: Database): DbAccessor {
 	return {
 		withReadDb<T>(fn: (readDb: ReadDb) => T): T {
-			return fn(db);
+			return fn(db as unknown as ReadDb);
 		},
 		withWriteTx<T>(fn: (writeDb: WriteDb) => T): T {
 			db.exec("BEGIN IMMEDIATE");
