@@ -1,6 +1,6 @@
 {
   "name": "signetai-win32-x64",
-  "version": "0.147.16",
+  "version": "0.147.17",
   "description": "Signet native binary for Windows x64",
   "os": [
     "win32"
