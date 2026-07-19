@@ -610,7 +610,7 @@ describe("summary job helpers", () => {
 						attempts: 1,
 						max_attempts: 3,
 						created_at: new Date().toISOString(),
-					},
+					} as unknown as SummaryJobRow,
 					"summary",
 					loadMemoryConfig(makeAgentsDir("memory:\n")),
 					controller.signal,
@@ -757,7 +757,7 @@ describe("command stage completion marker", () => {
 });
 
 describe("runSummaryCommandProvider", () => {
-	function summaryJob(id: string, transcript = "test") {
+	function summaryJob(id: string, transcript = "test"): SummaryJobRow {
 		return {
 			id,
 			session_key: `session-${id}`,
@@ -773,6 +773,7 @@ describe("runSummaryCommandProvider", () => {
 			attempts: 1,
 			max_attempts: 3,
 			created_at: new Date().toISOString(),
+			boundary_reason: "test" as const,
 		};
 	}
 
@@ -826,7 +827,7 @@ writeFileSync(markerPath, transcriptPath, "utf8");
 				attempts: 1,
 				max_attempts: 3,
 				created_at: new Date().toISOString(),
-			},
+			} as unknown as SummaryJobRow,
 			commandCfg,
 		);
 
@@ -873,7 +874,7 @@ writeFileSync(markerPath, transcriptPath, "utf8");
 					attempts: 1,
 					max_attempts: 3,
 					created_at: new Date().toISOString(),
-				},
+				} as unknown as SummaryJobRow,
 				commandCfg,
 			),
 		).rejects.toThrow("summary command exited with code 7");
@@ -932,7 +933,7 @@ setInterval(() => {}, 1000);
 					attempts: 1,
 					max_attempts: 3,
 					created_at: new Date().toISOString(),
-				},
+				} as unknown as SummaryJobRow,
 				commandCfg,
 			),
 		).rejects.toThrow("summary command timed out after 5000ms");
