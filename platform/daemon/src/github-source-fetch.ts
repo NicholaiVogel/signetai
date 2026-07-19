@@ -1,5 +1,5 @@
 import type { GitHubSourceState } from "@signet/core";
-import { logger } from "./logger";
+import { type LogCategory, logger } from "./logger";
 
 export interface GitHubFetchConfig {
 	readonly token?: string;
@@ -702,7 +702,7 @@ function escapeRegex(char: string): string {
 }
 
 export function logGitHubFetchError(sourceId: string, repo: string, phase: string, err: unknown): void {
-	logger.warn("github-source", "GitHub source fetch failed", {
+	logger.warn("github-source" as unknown as LogCategory, "GitHub source fetch failed", {
 		sourceId,
 		repo,
 		phase,

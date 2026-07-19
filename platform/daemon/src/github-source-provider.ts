@@ -26,7 +26,7 @@ import {
 	type GitHubResource,
 	logGitHubFetchError,
 } from "./github-source-fetch";
-import { logger } from "./logger";
+import { type LogCategory, logger } from "./logger";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
 import { getSecret } from "./secrets";
 import { indexSourceArtifactStructure, purgeSourceArtifactStructure } from "./source-artifact-graph";
@@ -398,7 +398,7 @@ async function resolveRepos(
 				);
 			}
 			if (expanded.truncated) {
-				logger.warn("github-source", "Wildcard repo source expansion hit configured cap", {
+				logger.warn("github-source" as unknown as LogCategory, "Wildcard repo source expansion hit configured cap", {
 					owner,
 					pattern: repoPart,
 					limit: settings.maxItemsPerRepo,

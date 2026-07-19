@@ -120,7 +120,7 @@ describe("embedding-worker-handle", () => {
 		const p = handle.checkAvailable();
 		await flush();
 		worker.emit({ type: "status", status: { initialized: true, initializing: false, modelCached: true, error: null } });
-		worker.emit({ type: "check_result", id: lastCheckId(worker), available: true });
+		worker.emit({ type: "check_result", id: lastCheckId(worker), available: true } as unknown as WorkerToMainMessage);
 
 		const status = await p;
 		expect(status.available).toBe(true);

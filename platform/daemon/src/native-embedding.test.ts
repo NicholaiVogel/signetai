@@ -95,7 +95,7 @@ describe("native-embedding facade (worker-backed)", () => {
 			id: req?.type === "checkAvailable" ? req.id : -1,
 			available: false,
 			error: "model download failed",
-		});
+		} as unknown as WorkerToMainMessage);
 		const status = await p;
 		expect(status.available).toBe(false);
 		expect(status.error).toMatch(/model download failed/);
@@ -171,7 +171,7 @@ describe("native-embedding facade (worker-backed)", () => {
 			type: "check_result",
 			id: checkReq?.type === "checkAvailable" ? checkReq.id : -1,
 			available: true,
-		});
+		} as unknown as WorkerToMainMessage);
 		await checkP;
 		await flush();
 
@@ -224,7 +224,7 @@ describe("native-embedding facade (worker-backed)", () => {
 			id: checkReq?.type === "checkAvailable" ? checkReq.id : -1,
 			available: false,
 			error: "not ready yet",
-		});
+		} as unknown as WorkerToMainMessage);
 		await checkP;
 
 		// The init promise has settled (not rejected — checkAvailable
