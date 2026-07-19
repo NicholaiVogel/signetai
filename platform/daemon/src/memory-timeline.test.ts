@@ -6,7 +6,7 @@ import { buildMemoryTimeline } from "./memory-timeline";
 
 function makeDb(): Database {
 	const db = new Database(":memory:");
-	runMigrations(db);
+	runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
 	return db;
 }
 

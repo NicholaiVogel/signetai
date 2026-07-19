@@ -341,7 +341,10 @@ describe("InferenceRouter legacy API credentials", () => {
 			if (!result.ok) return;
 			expect(result.value.text).toBe("mercury answer");
 			expect(result.value.decision.targetRef).toBe("mercury/default");
-			expect(requestBody?.reasoning).toEqual({ enabled: false, max_tokens: 0 });
+			expect((requestBody as Record<string, unknown> | null | undefined)?.reasoning).toEqual({
+				enabled: false,
+				max_tokens: 0,
+			});
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

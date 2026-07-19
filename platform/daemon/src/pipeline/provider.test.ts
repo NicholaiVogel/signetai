@@ -3263,7 +3263,10 @@ describe("createOpenRouterProvider", () => {
 		});
 		await provider.generate("test");
 
-		expect(requestBody?.reasoning).toEqual({ enabled: false, max_tokens: 0 });
+		expect((requestBody as Record<string, unknown> | null | undefined)?.reasoning).toEqual({
+			enabled: false,
+			max_tokens: 0,
+		});
 	});
 
 	it("generate() throws timeout on slow responses", async () => {

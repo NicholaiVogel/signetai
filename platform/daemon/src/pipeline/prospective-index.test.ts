@@ -9,7 +9,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { PipelineHintsConfig } from "@signet/core";
-import { runMigrations } from "../../../core/src/migrations";
+import { runMigrations } from "../../core/src/migrations";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { DEFAULT_PIPELINE_V2 } from "../memory-config";
 import { enqueueHintsJob, generateHints, startHintsWorker } from "./prospective-index";
@@ -282,7 +282,7 @@ describe("prospective-index", () => {
 	beforeEach(() => {
 		db = new Database(":memory:");
 		db.exec("PRAGMA foreign_keys = ON");
-		runMigrations(db);
+		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
 		accessor = makeAccessor(db);
 	});
 
