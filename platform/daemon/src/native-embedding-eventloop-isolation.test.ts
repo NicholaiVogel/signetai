@@ -138,13 +138,13 @@ describe("native embedding event-loop isolation (e2e)", () => {
 			},
 			stdio: ["ignore", "pipe", "pipe"],
 		});
-		children.push(child);
+		children.push(child as unknown as ChildProcessWithoutNullStreams);
 
 		// Surface daemon failures fast.
 		child.stderr.on("data", () => {});
 		child.stdout.on("data", () => {});
 
-		await waitForHealth(origin, child);
+		await waitForHealth(origin, child as unknown as ChildProcessWithoutNullStreams);
 
 		// The daemon's startup probe (daemon.ts) fires checkEmbeddingProvider
 		// at boot, so the embedding worker is now grinding against the

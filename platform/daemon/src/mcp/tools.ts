@@ -770,7 +770,12 @@ function registerGraphiqCompatAliases(server: McpServer, pluginHostProvider: Gra
 				inputSchema: def.schema,
 			},
 			(args) =>
-				graphIqToolResult(def.buildArgs(args as Record<string, unknown>), def.label, def.canonical, pluginHostProvider),
+				graphIqToolResult(
+					def.buildArgs(args as Record<string, unknown>),
+					def.label,
+					def.canonical,
+					pluginHostProvider as unknown as GraphiqPluginPolicyHostProvider,
+				),
 		);
 	}
 }
@@ -2555,7 +2560,13 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			description: "Show GraphIQ status for the active indexed project.",
 			inputSchema: z.object({}),
 		},
-		async () => graphIqToolResult(["status"], "Code status failed", "signet_code_status", pluginHostProvider),
+		async () =>
+			graphIqToolResult(
+				["status"],
+				"Code status failed",
+				"signet_code_status",
+				pluginHostProvider as unknown as GraphiqPluginPolicyHostProvider,
+			),
 	);
 
 	server.registerTool(
@@ -2565,7 +2576,13 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			description: "Diagnose GraphIQ artifact health for the active indexed project.",
 			inputSchema: z.object({}),
 		},
-		async () => graphIqToolResult(["doctor"], "Code doctor failed", "signet_code_doctor", pluginHostProvider),
+		async () =>
+			graphIqToolResult(
+				["doctor"],
+				"Code doctor failed",
+				"signet_code_doctor",
+				pluginHostProvider as unknown as GraphiqPluginPolicyHostProvider,
+			),
 	);
 
 	server.registerTool(
@@ -2599,7 +2616,7 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 		},
 	);
 
-	registerGraphiqCompatAliases(server, pluginHostProvider);
+	registerGraphiqCompatAliases(server, pluginHostProvider as unknown as GraphiqPluginPolicyHost);
 
 	if (enableMarketplaceProxyTools) {
 		await refreshMarketplaceProxyTools(server, { notify: false });

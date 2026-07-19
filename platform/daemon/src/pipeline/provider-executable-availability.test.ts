@@ -18,7 +18,7 @@ describe("provider executable availability", () => {
 			name: "missing-relative-command",
 			bin: "./node_modules/.bin/signet-missing-command",
 			args: [],
-		});
+		} as unknown as CommandLineProviderConfig);
 
 		await expect(provider.available()).resolves.toBe(false);
 	});
