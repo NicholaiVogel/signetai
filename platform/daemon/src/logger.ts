@@ -51,6 +51,7 @@ export type LogCategory =
 	| "reflections" // Daily reflection generation and writeback
 	| "summary-condensation" // Session summary DAG condensation
 	| "session-tracker" // Runtime-path session ownership + bypass TTL tracking
+	| "session-ttl" // Session TTL-expiry finalization (issue #902)
 	| "system" // System events
 	| "update" // Auto-update cycle
 	| "probe" // MCP server auto-probe (Signet OS)

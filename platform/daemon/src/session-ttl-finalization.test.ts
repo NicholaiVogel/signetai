@@ -11,19 +11,18 @@ import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { getSessionHealth } from "./diagnostics";
 import {
+	type SessionExpiredInfo,
 	claimSession,
 	hasSession,
 	resetSessions,
 	runStaleCleanup,
 	setSessionExpirationHandler,
-	type SessionExpiredInfo,
 } from "./session-tracker";
 import { finalizeExpiredSession, registerSessionTtlFinalization } from "./session-ttl-finalization";
 
 const AGENT = "default";
-const LONG_TRANSCRIPT = `user: please investigate the flaky test\nassistant: root cause is a race in the scheduler\n`.repeat(
-	20,
-);
+const LONG_TRANSCRIPT =
+	"user: please investigate the flaky test\nassistant: root cause is a race in the scheduler\n".repeat(20);
 const SHORT_TRANSCRIPT = "user: hi\nassistant: hello";
 
 let dir: string;
@@ -40,9 +39,9 @@ function seedTranscript(sessionKey: string, content: string): void {
 function outcomeRows(sessionKey: string): Array<Record<string, unknown>> {
 	return getDbAccessor().withReadDb(
 		(db) =>
-			db
-				.prepare("SELECT * FROM session_outcomes WHERE session_key = ? ORDER BY created_at")
-				.all(sessionKey) as Array<Record<string, unknown>>,
+			db.prepare("SELECT * FROM session_outcomes WHERE session_key = ? ORDER BY created_at").all(sessionKey) as Array<
+				Record<string, unknown>
+			>,
 	);
 }
 

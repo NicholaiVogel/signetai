@@ -134,7 +134,8 @@ export function claimSession(
 	const key = normalizeSessionKey(sessionKey);
 	const existing = sessions.get(key);
 	endedSessions.delete(key);
-	const ttlMs = typeof opts?.ttlMs === "number" && Number.isFinite(opts.ttlMs) && opts.ttlMs > 0 ? opts.ttlMs : STALE_SESSION_MS;
+	const ttlMs =
+		typeof opts?.ttlMs === "number" && Number.isFinite(opts.ttlMs) && opts.ttlMs > 0 ? opts.ttlMs : STALE_SESSION_MS;
 
 	if (existing) {
 		if (existing.runtimePath === runtimePath) {

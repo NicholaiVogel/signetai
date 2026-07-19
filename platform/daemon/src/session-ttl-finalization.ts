@@ -22,11 +22,11 @@ import { type DbAccessor, type ReadDb, type WriteDb, getDbAccessor } from "./db-
 import { logger } from "./logger";
 import { loadMemoryConfig } from "./memory-config";
 import { enqueueSummaryJob } from "./pipeline/summary-worker";
-import { deriveSessionEndFallbackId } from "./session-end-recovery";
 import { writeCheckpoint } from "./session-checkpoints";
+import { deriveSessionEndFallbackId } from "./session-end-recovery";
 import { isNoiseSession } from "./session-noise";
-import { getSessionTranscriptContent, getStoredSessionTranscriptInfo } from "./session-transcripts";
 import { type SessionExpiredInfo, setSessionExpirationHandler } from "./session-tracker";
+import { getSessionTranscriptContent, getStoredSessionTranscriptInfo } from "./session-transcripts";
 
 export type SessionOutcomeSkipReason =
 	| "pipeline-disabled"
@@ -71,15 +71,13 @@ function summaryJobExists(db: ReadDb | WriteDb, sessionKey: string, sessionId: s
 		const agentClause = columns.has("agent_id") ? " AND agent_id = ?" : "";
 		const args = columns.has("agent_id") ? [sessionId, agentId] : [sessionId];
 		return (
-			db.prepare(`SELECT id FROM summary_jobs WHERE session_id = ?${agentClause} AND status <> 'dead' LIMIT 1`).get(
-				...args,
-			) != null
+			db
+				.prepare(`SELECT id FROM summary_jobs WHERE session_id = ?${agentClause} AND status <> 'dead' LIMIT 1`)
+				.get(...args) != null
 		);
 	}
 	return (
-		db
-			.prepare("SELECT id FROM summary_jobs WHERE session_key = ? AND status <> 'dead' LIMIT 1")
-			.get(sessionKey) != null
+		db.prepare("SELECT id FROM summary_jobs WHERE session_key = ? AND status <> 'dead' LIMIT 1").get(sessionKey) != null
 	);
 }
 
@@ -186,8 +184,7 @@ function finalizeExpiredSessionInner(info: SessionExpiredInfo): SessionOutcomeRe
 			)?.id,
 	);
 
-	const pipelineEnabled =
-		memoryCfg.pipelineV2.enabled || memoryCfg.pipelineV2.shadowMode || memoryCfg.dreaming.enabled;
+	const pipelineEnabled = memoryCfg.pipelineV2.enabled || memoryCfg.pipelineV2.shadowMode || memoryCfg.dreaming.enabled;
 	const skipReason: SessionOutcomeSkipReason | null = !pipelineEnabled
 		? "pipeline-disabled"
 		: transcript.length < MIN_TRANSCRIPT_CHARS

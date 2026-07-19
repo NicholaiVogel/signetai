@@ -4,8 +4,8 @@
  * user-prompt-submit hot path.
  */
 
-import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import type { ContinuityState, StructuralSnapshot } from "./continuity-state";
+import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { logger } from "./logger";
 
 // ============================================================================
