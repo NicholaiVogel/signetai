@@ -60,6 +60,58 @@ let cleanupTimer: ReturnType<typeof setInterval> | null = null;
 // Synchronous guard — prevents double-start during concurrent async init.
 let cleanupStarted = false;
 
+// ---------------------------------------------------------------------------
+// TTL-expiry lifecycle hook (issue #902)
+// ---------------------------------------------------------------------------
+
+/** State handed to the expiration handler before a stale claim is evicted. */
+export interface SessionExpiredInfo {
+	readonly key: string;
+	readonly agentId: string;
+	readonly runtimePath: RuntimePath;
+	readonly claimedAt: string;
+}
+
+export type SessionExpirationHandler = (info: SessionExpiredInfo) => void;
+
+let expirationHandler: SessionExpirationHandler | null = null;
+
+/**
+ * Register the callback invoked whenever a stale session claim is evicted
+ * (TTL sweep or opportunistic stale eviction). The handler runs before the
+ * claim is deleted so it can checkpoint/finalize/audit the transition.
+ * Pass null to clear (tests).
+ */
+export function setSessionExpirationHandler(handler: SessionExpirationHandler | null): void {
+	expirationHandler = handler;
+}
+
+/**
+ * Evict a stale claim as a formal lifecycle transition: notify the
+ * expiration handler first (checkpoint/finalize/audit), then delete.
+ * Handler errors are logged and never block eviction.
+ */
+function evictClaim(key: string, claim: SessionClaim): void {
+	if (expirationHandler) {
+		try {
+			expirationHandler({
+				key,
+				agentId: claim.agentId,
+				runtimePath: claim.runtimePath,
+				claimedAt: claim.claimedAt,
+			});
+		} catch (error) {
+			logger.warn("session-tracker", "Session expiration handler failed", {
+				sessionKey: key,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+	sessions.delete(key);
+	bypassedSessions.delete(key);
+	warnedSessions.delete(key);
+}
+
 export function normalizeSessionKey(sessionKey: string): string {
 	const trimmed = sessionKey.trim();
 	if (trimmed.startsWith("session:")) {
@@ -73,10 +125,16 @@ export function normalizeSessionKey(sessionKey: string): string {
  * session is unclaimed or already claimed by the same path. Returns
  * ok:false with claimedBy if claimed by the other path.
  */
-export function claimSession(sessionKey: string, runtimePath: RuntimePath, agentId = "default"): ClaimResult {
+export function claimSession(
+	sessionKey: string,
+	runtimePath: RuntimePath,
+	agentId = "default",
+	opts?: { readonly ttlMs?: number },
+): ClaimResult {
 	const key = normalizeSessionKey(sessionKey);
 	const existing = sessions.get(key);
 	endedSessions.delete(key);
+	const ttlMs = typeof opts?.ttlMs === "number" && Number.isFinite(opts.ttlMs) && opts.ttlMs > 0 ? opts.ttlMs : STALE_SESSION_MS;
 
 	if (existing) {
 		if (existing.runtimePath === runtimePath) {
@@ -92,7 +150,7 @@ export function claimSession(sessionKey: string, runtimePath: RuntimePath, agent
 				previousPath: existing.runtimePath,
 				newPath: runtimePath,
 			});
-			sessions.delete(key);
+			evictClaim(key, existing);
 			// Fall through to create new claim
 		} else {
 			return { ok: false, claimedBy: existing.runtimePath };
@@ -103,7 +161,7 @@ export function claimSession(sessionKey: string, runtimePath: RuntimePath, agent
 		agentId,
 		runtimePath,
 		claimedAt: new Date().toISOString(),
-		expiresAt: Date.now() + STALE_SESSION_MS,
+		expiresAt: Date.now() + ttlMs,
 	});
 
 	logger.info("session-tracker", "Session claimed", {
@@ -151,8 +209,7 @@ export function hasSession(sessionKey: string): boolean {
 	const claim = sessions.get(key);
 	if (!claim) return false;
 	if (Date.now() > claim.expiresAt) {
-		sessions.delete(key);
-		bypassedSessions.delete(key);
+		evictClaim(key, claim);
 		return false;
 	}
 	return true;
@@ -167,8 +224,7 @@ export function getSessionPath(sessionKey: string): RuntimePath | undefined {
 	if (!claim) return undefined;
 
 	if (Date.now() > claim.expiresAt) {
-		sessions.delete(key);
-		bypassedSessions.delete(key);
+		evictClaim(key, claim);
 		return undefined;
 	}
 
@@ -247,8 +303,7 @@ export function getActiveSessions(): readonly SessionInfo[] {
 
 	for (const [key, claim] of sessions) {
 		if (now > claim.expiresAt) {
-			sessions.delete(key);
-			bypassedSessions.delete(key);
+			evictClaim(key, claim);
 			continue;
 		}
 		result.push({
@@ -293,9 +348,7 @@ export function renewSession(sessionKey: string): string | null {
 	if (!claim) return null;
 	// Reject renewal of already-expired sessions — caller should re-claim
 	if (claim.expiresAt <= Date.now()) {
-		sessions.delete(key);
-		bypassedSessions.delete(key);
-		warnedSessions.delete(key);
+		evictClaim(key, claim);
 		return null;
 	}
 	claim.expiresAt = Date.now() + STALE_SESSION_MS;
@@ -319,9 +372,7 @@ function cleanupStaleSessions(): void {
 
 	for (const [key, claim] of sessions) {
 		if (now > claim.expiresAt) {
-			sessions.delete(key);
-			bypassedSessions.delete(key);
-			warnedSessions.delete(key);
+			evictClaim(key, claim);
 			cleaned++;
 			logger.warn("session-tracker", "Session evicted (TTL expired)", {
 				sessionKey: key,
@@ -403,4 +454,5 @@ export function resetSessions(): void {
 	endedSessions.clear();
 	bypassedSessions.clear();
 	warnedSessions.clear();
+	expirationHandler = null;
 }

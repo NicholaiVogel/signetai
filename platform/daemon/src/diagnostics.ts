@@ -6,6 +6,7 @@
  */
 
 import type { ReadDb } from "./db-accessor";
+import { activeSessionCount } from "./session-tracker";
 import type { UpdateState } from "./update-system";
 
 // ---------------------------------------------------------------------------
@@ -109,6 +110,42 @@ export interface DiagnosticsReport {
 	readonly update: UpdateHealth;
 	readonly graph: GraphHealth;
 	readonly openclaw: OpenClawHealth;
+	/** Session lifecycle counts (issue #902). Additive; not scored. */
+	readonly sessions: SessionHealth;
+}
+
+export interface SessionHealth {
+	/** Currently claimed sessions in the in-memory tracker. */
+	readonly active: number;
+	/** TTL-expired sessions with a recorded outcome row (all time). */
+	readonly expired: number;
+	/** Expired sessions whose finalization was intentionally skipped. */
+	readonly unfinalized: number;
+}
+
+/**
+ * Count session lifecycle outcomes (issue #902). Zero-fills on databases
+ * that predate the session_outcomes migration.
+ */
+export function getSessionHealth(db: ReadDb, activeSessions: number): SessionHealth {
+	const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_outcomes'").get();
+	if (!table) {
+		return { active: activeSessions, expired: 0, unfinalized: 0 };
+	}
+	const row = db
+		.prepare(
+			`SELECT
+				COUNT(*) AS expired,
+				COALESCE(SUM(CASE WHEN outcome = 'skipped' THEN 1 ELSE 0 END), 0) AS unfinalized
+			 FROM session_outcomes
+			 WHERE reason = 'ttl_expired'`,
+		)
+		.get() as { expired: number; unfinalized: number } | undefined;
+	return {
+		active: activeSessions,
+		expired: row?.expired ?? 0,
+		unfinalized: row?.unfinalized ?? 0,
+	};
 }
 
 export interface DiagnosticsOptions {
@@ -649,6 +686,7 @@ export function getDiagnostics(
 		graphExtractionWritesEnabled: options?.graphExtractionWritesEnabled,
 		traversalPrimary: options?.traversalPrimary,
 	});
+	const sessions = getSessionHealth(db, activeSessionCount());
 
 	const compositeScore = clamp(
 		queue.score * BASE_WEIGHTS.queue +
@@ -701,5 +739,6 @@ export function getDiagnostics(
 		update,
 		graph,
 		openclaw,
+		sessions,
 	};
 }

@@ -93,6 +93,7 @@ import { up as legacyMarkdownImportState } from "./084-legacy-markdown-import-st
 import { up as backfillRelationsToDependencies } from "./085-backfill-relations-to-dependencies";
 import { up as summaryJobsContentHash } from "./086-summary-jobs-content-hash";
 import { up as summaryJobsBoundaryReason } from "./087-summary-jobs-boundary-reason";
+import { up as sessionOutcomes } from "./088-session-outcomes";
 
 // -- Public interface consumed by Database.init() --
 
@@ -836,6 +837,14 @@ export const MIGRATIONS: readonly Migration[] = [
 		up: summaryJobsBoundaryReason,
 		artifacts: {
 			columns: [{ table: "summary_jobs", column: "boundary_reason" }],
+		},
+	},
+	{
+		version: 88,
+		name: "session-outcomes",
+		up: sessionOutcomes,
+		artifacts: {
+			tables: ["session_outcomes"],
 		},
 	},
 ];

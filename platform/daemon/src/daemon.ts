@@ -109,6 +109,7 @@ import { startSchedulerWorker } from "./scheduler";
 import { getSecret } from "./secrets.js";
 import { flushPendingCheckpoints, initCheckpointFlush, pruneCheckpoints } from "./session-checkpoints";
 import { releaseAllSessions, startSessionCleanup, stopSessionCleanup } from "./session-tracker";
+import { registerSessionTtlFinalization } from "./session-ttl-finalization";
 import { createSingleFlightRunner } from "./single-flight-runner";
 import {
 	beginSourceIndexJob,
@@ -1748,6 +1749,7 @@ async function main() {
 	mkdirSync(LOG_DIR, { recursive: true });
 
 	await initDbAccessorAsync(MEMORY_DB, { agentsDir: AGENTS_DIR });
+	registerSessionTtlFinalization();
 	startSessionCleanup();
 	logFdSnapshot("post-db-init");
 	startEventLoopMonitor();
