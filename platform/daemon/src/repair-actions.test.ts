@@ -9,9 +9,11 @@ import { runMigrations } from "../../core/src/migrations";
 import { normalizeAndHashContent } from "./content-normalization";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { toFtsSchemaQueryDb } from "./db-accessor";
+import { getOldestDeadJob, getQueueCounts } from "./diagnostics-queue";
 import { DEFAULT_PIPELINE_V2 } from "./memory-config";
 import type { EmbeddingConfig, PipelineV2Config } from "./memory-config";
 import {
+	cancelObsoleteJobs,
 	checkFtsConsistency,
 	checkRepairGate,
 	cleanOrphanedEmbeddings,
@@ -20,6 +22,7 @@ import {
 	getDedupStats,
 	getEmbeddingGapStats,
 	pruneGenericEntities,
+	pruneTerminalJobs,
 	reembedMissingMemories,
 	releaseStaleLeases,
 	requeueDeadJobs,
@@ -31,6 +34,10 @@ import {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function asReadDb(raw: Database): ReadDb {
+	return raw as unknown as ReadDb;
+}
 
 function asAccessor(db: Database): DbAccessor {
 	return {
@@ -493,6 +500,282 @@ describe("requeueDeadJobs", () => {
 
 		const remaining = db.prepare("SELECT COUNT(*) as n FROM memory_jobs WHERE status = 'dead'").get() as { n: number };
 		expect(remaining.n).toBe(2);
+	});
+
+	it("dry-run does not mutate", () => {
+		insertMemory(db, "mem-dry");
+		insertJob(db, "job-dry-1", "mem-dry", "dead");
+		insertJob(db, "job-dry-2", "mem-dry", "dead");
+
+		const limiter = createRateLimiter();
+		const result = requeueDeadJobs(accessor, TEST_CFG, CTX_OPERATOR, limiter, undefined, {
+			dryRun: true,
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.affected).toBe(0);
+		expect(result.preview?.length).toBe(2);
+		expect(result.totalMatching).toBe(2);
+
+		const remaining = db.prepare("SELECT COUNT(*) as n FROM memory_jobs WHERE status = 'dead'").get() as { n: number };
+		expect(remaining.n).toBe(2);
+	});
+
+	it("ids filter limits scope", () => {
+		insertMemory(db, "mem-ids");
+		insertJob(db, "job-keep", "mem-ids", "dead");
+		insertJob(db, "job-die", "mem-ids", "dead");
+
+		const limiter = createRateLimiter();
+		const result = requeueDeadJobs(accessor, TEST_CFG, CTX_OPERATOR, limiter, undefined, {
+			ids: ["job-keep"],
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.affected).toBe(1);
+
+		const keep = db.prepare("SELECT status FROM memory_jobs WHERE id = 'job-keep'").get() as { status: string };
+		const die = db.prepare("SELECT status FROM memory_jobs WHERE id = 'job-die'").get() as { status: string };
+		expect(keep.status).toBe("pending");
+		expect(die.status).toBe("dead");
+	});
+
+	it("olderThanMs filter", () => {
+		insertMemory(db, "mem-old");
+		const longAgo = new Date(Date.now() - 7 * 86_400_000).toISOString();
+		const recent = new Date().toISOString();
+		db.prepare(
+			`INSERT INTO memory_jobs
+			 (id, memory_id, job_type, status, attempts, max_attempts, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run("job-old", "mem-old", "extract", "dead", 0, 3, longAgo, longAgo);
+		db.prepare(
+			`INSERT INTO memory_jobs
+			 (id, memory_id, job_type, status, attempts, max_attempts, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run("job-new", "mem-old", "extract", "dead", 0, 3, recent, recent);
+
+		const limiter = createRateLimiter();
+		const result = requeueDeadJobs(accessor, TEST_CFG, CTX_OPERATOR, limiter, undefined, {
+			olderThanMs: 86_400_000, // older than 1 day
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.affected).toBe(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// cancelObsoleteJobs (issue #901)
+// ---------------------------------------------------------------------------
+
+describe("cancelObsoleteJobs", () => {
+	let db: Database;
+	let accessor: DbAccessor;
+
+	beforeEach(() => {
+		db = new Database(":memory:");
+		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
+		accessor = asAccessor(db);
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("dry-run previews without mutating", () => {
+		insertMemory(db, "mem-c-1");
+		insertJob(db, "job-c-1", "mem-c-1", "dead");
+		insertJob(db, "job-c-2", "mem-c-1", "completed");
+
+		const limiter = createRateLimiter();
+		const result = cancelObsoleteJobs(accessor, TEST_CFG, CTX_OPERATOR, limiter, {
+			dryRun: true,
+			tables: ["memory"],
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.affected).toBe(0);
+		expect(result.totalMatching).toBe(2);
+		expect(result.preview?.length).toBe(2);
+
+		const remaining = db.prepare("SELECT COUNT(*) as n FROM memory_jobs").get() as { n: number };
+		expect(remaining.n).toBe(2);
+	});
+
+	it("apply moves rows to job_cancellations and deletes from source", () => {
+		insertMemory(db, "mem-c-3");
+		insertJob(db, "job-c-3a", "mem-c-3", "dead");
+		insertJob(db, "job-c-3b", "mem-c-3", "completed");
+
+		const limiter = createRateLimiter();
+		const result = cancelObsoleteJobs(accessor, TEST_CFG, CTX_OPERATOR, limiter, {
+			tables: ["memory"],
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.affected).toBe(2);
+
+		const remaining = db.prepare("SELECT COUNT(*) as n FROM memory_jobs").get() as { n: number };
+		expect(remaining.n).toBe(0);
+
+		const audit = db.prepare("SELECT COUNT(*) as n FROM job_cancellations").get() as { n: number };
+		expect(audit.n).toBe(2);
+	});
+
+	it("respects olderThanMs filter", () => {
+		insertMemory(db, "mem-c-4");
+		const oldIso = new Date(Date.now() - 60 * 86_400_000).toISOString();
+		const recentIso = new Date().toISOString();
+		db.prepare(
+			`INSERT INTO memory_jobs
+			 (id, memory_id, job_type, status, attempts, max_attempts, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run("job-c-old", "mem-c-4", "extract", "dead", 0, 3, oldIso, oldIso);
+		db.prepare(
+			`INSERT INTO memory_jobs
+			 (id, memory_id, job_type, status, attempts, max_attempts, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run("job-c-new", "mem-c-4", "extract", "completed", 0, 3, recentIso, recentIso);
+
+		const limiter = createRateLimiter();
+		const result = cancelObsoleteJobs(accessor, TEST_CFG, CTX_OPERATOR, limiter, {
+			tables: ["memory"],
+			olderThanMs: 30 * 86_400_000, // 30 days
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.affected).toBe(1); // only the old dead one
+	});
+});
+
+// ---------------------------------------------------------------------------
+// pruneTerminalJobs (issue #901)
+// ---------------------------------------------------------------------------
+
+describe("pruneTerminalJobs", () => {
+	let db: Database;
+	let accessor: DbAccessor;
+
+	beforeEach(() => {
+		db = new Database(":memory:");
+		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
+		accessor = asAccessor(db);
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("dry-run previews without mutating", () => {
+		insertMemory(db, "mem-p-1");
+		const longAgo = new Date(Date.now() - 365 * 86_400_000).toISOString();
+		for (let i = 0; i < 3; i++) {
+			db.prepare(
+				`INSERT INTO memory_jobs
+				 (id, memory_id, job_type, status, attempts, max_attempts, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			).run(`job-p-${i}`, "mem-p-1", "extract", "dead", 0, 3, longAgo, longAgo);
+		}
+
+		const limiter = createRateLimiter();
+		const result = pruneTerminalJobs(accessor, TEST_CFG, CTX_OPERATOR, limiter, {
+			tables: ["memory"],
+			dryRun: true,
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.affected).toBe(0);
+		expect(result.totalMatching).toBe(3);
+
+		const remaining = db.prepare("SELECT COUNT(*) as n FROM memory_jobs").get() as { n: number };
+		expect(remaining.n).toBe(3);
+	});
+
+	it("apply archives rows before deletion", () => {
+		insertMemory(db, "mem-p-2");
+		const longAgo = new Date(Date.now() - 365 * 86_400_000).toISOString();
+		db.prepare(
+			`INSERT INTO memory_jobs
+			 (id, memory_id, job_type, status, attempts, max_attempts, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run("job-p-archive-1", "mem-p-2", "extract", "dead", 0, 3, longAgo, longAgo);
+		db.prepare(
+			`INSERT INTO memory_jobs
+			 (id, memory_id, job_type, status, attempts, max_attempts, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run("job-p-archive-2", "mem-p-2", "extract", "completed", 0, 3, longAgo, longAgo);
+
+		const limiter = createRateLimiter();
+		const result = pruneTerminalJobs(accessor, TEST_CFG, CTX_OPERATOR, limiter, {
+			tables: ["memory"],
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.affected).toBe(2);
+
+		const remaining = db.prepare("SELECT COUNT(*) as n FROM memory_jobs").get() as { n: number };
+		expect(remaining.n).toBe(0);
+
+		const archive = db.prepare("SELECT COUNT(*) as n FROM job_archive").get() as { n: number };
+		expect(archive.n).toBe(2);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// getQueueCounts + getOldestDeadJob (issue #901)
+// ---------------------------------------------------------------------------
+
+describe("getQueueCounts", () => {
+	let db: Database;
+
+	beforeEach(() => {
+		db = new Database(":memory:");
+		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("returns zeros for empty queues", () => {
+		const mem = getQueueCounts(asReadDb(db), "memory");
+		expect(mem.dead).toBe(0);
+		expect(mem.pending).toBe(0);
+		expect(mem.oldestAgeSec).toBe(0);
+	});
+
+	it("counts summary_jobs dead rows even when memory_jobs is empty", () => {
+		insertMemory(db, "mem-q-1");
+		insertJob(db, "job-q-1", "mem-q-1", "pending");
+		const limiter = createRateLimiter();
+		void limiter;
+		// Add a summary_jobs row directly to verify summary counts.
+		db.prepare(
+			`INSERT INTO summary_jobs
+			 (id, session_key, harness, transcript, status, attempts, max_attempts, created_at, completed_at, error)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run(
+			"sum-q-1",
+			"session-q",
+			"claude-code",
+			"transcript",
+			"dead",
+			3,
+			3,
+			new Date().toISOString(),
+			null,
+			"test failure",
+		);
+
+		const summary = getQueueCounts(asReadDb(db), "summary");
+		expect(summary.dead).toBe(1);
+		expect(summary.lastError).toBe("test failure");
+
+		const oldest = getOldestDeadJob(asReadDb(db), "summary");
+		expect(oldest).not.toBeNull();
+		expect(oldest?.id).toBe("sum-q-1");
+		expect(oldest?.harness).toBe("claude-code");
 	});
 });
 

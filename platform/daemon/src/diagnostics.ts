@@ -18,11 +18,34 @@ export interface HealthScore {
 }
 
 export interface QueueHealth extends HealthScore {
+	/** Legacy aggregate depth (memory_jobs pending). Kept for back-compat. */
 	readonly depth: number;
+	/** Legacy aggregate oldest pending age (memory_jobs). Kept for back-compat. */
 	readonly oldestAgeSec: number;
+	/** Legacy aggregate dead rate within QUEUE_RECENT_WINDOW_MS. Kept for back-compat. */
 	readonly deadRate: number;
+	/** Legacy aggregate count of stale leased rows. Kept for back-compat. */
 	readonly leaseAnomalies: number;
+	readonly memory: QueueCounts;
+	readonly summary: QueueCounts;
+	readonly extraction: QueueCounts;
+	readonly oldestDeadSummaryJob: OldestDeadJob | null;
 }
+
+// Re-exports from the diagnostics-queue split module so existing callers
+// (`import { QueueCounts, ... } from "../diagnostics"`) keep working.
+import {
+	DEFAULT_QUEUE_THRESHOLDS,
+	type OldestDeadJob,
+	type QueueCounts,
+	type QueueSource,
+	type QueueThresholds,
+	getOldestDeadJob,
+	getQueueCounts,
+	scoreCountsWithThresholds,
+} from "./diagnostics-queue";
+export type { QueueCounts, OldestDeadJob, QueueSource, QueueThresholds };
+export { DEFAULT_QUEUE_THRESHOLDS, getQueueCounts, getOldestDeadJob, scoreCountsWithThresholds };
 
 export interface StorageHealth extends HealthScore {
 	readonly totalMemories: number;
@@ -109,6 +132,7 @@ export interface DiagnosticsReport {
 	readonly update: UpdateHealth;
 	readonly graph: GraphHealth;
 	readonly openclaw: OpenClawHealth;
+	readonly lastProviderError: ProviderErrorEvent | null;
 }
 
 export interface DiagnosticsOptions {
@@ -121,14 +145,24 @@ export interface DiagnosticsOptions {
 // Provider tracker (in-memory ring buffer)
 // ---------------------------------------------------------------------------
 
+export interface ProviderErrorEvent {
+	readonly at: string;
+	readonly message: string;
+	readonly provider: string;
+}
+
 export interface ProviderTracker {
 	record(outcome: "success" | "failure" | "timeout"): void;
+	/** Record an error with message + provider label. Optional — older trackers return null. */
+	recordError?(message: string, provider: string): void;
 	readonly stats: {
 		total: number;
 		successes: number;
 		failures: number;
 		timeouts: number;
 	};
+	/** Most recent recorded error event, or null when none / not supported. */
+	readonly lastError: ProviderErrorEvent | null;
 }
 
 type Outcome = "success" | "failure" | "timeout";
@@ -142,6 +176,10 @@ export function createProviderTracker(capacity = 100): ProviderTracker {
 	let successes = 0;
 	let failures = 0;
 	let timeouts = 0;
+
+	// Last error event — provider label is captured at the call site so
+	// downstream consumers don't need to thread the active provider name.
+	let lastErrorEvent: ProviderErrorEvent | null = null;
 
 	function addCount(outcome: Outcome, delta: 1 | -1): void {
 		if (outcome === "success") successes += delta;
@@ -162,6 +200,17 @@ export function createProviderTracker(capacity = 100): ProviderTracker {
 			if (size < capacity) size += 1;
 		},
 
+		recordError(message: string, provider: string): void {
+			const trimmedMessage = typeof message === "string" ? message.slice(0, 512) : "";
+			const trimmedProvider = typeof provider === "string" ? provider.slice(0, 64) : "";
+			if (trimmedMessage.length === 0) return;
+			lastErrorEvent = {
+				at: new Date().toISOString(),
+				message: trimmedMessage,
+				provider: trimmedProvider,
+			};
+		},
+
 		get stats() {
 			return {
 				total: size,
@@ -169,6 +218,10 @@ export function createProviderTracker(capacity = 100): ProviderTracker {
 				failures,
 				timeouts,
 			};
+		},
+
+		get lastError(): ProviderErrorEvent | null {
+			return lastErrorEvent;
 		},
 	};
 }
@@ -200,7 +253,9 @@ const GRAPH_FLATLINE_MEMORY_THRESHOLD = 10;
 // Domain health functions
 // ---------------------------------------------------------------------------
 
-export function getQueueHealth(db: ReadDb): QueueHealth {
+export function getQueueHealth(db: ReadDb, thresholds: QueueThresholds = DEFAULT_QUEUE_THRESHOLDS): QueueHealth {
+	// Legacy aggregate fields (kept for back-compat with existing /api/diagnostics
+	// consumers, the maintenance worker, and the dashboard).
 	const pendingRow = db
 		.prepare(
 			`SELECT COUNT(*) AS cnt, MIN(created_at) AS oldest
@@ -239,13 +294,39 @@ export function getQueueHealth(db: ReadDb): QueueHealth {
 
 	const leaseAnomalies = anomalyRow?.cnt ?? 0;
 
-	let score = 1.0;
-	if (depth > 50) score -= 0.3;
-	if (deadRate > 0.01) score -= 0.3;
-	if (oldestAgeSec > 300) score -= 0.2;
-	if (leaseAnomalies > 0) score -= 0.2;
+	// Per-queue breakdown (issue #901)
+	const memory = getQueueCounts(db, "memory");
+	const summary = getQueueCounts(db, "summary");
+	const extraction = getQueueCounts(db, "extraction");
+	const oldestDeadSummaryJob = getOldestDeadJob(db, "summary");
 
-	score = clamp(score);
+	// Legacy scoring (memory_jobs aggregate).
+	let legacyScore = 1.0;
+	if (depth > 50) legacyScore -= 0.3;
+	if (deadRate > 0.01) legacyScore -= 0.3;
+	if (oldestAgeSec > 300) legacyScore -= 0.2;
+	if (leaseAnomalies > 0) legacyScore -= 0.2;
+	legacyScore = clamp(legacyScore);
+
+	// Per-queue scoring with thresholds (issue #901).
+	const summaryScore = scoreCountsWithThresholds(
+		summary,
+		thresholds.summaryDeadWarn,
+		thresholds.summaryDeadFail,
+		thresholds.summaryOldestPendingWarnSec,
+		thresholds.summaryOldestPendingFailSec,
+	);
+	const extractionScore = scoreCountsWithThresholds(
+		extraction,
+		thresholds.extractionDeadWarn,
+		thresholds.extractionDeadFail,
+		thresholds.summaryOldestPendingWarnSec,
+		thresholds.summaryOldestPendingFailSec,
+	);
+
+	// Composite queue score = worst of legacy, summary, extraction.
+	const score = clamp(Math.min(legacyScore, summaryScore, extractionScore));
+
 	return {
 		score,
 		status: scoreStatus(score),
@@ -253,6 +334,10 @@ export function getQueueHealth(db: ReadDb): QueueHealth {
 		oldestAgeSec,
 		deadRate,
 		leaseAnomalies,
+		memory,
+		summary,
+		extraction,
+		oldestDeadSummaryJob,
 	};
 }
 
@@ -701,5 +786,6 @@ export function getDiagnostics(
 		update,
 		graph,
 		openclaw,
+		lastProviderError: tracker.lastError ?? null,
 	};
 }

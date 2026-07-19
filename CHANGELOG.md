@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-07-18
+- Ops hardening (issue #901): surface dead summary-job backlog on every operator surface — `signet status`, `/api/status`, `/api/diagnostics/queue`, `/health`, and `/health/ready`. New repair actions `cancelObsoleteJobs` and `pruneTerminalJobs` move dead/completed jobs to `job_cancellations` / `job_archive` while preserving provenance. `requeueDeadJobs` gains a dry-run/ids/olderThanMs/errorPattern filter API. Schema migration 088 + 089 add the audit/archive tables; nothing mutates `summary_jobs` itself.
+
 ### 2026-07-15
 - Bug fixes: centralize canonical recall requests.
 

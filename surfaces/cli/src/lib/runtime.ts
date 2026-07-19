@@ -76,6 +76,19 @@ interface DaemonInstance {
 		readonly failed: number;
 		readonly dead: number;
 	} | null;
+	readonly queue: {
+		readonly memory: { pending: number; leased: number; completed: number; failed: number; dead: number };
+		readonly summary: { pending: number; leased: number; completed: number; failed: number; dead: number };
+		readonly extraction: { pending: number; leased: number; completed: number; failed: number; dead: number };
+		readonly oldestDeadSummary: {
+			id: string;
+			harness: string;
+			sessionKey: string | null;
+			createdAt: string;
+			attempts: number;
+			error: string | null;
+		} | null;
+	} | null;
 	readonly probe: DaemonHealthProbe;
 	readonly openclaw: DaemonOpenClawHealthSummary | null;
 }
@@ -166,6 +179,27 @@ async function fetchJsonOrNull<T>(baseUrl: string, path: string): Promise<T | nu
 	} catch {
 		return null;
 	}
+}
+
+function normalizeQueueCounts(input: unknown): {
+	pending: number;
+	leased: number;
+	completed: number;
+	failed: number;
+	dead: number;
+} {
+	if (!input || typeof input !== "object") {
+		return { pending: 0, leased: 0, completed: 0, failed: 0, dead: 0 };
+	}
+	const r = input as Record<string, unknown>;
+	const num = (k: string): number => (typeof r[k] === "number" ? (r[k] as number) : 0);
+	return {
+		pending: num("pending"),
+		leased: num("leased"),
+		completed: num("completed"),
+		failed: num("failed"),
+		dead: num("dead"),
+	};
 }
 
 function stringArray(value: unknown): string[] {
@@ -320,10 +354,24 @@ async function getDaemonInstances(): Promise<DaemonInstance[]> {
 								dead?: number;
 							};
 						};
+						queue?: {
+							memory?: { pending?: number; leased?: number; completed?: number; failed?: number; dead?: number };
+							summary?: { pending?: number; leased?: number; completed?: number; failed?: number; dead?: number };
+							extraction?: { pending?: number; leased?: number; completed?: number; failed?: number; dead?: number };
+							oldestDeadSummary?: {
+								id: string;
+								harness: string;
+								sessionKey: string | null;
+								createdAt: string;
+								attempts: number;
+								error: string | null;
+							} | null;
+						};
 					};
 					const extraction = data.providerResolution?.extraction;
 					const extractionWorker = data.pipeline?.extraction;
 					const transcripts = data.transcripts?.capture;
+					const queueReport = data.pipeline?.queue;
 					const openclawReport = await fetchJsonOrNull<unknown>(baseUrl, "/api/diagnostics/openclaw");
 					return {
 						baseUrl,
@@ -365,6 +413,14 @@ async function getDaemonInstances(): Promise<DaemonInstance[]> {
 									dead: typeof transcripts.dead === "number" ? transcripts.dead : 0,
 								}
 							: null,
+						queue: queueReport
+							? {
+									memory: normalizeQueueCounts(queueReport.memory),
+									summary: normalizeQueueCounts(queueReport.summary),
+									extraction: normalizeQueueCounts(queueReport.extraction),
+									oldestDeadSummary: queueReport.oldestDeadSummary ?? null,
+								}
+							: null,
 						probe: {
 							status: "healthy",
 							detail: `/health responded successfully at ${baseUrl}`,
@@ -391,6 +447,7 @@ async function getDaemonInstances(): Promise<DaemonInstance[]> {
 				extraction: null,
 				extractionWorker: null,
 				transcripts: null,
+				queue: null,
 				probe: {
 					status: "healthy",
 					detail: `/health responded successfully at ${baseUrl}; /api/status did not return full metadata`,
@@ -512,6 +569,7 @@ export async function getDaemonStatus(): Promise<{
 	extraction: DaemonInstance["extraction"];
 	extractionWorker: DaemonInstance["extractionWorker"];
 	transcripts: DaemonInstance["transcripts"];
+	queue: DaemonInstance["queue"];
 	probe: DaemonHealthProbe;
 	openclaw: DaemonOpenClawHealthSummary | null;
 }> {
@@ -530,6 +588,7 @@ export async function getDaemonStatus(): Promise<{
 			extraction: preferred.extraction,
 			extractionWorker: preferred.extractionWorker,
 			transcripts: preferred.transcripts,
+			queue: preferred.queue,
 			probe: {
 				...preferred.probe,
 				processPid: preferred.probe.processPid ?? fallbackPid,
@@ -550,6 +609,7 @@ export async function getDaemonStatus(): Promise<{
 		extraction: null,
 		extractionWorker: null,
 		transcripts: null,
+		queue: null,
 		probe,
 		openclaw: null,
 	};

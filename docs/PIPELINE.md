@@ -1270,3 +1270,80 @@ The pipeline worker itself is agent-agnostic: it operates on the `memory_jobs`
 queue and reads `agent_id` from each job record. Entity graph operations
 (extraction, traversal, aspect updates) all pass `agent_id` through to
 ensure knowledge is scoped to the correct agent.
+
+Queue Health and Repair (issue #901)
+---
+
+Operators rely on `signet status`, `/api/status`, and the maintenance worker's
+recommendations to detect pipeline problems. Before #901, dead summary-job
+backlog was invisible to all three: a live `0.147.1` database could sit on
+1,667 dead summary jobs and the operator would only see the symptom (recall
+going stale), not the cause.
+
+#901 exposes queue counts on every operator surface and adds two new repair
+actions with dry-run/preview support so operators can verify before
+mutating. The implementation is schema-light: nothing changes on
+`summary_jobs` or `memory_jobs`. The two new audit/archive tables
+(`job_cancellations`, `job_archive`) capture provenance before rows are
+deleted.
+
+## Queue surfaces
+
+- `signet status` renders a `Pipeline queues` block with per-queue counts
+  for memory, summary, and extraction. Highlights the oldest dead summary
+  job (id, harness, session_key, created_at, attempts, error preview).
+- `GET /api/status` adds `pipeline.queue.{memory,summary,extraction}` and
+  `pipeline.queue.oldestDeadSummary`.
+- `GET /api/diagnostics/queue` returns the same block plus
+  `lastProviderError`.
+- `GET /health` adds `queue.{memoryDead,summaryDead,extractionDead,summaryOldestDeadSec}`.
+- `GET /health/ready` returns HTTP 503 when dead summary jobs exceed the
+  default fail threshold (500) or the oldest pending row exceeds 30 minutes.
+- `GET /health/live` is a process-only liveness probe unaffected by
+  thresholds.
+
+## Repair actions
+
+`platform/daemon/src/repair-actions.ts` now ships:
+
+- `requeueDeadJobs(accessor, cfg, ctx, limiter, maxBatch?, options?)`
+  - `options.dryRun` — preview without mutating.
+  - `options.ids` — restrict to specific job ids (intersected with status).
+  - `options.olderThanMs` — only touch rows older than the cutoff.
+  - `options.errorPattern` — only touch rows whose error matches the LIKE pattern.
+- `cancelObsoleteJobs(accessor, cfg, ctx, limiter, options?)`
+  - Targets `status IN ('dead','completed')` past `olderThanMs` (default 30 days).
+  - Schema-light: rows are copied into `job_cancellations` then deleted
+    from the source table.
+- `pruneTerminalJobs(accessor, cfg, ctx, limiter, options?)`
+  - Targets terminal jobs past per-status retention days (defaults: dead=90,
+    completed=14, cancelled=90).
+  - Rows are archived to `job_archive` before deletion.
+  - Hard cap of 1000 rows per call.
+
+All three accept an HTTP `POST /api/diagnostics/queue/repair` with the
+shape `{ action: 'requeue'|'cancel'|'prune', dryRun?, ids?, tables?,
+olderThanMs?, errorPattern?, reason?, actor? }`. The endpoint is
+permission-gated with `admin`.
+
+The CLI command `signet repair queue …` will land in a follow-up once the
+HTTP surface has soaked.
+
+## Thresholds
+
+Defaults live in `platform/daemon/src/diagnostics-queue.ts` as
+`DEFAULT_QUEUE_THRESHOLDS`:
+
+| Threshold                      | Default | Effect                                                |
+|--------------------------------|---------|-------------------------------------------------------|
+| `summaryDeadWarn`              | 50      | queue score → degraded                                |
+| `summaryDeadFail`              | 500     | queue score → unhealthy; `/health/ready` → 503        |
+| `summaryOldestPendingWarnSec`  | 300     | queue score → degraded                                |
+| `summaryOldestPendingFailSec`  | 1800    | `/health/ready` → 503                                 |
+| `summaryOldestDeadWarnSec`     | 86400   | queue score → degraded                                |
+| `extractionDeadWarn`           | 50      | queue score → degraded                                |
+| `extractionDeadFail`           | 500     | queue score → unhealthy                               |
+
+Operators can override thresholds by passing a custom `QueueThresholds`
+object to `getQueueHealth(db, thresholds)`. Plumbing into the YAML cfg
+will land in a follow-up so existing agents don't need reconfiguration.

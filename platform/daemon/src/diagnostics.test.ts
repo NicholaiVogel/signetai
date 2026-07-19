@@ -149,6 +149,74 @@ describe("getQueueHealth", () => {
 		expect(result.deadRate).toBe(0);
 		expect(result.status).toBe("healthy");
 	});
+
+	test("summary_jobs dead backlog degrades queue health past threshold (issue #901)", () => {
+		// Seed 60 dead summary jobs to exceed the warn threshold of 50.
+		for (let i = 0; i < 60; i++) {
+			db.prepare(
+				`INSERT INTO summary_jobs
+				 (id, session_key, harness, transcript, status, attempts, max_attempts, created_at, completed_at, error)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			).run(
+				`sum-${i}`,
+				`session-${i}`,
+				"claude-code",
+				"transcript",
+				"dead",
+				3,
+				3,
+				new Date(Date.now() - 86_400_000).toISOString(),
+				null,
+				"simulated failure",
+			);
+		}
+
+		const result = getQueueHealth(asReadDb(db));
+		expect(result.summary.dead).toBe(60);
+		expect(result.memory.dead).toBe(0);
+		expect(result.oldestDeadSummaryJob).not.toBeNull();
+		expect(result.oldestDeadSummaryJob?.harness).toBe("claude-code");
+		expect(result.status).not.toBe("healthy");
+	});
+
+	test("summary_jobs dead backlog past fail threshold makes queue unhealthy", () => {
+		for (let i = 0; i < 600; i++) {
+			db.prepare(
+				`INSERT INTO summary_jobs
+				 (id, session_key, harness, transcript, status, attempts, max_attempts, created_at, completed_at, error)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			).run(
+				`sum-fail-${i}`,
+				`session-${i}`,
+				"opencode",
+				"transcript",
+				"dead",
+				3,
+				3,
+				new Date(Date.now() - 86_400_000).toISOString(),
+				null,
+				"simulated failure",
+			);
+		}
+
+		const result = getQueueHealth(asReadDb(db));
+		expect(result.summary.dead).toBe(600);
+		expect(result.status).toBe("unhealthy");
+		expect(result.score).toBe(0);
+	});
+
+	test("legacy aggregate fields remain populated for back-compat (issue #901)", () => {
+		const memId = "mem-legacy-1";
+		insertMemory(db, memId);
+		insertJob(db, "job-legacy-1", memId, "pending");
+		insertJob(db, "job-legacy-2", memId, "dead");
+
+		const result = getQueueHealth(asReadDb(db));
+		expect(result.depth).toBe(1);
+		expect(result.memory.dead).toBe(1);
+		expect(typeof result.memory.pending).toBe("number");
+		expect(typeof result.summary.dead).toBe("number");
+	});
 });
 
 // ---------------------------------------------------------------------------

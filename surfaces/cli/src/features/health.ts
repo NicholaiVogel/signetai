@@ -45,6 +45,19 @@ interface DaemonStatus {
 		readonly failed: number;
 		readonly dead: number;
 	} | null;
+	readonly queue: {
+		readonly memory: { pending: number; leased: number; completed: number; failed: number; dead: number };
+		readonly summary: { pending: number; leased: number; completed: number; failed: number; dead: number };
+		readonly extraction: { pending: number; leased: number; completed: number; failed: number; dead: number };
+		readonly oldestDeadSummary: {
+			id: string;
+			harness: string;
+			sessionKey: string | null;
+			createdAt: string;
+			attempts: number;
+			error: string | null;
+		} | null;
+	} | null;
 	readonly probe?: {
 		readonly status: "healthy" | "listener-unhealthy" | "process-unhealthy" | "stale-artifact" | "absent";
 		readonly detail: string;
@@ -230,6 +243,36 @@ export async function showStatus(options: { path?: string; json?: boolean }, dep
 			console.log(
 				`    ${icon} Transcript capture ${label}${transcripts.pending > 0 ? chalk.dim(` (${transcripts.pending} pending)`) : ""}${transcripts.failed + transcripts.dead > 0 ? chalk.dim(` (${transcripts.failed + transcripts.dead} failed/dead)`) : ""}`,
 			);
+		}
+		// Issue #901 — render queue counts. Highlights any dead backlog so
+		// operators notice the signal without needing to query SQLite.
+		const queue = report.daemon.queue;
+		if (queue) {
+			const memoryDead = queue.memory.dead;
+			const summaryDead = queue.summary.dead;
+			const extractionDead = queue.extraction.dead;
+			const backlogTotal = memoryDead + summaryDead + extractionDead;
+			const queueIcon = backlogTotal > 0 ? chalk.yellow("⚠") : chalk.green("✓");
+			const queueLabel =
+				backlogTotal > 0 ? chalk.yellow(`${backlogTotal} dead jobs across queues`) : chalk.green("queues clear");
+			console.log(`    ${queueIcon} Pipeline queues ${queueLabel}`);
+			console.log(
+				chalk.dim(
+					`      memory: ${queue.memory.pending}P / ${queue.memory.leased}L / ${queue.memory.dead}D   summary: ${queue.summary.pending}P / ${queue.summary.leased}L / ${queue.summary.dead}D   extraction: ${queue.extraction.pending}P / ${queue.extraction.leased}L / ${queue.extraction.dead}D`,
+				),
+			);
+			if (queue.oldestDeadSummary) {
+				const o = queue.oldestDeadSummary;
+				console.log(
+					chalk.dim(
+						`      oldest dead summary: ${o.id} (harness=${o.harness}, attempts=${o.attempts}, created=${o.createdAt})`,
+					),
+				);
+				if (o.error) {
+					const errPreview = o.error.length > 120 ? `${o.error.slice(0, 117)}…` : o.error;
+					console.log(chalk.dim(`        error: ${errPreview}`));
+				}
+			}
 		}
 		const extractionNotice = getExtractionStatusNotice(report.daemon);
 		if (extractionNotice) {

@@ -49,6 +49,7 @@ import {
 	providerRuntimeResolution,
 	readEnvTrimmed,
 	readPipelineMode,
+	repairLimiter,
 	resolveRegistryLlamaCppBaseUrl,
 	resolveRegistryOllamaBaseUrl,
 	resolveRegistryOpenRouterBaseUrl,
@@ -58,6 +59,58 @@ import {
 	telemetryRef,
 } from "./state.js";
 import { STATUS_CACHE_TTL, cachedEmbeddingStatus, resolveScopedAgentId, statusCacheTime } from "./utils.js";
+
+/**
+ * Build a compact queue summary block for /api/status. Returns null when
+ * the diagnostics cache is not yet ready so the caller can omit the field
+ * rather than emit zeros that misrepresent state.
+ */
+function buildPipelineQueueSummary(): {
+	queue: {
+		memory: { pending: number; leased: number; completed: number; failed: number; dead: number };
+		summary: { pending: number; leased: number; completed: number; failed: number; dead: number };
+		extraction: { pending: number; leased: number; completed: number; failed: number; dead: number };
+		oldestDeadSummary: {
+			id: string;
+			harness: string;
+			sessionKey: string | null;
+			createdAt: string;
+			attempts: number;
+			error: string | null;
+		} | null;
+		lastProviderError: { at: string; message: string; provider: string } | null;
+	};
+} | null {
+	try {
+		const report = getCachedDiagnosticsReport();
+		const strip = (
+			q: typeof report.queue.memory,
+		): {
+			pending: number;
+			leased: number;
+			completed: number;
+			failed: number;
+			dead: number;
+		} => ({
+			pending: q.pending,
+			leased: q.leased,
+			completed: q.completed,
+			failed: q.failed,
+			dead: q.dead,
+		});
+		return {
+			queue: {
+				memory: strip(report.queue.memory),
+				summary: strip(report.queue.summary),
+				extraction: strip(report.queue.extraction),
+				oldestDeadSummary: report.queue.oldestDeadSummaryJob,
+				lastProviderError: report.lastProviderError,
+			},
+		};
+	} catch {
+		return null;
+	}
+}
 
 const pipelineAdminGuard = async (c: Context, next: () => Promise<void>): Promise<Response | undefined> => {
 	const permDenied = await requirePermission("admin", authConfig)(c, () => Promise.resolve());
@@ -240,6 +293,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					overloadSince: extractionWorker.stats?.overloadSince ?? null,
 					nextTickInMs: extractionWorker.stats?.nextTickInMs ?? null,
 				},
+				...(buildPipelineQueueSummary() ?? {}),
 			},
 			providerResolution: providerRuntimeResolution,
 			logging: {
@@ -323,6 +377,90 @@ export function registerPipelineRoutes(app: Hono): void {
 			return c.json({ error: `Unknown domain: ${domain}` }, 400);
 		}
 		return c.json(domainData);
+	});
+
+	// Issue #901 — dedicated queue diagnostics endpoint. Mirrors the queue
+	// block in the diagnostics report but at a stable URL that doesn't
+	// collide with the dynamic `:domain` router above.
+	app.get("/api/diagnostics/queue", (c) => {
+		const report = getCachedDiagnosticsReport();
+		return c.json({
+			queue: report.queue,
+			lastProviderError: report.lastProviderError,
+		});
+	});
+
+	// Issue #901 — repair action endpoint. Re-runs through the existing
+	// repair-actions module and respects the policy gate + rate limiter.
+	app.post("/api/diagnostics/queue/repair", async (c) => {
+		const permDenied = await requirePermission("admin", authConfig)(c, () => Promise.resolve());
+		if (permDenied) return permDenied;
+
+		let body: unknown;
+		try {
+			body = await c.req.json();
+		} catch {
+			return c.json({ error: "Invalid JSON" }, 400);
+		}
+		if (!body || typeof body !== "object") {
+			return c.json({ error: "Body must be an object" }, 400);
+		}
+		const b = body as Record<string, unknown>;
+		const action = typeof b.action === "string" ? b.action : "";
+		const dryRun = b.dryRun === true;
+
+		if (action !== "requeue" && action !== "cancel" && action !== "prune") {
+			return c.json({ error: `Unknown action: ${action}` }, 400);
+		}
+
+		const ids = Array.isArray(b.ids)
+			? b.ids.filter((x): x is string => typeof x === "string").slice(0, 10_000)
+			: undefined;
+		const tables = Array.isArray(b.tables)
+			? b.tables
+					.filter((x): x is string => typeof x === "string" && (x === "memory" || x === "summary"))
+					.map((x) => x as "memory" | "summary")
+			: undefined;
+		const olderThanMs =
+			typeof b.olderThanMs === "number" && Number.isFinite(b.olderThanMs)
+				? Math.max(0, Math.floor(b.olderThanMs))
+				: undefined;
+		const errorPattern = typeof b.errorPattern === "string" ? b.errorPattern.slice(0, 512) : undefined;
+
+		const cfg = loadMemoryConfig(AGENTS_DIR);
+		const ctx = {
+			reason: typeof b.reason === "string" ? b.reason : `api:${action}`,
+			actor: typeof b.actor === "string" ? b.actor : "api",
+			actorType: "operator" as const,
+			requestId: c.req.header("x-request-id") ?? undefined,
+		};
+		const limiter = repairLimiter;
+
+		if (action === "requeue") {
+			const { requeueDeadJobs } = await import("../repair-actions.js");
+			const result = requeueDeadJobs(getDbAccessor(), cfg.pipelineV2, ctx, limiter, undefined, {
+				dryRun,
+				ids,
+				olderThanMs,
+				errorPattern,
+			});
+			return c.json(result);
+		}
+		if (action === "cancel") {
+			const { cancelObsoleteJobs } = await import("../repair-actions.js");
+			const result = cancelObsoleteJobs(getDbAccessor(), cfg.pipelineV2, ctx, limiter, {
+				dryRun,
+				tables,
+				olderThanMs,
+			});
+			return c.json(result);
+		}
+		const { pruneTerminalJobs } = await import("../repair-actions.js");
+		const result = pruneTerminalJobs(getDbAccessor(), cfg.pipelineV2, ctx, limiter, {
+			dryRun,
+			tables,
+		});
+		return c.json(result);
 	});
 
 	app.post("/api/diagnostics/openclaw/heartbeat", async (c) => {
