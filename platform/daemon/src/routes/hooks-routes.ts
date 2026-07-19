@@ -42,6 +42,7 @@ import { getInferenceRouterOrNull } from "../inference-router";
 import { logger } from "../logger";
 import { loadMemoryConfig } from "../memory-config";
 import { writeCompactionArtifact } from "../memory-lineage.js";
+import type { RecallParams } from "../memory-search";
 import { hybridRecall } from "../memory-search";
 import { getSynthesisWorker, readLastSynthesisTime } from "../pipeline";
 import { isNoiseSession } from "../session-noise";

@@ -143,7 +143,7 @@ describe("daemon status contract", () => {
 				return new Response(JSON.stringify({ data: [{ id: "qwen3:4b" }] }), { status: 200 });
 			}
 			return new Response("not found", { status: 404 });
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		try {
 			const { closeDbAccessor, initDbAccessor } = await import("./db-accessor");

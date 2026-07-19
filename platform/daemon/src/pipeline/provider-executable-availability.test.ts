@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { CommandLineProviderConfig } from "../pipeline/provider";
 
 import { createAcpxProvider, createCommandLineProvider } from "./provider";
 

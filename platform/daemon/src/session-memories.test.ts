@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "../../core/src/migrations";
+import type { WriteDb } from "./db-accessor";
 
 const TEST_DIR = join(tmpdir(), `signet-session-mem-test-${Date.now()}`);
 process.env.SIGNET_PATH = TEST_DIR;
