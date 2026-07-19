@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
+import type { ReadDb } from "./db-accessor";
 import { searchSessionTranscripts } from "./subagent-context.js";
 
 let db: Database | null = null;

@@ -2,6 +2,7 @@
  * Tests for the repair-actions module (F2 track: Autonomous Maintenance).
  */
 
+import type { SqliteStatement } from "bun:sqlite";
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { readMemoriesFtsSql } from "../../core/src/fts-schema";
