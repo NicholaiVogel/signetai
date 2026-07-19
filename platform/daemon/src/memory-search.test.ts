@@ -9,7 +9,11 @@ import { indexExternalMemoryArtifact } from "./memory-lineage";
 import { buildAgentScopeClause, expandRecallKeywordQuery, hybridRecall, transcriptExcerpt } from "./memory-search";
 
 type Mutable<T> =
-	T extends ReadonlyArray<infer U> ? Mutable<U>[] : T extends object ? { -readonly [K in keyof T]: Mutable<T[K]> } : T;
+	T extends ReadonlyArray<infer U>
+		? Mutable<U>[]
+		: T extends object
+			? { -readonly [K in keyof T]-?: Mutable<T[K]> }
+			: T;
 describe("hybridRecall", () => {
 	let dir = "";
 	let prevSignetPath: string | undefined;

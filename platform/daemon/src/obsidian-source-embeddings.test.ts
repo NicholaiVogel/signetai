@@ -313,7 +313,7 @@ describe("Obsidian source embeddings", () => {
 			fetchEmbedding: async () => testVector(1),
 		});
 
-		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
+		const cfg = loadMemoryConfig(dir) as DeepMutable<ResolvedMemoryConfig>;
 		cfg.embedding.provider = embeddingConfig.provider;
 		cfg.embedding.model = embeddingConfig.model;
 		cfg.embedding.dimensions = embeddingConfig.dimensions;
@@ -360,7 +360,7 @@ describe("Obsidian source embeddings", () => {
 			fetchEmbedding: async () => testVector(1),
 		});
 
-		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
+		const cfg = loadMemoryConfig(dir) as DeepMutable<ResolvedMemoryConfig>;
 		cfg.embedding.provider = embeddingConfig.provider;
 		cfg.embedding.model = embeddingConfig.model;
 		cfg.embedding.dimensions = embeddingConfig.dimensions;

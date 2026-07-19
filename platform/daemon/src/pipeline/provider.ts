@@ -2014,7 +2014,9 @@ export function createOllamaProvider(config?: Partial<OllamaProviderConfig>): Ll
 							...((opts as unknown as { responseFormat?: string; think?: unknown })?.responseFormat === "json"
 								? { format: "json" }
 								: {}),
-							...((opts as unknown as { think?: unknown })?.think !== undefined ? { think: opts.think } : {}),
+							...(((opts as unknown as { think?: unknown })?.think as unknown) !== undefined
+								? { think: (opts as unknown as { think?: unknown }).think }
+								: {}),
 						},
 					});
 				} catch (e) {
