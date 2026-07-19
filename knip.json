@@ -2,19 +2,59 @@
 	"$schema": "https://unpkg.com/knip@5/schema.json",
 	"workspaces": {
 		".": {
-			"entry": ["scripts/**/*.ts"],
-			"project": ["scripts/**/*.ts"]
-		},
-		"platform/*": {},
-		"libs/*": {},
-		"surfaces/*": {},
-		"integrations/*/*": {},
-		"dist/*": {},
-		"web/marketing": {},
-		"web/workers/*": {},
-		"memorybench": {}
+			"entry": [
+				"scripts/**/*.ts",
+				"platform/daemon/src/cli.ts",
+				"platform/daemon/src/index.ts",
+				"platform/core/src/index.ts",
+				"libs/sdk/src/index.ts",
+				"libs/sdk/src/react.tsx",
+				"libs/sdk/src/ai-sdk.ts",
+				"libs/sdk/src/openai.ts",
+				"surfaces/cli/src/cli.ts",
+				"surfaces/cli/src/browse.ts"
+			],
+			"project": [
+				"scripts/**/*.ts",
+				"platform/**/src/**/*.{ts,tsx}",
+				"platform/**/tests/**/*.{ts,tsx}",
+				"platform/**/*/tests/**/*.{ts,tsx}",
+				"platform/daemon-rs/**/*.rs",
+				"libs/**/src/**/*.{ts,tsx}",
+				"surfaces/**/src/**/*.{ts,tsx,svelte}",
+				"integrations/**/src/**/*.{ts,tsx}",
+				"integrations/**/extension/**/*.{ts,tsx}",
+				"memorybench/src/**/*.{ts,tsx}",
+				"memorybench/ui/src/**/*.{ts,tsx,svelte}",
+				"web/marketing/src/**/*.{ts,tsx,svelte}"
+			],
+			"ignore": [
+				"**/*.test.{ts,tsx}",
+				"**/*.spec.{ts,tsx}",
+				"**/*.generated.*",
+				"**/_app/**",
+				"**/dist/**",
+				"**/.svelte-kit/**",
+				"**/coverage/**",
+				"**/__tests__/**",
+				"**/fixtures/**"
+			]
+		}
 	},
-	"ignore": ["references/**", "**/dist/**", "**/_app/**", "**/*.generated.*"],
-	"ignoreBinaries": ["biome"],
-	"ignoreDependencies": ["bun-types"]
+	"ignoreBinaries": ["biome", "husky", "lint-staged"],
+	"ignoreDependencies": ["bun-types", "@signet/sdk", "@types/react", "react", "zod"],
+	"ignoreExportsUsedInFile": true,
+	"rules": {
+		"files": "warn",
+		"dependencies": "warn",
+		"devDependencies": "warn",
+		"exports": "off",
+		"types": "off",
+		"duplicates": "warn",
+		"enumMembers": "off",
+		"namespaceMembers": "off",
+		"unlisted": "warn",
+		"binaries": "off",
+		"unresolved": "warn"
+	}
 }
