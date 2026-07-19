@@ -621,7 +621,9 @@ describe("checkFtsConsistency", () => {
 		expect(result.success).toBe(true);
 		expect(result.affected).toBe(1);
 		expect(result.message).toMatch(/tokenizer drift/i);
-		expect(readMemoriesFtsSql(toFtsSchemaQueryDb(db))).toContain("porter unicode61");
+		expect(
+			readMemoriesFtsSql(toFtsSchemaQueryDb(db as unknown as { prepare(sql: string): SqliteStatement })),
+		).toContain("porter unicode61");
 	});
 
 	it("repairs legacy porter tokenizer drift when repair=true", () => {
@@ -634,7 +636,7 @@ describe("checkFtsConsistency", () => {
 		expect(result.affected).toBe(1);
 		expect(result.message).toMatch(/unicode61 tokenizer/i);
 
-		const sql = readMemoriesFtsSql(toFtsSchemaQueryDb(db));
+		const sql = readMemoriesFtsSql(toFtsSchemaQueryDb(db as unknown as { prepare(sql: string): SqliteStatement }));
 		expect(sql).toContain("tokenize='unicode61'");
 		expect(sql).not.toContain("porter unicode61");
 	});

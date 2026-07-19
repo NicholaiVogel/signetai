@@ -12,7 +12,7 @@ function makeAccessor(db: Database): DbAccessor {
 		withWriteTx<T>(fn: (writeDb: WriteDb) => T): T {
 			db.exec("BEGIN IMMEDIATE");
 			try {
-				const result = fn(db);
+				const result = fn(db as unknown as WriteDb);
 				db.exec("COMMIT");
 				return result;
 			} catch (err) {

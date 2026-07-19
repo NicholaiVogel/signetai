@@ -368,7 +368,7 @@ function scopedContentHashPredicate(input: RememberDedupeScope): {
 }
 
 function getScopedIdempotencyMemoryId(
-	db: WriteDb,
+	db: ReadDb | WriteDb,
 	key: string | undefined,
 	input: RememberDedupeScope,
 ): RememberDedupeIdRow | undefined {
@@ -419,7 +419,7 @@ function getScopedSourceDedupeRow(
 }
 
 function getScopedContentHashMemoryId(
-	db: WriteDb,
+	db: ReadDb | WriteDb,
 	contentHash: string,
 	input: RememberDedupeScope,
 ): { readonly id: string } | undefined {
@@ -456,7 +456,7 @@ function getScopedContentHashDedupeRow(
 }
 
 function getScopedChunkIdempotencyRows(
-	db: WriteDb,
+	db: ReadDb | WriteDb,
 	baseKey: string | undefined,
 	input: RememberDedupeScope,
 ): readonly RememberChunkDedupeRow[] {
