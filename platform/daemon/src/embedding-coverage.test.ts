@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { runMigrations } from "../../core/src/migrations";
+import type { ReadDb } from "./db-accessor";
 import { countUnembeddedMemories, listStaleEmbeddingRows, listUnembeddedMemories } from "./embedding-coverage";
 
 function insertEmbedding(db: Database, args: { id: string; sourceId: string; contentHash: string }): void {

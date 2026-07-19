@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ReadDb } from "./db-accessor";
 import { computeProjectionForQuery } from "./umap-projection";
 
 const SCHEMA = `

@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import type { ReadDb } from "./db-accessor";
 import { buildEmbeddingHealth } from "./embedding-health";
 
 describe("buildEmbeddingHealth", () => {

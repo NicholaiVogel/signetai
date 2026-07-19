@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeDbAccessor, getDbAccessor, getVectorRuntimeStatus, initDbAccessor } from "./db-accessor";
+import { closeDbAccessor, getDbAccessor, getVectorRuntimeStatus, initDbAccessor, ReadDb } from "./db-accessor";
 import type { ResolvedMemoryConfig } from "./memory-config";
 import { type EmbeddingConfig, loadMemoryConfig } from "./memory-config";
 import { hybridRecall } from "./memory-search";

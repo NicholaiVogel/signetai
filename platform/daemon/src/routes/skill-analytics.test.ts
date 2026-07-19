@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { runMigrations } from "../../../core/src/migrations";
+import type { ReadDb } from "./db-accessor";
 import { querySkillAnalytics } from "./skill-analytics.js";
 
 function seedSkills(db: Database, rows: ReadonlyArray<{ id: string; name: string; agentId?: string }>): void {

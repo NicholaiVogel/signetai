@@ -13,9 +13,12 @@
  */
 import { Duplex } from "node:stream";
 
+type DuplexWithDestroySoon = Duplex & { destroySoon?: () => void };
+
 export function applyPolyfill(): void {
-	if (typeof Duplex.prototype.destroySoon === "function") return;
-	Duplex.prototype.destroySoon = function destroySoon() {
+	const proto = Duplex.prototype as DuplexWithDestroySoon;
+	if (typeof proto.destroySoon === "function") return;
+	proto.destroySoon = function destroySoon() {
 		if (this.writable) this.end();
 		if (this.writableFinished) this.destroy();
 		else this.once("finish", this.destroy);

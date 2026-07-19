@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { runMigrations } from "../../core/src/migrations";
+import type { ReadDb } from "./db-accessor";
 import { readScopedTask, readTaskAgentId } from "./task-scope";
 
 describe("task scope helpers", () => {

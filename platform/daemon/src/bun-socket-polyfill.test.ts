@@ -3,16 +3,16 @@ import { Duplex } from "node:stream";
 import { applyPolyfill } from "./bun-socket-polyfill";
 
 describe("destroySoon polyfill", () => {
-	let originalDestroySoon: typeof Duplex.prototype.destroySoon | undefined;
+	let originalDestroySoon: (() => void) | undefined;
 
 	beforeEach(() => {
-		originalDestroySoon = Duplex.prototype.destroySoon;
+		originalDestroySoon = (Duplex.prototype as unknown as { destroySoon(): void }).destroySoon;
 		delete (Duplex.prototype as unknown as Record<string, unknown>).destroySoon;
 	});
 
 	afterEach(() => {
 		if (originalDestroySoon) {
-			Duplex.prototype.destroySoon = originalDestroySoon;
+			(Duplex.prototype as unknown as { destroySoon(): void }).destroySoon = originalDestroySoon;
 		}
 	});
 
@@ -23,7 +23,7 @@ describe("destroySoon polyfill", () => {
 				cb();
 			},
 		});
-		expect(typeof socket.destroySoon).toBe("undefined");
+		expect(typeof (socket as unknown as { destroySoon(): void }).destroySoon).toBe("undefined");
 	});
 
 	test("polyfill adds destroySoon to Duplex prototype", () => {
@@ -34,7 +34,7 @@ describe("destroySoon polyfill", () => {
 				cb();
 			},
 		});
-		expect(typeof socket.destroySoon).toBe("function");
+		expect(typeof (socket as unknown as { destroySoon(): void }).destroySoon).toBe("function");
 	});
 
 	test("destroySoon calls end() on writable socket then destroys after finish", async () => {
@@ -55,7 +55,7 @@ describe("destroySoon polyfill", () => {
 			destroyed = true;
 		});
 
-		socket.destroySoon();
+		(socket as unknown as { destroySoon(): void }).destroySoon();
 
 		await new Promise((r) => setTimeout(r, 50));
 		expect(ended).toBe(true);
@@ -79,17 +79,17 @@ describe("destroySoon polyfill", () => {
 			destroyed = true;
 		});
 
-		socket.destroySoon();
+		(socket as unknown as { destroySoon(): void }).destroySoon();
 		await new Promise((r) => setTimeout(r, 50));
 		expect(destroyed).toBe(true);
 	});
 
 	test("polyfill does not overwrite existing destroySoon", () => {
 		const sentinel = function sentinel() {};
-		Duplex.prototype.destroySoon = sentinel as unknown as typeof Duplex.prototype.destroySoon;
+		(Duplex.prototype as unknown as { destroySoon(): void }).destroySoon = sentinel as unknown as () => void;
 
 		applyPolyfill();
 
-		expect(Duplex.prototype.destroySoon).toBe(sentinel);
+		expect((Duplex.prototype as unknown as { destroySoon(): void }).destroySoon).toBe(sentinel);
 	});
 });
