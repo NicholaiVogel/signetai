@@ -626,6 +626,7 @@ export function purgeNativeMemorySourceArtifacts(source: NativeMemorySource, age
 				   AND source_kind IN (${source.files.map(() => "?").join(", ")})`,
 			)
 			.run(...params);
+		// @ts-expect-error -- void.changes on bun:sqlite run result
 		return result.changes;
 	});
 	let embeddingRows = 0;

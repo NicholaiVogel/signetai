@@ -108,6 +108,7 @@ export function deadLetterPendingExtractionJobs(accessor: DbAccessor, options: E
 			}
 		}
 
+		// @ts-expect-error -- void.changes on bun:sqlite run result
 		return result.changes;
 	});
 }

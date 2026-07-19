@@ -220,6 +220,7 @@ export function registerReflectionRoutes(app: Hono, deps: ReflectionRouteDeps = 
 					)
 					.run(answer, memoryId, now, id, agentId);
 
+				// @ts-expect-error -- void.changes on bun:sqlite run result
 				if (result.changes === 0) return;
 				claimed = true;
 

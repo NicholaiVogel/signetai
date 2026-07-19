@@ -106,7 +106,9 @@ export function startDreamingWorker(
 				 WHERE status = 'running'`,
 			)
 			.run();
+		// @ts-expect-error -- void.changes on bun:sqlite run result
 		if (orphaned.changes > 0) {
+			// @ts-expect-error -- void.changes on bun:sqlite run result
 			logger.warn("dreaming-worker", `Swept ${orphaned.changes} orphaned running pass(es) from prior shutdown`);
 		}
 	});

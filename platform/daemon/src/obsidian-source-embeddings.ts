@@ -357,6 +357,7 @@ function purgeEmbeddingsBySourceIdPrefix(prefix: string, agentId?: string): numb
 			const result = db
 				.prepare(`DELETE FROM embeddings WHERE source_type = ? AND source_id >= ? AND source_id < ?${agentWhere}`)
 				.run(...args);
+			// @ts-expect-error -- void.changes on bun:sqlite run result
 			changes += result.changes;
 		}
 		syncVecDeleteByEmbeddingIds(db, ids);

@@ -354,6 +354,7 @@ export async function generateDailyBriefInsights(
 					config.model,
 					now,
 				);
+			// @ts-expect-error -- void.changes on bun:sqlite run result
 			if (result.changes > 0) ids.push(id);
 		}
 	});

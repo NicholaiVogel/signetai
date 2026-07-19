@@ -316,6 +316,7 @@ export function linkMemoryToEntities(db: WriteDb, memoryId: string, content: str
 			 VALUES (?, ?, ?, 0.8, ?)`,
 			)
 			.run(memoryId, entityId, name, now);
+		// @ts-expect-error -- void.changes on bun:sqlite run result
 		if (ins.changes > 0) linked++;
 	}
 

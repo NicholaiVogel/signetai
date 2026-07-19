@@ -13,6 +13,7 @@ export function cancelExtractionJobsForForgottenMemory(db: WriteDb, memoryId: st
 			   AND status IN ('pending', 'leased')`,
 		)
 		.run(FORGOTTEN_MEMORY_JOB_RESULT, FORGOTTEN_MEMORY_JOB_ERROR, changedAt, changedAt, memoryId);
+	// @ts-expect-error -- void.changes on bun:sqlite run result
 	return result.changes;
 }
 

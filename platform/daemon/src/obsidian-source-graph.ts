@@ -370,9 +370,10 @@ function folderRelatives(root: string, filePath: string): string[] {
 }
 
 function purgeOrphanedDocumentReferences(db: WriteDb, agentId: string, sourceId: string, root: string): number {
-	return db
-		.prepare(
-			`DELETE FROM entities
+	return (
+		db
+			.prepare(
+				`DELETE FROM entities
 			 WHERE agent_id = ?
 			   AND source_id = ?
 			   AND source_root = ?
@@ -382,8 +383,10 @@ function purgeOrphanedDocumentReferences(db: WriteDb, agentId: string, sourceId:
 			     WHERE d.agent_id = entities.agent_id
 			       AND (d.source_entity_id = entities.id OR d.target_entity_id = entities.id)
 			   )`,
-		)
-		.run(agentId, sourceId, root).changes;
+			)
+			// @ts-expect-error -- void.changes on bun:sqlite run result
+			.run(agentId, sourceId, root).changes
+	);
 }
 
 function purgeObsidianSourceFileStructureInTx(
@@ -403,9 +406,11 @@ function purgeObsidianSourceFileStructureInTx(
 			   AND source_root = ?
 			   AND source_path = ?`,
 		)
+		// @ts-expect-error -- void.changes on bun:sqlite run result
 		.run(input.agentId, input.sourceId, root, filePath).changes;
 	const aspects = db
 		.prepare("DELETE FROM entity_aspects WHERE agent_id = ? AND entity_id = ?")
+		// @ts-expect-error -- void.changes on bun:sqlite run result
 		.run(input.agentId, documentEntityId).changes;
 	const dependencies = db
 		.prepare(
@@ -415,6 +420,7 @@ function purgeObsidianSourceFileStructureInTx(
 			   AND source_root = ?
 			   AND source_path = ?`,
 		)
+		// @ts-expect-error -- void.changes on bun:sqlite run result
 		.run(input.agentId, input.sourceId, root, filePath).changes;
 	const entities =
 		db
@@ -426,6 +432,7 @@ function purgeObsidianSourceFileStructureInTx(
 				   AND source_path = ?
 				   AND entity_type IN ('source_document', 'source_document_reference')`,
 			)
+			// @ts-expect-error -- void.changes on bun:sqlite run result
 			.run(input.agentId, input.sourceId, root, filePath).changes +
 		purgeOrphanedDocumentReferences(db, input.agentId, input.sourceId, root);
 	return { entities, attributes, dependencies, communities: aspects };
@@ -668,15 +675,19 @@ export function purgeObsidianSourceStructure(
 	return getDbAccessor().withWriteTx((db) => {
 		const attrs = db
 			.prepare(`DELETE FROM entity_attributes WHERE ${agentWhere}source_id = ? AND source_root = ?`)
+			// @ts-expect-error -- void.changes on bun:sqlite run result
 			.run(...params).changes;
 		const deps = db
 			.prepare(`DELETE FROM entity_dependencies WHERE ${agentWhere}source_id = ? AND source_root = ?`)
+			// @ts-expect-error -- void.changes on bun:sqlite run result
 			.run(...params).changes;
 		const entities = db
 			.prepare(`DELETE FROM entities WHERE ${agentWhere}source_id = ? AND source_root = ?`)
+			// @ts-expect-error -- void.changes on bun:sqlite run result
 			.run(...params).changes;
 		const communities = db
 			.prepare(`DELETE FROM entity_communities WHERE ${agentWhere}source_id = ? AND source_root = ?`)
+			// @ts-expect-error -- void.changes on bun:sqlite run result
 			.run(...params).changes;
 		return { entities, attributes: attrs, dependencies: deps, communities };
 	});
