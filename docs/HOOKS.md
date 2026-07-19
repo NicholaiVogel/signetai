@@ -67,6 +67,21 @@ and no network request is made.
 
 ---
 
+## Session TTL Expiry
+
+Session claims expire after 4 hours without hook activity. If a harness
+misses its terminal `session-end` event, the expiry sweep does not simply
+drop the claim: before eviction it checkpoints the latest stored
+transcript (`trigger: "ttl_expired"`), enqueues an idempotent summary job
+(`boundary_reason: "ttl_expired"`) when pipeline policy allows, and writes
+a `session_outcomes` audit row for the transition — including the explicit
+skip reason (`pipeline-disabled`, `transcript-too-short`, `noise-session`,
+`duplicate-job`, `no-transcript`) when finalization is intentionally not
+performed. Re-expiry of the same session is a no-op. See
+`docs/PIPELINE.md` → "Session TTL Finalization".
+
+---
+
 ## Session Start Hook
 
 **`POST /api/hooks/session-start`**

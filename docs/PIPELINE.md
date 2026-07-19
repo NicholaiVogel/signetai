@@ -762,12 +762,37 @@ Checkpoints are triggered by five event types:
 - `session_end` — fired when a session closes
 - `agent` — fired by agent-initiated events
 - `explicit` — fired by manual API calls
+- `ttl_expired` — fired when a tracked session expires without a
+  session-end event (see "Session TTL Finalization" below)
 
 Each checkpoint row stores `session_key`, `harness`, `project`,
 `project_normalized`, `trigger`, `digest`, `prompt_count`,
 `memory_queries` (JSON array), and `recent_remembers` (JSON array).
 Secrets are redacted before storage using pattern-based scrubbing
 (Bearer tokens, API keys, base64 credential blobs, env variable values).
+
+Session TTL Finalization
+---
+
+Tracked sessions carry a 4-hour in-memory claim TTL
+(`platform/daemon/src/session-tracker.ts`). When a claim expires without a
+session-end event, eviction is a formal, auditable lifecycle transition
+(`platform/daemon/src/session-ttl-finalization.ts`):
+
+1. The latest stored transcript is checkpointed with trigger `ttl_expired`.
+2. When pipeline policy allows (`pipelineV2.enabled || shadowMode ||
+   dreaming.enabled`), an idempotent summary job is enqueued with
+   `boundary_reason: "ttl_expired"` (content-derived session id, duplicate
+   detection against non-dead jobs). Otherwise the transition is recorded
+   as intentionally skipped with an explicit reason:
+   `pipeline-disabled`, `transcript-too-short`, `noise-session`,
+   `duplicate-job`, or `no-transcript`.
+3. Every transition writes one `session_outcomes` audit row (migration
+   088); re-finalization for the same session key is a no-op.
+
+Diagnostics expose additive `sessions` counts (`active`, `expired`,
+`unfinalized`) derived from `session_outcomes`.
+
 
 A buffered flush queue (`queueCheckpointWrite`) debounces writes at
 2,500 ms intervals. If two triggers fire within the flush window for

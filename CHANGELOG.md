@@ -34,6 +34,10 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ## Release Ledger
 
+## [Unreleased]
+
+- Bug fixes: formalize session TTL eviction as an auditable lifecycle transition — persist a `ttl_expired` checkpoint before eviction, enqueue an idempotent summary job under pipeline policy, record explicit skip reasons otherwise, and audit every transition in `session_outcomes` (#902). Rust daemon parity included.
+
 ## [0.147.15] - 2026-07-15
 
 Release summary: 1 bug fix.
