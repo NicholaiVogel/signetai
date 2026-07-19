@@ -269,7 +269,7 @@ export function buildMemoryTimeline(
 			   AND created_at >= ?${scopeSql}
 			 ORDER BY created_at DESC`,
 		)
-		.all(cutoffIso, ...scopeParams) as MemoryRow[];
+		.all(cutoffIso, ...scopeParams) as unknown as MemoryRow[];
 
 	const historyRows = db
 		.prepare(
@@ -280,7 +280,7 @@ export function buildMemoryTimeline(
 			   AND h.created_at >= ?${scopeSql.replace(/(?<!\.)agent_id/g, "m.agent_id").replace(/(?<=AND |\()visibility/g, "m.visibility")}
 			 ORDER BY h.created_at DESC`,
 		)
-		.all(cutoffIso, ...scopeParams) as HistoryRow[];
+		.all(cutoffIso, ...scopeParams) as unknown as HistoryRow[];
 
 	let invalidMemoryTimestamps = 0;
 	let invalidHistoryTimestamps = 0;

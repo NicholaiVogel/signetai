@@ -292,7 +292,7 @@ export function registerKnowledgeRoutes(app: Hono): void {
 					 WHERE agent_id = ?
 					 ORDER BY member_count DESC`,
 				)
-				.all(agentId) as ReadonlyArray<{
+				.all(agentId) as unknown as ReadonlyArray<{
 				id: string;
 				name: string | null;
 				cohesion: number;
@@ -423,7 +423,7 @@ export function registerKnowledgeRoutes(app: Hono): void {
 					 ORDER BY ea.weight DESC
 					 LIMIT ?`,
 				)
-				.all(...aspectArgs) as Array<{
+				.all(...aspectArgs) as unknown as Array<{
 				id: string;
 				canonical_name: string;
 				weight: number;
@@ -439,7 +439,7 @@ export function registerKnowledgeRoutes(app: Hono): void {
 						 ORDER BY importance DESC
 						 LIMIT ?`,
 					)
-					.all(aspect.id, agentId, traversalCfg.maxAttributesPerAspect) as Array<{
+					.all(aspect.id, agentId, traversalCfg.maxAttributesPerAspect) as unknown as Array<{
 					content: string;
 					kind: string;
 					importance: number;
@@ -464,7 +464,12 @@ export function registerKnowledgeRoutes(app: Hono): void {
 					 ORDER BY ed.strength DESC
 					 LIMIT ?`,
 				)
-				.all(primaryEntityId, agentId, traversalCfg.minDependencyStrength, traversalCfg.maxDependencyHops) as Array<{
+				.all(
+					primaryEntityId,
+					agentId,
+					traversalCfg.minDependencyStrength,
+					traversalCfg.maxDependencyHops,
+				) as unknown as Array<{
 				target: string;
 				type: string;
 				strength: number;
@@ -608,7 +613,7 @@ export function registerKnowledgeRoutes(app: Hono): void {
 					 ORDER BY ss.latest_at DESC
 					 LIMIT ?`,
 				)
-				.all(...args, entity.id, ...fallbackArgs, maxResults) as Array<{
+				.all(...args, entity.id, ...fallbackArgs, maxResults) as unknown as Array<{
 				id: string;
 				content: string;
 				session_key: string | null;

@@ -119,7 +119,7 @@ export function mountMcpAnalyticsRoutes(app: Hono): void {
 					 FROM mcp_invocations WHERE ${where}
 					 GROUP BY server_id ORDER BY count DESC LIMIT ?`,
 					)
-					.all(...params, limit) as ServerStats[];
+					.all(...params, limit) as unknown as ServerStats[];
 
 				// Top tools
 				const topTools = db
@@ -130,12 +130,12 @@ export function mountMcpAnalyticsRoutes(app: Hono): void {
 					 FROM mcp_invocations WHERE ${where}
 					 GROUP BY tool_name ORDER BY count DESC LIMIT ?`,
 					)
-					.all(...params, limit) as ToolStats[];
+					.all(...params, limit) as unknown as ToolStats[];
 
 				// Latency percentiles
 				const latencies = db
 					.prepare(`SELECT latency_ms FROM mcp_invocations WHERE ${where} ORDER BY latency_ms`)
-					.all(...params) as readonly { latency_ms: number }[];
+					.all(...params) as unknown as readonly { latency_ms: number }[];
 
 				const sorted = latencies.map((r) => r.latency_ms);
 				const p50 = computePercentile(sorted, 50);
@@ -195,7 +195,7 @@ export function mountMcpAnalyticsRoutes(app: Hono): void {
 					 FROM mcp_invocations WHERE ${where}
 					 GROUP BY tool_name ORDER BY count DESC`,
 					)
-					.all(...params) as ToolStats[];
+					.all(...params) as unknown as ToolStats[];
 
 				// 7-day timeline (daily buckets, zero-filled)
 				const timelineCutoff = since ? "datetime(?)" : "datetime('now', '-7 days')";

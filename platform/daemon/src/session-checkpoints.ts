@@ -258,7 +258,7 @@ export function getCheckpointsBySession(db: DbAccessor, sessionKey: string): Rea
 				 WHERE session_key = ?
 				 ORDER BY created_at DESC, rowid DESC`,
 			)
-			.all(sessionKey) as CheckpointRow[];
+			.all(sessionKey) as unknown as CheckpointRow[];
 	});
 }
 
@@ -276,7 +276,7 @@ export function getCheckpointsByProject(
 				 ORDER BY created_at DESC, rowid DESC
 				 LIMIT ?`,
 			)
-			.all(projectNormalized, limit) as CheckpointRow[];
+			.all(projectNormalized, limit) as unknown as CheckpointRow[];
 	});
 }
 

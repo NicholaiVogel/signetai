@@ -93,7 +93,7 @@ export function registerReflectionRoutes(app: Hono, deps: ReflectionRouteDeps = 
 			const rows = resolveDbAccessor().withReadDb((db) => {
 				return db
 					.prepare("SELECT * FROM daily_reflections WHERE agent_id = ? AND date = ? ORDER BY created_at DESC LIMIT ?")
-					.all(agentId, date, limit) as ReflectionRow[];
+					.all(agentId, date, limit) as unknown as ReflectionRow[];
 			});
 
 			const reflections = rows.map(formatReflection);
@@ -119,7 +119,7 @@ export function registerReflectionRoutes(app: Hono, deps: ReflectionRouteDeps = 
                  ORDER BY created_at DESC
                  LIMIT ?`,
 					)
-					.all(agentId, limit) as ReflectionRow[];
+					.all(agentId, limit) as unknown as ReflectionRow[];
 			});
 
 			return c.json({ reflections: rows.map(formatReflection) });
@@ -165,7 +165,7 @@ export function registerReflectionRoutes(app: Hono, deps: ReflectionRouteDeps = 
 				.prepare(
 					`SELECT * FROM daily_reflections WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY created_at DESC`,
 				)
-				.all(...ids) as ReflectionRow[];
+				.all(...ids) as unknown as ReflectionRow[];
 		});
 
 		logger.info("reflections", "Generated daily brief questions", { agentId, date, count: rows.length });

@@ -123,7 +123,7 @@ export function constructContextBlocks(
 			`SELECT id, name, entity_type FROM entities
 			 WHERE id IN (${ph})`,
 		)
-		.all(...focalEntityIds) as EntityRow[];
+		.all(...focalEntityIds) as unknown as EntityRow[];
 
 	if (entities.length === 0) return [];
 
@@ -136,7 +136,7 @@ export function constructContextBlocks(
 				 WHERE entity_id = ? AND agent_id = ?
 				 ORDER BY weight DESC LIMIT 10`,
 			)
-			.all(ent.id, agentId) as AspectRow[];
+			.all(ent.id, agentId) as unknown as AspectRow[];
 
 		const lines: string[] = [];
 		const aspectIds: string[] = [];
@@ -151,7 +151,7 @@ export function constructContextBlocks(
 					   AND status = 'active' AND kind != 'constraint'
 					 ORDER BY importance DESC LIMIT 5`,
 				)
-				.all(asp.id, agentId) as AttributeRow[];
+				.all(asp.id, agentId) as unknown as AttributeRow[];
 
 			const values = attrs.map((a) => cleanValue(a.content)).filter((value) => !isNoise(value));
 			if (values.length === 0) continue;
@@ -175,7 +175,7 @@ export function constructContextBlocks(
 				   AND ea.kind = 'constraint' AND ea.status = 'active'
 				 ORDER BY ea.importance DESC LIMIT 10`,
 			)
-			.all(ent.id, agentId) as ConstraintRow[];
+			.all(ent.id, agentId) as unknown as ConstraintRow[];
 
 		const cleanConstraints = constraints.map((c) => cleanValue(c.content)).filter((value) => !isNoise(value));
 		if (cleanConstraints.length > 0) {
@@ -193,7 +193,7 @@ export function constructContextBlocks(
 				   AND ed.strength >= 0.3
 				 ORDER BY ed.strength DESC LIMIT 8`,
 			)
-			.all(ent.id, agentId) as DependencyRow[];
+			.all(ent.id, agentId) as unknown as DependencyRow[];
 
 		if (deps.length > 0) {
 			lines.push(`- Related: ${deps.map((d) => d.name).join(", ")}`);

@@ -55,7 +55,7 @@ export function listUnembeddedMemories(db: ReadDb, limit: number): ReadonlyArray
 			 ORDER BY m.created_at ASC
 			 LIMIT ?`,
 		)
-		.all(limit) as UnembeddedRow[];
+		.all(limit) as unknown as UnembeddedRow[];
 }
 
 export function listStaleEmbeddingRows(db: ReadDb, model: string, limit: number): ReadonlyArray<StaleEmbeddingRow> {
@@ -89,5 +89,5 @@ export function listStaleEmbeddingRows(db: ReadDb, model: string, limit: number)
 			 ORDER BY m.updated_at DESC
 			 LIMIT ?`,
 		)
-		.all(model, limit) as StaleEmbeddingRow[];
+		.all(model, limit) as unknown as StaleEmbeddingRow[];
 }

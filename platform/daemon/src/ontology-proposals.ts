@@ -1684,7 +1684,7 @@ function resolveEntityRefStrict(db: ReadDb, agentId: string, selector: string): 
 			   AND (id = ? OR COALESCE(canonical_name, LOWER(name)) = ? OR LOWER(name) = ?)
 			 ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, updated_at DESC, name ASC`,
 		)
-		.all(agentId, selector, key, key, selector) as DuplicateEntityRow[];
+		.all(agentId, selector, key, key, selector) as unknown as DuplicateEntityRow[];
 	if (rows.length === 0) throw new OntologyProposalError(`Entity not found: ${selector}`, 404);
 	if (rows.length > 1) throw new OntologyProposalError(`Entity selector is ambiguous: ${selector}. Use an id.`, 409);
 	return entityRowToRef(rows[0] as DuplicateEntityRow);
@@ -1929,7 +1929,7 @@ function duplicateMergeCandidates(
 			   AND COALESCE(status, 'active') = 'active'
 			 ORDER BY COALESCE(canonical_name, LOWER(name)), COALESCE(mentions, 0) DESC, updated_at DESC`,
 		)
-		.all(agentId) as DuplicateEntityRow[];
+		.all(agentId) as unknown as DuplicateEntityRow[];
 	const groups = new Map<string, DuplicateEntityRow[]>();
 	for (const row of rows) {
 		const key = canonical(row.canonical_name ?? row.name);

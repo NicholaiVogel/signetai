@@ -290,7 +290,7 @@ export function getDreamingPasses(accessor: DbAccessor, agentId: string, limit =
 				 ORDER BY created_at DESC
 				 LIMIT ?`,
 			)
-			.all(agentId, limit) as DreamingPassRow[];
+			.all(agentId, limit) as unknown as DreamingPassRow[];
 	});
 }
 
@@ -348,7 +348,7 @@ function fetchEntityGraph(
 			 ORDER BY mentions DESC, updated_at DESC
 			 LIMIT ?`,
 		)
-		.all(agentId, maxEntities) as EntityRow[];
+		.all(agentId, maxEntities) as unknown as EntityRow[];
 
 	const aspects = db
 		.prepare(
@@ -358,7 +358,7 @@ function fetchEntityGraph(
 			 ORDER BY ea.weight DESC
 			 LIMIT ?`,
 		)
-		.all(agentId, maxAspects) as AspectRow[];
+		.all(agentId, maxAspects) as unknown as AspectRow[];
 
 	const attributes = db
 		.prepare(
@@ -369,7 +369,7 @@ function fetchEntityGraph(
 			 ORDER BY ea.importance DESC
 			 LIMIT ?`,
 		)
-		.all(agentId, maxAttrs) as AttributeRow[];
+		.all(agentId, maxAttrs) as unknown as AttributeRow[];
 
 	const dependencies = db
 		.prepare(
@@ -381,7 +381,7 @@ function fetchEntityGraph(
 			 WHERE agent_id = ?
 			 LIMIT ?`,
 		)
-		.all(agentId, maxDeps) as DependencyRow[];
+		.all(agentId, maxDeps) as unknown as DependencyRow[];
 
 	return { entities, aspects, attributes, dependencies };
 }

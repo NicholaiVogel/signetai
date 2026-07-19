@@ -76,7 +76,7 @@ export function selectDueTasks(db: ReadDb, nowIso: string, limit: number): Reado
 			 ORDER BY t.next_run_at ASC
 			 LIMIT ?`,
 		)
-		.all(nowIso, limit) as ReadonlyArray<DueTaskRow>;
+		.all(nowIso, limit) as unknown as ReadonlyArray<DueTaskRow>;
 }
 
 export function resolveTaskModel(

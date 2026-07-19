@@ -1479,7 +1479,7 @@ export function recoverSummaryJobs(accessor: DbAccessor, limit: number = RECOVER
 				 ORDER BY created_at ASC
 				 LIMIT ?`,
 			)
-			.all(take) as SummaryJobRow[];
+			.all(take) as unknown as SummaryJobRow[];
 
 		if (rows.length === 0) {
 			return { selected: 0, updated: 0 };

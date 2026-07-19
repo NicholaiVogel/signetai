@@ -1258,7 +1258,7 @@ export async function deduplicateMemories(
 					   ${scopeFilter}
 					 ORDER BY importance DESC`,
 				)
-				.all(cluster.content_hash, ...scopeArgs) as DedupCandidate[];
+				.all(cluster.content_hash, ...scopeArgs) as unknown as DedupCandidate[];
 
 			const result = processCluster(db, candidates, ctx);
 			return result?.removed ?? 0;
@@ -1285,7 +1285,7 @@ export async function deduplicateMemories(
 						 FROM memories
 						 WHERE id IN (${placeholders}) AND is_deleted = 0`,
 					)
-					.all(...ids) as DedupCandidate[];
+					.all(...ids) as unknown as DedupCandidate[];
 
 				const result = processCluster(db, candidates, ctx);
 				return result?.removed ?? 0;
@@ -1481,7 +1481,7 @@ export async function reclassifyEntities(
 				 WHERE entity_type = 'extracted'
 				 LIMIT ?`,
 			)
-			.all(batchSize) as ExtractedEntity[];
+			.all(batchSize) as unknown as ExtractedEntity[];
 	});
 
 	if (entities.length === 0) {

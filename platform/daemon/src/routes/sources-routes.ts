@@ -682,7 +682,7 @@ function sourceOrphanChunks(source: SignetSourceEntry, agentId: string): number 
 				LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE,
 				chunkPrefix,
 				`${chunkPrefix}\uffff`,
-			) as SourceChunkHealthRow[];
+			) as unknown as SourceChunkHealthRow[];
 		return chunks.filter((chunk) => !sourceChunkMatchesLiveArtifact(source, chunk, livePaths)).length;
 	});
 }
@@ -706,7 +706,7 @@ function liveSourceArtifactPaths(db: ReadDb, source: SignetSourceEntry, agentId:
 					    )
 				    )`,
 			)
-			.all(agentId, source.id, rootPrefix, `${rootPrefix}\uffff`) as SourcePathHealthRow[];
+			.all(agentId, source.id, rootPrefix, `${rootPrefix}\uffff`) as unknown as SourcePathHealthRow[];
 		return new Set(rows.map((row) => normalizeSourcePath(row.source_path)));
 	}
 	const rows = db
@@ -717,7 +717,7 @@ function liveSourceArtifactPaths(db: ReadDb, source: SignetSourceEntry, agentId:
 			    AND source_id = ?
 			    AND COALESCE(is_deleted, 0) = 0`,
 		)
-		.all(agentId, source.id) as SourcePathHealthRow[];
+		.all(agentId, source.id) as unknown as SourcePathHealthRow[];
 	return new Set(rows.map((row) => normalizeSourcePath(row.source_path)));
 }
 
@@ -848,7 +848,7 @@ function discordHealthSummary(source: SignetSourceEntry, agentId: string): Disco
 				    AND source_kind IN ('source_discord_failure', 'source_discord_checkpoint')
 				    AND COALESCE(is_deleted, 0) = 0`,
 			)
-			.all(agentId, source.id) as DiscordHealthRow[];
+			.all(agentId, source.id) as unknown as DiscordHealthRow[];
 		let failures = 0;
 		let recoverable = 0;
 		let checkpoints = 0;

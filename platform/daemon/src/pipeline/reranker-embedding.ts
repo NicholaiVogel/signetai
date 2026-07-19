@@ -53,7 +53,7 @@ export function createEmbeddingReranker(accessor: DbAccessor, queryVector: Float
 					`SELECT source_id, vector FROM embeddings
 					 WHERE source_type = 'memory' AND source_id IN (${placeholders})`,
 				)
-				.all(...ids) as CachedEmbedding[];
+				.all(...ids) as unknown as CachedEmbedding[];
 
 			const map = new Map<string, Float32Array>();
 			for (const row of rows) {

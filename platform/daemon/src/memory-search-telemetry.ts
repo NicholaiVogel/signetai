@@ -320,7 +320,7 @@ export function listMemorySearchTelemetry(
 				 ORDER BY created_at DESC
 				 LIMIT ? OFFSET ?`,
 			)
-			.all(...args, limit, offset) as readonly MemorySearchTelemetryRow[];
+			.all(...args, limit, offset) as unknown as readonly MemorySearchTelemetryRow[];
 		return rows.map(rowToItem);
 	});
 }

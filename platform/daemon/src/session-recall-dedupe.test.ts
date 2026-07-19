@@ -121,7 +121,7 @@ const getDbAccessorSpy = spyOn(dbAccessor, "getDbAccessor").mockImplementation(
 	() =>
 		({
 			withWriteTx: <T>(fn: (db: typeof fakeDb) => T): T => fn(fakeDb),
-		}) as ReturnType<typeof dbAccessor.getDbAccessor>,
+		}) as unknown as ReturnType<typeof dbAccessor.getDbAccessor>,
 );
 
 const { advanceRecallContextEpoch, applyRecallDedupe, claimRecallItems } = await import("./session-recall-dedupe");

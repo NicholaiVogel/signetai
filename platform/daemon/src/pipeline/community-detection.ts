@@ -49,7 +49,7 @@ export function buildEntityGraph(db: ReadDb, agentId: string): UndirectedGraph {
 
 	const entities = db
 		.prepare("SELECT id, name, mentions FROM entities WHERE agent_id = ?")
-		.all(agentId) as ReadonlyArray<EntityRow>;
+		.all(agentId) as unknown as ReadonlyArray<EntityRow>;
 
 	for (const e of entities) {
 		graph.addNode(e.id, { name: e.name, mentions: e.mentions ?? 0 });
@@ -62,7 +62,7 @@ export function buildEntityGraph(db: ReadDb, agentId: string): UndirectedGraph {
 			 FROM entity_dependencies
 			 WHERE agent_id = ?`,
 		)
-		.all(agentId) as ReadonlyArray<DepRow>;
+		.all(agentId) as unknown as ReadonlyArray<DepRow>;
 
 	for (const d of deps) {
 		// Both endpoints must exist in the graph

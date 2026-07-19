@@ -292,7 +292,7 @@ export function scoreStructuredPathEvidence(
 			   AND e.agent_id = ?
 			   AND ea.status = 'active'`,
 		)
-		.all(...uniqueIds, agentId, agentId, agentId) as StructuredPathRow[];
+		.all(...uniqueIds, agentId, agentId, agentId) as unknown as StructuredPathRow[];
 
 	return scorePathRows(
 		rows.map((row) => ({ ...row, key: row.memory_id })),
@@ -402,7 +402,7 @@ export function findStructuredPathCandidates(
 			...(options.filterArgs ?? []),
 			...parsed.tokens.map((token) => `%${escapeLikeToken(token)}%`),
 			Math.max(options.limit * 8, options.limit),
-		) as StructuredPathRow[];
+		) as unknown as StructuredPathRow[];
 
 	const ids = [...new Set(rows.map((row) => row.memory_id))];
 	const scores = scoreStructuredPathEvidence(db, ids, query, agentId);
@@ -473,7 +473,7 @@ export function findStructuredClaimCandidates(
 			...parsed.tokens.map((token) => `%${escapeLikeToken(token)}%`),
 			...parsed.tokens.map((token) => `%${escapeLikeToken(token)}%`),
 			Math.max(options.limit * 32, 500),
-		) as StructuredClaimRow[];
+		) as unknown as StructuredClaimRow[];
 
 	const scores = scorePathRows(
 		rows.map((row) => ({ ...row, key: row.id })),

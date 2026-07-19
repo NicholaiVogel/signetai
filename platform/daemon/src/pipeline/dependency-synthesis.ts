@@ -71,7 +71,7 @@ function findStaleEntities(db: ReadDb, agentId: string, limit: number): readonly
 			 ORDER BY updated_at DESC
 			 LIMIT ?`,
 		)
-		.all(agentId, limit) as StaleEntity[];
+		.all(agentId, limit) as unknown as StaleEntity[];
 }
 
 function loadFacts(db: ReadDb, agentId: string, entityId: string, limit: number): readonly string[] {
@@ -98,7 +98,7 @@ function loadTopEntities(db: ReadDb, agentId: string, excludeId: string, limit: 
 			 ORDER BY mentions DESC
 			 LIMIT ?`,
 		)
-		.all(excludeId, agentId, limit) as GraphEntity[];
+		.all(excludeId, agentId, limit) as unknown as GraphEntity[];
 }
 
 function loadExistingTargets(db: ReadDb, agentId: string, entityId: string): ReadonlySet<string> {

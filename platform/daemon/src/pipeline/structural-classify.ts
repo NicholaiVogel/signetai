@@ -85,7 +85,7 @@ function leaseClassifyBatch(
 			 ORDER BY created_at ASC
 			 LIMIT ?`,
 		)
-		.all(maxAttempts, nowEpoch, entityId, maxBatch) as ClassifyJobRow[];
+		.all(maxAttempts, nowEpoch, entityId, maxBatch) as unknown as ClassifyJobRow[];
 
 	for (const row of rows) {
 		db.prepare(

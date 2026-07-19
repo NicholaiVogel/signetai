@@ -79,7 +79,7 @@ export async function checkAndCondense(
 				   AND id NOT IN (SELECT child_id FROM session_summary_children)
 				 ORDER BY created_at ASC`,
 			)
-			.all(project, agentId) as SummaryRow[];
+			.all(project, agentId) as unknown as SummaryRow[];
 	});
 
 	if (uncondensedSessions.length >= cfg.arcThreshold) {
@@ -99,7 +99,7 @@ export async function checkAndCondense(
 				   AND id NOT IN (SELECT child_id FROM session_summary_children)
 				 ORDER BY created_at ASC`,
 			)
-			.all(project, agentId) as SummaryRow[];
+			.all(project, agentId) as unknown as SummaryRow[];
 	});
 
 	if (uncondensedArcs.length >= cfg.epochThreshold) {

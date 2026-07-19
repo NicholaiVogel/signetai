@@ -78,11 +78,11 @@ export function querySkillAnalytics(
 			 ORDER BY count DESC, skillName ASC
 			 LIMIT ?`,
 		)
-		.all(...params, input.limit) as SkillStats[];
+		.all(...params, input.limit) as unknown as SkillStats[];
 
 	const latencies = db
 		.prepare(`SELECT si.latency_ms FROM skill_invocations si WHERE ${where} ORDER BY si.latency_ms`)
-		.all(...params) as readonly { latency_ms: number }[];
+		.all(...params) as unknown as readonly { latency_ms: number }[];
 
 	const sorted = latencies.map((row) => row.latency_ms);
 

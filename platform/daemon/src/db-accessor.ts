@@ -32,7 +32,7 @@ import {
 } from "@signet/core";
 import { loadMemoryConfig } from "./memory-config";
 
-const isBun = typeof (globalThis as Record<string, unknown>).Bun !== "undefined";
+const isBun = typeof (globalThis as unknown as Record<string, unknown>).Bun !== "undefined";
 const require = createRequire(import.meta.url);
 
 type SqliteStatement = {
@@ -136,7 +136,7 @@ function configurePragmas(db: SqliteDatabase): void {
 
 function toRecordOrUndefined(row: unknown): Record<string, unknown> | undefined {
 	if (typeof row !== "object" || row === null) return undefined;
-	return row as Record<string, unknown>;
+	return row as unknown as Record<string, unknown>;
 }
 
 function toMigrationDb(db: SqliteDatabase): {
@@ -308,7 +308,7 @@ export function resolveSqliteRuntimeConfig(opts?: {
 		opts?.set ??
 		((path: string) => {
 			if (typeof (Database as unknown as Record<string, unknown>).setCustomSQLite === "function") {
-				(Database as { setCustomSQLite(p: string): void }).setCustomSQLite(path);
+				(Database as unknown as { setCustomSQLite(p: string): void }).setCustomSQLite(path);
 			}
 		});
 	const agentsDir = opts?.agentsDir ?? resolveSqliteAgentsDir({ env });
@@ -850,7 +850,7 @@ function missingVecEmbeddingsRows(
 			 LEFT JOIN ${targetTable} v ON v.id = e.id
 			 WHERE v.id IS NULL AND e.dimensions = ?`,
 		)
-		.all(expectedDimensions) as Array<{ id: string; vector: Buffer }>;
+		.all(expectedDimensions) as unknown as Array<{ id: string; vector: Buffer }>;
 }
 
 function countSkippedVecEmbeddingsRows(db: SqliteDatabase, expectedDimensions: number): number {

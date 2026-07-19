@@ -163,7 +163,7 @@ function fetchMemoryRows(accessor: DbAccessor, ids: readonly string[], scope: De
 					...(scope.scope !== null
 						? [...ids, scope.agentId, scope.visibility, scope.scope]
 						: [...ids, scope.agentId, scope.visibility]),
-				) as CandidateMemory[],
+				) as unknown as CandidateMemory[],
 	);
 }
 

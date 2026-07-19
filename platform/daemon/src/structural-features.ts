@@ -95,7 +95,7 @@ export function getStructuralFeatures(
 				   ea.importance DESC,
 				   ea.created_at ASC`,
 			)
-			.all(...memoryIds, agentId) as ReadonlyArray<StructuralAttributeRow>;
+			.all(...memoryIds, agentId) as unknown as ReadonlyArray<StructuralAttributeRow>;
 
 		const byMemoryId = new Map<string, StructuralAttributeRow>();
 		for (const row of rows) {
@@ -166,7 +166,7 @@ export function buildCandidateFeatures(
 				 WHERE source_type = 'memory'
 				   AND source_id IN (${buildPlaceholders(candidateIds.length)})`,
 			)
-			.all(...candidateIds) as ReadonlyArray<{ source_id: string }>;
+			.all(...candidateIds) as unknown as ReadonlyArray<{ source_id: string }>;
 		return new Set(rows.map((row) => row.source_id));
 	});
 

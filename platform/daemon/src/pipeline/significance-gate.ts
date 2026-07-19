@@ -115,7 +115,7 @@ function countEntityOverlap(transcript: string, db: ReadDb, agentId: string): nu
 				`SELECT DISTINCT e.name FROM entities e
 				 WHERE e.agent_id = ? AND e.mentions >= 3`,
 			)
-			.all(agentId) as EntityNameRow[];
+			.all(agentId) as unknown as EntityNameRow[];
 	} catch {
 		// Table may not exist yet — let the gate pass
 		return -1;
@@ -157,7 +157,7 @@ function computeNovelty(transcript: string, db: ReadDb, agentId: string): number
 					 WHERE status = 'completed' AND agent_id = ?
 					 ORDER BY completed_at DESC LIMIT 5`,
 				)
-				.all(agentId) as TranscriptRow[];
+				.all(agentId) as unknown as TranscriptRow[];
 		} catch {
 			recentTranscripts = db
 				.prepare(
@@ -165,7 +165,7 @@ function computeNovelty(transcript: string, db: ReadDb, agentId: string): number
 					 WHERE status = 'completed'
 					 ORDER BY completed_at DESC LIMIT 5`,
 				)
-				.all() as TranscriptRow[];
+				.all() as unknown as TranscriptRow[];
 		}
 	} catch {
 		// Table missing or query failed — treat as novel

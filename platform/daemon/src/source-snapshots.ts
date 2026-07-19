@@ -116,7 +116,7 @@ export function exportSourceSnapshot(options: ExportSourceSnapshotOptions): Sour
 					    AND COALESCE(is_deleted, 0) = 0
 					  ORDER BY source_path ASC`,
 				)
-				.all(options.agentId, options.source.id) as ArtifactRow[]
+				.all(options.agentId, options.source.id) as unknown as ArtifactRow[]
 		).flatMap((row) => {
 			const artifact = artifactFromRow(row);
 			if (!includeLocalDiscord && isLocalDiscordArtifact(artifact)) {

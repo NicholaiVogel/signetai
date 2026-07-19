@@ -45,12 +45,14 @@ function startConnectorSync(connectorId: string, mode: "incremental" | "full"): 
 		typeof parsed !== "object" ||
 		parsed === null ||
 		!("provider" in parsed) ||
-		typeof (parsed as Record<string, unknown>).provider !== "string" ||
-		!(CONNECTOR_PROVIDERS as readonly string[]).includes((parsed as Record<string, unknown>).provider as string)
+		typeof (parsed as unknown as Record<string, unknown>).provider !== "string" ||
+		!(CONNECTOR_PROVIDERS as readonly string[]).includes(
+			(parsed as unknown as Record<string, unknown>).provider as string,
+		)
 	) {
 		return { status: "error", error: "Invalid connector config" };
 	}
-	const config = parsed as ConnectorConfig;
+	const config = parsed as unknown as ConnectorConfig;
 
 	if (config.provider !== "filesystem") {
 		return { status: "unsupported", provider: config.provider };
@@ -70,9 +72,9 @@ function startConnectorSync(connectorId: string, mode: "incremental" | "full"): 
 					typeof cursorParsed === "object" &&
 					cursorParsed !== null &&
 					"lastSyncAt" in cursorParsed &&
-					typeof (cursorParsed as Record<string, unknown>).lastSyncAt === "string"
+					typeof (cursorParsed as unknown as Record<string, unknown>).lastSyncAt === "string"
 				) {
-					incrementalCursor = cursorParsed as SyncCursor;
+					incrementalCursor = cursorParsed as unknown as SyncCursor;
 				} else {
 					incrementalCursor = { lastSyncAt: new Date(0).toISOString() };
 				}
@@ -128,7 +130,7 @@ export function registerConnectorRoutes(app: Hono): void {
 			const connectors = listConnectors(accessor);
 			return c.json({ connectors, count: connectors.length });
 		} catch (e) {
-			logger.error("connectors", "Failed to list", e as Error);
+			logger.error("connectors", "Failed to list", e as unknown as Error);
 			return c.json({ error: "Failed to list connectors" }, 500);
 		}
 	});
@@ -136,7 +138,7 @@ export function registerConnectorRoutes(app: Hono): void {
 	app.post("/api/connectors", async (c) => {
 		let body: Record<string, unknown>;
 		try {
-			body = (await c.req.json()) as Record<string, unknown>;
+			body = (await c.req.json()) as unknown as Record<string, unknown>;
 		} catch {
 			return c.json({ error: "Invalid JSON body" }, 400);
 		}
@@ -148,7 +150,9 @@ export function registerConnectorRoutes(app: Hono): void {
 
 		const displayName = typeof body.displayName === "string" ? body.displayName : provider;
 		const settings =
-			typeof body.settings === "object" && body.settings !== null ? (body.settings as Record<string, unknown>) : {};
+			typeof body.settings === "object" && body.settings !== null
+				? (body.settings as unknown as Record<string, unknown>)
+				: {};
 
 		try {
 			const accessor = getDbAccessor();
@@ -163,7 +167,7 @@ export function registerConnectorRoutes(app: Hono): void {
 			const id = registerConnector(accessor, config);
 			return c.json({ id }, 201);
 		} catch (e) {
-			logger.error("connectors", "Failed to register", e as Error);
+			logger.error("connectors", "Failed to register", e as unknown as Error);
 			return c.json({ error: "Failed to register connector" }, 500);
 		}
 	});
@@ -176,7 +180,7 @@ export function registerConnectorRoutes(app: Hono): void {
 			if (!connector) return c.json({ error: "Connector not found" }, 404);
 			return c.json(connector);
 		} catch (e) {
-			logger.error("connectors", "Failed to get connector", e as Error);
+			logger.error("connectors", "Failed to get connector", e as unknown as Error);
 			return c.json({ error: "Failed to get connector" }, 500);
 		}
 	});
@@ -279,7 +283,7 @@ export function registerConnectorRoutes(app: Hono): void {
 								`SELECT id FROM documents
 								 WHERE source_url LIKE ? ESCAPE '\\'`,
 							)
-							.all(escapeLikePrefix(rootPath)) as ReadonlyArray<{ id: string }>;
+							.all(escapeLikePrefix(rootPath)) as unknown as ReadonlyArray<{ id: string }>;
 					});
 					const now = new Date().toISOString();
 					for (const doc of docs) {
@@ -299,7 +303,7 @@ export function registerConnectorRoutes(app: Hono): void {
 			const removed = removeConnector(accessor, id);
 			return c.json({ deleted: removed });
 		} catch (e) {
-			logger.error("connectors", "Failed to remove", e as Error);
+			logger.error("connectors", "Failed to remove", e as unknown as Error);
 			return c.json({ error: "Failed to remove connector" }, 500);
 		}
 	});
@@ -336,7 +340,7 @@ export function registerConnectorRoutes(app: Hono): void {
 				documentCount: docCount,
 			});
 		} catch (e) {
-			logger.error("connectors", "Failed to get health", e as Error);
+			logger.error("connectors", "Failed to get health", e as unknown as Error);
 			return c.json({ error: "Failed to get connector health" }, 500);
 		}
 	});

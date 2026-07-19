@@ -181,7 +181,7 @@ function listTables(db: ReadDb): readonly SqliteMasterRow[] {
 			   AND name NOT LIKE '%_fts_config'
 			 ORDER BY name ASC`,
 		)
-		.all() as SqliteMasterRow[];
+		.all() as unknown as SqliteMasterRow[];
 }
 
 function readColumns(db: ReadDb, table: string): readonly DatabaseColumnInfo[] {

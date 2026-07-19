@@ -170,7 +170,7 @@ export function createTelemetryCollector(
 						 ORDER BY timestamp ASC
 						 LIMIT ?`,
 					)
-					.all(limit) as readonly {
+					.all(limit) as unknown as readonly {
 					id: string;
 					event: string;
 					timestamp: string;
@@ -179,9 +179,9 @@ export function createTelemetryCollector(
 
 				return rows.map((row) => ({
 					id: row.id,
-					event: row.event as TelemetryEventType,
+					event: row.event as unknown as TelemetryEventType,
 					timestamp: row.timestamp,
-					properties: JSON.parse(row.properties) as TelemetryProperties,
+					properties: JSON.parse(row.properties) as unknown as TelemetryProperties,
 				}));
 			});
 		} catch {
@@ -323,7 +323,7 @@ export function createTelemetryCollector(
 							 ORDER BY timestamp DESC
 							 LIMIT ?`,
 						)
-						.all(...params, limit) as readonly {
+						.all(...params, limit) as unknown as readonly {
 						id: string;
 						event: string;
 						timestamp: string;
@@ -332,9 +332,9 @@ export function createTelemetryCollector(
 
 					return rows.map((row) => ({
 						id: row.id,
-						event: row.event as TelemetryEventType,
+						event: row.event as unknown as TelemetryEventType,
 						timestamp: row.timestamp,
-						properties: JSON.parse(row.properties) as TelemetryProperties,
+						properties: JSON.parse(row.properties) as unknown as TelemetryProperties,
 					}));
 				});
 			} catch {

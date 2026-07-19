@@ -381,7 +381,7 @@ function getScopedIdempotencyMemoryId(
 			 WHERE idempotency_key = ? AND ${scoped.sql} AND is_deleted = 0
 			 LIMIT 1`,
 		)
-		.get(key, ...scoped.params) as RememberDedupeIdRow | undefined;
+		.get(key, ...scoped.params) as unknown as RememberDedupeIdRow | undefined;
 }
 
 function getScopedIdempotencyDedupeRow(
@@ -398,7 +398,7 @@ function getScopedIdempotencyDedupeRow(
 			 WHERE idempotency_key = ? AND ${scoped.sql} AND is_deleted = 0
 			 LIMIT 1`,
 		)
-		.get(key, ...scoped.params) as RememberDedupeRow | undefined;
+		.get(key, ...scoped.params) as unknown as RememberDedupeRow | undefined;
 }
 
 function getScopedSourceDedupeRow(
@@ -415,7 +415,7 @@ function getScopedSourceDedupeRow(
 			 WHERE source_type = ? AND source_id = ? AND ${scoped.sql} AND is_deleted = 0
 			 LIMIT 1`,
 		)
-		.get(sourceType, sourceId, ...scoped.params) as RememberDedupeRow | undefined;
+		.get(sourceType, sourceId, ...scoped.params) as unknown as RememberDedupeRow | undefined;
 }
 
 function getScopedContentHashMemoryId(
@@ -452,7 +452,7 @@ function getScopedContentHashDedupeRow(
 			 WHERE content_hash = ? AND ${scoped.sql} AND is_deleted = 0
 			 LIMIT 1`,
 		)
-		.get(contentHash, ...scoped.params) as RememberDedupeRow | undefined;
+		.get(contentHash, ...scoped.params) as unknown as RememberDedupeRow | undefined;
 }
 
 function getScopedChunkIdempotencyRows(
@@ -469,7 +469,7 @@ function getScopedChunkIdempotencyRows(
 				 FROM memories
 				 WHERE idempotency_key LIKE ? ESCAPE '\\' AND ${scoped.sql} AND is_deleted = 0`,
 			)
-			.all(`${escapeSqlLike(baseKey)}:chunk:%`, ...scoped.params) as RememberChunkDedupeRow[]
+			.all(`${escapeSqlLike(baseKey)}:chunk:%`, ...scoped.params) as unknown as RememberChunkDedupeRow[]
 	)
 		.filter((row) => chunkIdempotencyIndex(baseKey, row.idempotencyKey) !== null)
 		.sort((left, right) => {
@@ -487,7 +487,7 @@ function hasMemoriesSessionIdColumn(db: {
 	}
 
 	const result = (
-		db.prepare("PRAGMA table_info(memories)").all() as Array<{
+		db.prepare("PRAGMA table_info(memories)").all() as unknown as Array<{
 			name?: unknown;
 		}>
 	).some((column) => column.name === "session_id");
@@ -773,7 +773,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 
 			return c.json(result);
 		} catch (e) {
-			logger.error("memory", "Error loading memories", e as Error);
+			logger.error("memory", "Error loading memories", e as unknown as Error);
 			return c.json({
 				memories: [],
 				stats: { total: 0, withEmbeddings: 0, critical: 0 },
@@ -804,7 +804,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			);
 			return c.json({ memories });
 		} catch (e) {
-			logger.error("memory", "Error loading most-used memories", e as Error);
+			logger.error("memory", "Error loading most-used memories", e as unknown as Error);
 			return c.json({ memories: [] });
 		}
 	});
@@ -883,7 +883,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			});
 			return c.json({ agentId, minSessions, limit, ...slices });
 		} catch (e) {
-			logger.error("memory", "Error loading curator slices", e as Error);
+			logger.error("memory", "Error loading curator slices", e as unknown as Error);
 			return c.json({ error: "Failed to load curator slices" }, 500);
 		}
 	});
@@ -911,7 +911,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			);
 			return c.json(timeline);
 		} catch (e) {
-			logger.error("memory", "Error building memory timeline", e as Error);
+			logger.error("memory", "Error building memory timeline", e as unknown as Error);
 			return c.json(
 				{
 					error: "Failed to build memory timeline",
@@ -964,7 +964,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			});
 			return c.json({ items: rows });
 		} catch (e) {
-			logger.error("memory", "Error fetching review queue", e as Error);
+			logger.error("memory", "Error fetching review queue", e as unknown as Error);
 			return c.json({ error: "Failed to fetch review queue", items: [] }, 500);
 		}
 	});
@@ -1059,7 +1059,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 
 			return c.json({ results });
 		} catch (e) {
-			logger.error("memory", "Error searching memories", e as Error);
+			logger.error("memory", "Error searching memories", e as unknown as Error);
 			return c.json({ results: [], error: "Search failed" });
 		}
 	});
@@ -1088,7 +1088,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			});
 			return c.json({ ok: true, path });
 		} catch (e) {
-			logger.error("memory", "Failed to save Codex native memory note", e as Error);
+			logger.error("memory", "Failed to save Codex native memory note", e as unknown as Error);
 			return c.json({ error: "Failed to save Codex native memory note" }, 500);
 		}
 	});
@@ -1165,7 +1165,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		const temporalInputs = collectExplicitTemporalInputs(body);
 		if (temporalInputs.error) return c.json({ error: temporalInputs.error }, 400);
 		const scope = body.scope ?? null;
-		const rowProvenance = parseRememberRowProvenance(body as Record<string, unknown>);
+		const rowProvenance = parseRememberRowProvenance(body as unknown as Record<string, unknown>);
 		const agentId = resolveAgentId({ agentId: body.agentId, sessionKey: c.req.header("x-signet-session-key") });
 
 		// Scope check: in team/hybrid mode, verify the token allows writing
@@ -1636,7 +1636,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					});
 				}
 			}
-			logger.error("memory", "Failed to save memory", e as Error);
+			logger.error("memory", "Failed to save memory", e as unknown as Error);
 			return c.json({ error: "Failed to save memory" }, 500);
 		}
 
@@ -1917,7 +1917,9 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					   ${access.sql}
 					   ${projectSql}`,
 				)
-				.get(memoryId, ...access.args, ...(scopeProject ? [scopeProject] : [])) as Record<string, unknown> | undefined;
+				.get(memoryId, ...access.args, ...(scopeProject ? [scopeProject] : [])) as unknown as
+				| Record<string, unknown>
+				| undefined;
 		});
 
 		if (!row) {
@@ -1970,7 +1972,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					 ORDER BY created_at ASC
 					 LIMIT ?`,
 				)
-				.all(memoryId, limit) as Array<{
+				.all(memoryId, limit) as unknown as Array<{
 				id: string;
 				event: string;
 				old_content: string | null;
@@ -2054,7 +2056,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 
 		const isJobRow = (val: unknown): val is JobRow => {
 			if (!val || typeof val !== "object") return false;
-			const obj = val as Record<string, unknown>;
+			const obj = val as unknown as Record<string, unknown>;
 			return (
 				typeof obj.id === "string" &&
 				typeof obj.job_type === "string" &&
@@ -2960,7 +2962,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			});
 			return c.json(result);
 		} catch (e) {
-			logger.error("memory", "Recall failed", e as Error);
+			logger.error("memory", "Recall failed", e as unknown as Error);
 			return c.json({ error: "Recall failed", results: [] }, 500);
 		}
 	});
@@ -3028,7 +3030,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			});
 			return c.json(result);
 		} catch (e) {
-			logger.error("memory", "Search (recall alias) failed", e as Error);
+			logger.error("memory", "Search (recall alias) failed", e as unknown as Error);
 			return c.json({ error: "Recall failed", results: [] }, 500);
 		}
 	});
@@ -3092,7 +3094,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
         FROM memories
         WHERE id IN (${placeholders})
       `)
-						.all(...ids) as Array<{
+						.all(...ids) as unknown as Array<{
 						id: string;
 						content: string;
 						type: string;
@@ -3122,7 +3124,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 
 			return c.json({ results });
 		} catch (e) {
-			logger.error("memory", "Similarity search failed", e as Error);
+			logger.error("memory", "Similarity search failed", e as unknown as Error);
 			return c.json({ error: "Similarity search failed", results: [] }, 500);
 		}
 	});
@@ -3173,7 +3175,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					ORDER BY m.created_at DESC
 					LIMIT ? OFFSET ?
 				`)
-							.all(limit, offset) as EmbeddingRow[])
+							.all(limit, offset) as unknown as EmbeddingRow[])
 					: (db
 							.prepare(`
 					SELECT
@@ -3185,7 +3187,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					ORDER BY m.created_at DESC
 					LIMIT ? OFFSET ?
 				`)
-							.all(limit, offset) as EmbeddingRow[]);
+							.all(limit, offset) as unknown as EmbeddingRow[]);
 
 				return { total: totalRow?.count ?? 0, rows: rowData };
 			});
@@ -3227,7 +3229,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			}
 
 			return c.json({
-				error: (e as Error).message,
+				error: (e as unknown as Error).message,
 				embeddings: [],
 				count: 0,
 				total: 0,
@@ -3421,7 +3423,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 	app.post("/api/documents", async (c) => {
 		let body: Record<string, unknown>;
 		try {
-			body = (await c.req.json()) as Record<string, unknown>;
+			body = (await c.req.json()) as unknown as Record<string, unknown>;
 		} catch {
 			return c.json({ error: "Invalid JSON body" }, 400);
 		}
@@ -3478,7 +3480,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 							 WHERE source_url = ?
 							   AND status NOT IN ('failed', 'deleted')`,
 						)
-						.all(sourceUrl) as ReadonlyArray<{ id: string; status: string } & DocumentScopeRow>;
+						.all(sourceUrl) as unknown as ReadonlyArray<{ id: string; status: string } & DocumentScopeRow>;
 					const existing = candidates.find((candidate) =>
 						documentScopeMatches(candidate, {
 							agentId: scopedAgent.agentId,
@@ -3525,7 +3527,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			const jobId = enqueueDocumentIngestJob(accessor, id);
 			return c.json({ id, status: "queued", jobId: jobId ?? undefined }, 201);
 		} catch (e) {
-			logger.error("documents", "Failed to create document", e as Error);
+			logger.error("documents", "Failed to create document", e as unknown as Error);
 			return c.json({ error: "Failed to create document" }, 500);
 		}
 	});
@@ -3566,7 +3568,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 
 			return c.json({ ...result, limit, offset });
 		} catch (e) {
-			logger.error("documents", "Failed to list documents", e as Error);
+			logger.error("documents", "Failed to list documents", e as unknown as Error);
 			return c.json({ error: "Failed to list documents" }, 500);
 		}
 	});
@@ -3587,7 +3589,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			if (!doc) return c.json({ error: "Document not found" }, 404);
 			return c.json(doc);
 		} catch (e) {
-			logger.error("documents", "Failed to get document", e as Error);
+			logger.error("documents", "Failed to get document", e as unknown as Error);
 			return c.json({ error: "Failed to get document" }, 500);
 		}
 	});
@@ -3629,7 +3631,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			});
 			return c.json({ chunks, count: chunks.length });
 		} catch (e) {
-			logger.error("documents", "Failed to list chunks", e as Error);
+			logger.error("documents", "Failed to list chunks", e as unknown as Error);
 			return c.json({ error: "Failed to list chunks" }, 500);
 		}
 	});
@@ -3694,7 +3696,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				let removed = 0;
 				const linkedMemories = db
 					.prepare(linkedMemorySql)
-					.all(id, ...(enforceScope ? delScopeArgs : [])) as ReadonlyArray<{ memory_id: string }>;
+					.all(id, ...(enforceScope ? delScopeArgs : [])) as unknown as ReadonlyArray<{ memory_id: string }>;
 				for (const link of linkedMemories) {
 					const mem = db.prepare("SELECT is_deleted FROM memories WHERE id = ?").get(link.memory_id) as
 						| { is_deleted: number }
@@ -3734,7 +3736,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 
 			return c.json({ deleted: true, memoriesRemoved });
 		} catch (e) {
-			logger.error("documents", "Failed to delete document", e as Error);
+			logger.error("documents", "Failed to delete document", e as unknown as Error);
 			return c.json({ error: "Failed to delete document" }, 500);
 		}
 	});

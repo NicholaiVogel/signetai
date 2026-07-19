@@ -84,7 +84,7 @@ function leaseDependencyBatch(db: WriteDb, maxBatch: number, maxAttempts: number
 			 ORDER BY created_at ASC
 			 LIMIT ?`,
 		)
-		.all(maxAttempts, nowEpoch, maxBatch) as DependencyJobRow[];
+		.all(maxAttempts, nowEpoch, maxBatch) as unknown as DependencyJobRow[];
 
 	for (const row of rows) {
 		db.prepare(
@@ -179,7 +179,7 @@ function validateDependencyResults(parsed: unknown, factCount: number): readonly
 	const valid: DependencyResult[] = [];
 	for (const item of parsed) {
 		if (typeof item !== "object" || item === null) continue;
-		const obj = item as Record<string, unknown>;
+		const obj = item as unknown as Record<string, unknown>;
 
 		const i = typeof obj.i === "number" ? obj.i : -1;
 		if (i < 1 || i > factCount) continue;
@@ -216,7 +216,7 @@ async function processDependencyBatch(
 	const payloads: Array<DependencyPayload | null> = [];
 	for (const job of jobs) {
 		try {
-			payloads.push(JSON.parse(job.payload) as DependencyPayload);
+			payloads.push(JSON.parse(job.payload) as unknown as DependencyPayload);
 		} catch {
 			payloads.push(null);
 		}
@@ -237,7 +237,7 @@ async function processDependencyBatch(
 	for (let i = 0; i < payloads.length; i++) {
 		if (payloads[i] !== null) {
 			validIndices.push(i);
-			validPayloads.push(payloads[i] as DependencyPayload);
+			validPayloads.push(payloads[i] as unknown as DependencyPayload);
 		}
 	}
 	if (validPayloads.length === 0) return;
@@ -264,7 +264,7 @@ async function processDependencyBatch(
 				`SELECT name FROM entity_aspects
 				 WHERE entity_id = ? AND agent_id = ?`,
 			)
-			.all(validPayloads[0].entity_id, agentId) as readonly { name: string }[];
+			.all(validPayloads[0].entity_id, agentId) as unknown as readonly { name: string }[];
 		return rows.map((r) => r.name);
 	});
 
@@ -347,7 +347,7 @@ async function processDependencyBatch(
 						targetEntityId: targetEntity.id,
 						agentId,
 						aspectId: aspect.id,
-						dependencyType: result.dep_type as DependencyType,
+						dependencyType: result.dep_type as unknown as DependencyType,
 						strength: 0.5,
 						confidence: 0.7,
 						reason,

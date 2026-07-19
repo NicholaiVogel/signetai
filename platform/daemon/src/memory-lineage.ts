@@ -1582,7 +1582,7 @@ function buildLedger(agentId: string): ReadonlyArray<LedgerSession> {
 					   AND source_kind IN ('summary', 'transcript', 'compaction')
 					 ORDER BY COALESCE(ended_at, captured_at) DESC, captured_at DESC`,
 					)
-					.all(agentId) as ArtifactRow[],
+					.all(agentId) as unknown as ArtifactRow[],
 		);
 	} catch {
 		rows = [];

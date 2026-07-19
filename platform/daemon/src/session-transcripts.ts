@@ -575,7 +575,7 @@ export function searchTranscriptFallback(params: {
 						`ORDER BY CASE WHEN st.session_key = ? THEN 0 ELSE 1 END, CASE WHEN st.project = ? THEN 0 ELSE 1 END, ${seenExpr} DESC LIMIT ?`,
 					].join("\n"),
 				)
-				.all(...args) as TranscriptRow[];
+				.all(...args) as unknown as TranscriptRow[];
 		});
 		if (exactRows.length > 0) {
 			return exactRows
