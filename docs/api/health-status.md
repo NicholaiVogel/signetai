@@ -147,6 +147,35 @@ intentionally backing off for `overloadBackoffMs` between polls.
 use `GET /api/diagnostics/transcripts` for detailed artifact/audit diagnostics.
 Use `GET /api/inference/status` for the shared inference control plane status.
 
+As of the #901 release, `pipeline.queue` carries the per-queue counts
+(`memory`, `summary`, `extraction`) plus the oldest dead summary job and the
+last recorded provider error so operators can spot a backlog without
+querying SQLite. The shape is:
+
+```json
+"pipeline": {
+  "extraction": { "...": "..." },
+  "queue": {
+    "memory":     { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0 },
+    "summary":    { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 1667 },
+    "extraction": { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0 },
+    "oldestDeadSummary": {
+      "id": "sum-1234",
+      "harness": "claude-code",
+      "sessionKey": "session-abc",
+      "createdAt": "2026-07-18T05:00:00.000Z",
+      "attempts": 3,
+      "error": "..."
+    },
+    "lastProviderError": {
+      "at": "2026-07-18T10:00:00.000Z",
+      "message": "connection refused",
+      "provider": "ollama"
+    }
+  }
+}
+```
+
 
 ### GET /api/features
 
@@ -160,3 +189,106 @@ Returns all runtime feature flags.
   "anotherFeature": false
 }
 ```
+
+
+## Liveness & readiness probes
+
+Added in #901 so operators can wire the daemon into Kubernetes-style probes
+or any HTTP load balancer that distinguishes liveness from readiness.
+
+### GET /health/live
+
+No authentication required. Returns 200 whenever the process is alive and
+not shutting down. Use for liveness probes (restart on failure).
+
+**Response**
+
+```json
+{ "status": "alive", "uptime": 3600.5, "pid": 12345, "shuttingDown": false }
+```
+
+
+### GET /health/ready
+
+No authentication required. Returns 200 when the daemon is willing to
+serve traffic. Pulls out of rotation when any readiness criterion fails:
+
+- `shutting_down` — process is exiting.
+- `db_unavailable` — SQLite probe query fails.
+- `summary_dead_exceeded:<n>` — dead summary jobs ≥ 500.
+- `extraction_dead_exceeded:<n>` — dead extraction jobs ≥ 500.
+- `summary_oldest_pending_exceeded:<sec>s` — oldest pending summary
+  job ≥ 1800 s.
+
+Returns HTTP 503 with the `reasons` array populated when any criterion
+fails.
+
+**Response (ready)**
+
+```json
+{
+  "status": "ready",
+  "ready": true,
+  "db": true,
+  "queue": {
+    "summaryDead": 0,
+    "extractionDead": 0,
+    "summaryOldestPendingSec": 0
+  },
+  "reasons": []
+}
+```
+
+**Response (not ready)**
+
+```json
+{
+  "status": "not_ready",
+  "ready": false,
+  "db": true,
+  "queue": { "summaryDead": 1667, "extractionDead": 0, "summaryOldestPendingSec": 0 },
+  "reasons": ["summary_dead_exceeded:1667"]
+}
+```
+
+
+## Queue repair (issue #901)
+
+### POST /api/diagnostics/queue/repair
+
+Admin permission required. Runs one of the three queue repair actions
+(`requeue`, `cancel`, `prune`) with optional dry-run preview.
+
+**Request body**
+
+```json
+{
+  "action": "requeue" | "cancel" | "prune",
+  "dryRun": true,
+  "ids": ["job-id-1", "job-id-2"],
+  "tables": ["memory", "summary"],
+  "olderThanMs": 2592000000,
+  "errorPattern": "connection refused",
+  "reason": "operator triage",
+  "actor": "aaf2tbz"
+}
+```
+
+**Response**
+
+```json
+{
+  "action": "requeue",
+  "success": true,
+  "affected": 0,
+  "message": "dry-run: 1667 dead job(s) match; no rows mutated",
+  "preview": ["sum-1", "sum-2", "..."],
+  "totalMatching": 1667
+}
+```
+
+Use `dryRun: true` first to inspect the match before mutating. Pass
+`dryRun: false` (or omit) to apply. The action records a `repair_action`
+entry in `memory_history` regardless of dry-run so operators can audit
+what was previewed vs applied.
+
