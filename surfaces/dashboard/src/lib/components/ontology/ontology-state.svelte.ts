@@ -5,7 +5,6 @@
 
 import type {
 	ConstellationEntity,
-	ConstellationGraph,
 	KnowledgeAspectWithCounts,
 	KnowledgeAttribute,
 	KnowledgeDependencyEdge,
@@ -13,7 +12,6 @@ import type {
 	ProjectionResponse,
 } from "$lib/api";
 import {
-	type KnowledgeStats,
 	getConstellationOverlay,
 	getEmbeddings,
 	getKnowledgeAspects,
@@ -25,16 +23,15 @@ import {
 	getProjection,
 } from "$lib/api";
 import {
+	buildGraphFromConstellation,
 	DEFAULT_EDGE_FILTER,
 	DEFAULT_NODE_FILTER,
 	type OntologyEdge,
-	type OntologyEdgeKind,
 	type OntologyNode,
 	type OntologyNodeKind,
+	relatedIdsForEntity,
 	TABLE_EDGE_FILTER,
 	TABLE_NODE_FILTER,
-	buildGraphFromConstellation,
-	relatedIdsForEntity,
 } from "./ontology-data";
 
 export interface SelectedNode {
@@ -253,7 +250,7 @@ export async function loadEntityDetail(entityId: string, agentId = "default"): P
 
 let aspectGeneration = 0;
 
-export async function loadAspectDetail(aspectId: string, triggeredBy = aspectId, agentId = "default"): Promise<void> {
+export async function loadAspectDetail(aspectId: string, _triggeredBy = aspectId, agentId = "default"): Promise<void> {
 	const node = ontology.graphNodes.find((n) => n.id === aspectId && n.kind === "aspect");
 	if (!node?.parentId) return;
 

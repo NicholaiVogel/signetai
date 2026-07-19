@@ -5,8 +5,8 @@
  * (large text on its own line → heading, page breaks → section boundaries).
  */
 
-import { readFileSync } from "fs";
-import { basename } from "path";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import type { ParsedDocument, ParsedSection } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -51,15 +51,9 @@ export async function parsePdf(filePath: string): Promise<ParsedDocument> {
 
 		const buffer = readFileSync(filePath);
 		const parser = new PDFParse({ data: new Uint8Array(buffer) });
-
-		try {
-			const textResult = await parser.getText();
-			text = textResult.text || "";
-			numPages = textResult.total || 0;
-		} catch (textErr) {
-			// Some PDFs fail text extraction — try fallback
-			throw textErr;
-		}
+		const textResult = await parser.getText();
+		text = textResult.text || "";
+		numPages = textResult.total || 0;
 
 		try {
 			const infoResult = await parser.getInfo();
@@ -128,7 +122,7 @@ export async function parsePdf(filePath: string): Promise<ParsedDocument> {
  * 2. Lines that look like headings (short, possibly all caps, followed by content)
  * 3. Large gaps between paragraphs
  */
-function splitPdfText(text: string, numPages: number): ParsedSection[] {
+function splitPdfText(text: string, _numPages: number): ParsedSection[] {
 	const sections: ParsedSection[] = [];
 
 	// Split by page breaks first

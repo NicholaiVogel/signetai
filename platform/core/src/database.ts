@@ -9,8 +9,7 @@ import { dirname, join } from "node:path";
 import { arch, platform } from "node:process";
 import { fileURLToPath } from "node:url";
 import { runMigrations } from "./migrations/index";
-import type { Conversation, Embedding, Memory } from "./types";
-import type { MemoryHistory, MemoryJob } from "./types";
+import type { Memory, MemoryHistory, MemoryJob } from "./types";
 
 // Compute __dirname at runtime so bun's bundler doesn't bake in a static path
 const __filename = fileURLToPath(import.meta.url);
@@ -187,7 +186,6 @@ export class Database {
 	private dbPath: string;
 	private db: SQLiteDatabase | null = null;
 	private options?: { readonly?: boolean };
-	private vecEnabled = false;
 
 	constructor(dbPath: string, options?: { readonly?: boolean }) {
 		this.dbPath = dbPath;
@@ -224,7 +222,7 @@ export class Database {
 		}
 
 		// Load sqlite-vec extension for vector search capabilities
-		this.vecEnabled = loadSqliteVec(this.db);
+		loadSqliteVec(this.db);
 
 		// Enable WAL mode (skip for readonly)
 		if (!this.options?.readonly) {

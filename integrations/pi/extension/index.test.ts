@@ -63,7 +63,6 @@ function makeTempDirInHome() {
 describe("loadConfig", () => {
 	it("defaults to enabled when no env var or config file exists", () => {
 		saveEnv("SIGNET_ENABLED", "PI_CODING_AGENT_DIR");
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.SIGNET_ENABLED;
 		process.env.PI_CODING_AGENT_DIR = makeTempDir(); // empty dir — no signet.json
 		expect(loadConfig().enabled).toBe(true);
@@ -91,7 +90,6 @@ describe("loadConfig", () => {
 		mkdirSync(join(dir, "extensions"), { recursive: true });
 		writeFileSync(join(dir, "extensions", "signet.json"), JSON.stringify({ enabled: false }));
 		process.env.PI_CODING_AGENT_DIR = dir;
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.SIGNET_ENABLED;
 		expect(loadConfig().enabled).toBe(false);
 	});
@@ -104,16 +102,13 @@ describe("loadConfig", () => {
 		// Express the path as ~/relative so tilde expansion is required
 		const rel = relative(homedir(), dir);
 		process.env.PI_CODING_AGENT_DIR = `~/${rel}`;
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.SIGNET_ENABLED;
 		expect(loadConfig().enabled).toBe(false);
 	});
 
 	it("reads config from persisted pi.json when PI_CODING_AGENT_DIR is unset", () => {
 		saveEnv("SIGNET_ENABLED", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME");
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.SIGNET_ENABLED;
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.PI_CODING_AGENT_DIR;
 
 		// Set XDG_CONFIG_HOME to an isolated temp dir so we don't touch the real config
@@ -135,9 +130,7 @@ describe("loadConfig", () => {
 
 	it("SIGNET_BYPASS=1 is not part of loadConfig (read at runtime)", () => {
 		saveEnv("SIGNET_ENABLED", "SIGNET_BYPASS", "PI_CODING_AGENT_DIR");
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.SIGNET_ENABLED;
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.PI_CODING_AGENT_DIR;
 		process.env.SIGNET_BYPASS = "1";
 		// loadConfig does not include bypass — it's checked at factory call time
@@ -434,13 +427,9 @@ describe("SignetPiExtension", () => {
 		for (const server of servers.splice(0)) {
 			server.stop();
 		}
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.SIGNET_ENABLED;
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.SIGNET_AGENT_ID;
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.SIGNET_DAEMON_URL;
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.SIGNET_BYPASS;
 	});
 

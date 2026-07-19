@@ -252,7 +252,7 @@ function migrateFromPython(
 			all(...args: unknown[]): Record<string, unknown>[];
 		};
 	},
-	schemaInfo: SchemaInfo,
+	_schemaInfo: SchemaInfo,
 ): number {
 	// Create backup of old data
 	const oldMemories = db
@@ -375,7 +375,7 @@ function migrateFromCliV1(
 			all(...args: unknown[]): Record<string, unknown>[];
 		};
 	},
-	schemaInfo: SchemaInfo,
+	_schemaInfo: SchemaInfo,
 ): number {
 	// Get old data
 	const oldMemories = db

@@ -6,7 +6,7 @@ let mockServer: ReturnType<typeof Bun.serve>;
 let port: number;
 
 // Track calls the mock client receives
-const calls: { method: string; args: unknown[] }[] = [];
+const _calls: { method: string; args: unknown[] }[] = [];
 let lastRecallBody: Record<string, unknown> | null = null;
 
 function mockClient(): SignetClient {

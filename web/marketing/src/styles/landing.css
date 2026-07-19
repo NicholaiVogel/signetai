@@ -30,7 +30,12 @@
 	content: "";
 	position: absolute;
 	inset: -12px -48px -14px -48px;
-	background: radial-gradient(ellipse at 50% 36%, rgba(6, 6, 8, 0.35) 0%, rgba(6, 6, 8, 0.12) 60%, rgba(6, 6, 8, 0) 90%);
+	background: radial-gradient(
+		ellipse at 50% 36%,
+		rgba(6, 6, 8, 0.35) 0%,
+		rgba(6, 6, 8, 0.12) 60%,
+		rgba(6, 6, 8, 0) 90%
+	);
 	filter: blur(4px);
 	pointer-events: none;
 	z-index: -1;
@@ -184,7 +189,10 @@
 	padding: 14px 18px;
 	position: relative;
 	gap: 12px;
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 4px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.08),
+		0 2px 4px rgba(0, 0, 0, 0.5),
+		0 0 0 1px rgba(255, 255, 255, 0.03);
 	width: max-content;
 	max-width: 100%;
 	border-radius: 0.5rem;
@@ -241,7 +249,9 @@
 	letter-spacing: 0.08em;
 	color: var(--color-text-muted);
 	cursor: pointer;
-	transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+	transition:
+		color var(--dur) var(--ease),
+		background var(--dur) var(--ease);
 	border-radius: 3px 3px 0 0;
 }
 .install-tab:hover {
@@ -368,7 +378,8 @@
 	transform: translateY(-50%);
 	width: 12px;
 	height: 12px;
-	background: linear-gradient(
+	background:
+		linear-gradient(
 			to right,
 			transparent 5px,
 			var(--color-text-bright) 5px,
@@ -481,7 +492,10 @@
 	background: var(--color-surface);
 	border: 1px solid var(--color-border-strong);
 	border-radius: 0.5rem;
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 4px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.08),
+		0 2px 4px rgba(0, 0, 0, 0.5),
+		0 0 0 1px rgba(255, 255, 255, 0.03);
 	overflow: hidden;
 }
 .secrets-demo-header {
@@ -714,7 +728,10 @@
 	border-radius: 0.5rem;
 	overflow: hidden;
 	position: relative;
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 4px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.08),
+		0 2px 4px rgba(0, 0, 0, 0.5),
+		0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 
 .code-tab-nav {
@@ -733,7 +750,9 @@
 	border: none;
 	cursor: pointer;
 	border-bottom: 2px solid transparent;
-	transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+	transition:
+		color var(--dur) var(--ease),
+		border-color var(--dur) var(--ease);
 }
 .code-tab:hover {
 	color: var(--color-text);
@@ -786,7 +805,10 @@
 	border-radius: 0.5rem;
 	position: relative;
 	transition: background-color var(--dur) var(--ease);
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 4px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.08),
+		0 2px 4px rgba(0, 0, 0, 0.5),
+		0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 .trust-card:hover {
 	background-color: var(--color-surface);
@@ -833,7 +855,10 @@
 	background: var(--color-surface);
 	border: 1px solid var(--color-border-strong);
 	position: relative;
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 4px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.08),
+		0 2px 4px rgba(0, 0, 0, 0.5),
+		0 0 0 1px rgba(255, 255, 255, 0.03);
 	border-radius: 0.5rem;
 	overflow: hidden;
 }
@@ -946,7 +971,9 @@
 	gap: 16px;
 	padding: 20px 24px;
 	border-right: 1px solid var(--color-border);
-	transition: background-color var(--dur) var(--ease), transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+	transition:
+		background-color var(--dur) var(--ease),
+		transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
 	position: relative;
 }
 .harness-item::before,
@@ -958,7 +985,9 @@
 	border-color: var(--color-text-bright);
 	border-style: solid;
 	opacity: 0;
-	transition: opacity 0.2s ease, transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+	transition:
+		opacity 0.2s ease,
+		transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
 	pointer-events: none;
 }
 .harness-item::before {
@@ -1269,7 +1298,11 @@
 	font-weight: 700;
 	line-height: 1.1;
 	letter-spacing: -0.02em;
-	background: linear-gradient(to bottom, var(--color-text-bright) 40%, color-mix(in srgb, var(--color-text-bright) 60%, transparent));
+	background: linear-gradient(
+		to bottom,
+		var(--color-text-bright) 40%,
+		color-mix(in srgb, var(--color-text-bright) 60%, transparent)
+	);
 	-webkit-background-clip: text;
 	-webkit-text-fill-color: transparent;
 	text-shadow: 0 0 40px rgba(255, 255, 255, 0.05);
@@ -1333,14 +1366,14 @@
 	padding: 16px 24px;
 	border-radius: 12px;
 	transition: all 0.4s var(--ease);
-	box-shadow: 
+	box-shadow:
 		0 4px 12px rgba(0, 0, 0, 0.3),
 		inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 .landing-page .hero-install .install-box:hover {
 	border-color: var(--color-accent);
 	transform: translateY(-2px) scale(1.01);
-	box-shadow: 
+	box-shadow:
 		0 12px 40px var(--color-highlight-dim),
 		0 0 0 1px var(--color-highlight-muted),
 		inset 0 1px 0 rgba(255, 255, 255, 0.1);
@@ -1816,12 +1849,7 @@
 	content: "";
 	position: absolute;
 	inset: 0;
-	background: linear-gradient(
-		to bottom,
-		transparent 0%,
-		rgba(200, 255, 0, 0.03) 50%,
-		transparent 100%
-	);
+	background: linear-gradient(to bottom, transparent 0%, rgba(200, 255, 0, 0.03) 50%, transparent 100%);
 	background-size: 100% 4px;
 	opacity: 0;
 	pointer-events: none;
@@ -1833,8 +1861,12 @@
 	animation: scanline-move 2s linear infinite;
 }
 @keyframes scanline-move {
-	from { background-position: 0 0; }
-	to { background-position: 0 100%; }
+	from {
+		background-position: 0 0;
+	}
+	to {
+		background-position: 0 100%;
+	}
 }
 /* Corner accent on hover */
 .cap-cell::after {
@@ -1852,7 +1884,9 @@
 	background: color-mix(in srgb, var(--color-surface) 60%, transparent);
 	border-color: var(--color-border-strong);
 	transform: translateY(-4px);
-	box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4), 0 0 0 1px var(--color-highlight-muted);
+	box-shadow:
+		0 12px 30px rgba(0, 0, 0, 0.4),
+		0 0 0 1px var(--color-highlight-muted);
 }
 .cap-cell:hover::after {
 	opacity: 1;

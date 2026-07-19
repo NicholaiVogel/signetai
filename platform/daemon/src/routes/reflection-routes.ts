@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { resolveDefaultBasePath } from "@signet/core";
 import type { Hono } from "hono";
 import { requirePermission } from "../auth";

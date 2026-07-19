@@ -10,14 +10,12 @@ const originalOpenClawConfig = process.env.OPENCLAW_CONFIG_PATH;
 
 afterEach(() => {
 	if (originalHome === undefined) {
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.HOME;
 	} else {
 		process.env.HOME = originalHome;
 	}
 
 	if (originalOpenClawConfig === undefined) {
-		// biome-ignore lint/performance/noDelete: assigning undefined to process.env stores the string "undefined"
 		delete process.env.OPENCLAW_CONFIG_PATH;
 	} else {
 		process.env.OPENCLAW_CONFIG_PATH = originalOpenClawConfig;

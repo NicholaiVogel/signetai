@@ -5,7 +5,6 @@ import type { HTMLAttributes } from "svelte/elements";
 import { SIDEBAR_WIDTH_MOBILE } from "./constants.js";
 import { useSidebar } from "./context.svelte.js";
 
-// biome-ignore lint/style/useConst: ref is rebound by bind:this.
 let {
 	ref = $bindable(null),
 	side = "left",

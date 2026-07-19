@@ -4,8 +4,6 @@
  * The ingestion pipeline: detect → parse → chunk → extract → store
  */
 
-import type { MemoryType } from "../types";
-
 // ---------------------------------------------------------------------------
 // Database abstraction (avoids `as` casts on the db parameter)
 // ---------------------------------------------------------------------------

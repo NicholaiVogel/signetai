@@ -8,12 +8,13 @@
 // On Windows, use node:child_process spawn with windowsHide to prevent
 // console window flashing. Bun.spawn doesn't support windowsHide.
 import { spawn as nodeSpawn } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { Readable } from "node:stream";
 import {
 	DEFAULT_PROVIDER_RATE_LIMIT,
+	defaultPipelineModel,
 	type LlmGenerateResult,
 	type LlmProvider,
 	type LlmUsage,
@@ -21,7 +22,6 @@ import {
 	OPENCODE_PIPELINE_SYSTEM_PROMPT,
 	type PipelineExtractionConfig,
 	type ProviderRateLimitConfig,
-	defaultPipelineModel,
 	resolveDefaultBasePath,
 } from "@signet/core";
 import { logger } from "../logger";
@@ -371,9 +371,10 @@ export function withRateLimit(provider: LlmProvider, config?: ProviderRateLimitC
  * Run an async function guarded by the global LLM concurrency semaphore.
  * Ensures no more than N concurrent LLM calls across all providers and workers.
  */
-function generateSignal(opts?: { readonly signal?: AbortSignal; readonly abortSignal?: AbortSignal }):
-	| AbortSignal
-	| undefined {
+function generateSignal(opts?: {
+	readonly signal?: AbortSignal;
+	readonly abortSignal?: AbortSignal;
+}): AbortSignal | undefined {
 	return opts?.signal ?? opts?.abortSignal;
 }
 
@@ -940,7 +941,7 @@ function createSterileCodexEnv(baseEnv: Record<string, string | undefined>): {
 	};
 }
 
-export type { LlmProvider, LlmGenerateResult } from "@signet/core";
+export type { LlmGenerateResult, LlmProvider } from "@signet/core";
 
 export type LlmProviderCallOptions = {
 	readonly timeoutMs?: number;
@@ -3383,7 +3384,7 @@ function selectLatestAssistantMessage(messages: readonly OpenCodeMessageResponse
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
 		const info = isRecord(message.info) ? message.info : null;
-		if (!info || info.role !== "assistant") continue;
+		if (info?.role !== "assistant") continue;
 		if (!hasUsableOpenCodeText(message)) continue;
 		return message;
 	}

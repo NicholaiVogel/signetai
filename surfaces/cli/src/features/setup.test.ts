@@ -3,15 +3,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	SIGNET_SECRETS_PLUGIN_ID,
-	type SetupDetection,
 	detectExistingSetup,
 	readGraphiqState,
+	type SetupDetection,
+	SIGNET_SECRETS_PLUGIN_ID,
 	updateGraphiqActiveProject,
 } from "@signet/core";
+import { setupWizard } from "./setup.js";
 import { detectedHarnessesForExistingSetup, runExistingSetupWizard } from "./setup-migrate.js";
 import type { SetupDeps } from "./setup-types.js";
-import { setupWizard } from "./setup.js";
 
 const NO_HARNESSES = {
 	claudeCode: false,
@@ -106,19 +106,16 @@ describe("setupWizard non-interactive harness hooks", () => {
 
 	afterEach(() => {
 		if (ORIGINAL_HOME === undefined) {
-			// biome-ignore lint/performance/noDelete: assigning undefined stores the string "undefined"
 			delete process.env.HOME;
 		} else {
 			process.env.HOME = ORIGINAL_HOME;
 		}
 		if (ORIGINAL_HERMES_REPO === undefined) {
-			// biome-ignore lint/performance/noDelete: assigning undefined stores the string "undefined"
 			delete process.env.HERMES_REPO;
 		} else {
 			process.env.HERMES_REPO = ORIGINAL_HERMES_REPO;
 		}
 		if (ORIGINAL_HERMES_HOME === undefined) {
-			// biome-ignore lint/performance/noDelete: assigning undefined stores the string "undefined"
 			delete process.env.HERMES_HOME;
 		} else {
 			process.env.HERMES_HOME = ORIGINAL_HERMES_HOME;
@@ -349,9 +346,7 @@ describe("setupWizard non-interactive harness hooks", () => {
 		mkdirSync(basePath, { recursive: true });
 		mkdirSync(join(root, ".hermes", "plugins", "memory"), { recursive: true });
 		process.env.HOME = root;
-		// biome-ignore lint/performance/noDelete: default ~/.hermes must be enough
 		delete process.env.HERMES_REPO;
-		// biome-ignore lint/performance/noDelete: default ~/.hermes must be enough
 		delete process.env.HERMES_HOME;
 
 		const detection = detectExistingSetup(basePath);

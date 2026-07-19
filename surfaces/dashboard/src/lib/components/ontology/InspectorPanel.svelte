@@ -10,7 +10,6 @@ import { loadAspectDetail, loadEntityDetail, ontology, selectNode } from "./onto
 interface Props {
 	agentId?: string;
 }
-// biome-ignore lint/style/useConst: Svelte props can update after initial mount.
 let { agentId = "default" }: Props = $props();
 
 // Load entity detail when entity or agentId changes

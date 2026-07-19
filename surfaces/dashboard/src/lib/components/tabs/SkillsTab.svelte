@@ -29,11 +29,7 @@ import { onMount } from "svelte";
 interface Props {
 	embedded?: boolean;
 	showViewTabs?: boolean;
-	onreviewrequest?: (payload: {
-		targetType: "skill";
-		targetId: string;
-		targetLabel: string;
-	}) => void | Promise<void>;
+	onreviewrequest?: (payload: { targetType: "skill"; targetId: string; targetLabel: string }) => void | Promise<void>;
 }
 
 const { embedded = false, showViewTabs = true, onreviewrequest }: Props = $props();

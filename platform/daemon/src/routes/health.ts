@@ -3,8 +3,8 @@ import { getDbAccessor } from "../db-accessor";
 import { getAllFeatureFlags } from "../feature-flags";
 import { getPipelineWorkerStatus } from "../pipeline";
 import { getResourceSnapshot } from "../resource-monitor";
-import { AGENTS_DIR, CURRENT_VERSION, PORT, shuttingDown } from "./state.js";
 import { getUpdateState } from "../update-system";
+import { AGENTS_DIR, CURRENT_VERSION, PORT, shuttingDown } from "./state.js";
 
 export function mountHealthRoutes(app: Hono): void {
 	app.get("/health", (c) => {

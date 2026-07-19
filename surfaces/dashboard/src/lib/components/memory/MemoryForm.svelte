@@ -48,7 +48,7 @@ const knownTypes = [
 ] as const;
 
 // Track last initialised ID to avoid re-init on same memory
-let lastInitializedId: string | undefined | null = undefined;
+let lastInitializedId: string | undefined | null;
 
 $effect(() => {
 	if (open && editing) {

@@ -297,23 +297,26 @@ function readTextFileOrStdin(path: string): string {
 }
 
 function readOperationJsonl(path: string): readonly Record<string, unknown>[] {
-	return readTextFileOrStdin(path)
+	const lines = readTextFileOrStdin(path)
 		.split(/\r?\n/)
 		.map((line) => line.trim())
-		.filter((line) => line.length > 0)
-		.map((line, index) => {
-			try {
-				const parsed: unknown = JSON.parse(line);
-				if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-					return parsed as Record<string, unknown>;
-				}
-				throw new Error("line is not an object");
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				console.error(chalk.red(`Invalid JSONL operation on line ${index + 1}: ${message}`));
-				process.exit(1);
+		.filter((line) => line.length > 0);
+	const operations: Record<string, unknown>[] = [];
+	for (const [index, line] of lines.entries()) {
+		try {
+			const parsed: unknown = JSON.parse(line);
+			if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+				operations.push(parsed as Record<string, unknown>);
+				continue;
 			}
-		});
+			throw new Error("line is not an object");
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.error(chalk.red(`Invalid JSONL operation on line ${index + 1}: ${message}`));
+			process.exit(1);
+		}
+	}
+	return operations;
 }
 
 function proposalInput(
@@ -1703,7 +1706,7 @@ export function registerOntologyCommands(program: Command, deps: OntologyDeps): 
 		.command("config")
 		.description("Show graph-related Pipeline V2 config")
 		.option("--json", "Output as JSON")
-		.action(async (options) => {
+		.action(async (_options) => {
 			if (!(await deps.ensureDaemonForSecrets())) return;
 			const status = asRecord(await apiGet(deps, "/api/status", new URLSearchParams()));
 			const pipe = asRecord(status.pipelineV2);

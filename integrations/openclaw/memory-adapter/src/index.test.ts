@@ -1837,7 +1837,13 @@ describe("registration guard (#422)", () => {
 
 		expect(lastHeartbeatBody).toMatchObject({
 			pluginVersion: "test-plugin",
-			hooksRegistered: ["before_prompt_build", "before_agent_start", "agent_end", "before_compaction", "after_compaction"],
+			hooksRegistered: [
+				"before_prompt_build",
+				"before_agent_start",
+				"agent_end",
+				"before_compaction",
+				"after_compaction",
+			],
 		});
 	});
 

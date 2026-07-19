@@ -58,7 +58,7 @@ export function registerPluginRoutes(app: Hono, host: PluginHostV1 = getDefaultP
 	});
 }
 
-async function readJsonObject(req: Request): Promise<Record<string, unknown> | null> {
+async function _readJsonObject(req: Request): Promise<Record<string, unknown> | null> {
 	const raw = await req.text();
 	if (!raw.trim()) return {};
 	try {

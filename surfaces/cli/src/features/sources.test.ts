@@ -74,7 +74,7 @@ describe("sources CLI features", () => {
 
 		await removeConfiguredSource(added.source.id, {
 			agentsDir: dir,
-			removeSourceFromDaemon: async (sourceId) => ({
+			removeSourceFromDaemon: async (_sourceId) => ({
 				ok: true,
 				purged: 12,
 				source: { name: "CLI Vault", root: vault },
@@ -213,7 +213,7 @@ describe("sources CLI features", () => {
 				agentsDir: dir,
 				importSourceSnapshotToDaemon: async (sourceId, snapshot, options) => ({
 					ok: true,
-					imported: sourceId === "discord:source" && options.includeLocalDiscord && !!snapshot ? 3 : 0,
+					imported: sourceId === "discord:source" && options.includeLocalDiscord && snapshot ? 3 : 0,
 					skippedLocalDiscordArtifacts: 0,
 				}),
 			},

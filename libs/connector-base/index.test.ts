@@ -5,10 +5,10 @@ import { join, relative, resolve } from "node:path";
 import {
 	BaseConnector,
 	type InstallResult,
-	type UninstallResult,
 	removeManagedExtensionFile,
 	resolveSignetDaemonUrl,
 	resolveSignetWorkspacePath,
+	type UninstallResult,
 } from "./src/index";
 
 class TestConnector extends BaseConnector {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { type Server, createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -162,10 +162,7 @@ interface ConnectorReleaseServer {
 	readonly version: string;
 }
 
-async function serveConnectorRelease(
-	connectorTarball: Buffer,
-	version: string,
-): Promise<ConnectorReleaseServer> {
+async function serveConnectorRelease(connectorTarball: Buffer, version: string): Promise<ConnectorReleaseServer> {
 	const sha256 = createHash("sha256").update(connectorTarball).digest("hex");
 	const manifest = JSON.stringify({
 		schemaVersion: 1,
@@ -181,10 +178,7 @@ async function serveConnectorRelease(
 	});
 
 	const server = createServer((req, res) => {
-		if (
-			req.url === "/download/native-manifest.json" ||
-			req.url === `/download/v${version}/native-manifest.json`
-		) {
+		if (req.url === "/download/native-manifest.json" || req.url === `/download/v${version}/native-manifest.json`) {
 			res.writeHead(200, { "Content-Type": "application/json" });
 			res.end(manifest);
 			return;
@@ -224,10 +218,7 @@ function buildFakeConnectorTarball(): Buffer {
 	tempDirs.push(stage);
 	const pluginDir = join(stage, "runtime", "connectors", "hermes-agent", "hermes-plugin");
 	mkdirSync(pluginDir, { recursive: true });
-	writeFileSync(
-		join(pluginDir, "__init__.py"),
-		"\"\"\"Smoke test plugin for issue #831 connector install path.\"\"\"\n",
-	);
+	writeFileSync(join(pluginDir, "__init__.py"), '"""Smoke test plugin for issue #831 connector install path."""\n');
 	writeFileSync(join(pluginDir, "plugin.yaml"), "name: signet\nversion: 1.0.0\n");
 	const tarballPath = join(stage, "out.tar.gz");
 	const tar = spawnSync(
@@ -301,11 +292,10 @@ describe("native install smoke", () => {
 		writeFileSync(nativePackageBin, "");
 		chmodSync(nativePackageBin, 0o755);
 
-		const result = await runCommand(
-			"node",
-			[join(packageDir, "scripts", "install-native.js")],
-			{ ...process.env, SIGNET_DOWNLOAD_BASE: release.downloadBase },
-		);
+		const result = await runCommand("node", [join(packageDir, "scripts", "install-native.js")], {
+			...process.env,
+			SIGNET_DOWNLOAD_BASE: release.downloadBase,
+		});
 
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("Installed connector assets to");
@@ -314,21 +304,13 @@ describe("native install smoke", () => {
 		// This is the path the binary's `$SIGNET_DIR/runtime/connectors/...`
 		// lookup resolves to, and the layout the connector's
 		// `getPluginSourceDir()` expects.
-		const extractedDir = join(
-			packageDir,
-			"runtime",
-			"connectors",
-			"hermes-agent",
-			"hermes-plugin",
-		);
+		const extractedDir = join(packageDir, "runtime", "connectors", "hermes-agent", "hermes-plugin");
 		expect(existsSync(join(extractedDir, "__init__.py"))).toBe(true);
 		expect(existsSync(join(extractedDir, "plugin.yaml"))).toBe(true);
-		expect(
-			readFileSync(join(extractedDir, "__init__.py"), "utf8"),
-		).toContain("Smoke test plugin for issue #831");
-		expect(
-			readFileSync(join(packageDir, "runtime", "connectors", ".signet-connectors-version"), "utf8").trim(),
-		).toBe(version);
+		expect(readFileSync(join(extractedDir, "__init__.py"), "utf8")).toContain("Smoke test plugin for issue #831");
+		expect(readFileSync(join(packageDir, "runtime", "connectors", ".signet-connectors-version"), "utf8").trim()).toBe(
+			version,
+		);
 	});
 
 	test("postinstall rejects a tarball whose SHA-256 does not match the manifest", async () => {
@@ -339,10 +321,7 @@ describe("native install smoke", () => {
 		// Serve a manifest with a wrong SHA so verification must fail.
 		const wrongSha = "0".repeat(64);
 		const server = createServer((req, res) => {
-			if (
-				req.url === "/download/native-manifest.json" ||
-				req.url === `/download/v${version}/native-manifest.json`
-			) {
+			if (req.url === "/download/native-manifest.json" || req.url === `/download/v${version}/native-manifest.json`) {
 				res.writeHead(200, { "Content-Type": "application/json" });
 				res.end(
 					JSON.stringify({
@@ -417,11 +396,10 @@ describe("native install smoke", () => {
 		writeFileSync(nativePackageBin, "");
 		chmodSync(nativePackageBin, 0o755);
 
-		const result = await runCommand(
-			"node",
-			[join(packageDir, "scripts", "install-native.js")],
-			{ ...process.env, SIGNET_DOWNLOAD_BASE: `http://127.0.0.1:${address.port}/download` },
-		);
+		const result = await runCommand("node", [join(packageDir, "scripts", "install-native.js")], {
+			...process.env,
+			SIGNET_DOWNLOAD_BASE: `http://127.0.0.1:${address.port}/download`,
+		});
 
 		expect(result.status).not.toBe(0);
 		expect(result.stderr).toContain("SHA-256 mismatch");

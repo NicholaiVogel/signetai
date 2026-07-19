@@ -5,7 +5,7 @@
  * Two modes: local (sidebar, depth-1 neighbors) and global (modal, all nodes).
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { drag as d3drag } from "d3-drag";
 import {
 	forceCenter,
 	forceCollide,
@@ -18,7 +18,7 @@ import {
 } from "d3-force";
 import { select } from "d3-selection";
 import { zoom as d3zoom, type ZoomBehavior } from "d3-zoom";
-import { drag as d3drag } from "d3-drag";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ─── types ───────────────────────────────────────────────────────────
 
@@ -133,7 +133,7 @@ export default function GraphViewer({ currentSlug, collection, mode = "local" }:
 		const rect = container.getBoundingClientRect();
 		const width = rect.width;
 		const height = activeMode === "global" ? Math.min(600, window.innerHeight * 0.7) : 280;
-		const padding = 30;
+		const _padding = 30;
 
 		canvas.width = width * dpr;
 		canvas.height = height * dpr;
@@ -146,17 +146,18 @@ export default function GraphViewer({ currentSlug, collection, mode = "local" }:
 
 		// ─── Colors ──────────────────────────────────────────────
 		const isLocal = activeMode === "local";
-		const accentColor = getComputedStyle(document.documentElement).getPropertyValue("--color-accent").trim() || "#c8ff00";
+		const accentColor =
+			getComputedStyle(document.documentElement).getPropertyValue("--color-accent").trim() || "#c8ff00";
 
 		// Node colors by role
-		const COL_CURRENT = accentColor; 
-		const COL_DOC = "#8b8b94"; 
-		const COL_BLOG = "#a0a0aa"; 
-		const COL_LINK = "rgba(255,255,255,0.06)"; 
-		const COL_LINK_HIGHLIGHT = "rgba(200,255,0,0.25)"; 
+		const COL_CURRENT = accentColor;
+		const COL_DOC = "#8b8b94";
+		const COL_BLOG = "#a0a0aa";
+		const COL_LINK = "rgba(255,255,255,0.06)";
+		const COL_LINK_HIGHLIGHT = "rgba(200,255,0,0.25)";
 		const COL_LABEL = "#f0f0f2";
 		const COL_LABEL_MUTED = "#6b6b73";
-		const COL_GLOW = "rgba(200,255,0,0.08)"; 
+		const COL_GLOW = "rgba(200,255,0,0.08)";
 
 		// Build adjacency for hover highlighting
 		const adjacency = new Map<string, Set<string>>();
@@ -429,8 +430,20 @@ export default function GraphViewer({ currentSlug, collection, mode = "local" }:
 			</div>
 
 			{globalOpen && (
-				<div className="graph-modal-backdrop" onClick={() => setGlobalOpen(false)}>
-					<div className="graph-modal" onClick={(e) => e.stopPropagation()}>
+				/* biome-ignore lint/a11y/useSemanticElements: fullscreen backdrop cannot be a <button> because it wraps the modal content */
+				<div
+					className="graph-modal-backdrop"
+					role="button"
+					tabIndex={-1}
+					aria-label="Close graph modal"
+					onClick={(e) => {
+						if (e.target === e.currentTarget) setGlobalOpen(false);
+					}}
+					onKeyDown={(e) => {
+						if (e.key === "Escape") setGlobalOpen(false);
+					}}
+				>
+					<div className="graph-modal">
 						<div className="graph-modal-header">
 							<span className="graph-title">Knowledge Graph</span>
 							<span className="graph-count">{Object.keys(data).length} pages</span>

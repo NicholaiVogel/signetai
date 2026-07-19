@@ -11,8 +11,8 @@ import { runMigrations } from "../../../core/src/migrations";
 import { normalizeAndHashContent } from "../content-normalization";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { syncVecInsert, vectorToBlob } from "../db-helpers";
-import { DEFAULT_PIPELINE_V2 } from "../memory-config";
 import type { PipelineV2Config } from "../memory-config";
+import { DEFAULT_PIPELINE_V2 } from "../memory-config";
 import type { DecisionConfig } from "./decision";
 import { ClaudeCodeCircuitOpenError, type LlmProvider, RateLimitExceededError } from "./provider";
 import { enqueueExtractionJob, recoverMemoryJobs, startWorker } from "./worker";
@@ -167,7 +167,7 @@ function goodProvider(): LlmProvider {
  * Simulates LLM returning nothing useful (e.g., error was caught inside
  * extractFactsAndEntities and returned as warnings).
  */
-function emptyProvider(): LlmProvider {
+function _emptyProvider(): LlmProvider {
 	return {
 		name: "mock-empty",
 		async generate() {

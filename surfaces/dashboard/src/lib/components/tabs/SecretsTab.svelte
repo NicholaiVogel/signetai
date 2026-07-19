@@ -45,7 +45,6 @@ let onePasswordConnecting = $state(false);
 let onePasswordDisconnecting = $state(false);
 let onePasswordImporting = $state(false);
 let selectedVaultIds = $state<string[]>([]);
-// biome-ignore lint/style/useConst: Svelte markup assignments mutate this rune.
 let onePasswordExpanded = $state(false);
 
 let focusedSecretIndex = $state(-1);

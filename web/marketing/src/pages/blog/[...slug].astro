@@ -1,7 +1,5 @@
 ---
 import { getCollection, render } from "astro:content";
-import Blog from "../../layouts/Blog.astro";
-import StructuredData from "../../components/StructuredData.astro";
 
 export async function getStaticPaths() {
 	const posts = await getCollection("blog");
@@ -22,21 +20,21 @@ const allPosts = (await getCollection("blog"))
 	.sort((a, b) => a.data.date.getTime() - b.data.date.getTime());
 
 const currentIndex = allPosts.findIndex((p) => p.id === post.id);
-const previousPost =
+const _previousPost =
 	currentIndex > 0
 		? { title: allPosts[currentIndex - 1].data.title, url: `/blog/${allPosts[currentIndex - 1].id}/` }
 		: undefined;
-const nextPost =
+const _nextPost =
 	currentIndex < allPosts.length - 1
 		? { title: allPosts[currentIndex + 1].data.title, url: `/blog/${allPosts[currentIndex + 1].id}/` }
 		: undefined;
 
 const siteUrl = Astro.site?.toString().replace(/\/$/, "") ?? "https://signetai.sh";
-const pageUrl = `${siteUrl}/blog/${post.id}/`;
+const _pageUrl = `${siteUrl}/blog/${post.id}/`;
 
 // Recommended posts: score by shared tags, sort by score then date
 const currentTags = new Set(post.data.tags);
-const recommended = allPosts
+const _recommended = allPosts
 	.filter((p) => p.id !== post.id)
 	.map((p) => ({
 		post: p,

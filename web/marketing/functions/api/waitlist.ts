@@ -20,7 +20,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 		const body = (await context.request.json()) as { email?: string };
 		const email = body.email?.trim().toLowerCase();
 
-		if (!email || !email.includes("@")) {
+		if (!email?.includes("@")) {
 			return new Response(JSON.stringify({ error: "Invalid email" }), {
 				status: 400,
 				headers,

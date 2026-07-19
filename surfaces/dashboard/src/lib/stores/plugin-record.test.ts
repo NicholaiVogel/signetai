@@ -1,8 +1,8 @@
-// @ts-nocheck
 import { describe, expect, it } from "bun:test";
+import type { PluginRegistryRecord } from "$lib/api";
 import { mergePluginRecord } from "./plugin-record";
 
-const base = {
+const base: PluginRegistryRecord = {
 	id: "signet.secrets",
 	name: "Signet Secrets",
 	version: "1.0.0",

@@ -40,14 +40,20 @@ function escapeHtml(s: string): string {
 }
 
 const ANSI_COLORS: Record<string, string> = {
-	"31": "var(--sig-error, #ef4444)",
-	"32": "var(--sig-success)",
-	"33": "var(--sig-warning, #e8a832)",
-	"90": "var(--sig-text-muted)",
-	"36": "var(--sig-accent)",
-	"34": "var(--sig-highlight)",
-	"35": "var(--sig-accent)",
+	31: "var(--sig-error, #ef4444)",
+	32: "var(--sig-success)",
+	33: "var(--sig-warning, #e8a832)",
+	90: "var(--sig-text-muted)",
+	36: "var(--sig-accent)",
+	34: "var(--sig-highlight)",
+	35: "var(--sig-accent)",
 };
+
+// Build via String.fromCharCode so the escape byte is explicit: a regex literal
+// trips noControlCharactersInRegex, and a static RegExp string trips useRegexLiterals.
+const ANSI_ESC = String.fromCharCode(0x1b);
+const ANSI_BLOCK_PATTERN = new RegExp(`${ANSI_ESC}\\[(\\d+(?:;\\d+)*)m([\\s\\S]*?)${ANSI_ESC}\\[0m`, "g");
+const ANSI_CODE_PATTERN = new RegExp(`${ANSI_ESC}\\[\\d+(?:;\\d+)*m`, "g");
 
 // INVARIANT: escapeHtml must run on the raw input before any HTML tags are
 // inserted. {@html} in the template relies on this — any future change that
@@ -57,7 +63,7 @@ function ansiToHtml(text: string): string {
 	// Match compound CSI sequences like \x1b[1;31m as well as simple \x1b[31m.
 	// For compound codes, prefer the last numeric segment as the color code and
 	// apply bold when "1" is present.
-	result = result.replace(/\x1b\[(\d+(?:;\d+)*)m([\s\S]*?)\x1b\[0m/g, (_, codes, content) => {
+	result = result.replace(ANSI_BLOCK_PATTERN, (_, codes, content) => {
 		const parts = codes.split(";");
 		const bold = parts.includes("1");
 		const color = parts.map((c: string) => ANSI_COLORS[c]).find(Boolean);
@@ -68,7 +74,7 @@ function ansiToHtml(text: string): string {
 	});
 	// Strip any remaining CSI sequences (including compound ones) that weren't
 	// wrapped above (e.g. codes with no matching reset).
-	return result.replace(/\x1b\[\d+(?:;\d+)*m/g, "");
+	return result.replace(ANSI_CODE_PATTERN, "");
 }
 
 function toLines(text: string | null): string[] {

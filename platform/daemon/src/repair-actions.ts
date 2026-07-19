@@ -22,11 +22,10 @@ import {
 	syncVecInsert,
 	vectorToBlob,
 } from "./db-helpers";
-import { type UnembeddedRow, countUnembeddedMemories, listUnembeddedMemories } from "./embedding-coverage";
+import { countUnembeddedMemories, listUnembeddedMemories, type UnembeddedRow } from "./embedding-coverage";
 import { classifyEntityQuality } from "./entity-quality";
 import { logger } from "./logger";
-import type { EmbeddingConfig } from "./memory-config";
-import type { PipelineV2Config } from "./memory-config";
+import type { EmbeddingConfig, PipelineV2Config } from "./memory-config";
 import { recoverStaleLeases } from "./pipeline/stale-leases";
 import { insertHistoryEvent } from "./transactions";
 
@@ -617,7 +616,7 @@ async function reembedMissingMemoriesBatch(
 				 WHERE source_type = 'memory' AND source_id = ?
 				   AND content_hash <> ?`,
 			).run(memory.id, contentHash);
-			const result = db
+			const _result = db
 				.prepare(
 					`INSERT INTO embeddings
 					 (id, content_hash, vector, dimensions, source_type,
@@ -2222,7 +2221,7 @@ export interface IntegrityCheckResult {
 export function integrityCheck(accessor: DbAccessor): IntegrityCheckResult {
 	return accessor.withReadDb((db) => {
 		const rows = db.prepare("PRAGMA integrity_check").all() as ReadonlyArray<Record<string, unknown>>;
-		const messages = rows.map((r) => String(r["integrity_check"] ?? ""));
+		const messages = rows.map((r) => String(r.integrity_check ?? ""));
 		if (messages.length === 1 && messages[0] === "ok") {
 			return { ok: true, messages: [] };
 		}

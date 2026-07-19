@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	DEFAULT_PIPELINE_V2,
-	MAX_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
-	MIN_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
 	loadMemoryConfig,
 	loadPipelineConfig,
+	MAX_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
+	MIN_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
 	shouldWarnGraphExtractionWritesDisabled,
 } from "./memory-config";
 

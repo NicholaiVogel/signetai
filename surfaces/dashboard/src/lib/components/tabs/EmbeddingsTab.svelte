@@ -32,8 +32,8 @@ import { ActionLabels } from "$lib/ui/action-labels";
 import { ChevronDown } from "$lib/icons";
 import { tick } from "svelte";
 import { onMount } from "svelte";
-// biome-ignore lint/style/useImportType: Svelte component tags need value imports.
 import EmbeddingCanvas2D from "../embeddings/EmbeddingCanvas2D.svelte";
+import type EmbeddingCanvas3D from "../embeddings/EmbeddingCanvas3D.svelte";
 import EmbeddingInspector from "../embeddings/EmbeddingInspector.svelte";
 import {
 	DEFAULT_EMBEDDING_LIMIT,
@@ -112,7 +112,6 @@ let lensIds = $state<Set<string>>(new Set());
 let activePresetId = $state("focus");
 let customPresets = $state<FilterPreset[]>([]);
 let presetsHydrated = $state(false);
-// biome-ignore lint/style/useConst: Mutated by Svelte bind:open.
 let showAdvancedFilters = $state(false);
 let controlsMenuOpen = $state(true);
 let presetsMenuOpen = $state(false);
@@ -149,7 +148,6 @@ let selectedServerSourceTypes = $state<Set<string>>(new Set());
 let lastAppliedProjectionKey = $state("");
 let projectionReloadTimer = 0;
 
-// biome-ignore lint/style/useConst: Mutated from template callback.
 let relationMode = $state<RelationKind>("similar");
 let similarNeighbors = $state<EmbeddingRelation[]>([]);
 let dissimilarNeighbors = $state<EmbeddingRelation[]>([]);
@@ -185,24 +183,19 @@ let searchIndex = $state(new Map<string, string>());
 let relationLookup = $state(new Map<string, RelationKind>());
 let hoverLockedId = $state<string | null>(null);
 
-// biome-ignore lint/style/useConst: Mutated by bind:this.
 let graphRegion = $state<HTMLDivElement | null>(null);
-// biome-ignore lint/style/useConst: Mutated by bind:this.
 let hoverCardEl = $state<HTMLDivElement | null>(null);
 let hoverX = 0;
 let hoverY = 0;
 let cachedRegionRect: DOMRect | null = null;
 
-// biome-ignore lint/style/useConst: Mutated by bind:this.
 let canvas2d = $state<EmbeddingCanvas2D | null>(null);
-// biome-ignore lint/style/useConst: Mutated by bind:this.
-let canvas3d = $state<any>(null);
-let Canvas3D = $state<any>(null);
+let canvas3d = $state<EmbeddingCanvas3D | null>(null);
+let Canvas3D = $state<typeof EmbeddingCanvas3D | null>(null);
 let canvas3dLoading = $state(false);
 let graphRegionVisible = $state(false);
 
 let healthReport = $state<EmbeddingHealthReport | null>(null);
-// biome-ignore lint/style/useConst: Mutated from template callback.
 let healthExpanded = $state(false);
 let healthFixBusy = $state(false);
 let healthTimer: ReturnType<typeof setInterval> | undefined;
@@ -663,13 +656,10 @@ function updateEmbeddingInState(id: string, patch: (entry: EmbeddingPoint) => Em
 	if (idx < 0) return;
 	const patched = patch(embeddings[idx]);
 	embeddings[idx] = patched;
-	embeddings = embeddings;
 	embeddingById.set(id, patched);
-	embeddingById = embeddingById;
 	const nodeIdx = nodes.findIndex((n) => n.data.id === id);
 	if (nodeIdx >= 0) {
 		nodes[nodeIdx] = { ...nodes[nodeIdx], data: patched };
-		nodes = nodes;
 	}
 	if (graphSelected?.id === id) graphSelected = patched;
 	if (graphHovered?.id === id) graphHovered = patched;
@@ -1487,7 +1477,7 @@ $effect(() => {
 	// Phase 6: Use pre-built search index instead of per-search string construction
 	for (const row of rows) {
 		const haystack = searchIndex.get(row.id);
-		if (haystack && haystack.includes(query)) {
+		if (haystack?.includes(query)) {
 			ids.add(row.id);
 			matches.push(row);
 		}

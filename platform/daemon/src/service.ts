@@ -3,10 +3,10 @@
  * Handles systemd (Linux), launchd (macOS), and Windows service management
  */
 
-import { execSync, spawn } from "child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import { homedir, platform } from "os";
-import { join } from "path";
+import { execSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, platform } from "node:os";
+import { join } from "node:path";
 import { resolveDefaultBasePath } from "@signet/core";
 
 const AGENTS_DIR = resolveDefaultBasePath();
@@ -71,7 +71,7 @@ function getRuntime(): string {
 // ============================================================================
 
 function generateLaunchdPlist(port: number = 3850): string {
-	const runtime = getRuntime();
+	const _runtime = getRuntime();
 	const daemonPath = getDaemonPath();
 
 	return `<?xml version="1.0" encoding="UTF-8"?>
@@ -185,7 +185,7 @@ function resolveRuntimePath(): string {
 }
 
 function generateSystemdUnit(port: number = 3850): string {
-	const runtime = getRuntime();
+	const _runtime = getRuntime();
 	const daemonPath = getDaemonPath();
 	const runtimePath = resolveRuntimePath();
 

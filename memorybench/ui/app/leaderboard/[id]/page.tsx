@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
 import { Highlight, themes } from "prism-react-renderer"
@@ -27,11 +27,7 @@ export default function LeaderboardEntryPage() {
   const [activeTab, setActiveTab] = useState<Tab>("overview")
   const [activeCodeFile, setActiveCodeFile] = useState<string>("index.ts")
 
-  useEffect(() => {
-    loadEntry()
-  }, [id])
-
-  async function loadEntry() {
+  const loadEntry = useCallback(async () => {
     try {
       setLoading(true)
       const data = await getLeaderboardEntry(id)
@@ -54,7 +50,11 @@ export default function LeaderboardEntryPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [id])
+
+  useEffect(() => {
+    loadEntry()
+  }, [loadEntry])
 
   if (loading) {
     return (
@@ -251,11 +251,13 @@ function CodeTab({
               style={{ ...style, background: "transparent", margin: 0 }}
             >
               {tokens.map((line, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: syntax tokens have no stable id; position is their identity
                 <div key={i} {...getLineProps({ line })}>
                   <span className="inline-block w-8 text-text-muted select-none text-right mr-4 text-xs">
                     {i + 1}
                   </span>
                   {line.map((token, key) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: syntax tokens have no stable id; position is their identity
                     <span key={key} {...getTokenProps({ token })} />
                   ))}
                 </div>

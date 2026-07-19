@@ -103,15 +103,32 @@ export default function RunDetailPage() {
       setRun(runData)
       setReport(reportData)
       setError(null)
-    } catch (e) {
+    } catch (_e) {
       // Silent fail on poll
+    }
+  }, [runId])
+
+  const loadData = useCallback(async () => {
+    try {
+      setLoading(true)
+      const [runData, reportData] = await Promise.all([
+        getRun(runId),
+        getRunReport(runId).catch(() => null),
+      ])
+      setRun(runData)
+      setReport(reportData)
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load run")
+    } finally {
+      setLoading(false)
     }
   }, [runId])
 
   // Initial load
   useEffect(() => {
     loadData()
-  }, [runId])
+  }, [loadData])
 
   // Polling when run is in progress
   useEffect(() => {
@@ -130,23 +147,6 @@ export default function RunDetailPage() {
       }
     }
   }, [isRunning, refreshData])
-
-  async function loadData() {
-    try {
-      setLoading(true)
-      const [runData, reportData] = await Promise.all([
-        getRun(runId),
-        getRunReport(runId).catch(() => null),
-      ])
-      setRun(runData)
-      setReport(reportData)
-      setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load run")
-    } finally {
-      setLoading(false)
-    }
-  }
 
   if (loading) {
     return (
@@ -213,7 +213,7 @@ export default function RunDetailPage() {
   const allQuestions = Object.values(run.questions)
   // Only count questions that have been evaluated
   const evaluatedQuestions = allQuestions.filter((q) => q.phases.evaluate.status === "completed")
-  const failedQuestions = evaluatedQuestions.filter((q) => q.phases.evaluate.label === "incorrect")
+  const _failedQuestions = evaluatedQuestions.filter((q) => q.phases.evaluate.label === "incorrect")
   const accuracy =
     report?.summary?.accuracy ??
     (evaluatedQuestions.length > 0

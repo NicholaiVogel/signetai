@@ -108,70 +108,43 @@ let removingSourceId = $state<string | null>(null);
 let snapshotBusySourceId = $state<string | null>(null);
 let snapshotIncludeLocalDiscordIds = $state<Set<string>>(new Set());
 let pickingFolder = $state(false);
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let searchTerm = $state("");
-// biome-ignore lint/style/useConst: Svelte event handlers mutate this rune from markup.
 let activeFilter = $state<ActiveFilter>("all");
 let selectedKind = $state<SourceKind>("obsidian");
 let connectMode = $state(false);
 let vaultPath = $state("");
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let vaultName = $state("Obsidian Vault");
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let excludeGlobsText = $state("**/.obsidian/**\n**/.trash/**\n**/.hermes/**\n**/.*/**\n**/.*");
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let discordName = $state("Discord");
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let discordSyncMode = $state<"rest" | "gateway-tail" | "desktop-cache">("rest");
 let discordGuildIdsText = $state("");
 let discordTokenRef = $state("");
 let discordDesktopCachePath = $state("");
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let discordDesktopCacheFullScan = $state(false);
 let discordChannelFilterText = $state("");
 let discordSince = $state("");
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let discordMaxMessages = $state(1000);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let discordIncludeMembers = $state(true);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let discordIncludeThreads = $state(true);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let discordIncludeArchivedThreads = $state(true);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let discordIncludePrivateArchivedThreads = $state(false);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let discordIncludeAttachments = $state(true);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let discordIncludeAttachmentText = $state(false);
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let discordMaxAttachmentTextBytes = $state(262144);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let discordIncludeEmbeds = $state(true);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let discordIncludePolls = $state(true);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let discordIncludeThreadMembers = $state(true);
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let githubName = $state("GitHub");
 let githubReposText = $state("");
 let githubTokenRef = $state("");
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let githubState = $state<"open" | "closed" | "all">("all");
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let githubIncludeIssues = $state(true);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let githubIncludePulls = $state(true);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let githubIncludeDiscussions = $state(false);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let githubIncludeDocs = $state(true);
-// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let githubIncludeComments = $state(true);
 let githubLabelsText = $state("");
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let githubDocPathsText = $state("README.md\nCHANGELOG.md");
-// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let githubMaxItems = $state(500);
 let status = $state<string | null>(null);
 let error = $state<string | null>(null);
@@ -179,7 +152,6 @@ let touchedPath = $state(false);
 let touchedDiscord = $state(false);
 let touchedGithub = $state(false);
 let expandedKind = $state<SourceKind | null>(null);
-// biome-ignore lint/style/useConst: Svelte event handlers mutate this rune from markup.
 let selectedDiscordSourceId = $state<string | null>(null);
 let sourceRefreshTimer: ReturnType<typeof setInterval> | null = null;
 

@@ -47,7 +47,6 @@ interface Props {
 	constellationOverlay?: ConstellationGraph | null;
 }
 
-// biome-ignore lint/style/useConst: Svelte keeps prop bindings reactive.
 let {
 	containerClass = "",
 	graphSelected,

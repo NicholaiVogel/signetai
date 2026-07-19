@@ -133,7 +133,6 @@ export default function DocSearch() {
 			</div>
 
 			{isOpen && (
-				/* biome-ignore lint/a11y/useSemanticElements: ARIA listbox popup is required for the combobox relationship */
 				<div id="doc-search-results" className="doc-search-results" role="listbox" tabIndex={-1}>
 					{results.map((r, i) => {
 						const option = (

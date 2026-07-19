@@ -89,6 +89,7 @@ export function DropdownMenu({ items, align = "right" }: DropdownMenuProps) {
             <div className="py-1">
               {items.map((item, idx) => {
                 if (item.divider) {
+                  // biome-ignore lint/suspicious/noArrayIndexKey: divider items have no label/href to key on
                   return <div key={idx} className="border-t border-[#333333] my-1" />
                 }
 
@@ -104,7 +105,7 @@ export function DropdownMenu({ items, align = "right" }: DropdownMenuProps) {
                 if (item.href && !item.disabled) {
                   return (
                     <Link
-                      key={idx}
+                      key={item.href}
                       href={item.href}
                       className={className}
                       onClick={() => setOpen(false)}
@@ -116,7 +117,7 @@ export function DropdownMenu({ items, align = "right" }: DropdownMenuProps) {
 
                 return (
                   <button
-                    key={idx}
+                    key={item.label}
                     className={className}
                     disabled={item.disabled}
                     onClick={() => {

@@ -184,18 +184,18 @@ function extractJsonObject(input: string): string | null {
 		// Try to find balanced end
 		let depth = 0;
 		let inString = false;
-		let escape = false;
+		let escaped = false;
 
 		for (let i = start; i < input.length; i++) {
 			const ch = input[i];
 
-			if (escape) {
-				escape = false;
+			if (escaped) {
+				escaped = false;
 				continue;
 			}
 
 			if (ch === "\\") {
-				escape = true;
+				escaped = true;
 				continue;
 			}
 

@@ -34,7 +34,6 @@ let savedByFile = $state<Record<string, string>>({});
 let collapsed = $state(false);
 let jumpMenuOpen = $state(false);
 let jumpFilter = $state("");
-// biome-ignore lint/style/useConst: Svelte bind:this writes the DOM node into this reference at runtime.
 let jumpInputRef = $state<HTMLInputElement | null>(null);
 
 const activeFile = $derived(mdFiles.find((f) => f.name === selectedFile));

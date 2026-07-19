@@ -670,7 +670,12 @@ export function traverseKnowledgeGraph(
 						if (!source) continue;
 						// Check if the memory path involves this hop entity
 						if (existingPath.entityIds.includes(hopId) && !existingPath.dependencyIds.length) {
-							const upgraded = toPathStatic(hopId, source.sourceEntityId, existingPath.aspectIds[0], source.dependencyId);
+							const upgraded = toPathStatic(
+								hopId,
+								source.sourceEntityId,
+								existingPath.aspectIds[0],
+								source.dependencyId,
+							);
 							if (pathSize(upgraded) > pathSize(existingPath)) {
 								phase1.memoryPaths.set(mid, upgraded);
 							}
@@ -682,7 +687,8 @@ export function traverseKnowledgeGraph(
 				const seen = new Set<string>();
 				let write = 0;
 				for (let read = 0; read < phase1.constraints.length; read++) {
-					const c = phase1.constraints[read]!;
+					const c = phase1.constraints[read];
+					if (!c) continue;
 					const key = `${c.entityName}::${c.content}`;
 					if (!seen.has(key)) {
 						seen.add(key);

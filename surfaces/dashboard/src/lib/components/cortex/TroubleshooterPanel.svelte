@@ -295,16 +295,19 @@ function escapeHtml(s: string): string {
 	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-const ANSI_BLOCK = new RegExp("\\u001b\\[(\\d+)m([\\s\\S]*?)\\u001b\\[0m", "g");
-const ANSI_CODE = new RegExp("\\u001b\\[\\d+m", "g");
+// Build via String.fromCharCode so the escape byte is explicit: a regex literal
+// trips noControlCharactersInRegex, and a static RegExp string trips useRegexLiterals.
+const ESC = String.fromCharCode(0x1b);
+const ANSI_BLOCK = new RegExp(`${ESC}\\[(\\d+)m([\\s\\S]*?)${ESC}\\[0m`, "g");
+const ANSI_CODE = new RegExp(`${ESC}\\[\\d+m`, "g");
 
 function ansiToHtml(text: string): string {
 	const colors: Record<string, string> = {
-		"31": "var(--sig-danger)",
-		"32": "var(--sig-success)",
-		"33": "var(--sig-warning, #e8a832)",
-		"90": "var(--sig-text-muted)",
-		"36": "var(--sig-accent)",
+		31: "var(--sig-danger)",
+		32: "var(--sig-success)",
+		33: "var(--sig-warning, #e8a832)",
+		90: "var(--sig-text-muted)",
+		36: "var(--sig-accent)",
 	};
 	// Escape all HTML first to prevent XSS, then apply styling
 	let result = escapeHtml(text);

@@ -483,7 +483,7 @@ describe("pipeline integration", () => {
 
 		const extractJob = getJob(db, sourceId, "extract");
 		expect(extractJob).toBeDefined();
-		expect(extractJob!.status).toBe("pending");
+		expect(extractJob?.status).toBe("pending");
 
 		// Start the extraction worker
 		const worker = startWorker(accessor, provider, cfg, testDecisionCfg());
@@ -495,12 +495,13 @@ describe("pipeline integration", () => {
 		// ----- Stage 1: Extraction job completed -----
 		const completedJob = getJob(db, sourceId, "extract");
 		expect(completedJob).toBeDefined();
-		expect(completedJob!.status).toBe("completed");
-		expect(completedJob!.attempts).toBe(1);
-		expect(completedJob!.error).toBeNull();
+		expect(completedJob?.status).toBe("completed");
+		expect(completedJob?.attempts).toBe(1);
+		expect(completedJob?.error).toBeNull();
 
 		// Verify job result payload
-		const result = JSON.parse(completedJob!.result!);
+		if (!completedJob?.result) throw new Error("expected completed job result");
+		const result = JSON.parse(completedJob.result);
 		expect(result.facts.length).toBe(2);
 		expect(result.entities.length).toBe(2);
 		expect(result.writeMode).toBe("phase-c");
@@ -520,14 +521,14 @@ describe("pipeline integration", () => {
 		const preferenceFact = facts.find((f) => f.content.includes("walkable"));
 		expect(relocationFact).toBeDefined();
 		expect(preferenceFact).toBeDefined();
-		expect(relocationFact!.type).toBe("fact");
-		expect(preferenceFact!.type).toBe("preference");
-		expect(relocationFact!.extraction_status).toBe("completed");
+		expect(relocationFact?.type).toBe("fact");
+		expect(preferenceFact?.type).toBe("preference");
+		expect(relocationFact?.extraction_status).toBe("completed");
 
 		// ----- Stage 3: Graph entities persisted -----
 		const nicholai = getEntities(db, "Nicholai");
 		expect(nicholai).toBeDefined();
-		expect(nicholai!.mentions).toBeGreaterThanOrEqual(1);
+		expect(nicholai?.mentions).toBeGreaterThanOrEqual(1);
 
 		const seattle = getEntities(db, "Seattle");
 		expect(seattle).toBeDefined();
@@ -536,14 +537,14 @@ describe("pipeline integration", () => {
 		expect(portland).toBeDefined();
 
 		// Relations: Nicholai -> Seattle, Nicholai -> Portland
-		const relations = getRelations(db, nicholai!.id);
+		const relations = getRelations(db, nicholai?.id);
 		expect(relations.length).toBe(2);
-		const seattleRelation = relations.find((r) => r.target_entity_id === seattle!.id);
-		const portlandRelation = relations.find((r) => r.target_entity_id === portland!.id);
+		const seattleRelation = relations.find((r) => r.target_entity_id === seattle?.id);
+		const portlandRelation = relations.find((r) => r.target_entity_id === portland?.id);
 		expect(seattleRelation).toBeDefined();
 		expect(portlandRelation).toBeDefined();
-		expect(seattleRelation!.relation_type).toBe("relocated_to");
-		expect(portlandRelation!.relation_type).toBe("relocated_from");
+		expect(seattleRelation?.relation_type).toBe("relocated_to");
+		expect(portlandRelation?.relation_type).toBe("relocated_from");
 
 		// Entity mentions linked to source memory
 		const mentions = getMentions(db, sourceId);
@@ -585,7 +586,7 @@ describe("pipeline integration", () => {
 		for (const fact of facts) {
 			const hintsJob = getJob(db, fact.id, "prospective_index");
 			expect(hintsJob).toBeDefined();
-			expect(hintsJob!.status).toBe("pending");
+			expect(hintsJob?.status).toBe("pending");
 		}
 
 		// ----- Stage 7: Run hints worker to generate and index hints -----
@@ -606,7 +607,7 @@ describe("pipeline integration", () => {
 			totalHints += hints.length;
 
 			const hintsJob = getJob(db, fact.id, "prospective_index");
-			expect(hintsJob!.status).toBe("completed");
+			expect(hintsJob?.status).toBe("completed");
 		}
 		expect(totalHints).toBeGreaterThan(0);
 
@@ -710,9 +711,10 @@ describe("pipeline integration", () => {
 
 		// Job completed
 		const job = getJob(db, sourceId, "extract");
-		expect(job!.status).toBe("completed");
+		expect(job?.status).toBe("completed");
 
-		const result = JSON.parse(job!.result!);
+		if (!job?.result) throw new Error("expected job result");
+		const result = JSON.parse(job.result);
 		expect(result.writeMode).toBe("shadow");
 		expect(result.writeStats.added).toBe(0);
 
@@ -749,9 +751,10 @@ describe("pipeline integration", () => {
 		await worker.stop();
 
 		const job = getJob(db, sourceId, "extract");
-		expect(job!.status).toBe("completed");
+		expect(job?.status).toBe("completed");
 
-		const result = JSON.parse(job!.result!);
+		if (!job?.result) throw new Error("expected job result");
+		const result = JSON.parse(job.result);
 		expect(result.writeStats.skippedLowConfidence).toBe(1);
 		expect(result.writeStats.added).toBe(0);
 
@@ -774,9 +777,10 @@ describe("pipeline integration", () => {
 		await worker.stop();
 
 		const job = getJob(db, sourceId, "extract");
-		expect(job!.status).toBe("completed");
+		expect(job?.status).toBe("completed");
 
-		const result = JSON.parse(job!.result!);
+		if (!job?.result) throw new Error("expected job result");
+		const result = JSON.parse(job.result);
 		expect(result.facts.length).toBe(0);
 		expect(result.proposals.length).toBe(0);
 		expect(result.writeStats.added).toBe(0);
@@ -860,8 +864,8 @@ describe("pipeline integration", () => {
 
 		const job = getJob(db, sourceId, "extract");
 		expect(job).toBeDefined();
-		expect(job!.status).toBe("completed");
-		expect(job!.error).toBeNull();
+		expect(job?.status).toBe("completed");
+		expect(job?.error).toBeNull();
 		expect(getWrittenFacts(db, sourceId).length).toBe(1);
 		expect(getEntities(db, "Nicholai")).toBeFalsy();
 	});
@@ -935,7 +939,8 @@ describe("pipeline integration", () => {
 		await worker.stop();
 
 		const job = getJob(db, sourceId, "extract");
-		const result = JSON.parse(job!.result!);
+		if (!job?.result) throw new Error("expected job result");
+		const result = JSON.parse(job.result);
 		expect(result.writeStats.deduped).toBe(1);
 		expect(result.writeStats.added).toBe(0);
 	});

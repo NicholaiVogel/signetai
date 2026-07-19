@@ -11,7 +11,7 @@
  * Config: max ~2000 tokens (~8000 chars), min ~100 tokens, overlap ~200 tokens
  */
 
-import type { ParsedDocument, ParsedSection, ChunkResult } from "./types";
+import type { ChunkResult, ParsedDocument, ParsedSection } from "./types";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -131,7 +131,7 @@ export function chunkDocument(doc: ParsedDocument, config: ChunkerConfig = DEFAU
 		if (section.heading) {
 			currentText += `\n## ${section.heading}\n\n`;
 		}
-		currentText += section.content + "\n\n";
+		currentText += `${section.content}\n\n`;
 
 		// Update chunk type (code takes precedence)
 		if (sectionType === "code") {
@@ -213,9 +213,9 @@ function splitText(text: string, maxChars: number, overlapChars: number): string
 		if (current.length + para.length + 2 > maxChars && current.length > 0) {
 			chunks.push(current.trim());
 			// Start next chunk with overlap from end of current
-			current = getOverlapText(current, Math.ceil(overlapChars / 4)) + "\n\n";
+			current = `${getOverlapText(current, Math.ceil(overlapChars / 4))}\n\n`;
 		}
-		current += para + "\n\n";
+		current += `${para}\n\n`;
 	}
 
 	if (current.trim().length > 0) {
@@ -251,9 +251,9 @@ function splitCode(code: string, maxChars: number, overlapChars: number): string
 			// Carry forward overlap: last N lines for code context
 			const lines = current.split("\n");
 			const overlapLines = Math.max(1, Math.ceil(overlapChars / 80)); // ~80 chars/line
-			current = lines.slice(-overlapLines).join("\n") + "\n\n";
+			current = `${lines.slice(-overlapLines).join("\n")}\n\n`;
 		}
-		current += block + "\n\n";
+		current += `${block}\n\n`;
 	}
 
 	if (current.trim().length > 0) {
@@ -275,9 +275,9 @@ function splitCode(code: string, maxChars: number, overlapChars: number): string
 					// Carry forward a few lines of overlap
 					const curLines = cur.split("\n");
 					const overlapLines = Math.max(1, Math.ceil(overlapChars / 80));
-					cur = curLines.slice(-overlapLines).join("\n") + "\n";
+					cur = `${curLines.slice(-overlapLines).join("\n")}\n`;
 				}
-				cur += line + "\n";
+				cur += `${line}\n`;
 			}
 			if (cur.trim().length > 0) {
 				result.push(cur.trim());

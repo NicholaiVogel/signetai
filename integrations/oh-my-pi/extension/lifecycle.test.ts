@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type LifecycleDeps, OMP_LIFECYCLE_CONFIG, endCurrentSession, endPreviousSession, flushPendingSessionEnds } from "./src/lifecycle.js";
+import {
+	endCurrentSession,
+	endPreviousSession,
+	flushPendingSessionEnds,
+	type LifecycleDeps,
+	OMP_LIFECYCLE_CONFIG,
+} from "./src/lifecycle.js";
 import { createSessionState } from "./src/session-state.js";
 
 const tempDirs: string[] = [];
@@ -54,7 +60,7 @@ describe("Oh My Pi lifecycle session-end handling", () => {
 		// Release call sent even without transcript (to free daemon claim)
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.path).toBe("/api/hooks/session-end");
-		expect((calls[0]?.body as Record<string, unknown>).transcript).toBeUndefined();
+		expect(((calls[0]?.body ?? {}) as Record<string, unknown>).transcript).toBeUndefined();
 		expect(deps.state.sessionAlreadyEnded("prev-session")).toBe(false);
 		expect(deps.state.getPendingSessionEnds()).toHaveLength(1);
 

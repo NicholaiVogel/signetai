@@ -2,14 +2,14 @@
  * Main Signet class - entry point for the library
  */
 
-import { Database } from "./database";
-import { Agent, AgentConfig, AgentManifest } from "./types";
-import { parseManifest, generateManifest } from "./manifest";
-import { parseSoul, generateSoul } from "./soul";
-import { parseMemory, generateMemory } from "./memory";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { resolveDefaultBasePath } from "./constants";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { join } from "path";
+import { Database } from "./database";
+import { generateManifest, parseManifest } from "./manifest";
+import { generateMemory } from "./memory";
+import { generateSoul } from "./soul";
+import type { Agent, AgentConfig, AgentManifest } from "./types";
 
 export class Signet {
 	private config: AgentConfig;
@@ -28,7 +28,7 @@ export class Signet {
 	 * Initialize Signet in a directory
 	 */
 	async init(name: string): Promise<Agent> {
-		const basePath = this.config.basePath!;
+		const basePath = this.config.basePath ?? resolveDefaultBasePath();
 
 		if (!existsSync(basePath)) {
 			mkdirSync(basePath, { recursive: true });
@@ -70,7 +70,7 @@ export class Signet {
 	 * Load an existing Signet agent
 	 */
 	async load(): Promise<Agent> {
-		const basePath = this.config.basePath!;
+		const basePath = this.config.basePath ?? resolveDefaultBasePath();
 
 		if (!existsSync(join(basePath, "agent.yaml"))) {
 			throw new Error(`No agent found at ${basePath}. Run 'signet init' first.`);

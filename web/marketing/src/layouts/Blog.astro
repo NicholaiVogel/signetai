@@ -1,10 +1,5 @@
 ---
 import { getCollection } from "astro:content";
-import Footer from "../components/Footer.astro";
-import GraphViewer from "../components/GraphViewer";
-import Nav from "../components/Nav.astro";
-import ShareButtons from "../components/ShareButtons.astro";
-import Base from "./Base.astro";
 import "../styles/blog.css";
 import "../styles/docs.css";
 import "../styles/graph.css";
@@ -49,17 +44,17 @@ const {
 	recommendedPosts = [],
 } = Astro.props;
 
-const formattedDate = date.toLocaleDateString("en-US", {
+const _formattedDate = date.toLocaleDateString("en-US", {
 	year: "numeric",
 	month: "long",
 	day: "numeric",
 });
 
 const tocHeadings = headings.filter((h) => h.depth === 2 || h.depth === 3);
-const hasToc = tocHeadings.length > 2;
+const _hasToc = tocHeadings.length > 2;
 
 // Build blog post list for left sidebar
-const allPosts = (await getCollection("blog"))
+const _allPosts = (await getCollection("blog"))
 	.filter((p) => !p.data.draft)
 	.sort((a, b) => b.data.date.getTime() - a.data.date.getTime());
 ---

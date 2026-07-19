@@ -13,10 +13,16 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { BaseConnector, type InstallResult, type UninstallResult, atomicWriteJson, isSignetGeneratedFile } from "@signet/connector-base";
+import {
+	atomicWriteJson,
+	BaseConnector,
+	type InstallResult,
+	isSignetGeneratedFile,
+	type UninstallResult,
+} from "@signet/connector-base";
 import { expandHome, resolvePromptSubmitTimeoutMs, resolveSessionStartTimeoutMs } from "@signet/core";
 
 // ============================================================================

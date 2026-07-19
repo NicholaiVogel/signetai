@@ -9,8 +9,14 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { resolveDefaultBasePath } from "@signet/core";
-import { type WriteDb, getDbAccessor } from "./db-accessor";
+import { getDbAccessor, type WriteDb } from "./db-accessor";
 import { logger } from "./logger";
+
+/** Narrow the lazily-prepared full-chunk statement to non-null. */
+function requireFullChunkStmt<T>(stmt: T | null): T {
+	if (stmt === null) throw new Error("full-chunk statement was not prepared");
+	return stmt;
+}
 
 function getMemoryDbPath(): string {
 	const agentsDir = resolveDefaultBasePath();
@@ -82,7 +88,7 @@ export function recordSessionCandidates(
 				// the remainder chunk (different SQL, can't reuse).
 				const stmt =
 					chunk.length === CHUNK_SIZE
-						? fullChunkStmt!
+						? requireFullChunkStmt(fullChunkStmt)
 						: db.prepare(BASE_SQL + Array.from({ length: chunk.length }, () => ROW).join(","));
 
 				const values: unknown[] = [];
@@ -170,7 +176,7 @@ export function trackFtsHits(
 
 				const stmt =
 					chunk.length === CHUNK_SIZE
-						? fullChunkStmt!
+						? requireFullChunkStmt(fullChunkStmt)
 						: db.prepare(BASE_SQL + Array.from({ length: chunk.length }, () => ROW).join(",") + CONFLICT_CLAUSE);
 
 				const values: unknown[] = [];

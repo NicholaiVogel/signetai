@@ -8,13 +8,13 @@ import {
 	resolveDefaultBasePath,
 	resolveNetworkBinding,
 } from "@signet/core";
-import { type AnalyticsCollector, createAnalyticsCollector } from "../analytics";
+import { createAnalyticsCollector } from "../analytics";
 import { type AuthConfig, AuthRateLimiter, loadOrCreateSecret, parseAuthConfig } from "../auth";
 import { getDbAccessor } from "../db-accessor";
-import { type DiagnosticsOptions, type DiagnosticsReport, createProviderTracker, getDiagnostics } from "../diagnostics";
+import { createProviderTracker, type DiagnosticsOptions, type DiagnosticsReport, getDiagnostics } from "../diagnostics";
 import type { EmbeddingTrackerHandle } from "../embedding-tracker";
 import { logger } from "../logger";
-import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
+import { loadMemoryConfig, type ResolvedMemoryConfig } from "../memory-config";
 import { enqueueExtractionJob as enqueueExtractionJobBase } from "../pipeline";
 import { deadLetterExtractionJob } from "../pipeline/extraction-fallback";
 import { createRateLimiter } from "../repair-actions";
@@ -499,9 +499,7 @@ export function setOpenClawHeartbeat(value: { timestamp: string; data: OpenClawH
 }
 
 // Feature flag and session helpers that use AGENTS_DIR
-export { AGENTS_DIR as default };
-
-export { getUpdateState };
+export { AGENTS_DIR as default, getUpdateState };
 
 function readPipelineMode(cfg: ResolvedMemoryConfig["pipelineV2"]): string {
 	if (!cfg.enabled) return "disabled";

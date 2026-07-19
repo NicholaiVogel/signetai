@@ -1,30 +1,36 @@
-import { describe, test, expect, beforeEach, afterEach, it } from "bun:test";
 import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, it, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runMigrations } from "../../core/src/migrations/index";
+import type { ContinuityState } from "./continuity-state";
+import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import {
-	writeCheckpoint,
+	type CheckpointRow,
+	flushPendingCheckpoints,
+	formatPeriodicDigest,
+	formatPreCompactionDigest,
+	formatRecoveryDigest,
+	formatSessionEndDigest,
+	getCheckpointsByProject,
+	getCheckpointsBySession,
 	getLatestCheckpoint,
 	getLatestCheckpointBySession,
-	getCheckpointsBySession,
-	getCheckpointsByProject,
-	pruneCheckpoints,
-	redactSecrets,
-	redactCheckpointRow,
-	formatPeriodicDigest,
-	queueCheckpointWrite,
-	flushPendingCheckpoints,
 	initCheckpointFlush,
+	pruneCheckpoints,
+	queueCheckpointWrite,
+	redactCheckpointRow,
+	redactSecrets,
 	type WriteCheckpointParams,
-	formatRecoveryDigest,
-	formatPreCompactionDigest,
-	formatSessionEndDigest,
-	type CheckpointRow,
+	writeCheckpoint,
 } from "./session-checkpoints";
-import type { DbAccessor, WriteDb, ReadDb } from "./db-accessor";
-import type { ContinuityState } from "./continuity-state";
+
+/** Parse a column that must be non-null; fails loudly in tests otherwise. */
+function mustParseJson(value: string | null, column: string): unknown {
+	if (value === null) throw new Error(`expected non-null column: ${column}`);
+	return JSON.parse(value);
+}
 
 function makeState(overrides: Partial<ContinuityState> = {}): ContinuityState {
 	return {
@@ -113,8 +119,8 @@ describe("session-checkpoints", () => {
 		expect(rows[0].session_key).toBe("sess-1");
 		expect(rows[0].harness).toBe("claude-code");
 		expect(rows[0].prompt_count).toBe(5);
-		expect(JSON.parse(rows[0].memory_queries!)).toEqual(["typescript", "database"]);
-		expect(JSON.parse(rows[0].focal_entity_names!)).toEqual(["signetai"]);
+		expect(mustParseJson(rows[0].memory_queries, "memory_queries")).toEqual(["typescript", "database"]);
+		expect(mustParseJson(rows[0].focal_entity_names, "focal_entity_names")).toEqual(["signetai"]);
 	});
 
 	test("writeCheckpoint enforces maxPerSession", () => {
@@ -191,11 +197,12 @@ describe("session-checkpoints", () => {
 		flushPendingCheckpoints();
 		const row = getLatestCheckpointBySession(dbAcc, "structural-merge");
 		expect(row).toBeDefined();
-		expect(JSON.parse(row!.focal_entity_ids!)).toEqual(["entity-1", "entity-2"]);
-		expect(JSON.parse(row!.focal_entity_names!)).toEqual(["signetai", "signet-core"]);
-		expect(JSON.parse(row!.active_aspect_ids!)).toEqual(["aspect-1", "aspect-2"]);
-		expect(row!.surfaced_constraint_count).toBe(3);
-		expect(row!.traversal_memory_count).toBe(24);
+		if (!row) throw new Error("expected checkpoint row");
+		expect(mustParseJson(row.focal_entity_ids, "focal_entity_ids")).toEqual(["entity-1", "entity-2"]);
+		expect(mustParseJson(row.focal_entity_names, "focal_entity_names")).toEqual(["signetai", "signet-core"]);
+		expect(mustParseJson(row.active_aspect_ids, "active_aspect_ids")).toEqual(["aspect-1", "aspect-2"]);
+		expect(row?.surfaced_constraint_count).toBe(3);
+		expect(row?.traversal_memory_count).toBe(24);
 	});
 
 	test("pruneCheckpoints deletes all old rows strictly", () => {
@@ -266,7 +273,7 @@ describe("redaction", () => {
 		const redacted = redactCheckpointRow(row);
 		expect(redacted.digest).not.toContain("eyJtoken");
 		expect(redacted.digest).toContain("[REDACTED]");
-		const remembers = JSON.parse(redacted.recent_remembers!);
+		const remembers = mustParseJson(redacted.recent_remembers, "recent_remembers");
 		expect(remembers[0]).toContain("[REDACTED]");
 	});
 });
@@ -448,7 +455,7 @@ describe("formatRecoveryDigest", () => {
 				"Traversal memories: 24",
 				"",
 				"### Recent Prompts",
-				"- " + "x".repeat(400),
+				`- ${"x".repeat(400)}`,
 			].join("\n"),
 			prompt_count: 12,
 			memory_queries: null,
@@ -518,10 +525,10 @@ describe("debounce merge", () => {
 		// Digest takes latest
 		expect(rows[0].digest).toBe("second digest");
 		// Queries merged
-		const queries = JSON.parse(rows[0].memory_queries!);
+		const queries = mustParseJson(rows[0].memory_queries, "memory_queries");
 		expect(queries).toEqual(["query-a", "query-b"]);
 		// Remembers merged
-		const remembers = JSON.parse(rows[0].recent_remembers!);
+		const remembers = mustParseJson(rows[0].recent_remembers, "recent_remembers");
 		expect(remembers).toEqual(["rem-a", "rem-b"]);
 	});
 });

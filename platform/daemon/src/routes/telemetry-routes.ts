@@ -1,17 +1,14 @@
 import { realpathSync } from "node:fs";
-import { join } from "node:path";
 import type { Hono } from "hono";
 import type { ErrorStage } from "../analytics.js";
 import { requirePermission } from "../auth";
 import { getDbAccessor } from "../db-accessor.js";
 import { getDiagnostics } from "../diagnostics.js";
-import { type LogCategory, type LogEntry, logger } from "../logger.js";
+import { type LogCategory, logger } from "../logger.js";
 import { listMemorySearchTelemetry } from "../memory-search-telemetry.js";
 import { getCheckpointsByProject, getCheckpointsBySession, redactCheckpointRow } from "../session-checkpoints.js";
 import type { TelemetryEventType } from "../telemetry.js";
-import { type TimelineSources, buildTimeline } from "../timeline.js";
 import {
-	CURRENT_VERSION,
 	analyticsCollector,
 	authConfig,
 	getDiagnosticsOptions,

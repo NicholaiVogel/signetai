@@ -25,7 +25,6 @@ const PAGE_SIZE = 25;
 let schema = $state<DatabaseSchemaResponse | null>(null);
 let sample = $state<DatabaseTableSampleResponse | null>(null);
 let selected = $state<string | null>(null);
-// biome-ignore lint/style/useConst: bind:value mutates this Svelte state.
 let query = $state("");
 let loadingSchema = $state(false);
 let loadingSample = $state(false);

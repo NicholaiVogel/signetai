@@ -5,8 +5,8 @@
  * Handles code blocks, tables, lists, and blockquotes as distinct content types.
  */
 
-import { readFileSync } from "fs";
-import { basename } from "path";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import type { ParsedDocument, ParsedSection } from "./types";
 
 // ---------------------------------------------------------------------------

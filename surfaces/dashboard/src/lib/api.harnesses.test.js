@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { afterEach, describe, expect, it } from "bun:test";
 import { getHarnesses } from "./api";
 
@@ -8,6 +7,7 @@ afterEach(() => {
 	globalThis.fetch = originalFetch;
 });
 
+/** @param {Record<string, unknown>} data */
 function json(data, status = 200) {
 	return new Response(JSON.stringify(data), {
 		status,
@@ -17,21 +17,23 @@ function json(data, status = 200) {
 
 describe("harness api helper", () => {
 	it("lists harnesses from the daemon", async () => {
-		globalThis.fetch = async (input, init) => {
-			expect(String(input).endsWith("/api/harnesses")).toBe(true);
-			expect(init?.signal).toBeDefined();
-			return json({
-				harnesses: [
-					{
-						id: "codex",
-						name: "Codex",
-						path: "/tmp/codex",
-						exists: true,
-						lastSeen: null,
-					},
-				],
-			});
-		};
+		globalThis.fetch = /** @type {typeof fetch} */ (
+			async (input, init) => {
+				expect(String(input).endsWith("/api/harnesses")).toBe(true);
+				expect(init?.signal).toBeDefined();
+				return json({
+					harnesses: [
+						{
+							id: "codex",
+							name: "Codex",
+							path: "/tmp/codex",
+							exists: true,
+							lastSeen: null,
+						},
+					],
+				});
+			}
+		);
 
 		const harnesses = await getHarnesses(50);
 
@@ -40,15 +42,17 @@ describe("harness api helper", () => {
 	});
 
 	it("falls back to an empty list when harness discovery stalls", async () => {
-		globalThis.fetch = async (_input, init) => {
-			return new Promise((_resolve, reject) => {
-				init?.signal?.addEventListener("abort", () => {
-					const err = new Error("aborted");
-					err.name = "AbortError";
-					reject(err);
+		globalThis.fetch = /** @type {typeof fetch} */ (
+			async (_input, init) => {
+				return new Promise((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => {
+						const err = new Error("aborted");
+						err.name = "AbortError";
+						reject(err);
+					});
 				});
-			});
-		};
+			}
+		);
 
 		const started = Date.now();
 		const harnesses = await getHarnesses(10);

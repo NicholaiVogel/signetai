@@ -4,12 +4,12 @@
  */
 
 import type { Context, MiddlewareHandler } from "hono";
-import type { AuthConfig } from "./config";
-import type { AuthResult, Permission, TokenScope } from "./types";
-import { verifyToken } from "./tokens";
 import { isSignetApiKey } from "./api-keys";
+import type { AuthConfig } from "./config";
 import { checkPermission, checkScope } from "./policy";
 import type { AuthRateLimiter } from "./rate-limiter";
+import { verifyToken } from "./tokens";
+import type { AuthResult, Permission, TokenScope } from "./types";
 
 // Augment Hono context variables
 declare module "hono" {
@@ -140,7 +140,7 @@ export function requirePermission(permission: Permission, config: AuthConfig): M
 		const auth = c.get("auth");
 
 		// In hybrid mode, localhost without token gets full access
-		if (config.mode === "hybrid" && isLocalhost(c) && (!auth || !auth.claims)) {
+		if (config.mode === "hybrid" && isLocalhost(c) && !auth?.claims) {
 			await next();
 			return;
 		}
@@ -159,7 +159,7 @@ export function requireScope(getTarget: (c: Context) => TokenScope, config: Auth
 	return async (c, next) => {
 		const auth = c.get("auth");
 
-		if (config.mode === "hybrid" && isLocalhost(c) && (!auth || !auth.claims)) {
+		if (config.mode === "hybrid" && isLocalhost(c) && !auth?.claims) {
 			await next();
 			return;
 		}

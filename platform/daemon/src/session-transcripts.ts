@@ -1,18 +1,18 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { extractAnchorTerms } from "./anchor-terms";
 import { getDbAccessor } from "./db-accessor";
 import { logger } from "./logger";
 import { sanitizeFtsQuery } from "./memory-search";
 import {
-	type TranscriptIdentity,
-	type TranscriptSessionKeyClassification,
 	appendCanonicalTranscriptSnapshotIfMissing,
 	canonicalTranscriptPath,
 	readCanonicalTranscriptSessionKeys,
 	rewriteReplacingLiveOnlySessions,
 	sanitizeHarnessPath,
 	sessionSeqCacheKey,
+	type TranscriptIdentity,
+	type TranscriptSessionKeyClassification,
 } from "./transcript-jsonl";
 
 interface TranscriptRow {
@@ -42,7 +42,6 @@ export function canonicalizeTranscriptLookup(value: string): string {
 	const trimmed = value.trim();
 	return OMP_UUID_LIKE_SESSION_ID.test(trimmed) ? trimmed.replace(/:/g, "-") : trimmed;
 }
-
 
 export interface StoredTranscriptInfo {
 	readonly sessionKey: string;
@@ -154,7 +153,7 @@ async function backfillMarkdownTranscriptArtifacts(
 		const path = join(memoryDir, name);
 		try {
 			const parsed = parseArtifactFrontmatter(readFileSync(path, "utf8"));
-			if (!parsed || parsed.frontmatter.kind !== "transcript") continue;
+			if (parsed?.frontmatter.kind !== "transcript") continue;
 			const rowAgentId = parsed.frontmatter.agent_id || "default";
 			if (agentId && rowAgentId !== agentId) continue;
 			const harness = parsed.frontmatter.harness || "unknown";
@@ -492,13 +491,13 @@ export function getStoredSessionTranscriptInfo(sessionKey: string, agentId: stri
 				)
 				.get(agentId, ...aliases, sessionKey) as
 				| {
-					session_key: string;
-					agent_id: string;
-					harness: string | null;
-					project: string | null;
-					created_at: string;
-					updated_at?: string | null;
-				}
+						session_key: string;
+						agent_id: string;
+						harness: string | null;
+						project: string | null;
+						created_at: string;
+						updated_at?: string | null;
+				  }
 				| undefined;
 			if (!row) return undefined;
 			return {
@@ -558,7 +557,14 @@ export function searchTranscriptFallback(params: {
 		const keyPredicates = [`st.session_key IN (${placeholders})`];
 		if (hasSessionId) keyPredicates.push(`st.session_id IN (${placeholders})`);
 		const exactRows = getDbAccessor().withReadDb((db) => {
-			const args: unknown[] = [params.agentId, ...aliases, ...(hasSessionId ? aliases : []), exactQuery, params.project ?? "", limit];
+			const args: unknown[] = [
+				params.agentId,
+				...aliases,
+				...(hasSessionId ? aliases : []),
+				exactQuery,
+				params.project ?? "",
+				limit,
+			];
 			return db
 				.prepare(
 					[

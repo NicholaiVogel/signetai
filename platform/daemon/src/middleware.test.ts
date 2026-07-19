@@ -48,7 +48,7 @@ describe("global middleware shadow body capture", () => {
 	test("captures mutating request bodies only when shadowing is active", async () => {
 		const textReads = trackRequestTextReads();
 		let shadowBody: BodyInit | null | undefined;
-		globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+		globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 			shadowBody = init?.body;
 			return Promise.resolve(new Response(null, { status: 200 }));
 		}) as typeof fetch;

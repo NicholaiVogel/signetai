@@ -7,7 +7,7 @@
  */
 
 import { DEPENDENCY_DESCRIPTIONS, DEPENDENCY_TYPES, type DependencyType } from "@signet/core";
-import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
+import type { DbAccessor, WriteDb } from "../db-accessor";
 import { upsertAspect, upsertDependency } from "../knowledge-graph";
 import { logger } from "../logger";
 import type { PipelineV2Config } from "../memory-config";

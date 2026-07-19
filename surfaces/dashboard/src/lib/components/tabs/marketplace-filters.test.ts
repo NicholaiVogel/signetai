@@ -1,12 +1,8 @@
-// @ts-nocheck
 import { describe, expect, it } from "bun:test";
-import {
-	filterSkillsByProvider,
-	getSkillsProviderLabel,
-	normalizeSkillsProviderFilter,
-} from "./marketplace-filters";
+import type { SkillSearchResult } from "$lib/api";
+import { filterSkillsByProvider, getSkillsProviderLabel, normalizeSkillsProviderFilter } from "./marketplace-filters";
 
-const items = [
+const items: SkillSearchResult[] = [
 	{
 		name: "official-a",
 		fullName: "Signet-AI/signetai",
@@ -41,9 +37,6 @@ describe("marketplace skill provider filter", () => {
 		const provider = normalizeSkillsProviderFilter("nope");
 		expect(provider).toBe("all");
 		expect(getSkillsProviderLabel(provider)).toBe("All providers");
-		expect(filterSkillsByProvider(items, provider).map((item) => item.name)).toEqual([
-			"official-a",
-			"community-a",
-		]);
+		expect(filterSkillsByProvider(items, provider).map((item) => item.name)).toEqual(["official-a", "community-a"]);
 	});
 });

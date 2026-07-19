@@ -1,17 +1,7 @@
 <script lang="ts">
-import type {
-	MarketplaceMcpServer,
-	Skill,
-	SkillAnalyticsSummary,
-	McpAnalyticsSummary,
-} from "$lib/api";
+import type { MarketplaceMcpServer, Skill, SkillAnalyticsSummary, McpAnalyticsSummary } from "$lib/api";
 import { getAvatarFromSource, getAvatarUrl, getMonogram, getMonogramBg } from "$lib/card-utils";
-import {
-	getMcpAnalytics,
-	getMarketplaceMcpServers,
-	getSkillAnalytics,
-	getSkills,
-} from "$lib/api";
+import { getMcpAnalytics, getMarketplaceMcpServers, getSkillAnalytics, getSkills } from "$lib/api";
 import { fetchMarketplaceMcpCatalog, mcpMarket } from "$lib/stores/marketplace-mcp.svelte";
 import { nav } from "$lib/stores/navigation.svelte";
 import { fetchCatalog, sk } from "$lib/stores/skills.svelte";

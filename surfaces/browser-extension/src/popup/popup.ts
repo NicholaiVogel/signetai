@@ -66,7 +66,7 @@ async function init(): Promise<void> {
 	}
 
 	// Load data
-	let recentMemories = (await getMemories(10, 0)).memories;
+	const recentMemories = (await getMemories(10, 0)).memories;
 	const { stats } = await getMemories(1, 0);
 
 	// Update stats
@@ -76,11 +76,11 @@ async function init(): Promise<void> {
 	renderMemories(memoryList, recentMemories);
 
 	// Search
-	let isSearching = false;
+	let _isSearching = false;
 	initSearch(
 		searchInput,
 		(results, query) => {
-			isSearching = true;
+			_isSearching = true;
 			if (results.length === 0) {
 				renderSearchEmpty(memoryList, query);
 			} else {
@@ -88,7 +88,7 @@ async function init(): Promise<void> {
 			}
 		},
 		() => {
-			isSearching = false;
+			_isSearching = false;
 			renderMemories(memoryList, recentMemories);
 		},
 	);

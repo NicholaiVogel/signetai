@@ -1,9 +1,4 @@
 ---
-import Footer from "../components/Footer.astro";
-import GraphViewer from "../components/GraphViewer";
-import Nav from "../components/Nav.astro";
-import Sidebar from "../components/docs/Sidebar.astro";
-import Base from "./Base.astro";
 import "../styles/docs.css";
 import "../styles/graph.css";
 
@@ -30,7 +25,7 @@ interface Props {
 const { title, description, currentSlug, currentSection, toc, previousDoc, nextDoc } = Astro.props;
 
 const tocHeadings = toc?.filter((h) => h.depth === 2 || h.depth === 3) ?? [];
-const hasToc = tocHeadings.length > 2;
+const _hasToc = tocHeadings.length > 2;
 ---
 
 <Base title={`${title} — Signet Docs`} description={description}>

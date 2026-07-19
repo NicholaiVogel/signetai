@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SetupDetection } from "@signet/core";
+import { setupWizard } from "./setup.js";
 import { validateOllamaModelNonInteractive } from "./setup-providers.js";
 import type { SetupDeps } from "./setup-types.js";
-import { setupWizard } from "./setup.js";
 
 const NO_HARNESSES = {
 	claudeCode: false,
@@ -83,7 +83,6 @@ describe("fresh setup native embedding model validation", () => {
 
 	afterEach(() => {
 		if (ORIGINAL_HOME === undefined) {
-			// biome-ignore lint/performance/noDelete: assigning undefined stores the string "undefined"
 			delete process.env.HOME;
 		} else {
 			process.env.HOME = ORIGINAL_HOME;

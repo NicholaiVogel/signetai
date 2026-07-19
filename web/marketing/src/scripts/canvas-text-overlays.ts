@@ -1,18 +1,10 @@
 // Canvas text overlays rendered via pretext. Registers into the rAF loop
 // from canvas-animations.ts via registerRenderer().
 
-import { registerRenderer, type AnimState } from "./canvas-animations";
-import { prepareText, layoutText, resolveSiteFont, clearPretextCache } from "./pretext-utils";
+import { type AnimState, registerRenderer } from "./canvas-animations";
+import { clearPretextCache, layoutText, prepareText, resolveSiteFont } from "./pretext-utils";
 
-const CLUSTER_LABELS = [
-	"EXTRACTION",
-	"RETENTION",
-	"SYNTHESIS",
-	"INDEXING",
-	"RETRIEVAL",
-	"ENCODING",
-	"DECAY",
-];
+const CLUSTER_LABELS = ["EXTRACTION", "RETENTION", "SYNTHESIS", "INDEXING", "RETRIEVAL", "ENCODING", "DECAY"];
 
 const CLUSTER_OFFSETS = [
 	{ rx: 0.62, ry: 0.24 },
@@ -31,7 +23,7 @@ type LabelCache = {
 };
 
 let labels: LabelCache[] | null = null;
-let lastFont = "";
+let _lastFont = "";
 let cleanup: (() => void) | null = null;
 let lastDraw = 0;
 
@@ -39,13 +31,13 @@ async function prepareLabelCache(font: string): Promise<void> {
 	const entries: LabelCache[] = [];
 	for (const text of CLUSTER_LABELS) {
 		const prepared = await prepareText(text, font);
-		const result = await layoutText(prepared, 9999, 12);
+		const _result = await layoutText(prepared, 9999, 12);
 		// Single line, so width is approximate from lineCount * char estimate.
 		// We'll measure with canvas directly for positioning.
 		entries.push({ prepared, text, width: 0 });
 	}
 	labels = entries;
-	lastFont = font;
+	_lastFont = font;
 }
 
 function drawClusterLabels(state: AnimState): void {

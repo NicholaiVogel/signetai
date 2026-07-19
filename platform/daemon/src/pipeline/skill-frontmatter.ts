@@ -6,7 +6,7 @@
  * back into SKILL.md frontmatter.
  */
 
-import { parseDocument, stringify } from "yaml";
+import { parseDocument } from "yaml";
 import type { SkillFrontmatter } from "./skill-graph";
 
 // ---------------------------------------------------------------------------

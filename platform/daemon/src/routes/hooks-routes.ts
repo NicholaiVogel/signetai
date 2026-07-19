@@ -1,8 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { emptyHookRecallResponse, withHookRecallCompat } from "@signet/core";
-import type { Context } from "hono";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { getAgentScope, resolveAgentId } from "../agent-id";
 import { aggregateRecall, parseAggregateRecallBudget, readAggregateRecallBudgetInput } from "../aggregate-recall";
 import { checkScope, requirePermission, requireRateLimit } from "../auth";
@@ -23,20 +22,20 @@ import { getDbAccessor } from "../db-accessor";
 import { fetchEmbedding } from "../embedding-fetch";
 import {
 	type CheckpointExtractRequest,
-	type PreCompactionRequest,
-	type RecallRequest,
-	type RememberRequest,
-	type SessionEndRequest,
-	type SessionStartRequest,
-	type SynthesisRequest,
-	type UserPromptSubmitRequest,
 	handleCheckpointExtract,
 	handlePreCompaction,
 	handleSessionEnd,
 	handleSessionStart,
 	handleSynthesisRequest,
 	handleUserPromptSubmit,
+	type PreCompactionRequest,
+	type RecallRequest,
+	type RememberRequest,
 	resetSessionStartDedupe,
+	type SessionEndRequest,
+	type SessionStartRequest,
+	type SynthesisRequest,
+	type UserPromptSubmitRequest,
 	writeMemoryMd,
 } from "../hooks.js";
 import { getInferenceRouterOrNull } from "../inference-router";
@@ -48,7 +47,6 @@ import { getSynthesisWorker, readLastSynthesisTime } from "../pipeline";
 import { isNoiseSession } from "../session-noise";
 import { advanceRecallContextEpoch } from "../session-recall-dedupe";
 import {
-	type RuntimePath,
 	claimSession,
 	getActiveSessions,
 	getEndedSession,
@@ -57,6 +55,7 @@ import {
 	isSessionBypassed,
 	markSessionEnded,
 	normalizeSessionKey,
+	type RuntimePath,
 	releaseSession,
 	renewSession,
 } from "../session-tracker.js";
@@ -67,13 +66,13 @@ import { upsertThreadHead } from "../thread-heads";
 import { autoConnectGraphiq } from "./graphiq-routes.js";
 import {
 	AGENTS_DIR,
-	INTERNAL_SELF_HOST,
-	PORT,
 	authConfig,
 	authCrossAgentMessageLimiter,
 	authRecallLlmLimiter,
 	getCurrentMemoryDbPath,
 	harnessLastSeen,
+	INTERNAL_SELF_HOST,
+	PORT,
 } from "./state";
 import {
 	parseOptionalBoolean,

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { BaseConnector, type InstallResult, type UninstallResult, atomicWriteJson } from "@signet/connector-base";
+import { atomicWriteJson, BaseConnector, type InstallResult, type UninstallResult } from "@signet/connector-base";
 import {
 	expandHome,
 	resolvePromptSubmitTimeoutMs,

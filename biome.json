@@ -3,22 +3,22 @@
 	"files": {
 		"includes": [
 			"**",
-			"!**/references/**",
-			"!**/dist/**",
-			"!**/node_modules/**",
-			"!**/.svelte-kit/**",
-			"!**/build/**",
-			"!**/web/marketing/.wrangler/**",
-			"!**/dist/signetai/dashboard/**",
-			"!**/web/marketing/.astro/**",
-			"!**/memorybench/data/**",
-			"!**/memorybench/dist/**",
-			"!**/memorybench/node_modules/**",
-			"!**/_app/**",
-			"!**/target/**",
-			"!**/coverage/**",
+			"!**/references",
+			"!**/dist",
+			"!**/node_modules",
+			"!**/.svelte-kit",
+			"!**/build",
+			"!**/web/marketing/.wrangler",
+			"!**/dist/signetai/dashboard",
+			"!**/web/marketing/.astro",
+			"!**/memorybench/data",
+			"!**/memorybench/dist",
+			"!**/memorybench/node_modules",
+			"!**/_app",
+			"!**/target",
+			"!**/coverage",
 			"!**/*.generated.*",
-			"!**/libs/sdk/src/generated/**"
+			"!**/libs/sdk/src/generated"
 		]
 	},
 	"formatter": {
@@ -47,7 +47,24 @@
 			"indentStyle": "tab"
 		}
 	},
+	"css": {
+		"parser": {
+			"tailwindDirectives": true
+		}
+	},
 	"overrides": [
+		{
+			"includes": ["**/*.svelte"],
+			"assist": { "actions": { "source": { "organizeImports": "off" } } },
+			"linter": {
+				"rules": {
+					"correctness": {
+						"noUnusedImports": "off",
+						"noUnusedVariables": "off"
+					}
+				}
+			}
+		},
 		{
 			"includes": ["**/memorybench/**"],
 			"formatter": {

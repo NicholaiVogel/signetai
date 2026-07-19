@@ -4,7 +4,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { HermesAgentConnector, diagnoseHermesIntegration } from "./src/index.js";
+import { diagnoseHermesIntegration, HermesAgentConnector } from "./src/index.js";
 
 const originalEnv = {
 	HOME: process.env.HOME,
@@ -152,30 +152,18 @@ function writeHermesMemoryFixture(hermesRepo: string): void {
 beforeEach(() => {
 	tmpRoot = mkdtempSync(join(tmpdir(), "signet-hermes-connector-"));
 	process.env.HOME = tmpRoot;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.HERMES_REPO;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.HERMES_HOME;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_AGENT_ID;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_AGENT_WORKSPACE;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_DAEMON_URL;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_TRUSTED_DAEMON_ORIGINS;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_TOKEN;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_AGENT_READ_POLICY;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_AGENT_MEMORY_POLICY;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_AGENT_POLICY_GROUP;
 	process.env.SIGNET_SKIP_AGENT_REGISTER = "1";
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_DIR;
-	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_CONNECTOR_ASSETS_DIR;
 });
 
@@ -733,11 +721,9 @@ describe("HermesAgentConnector.install()", () => {
 			process.env.HERMES_REPO = hermesRepo;
 			process.env.HERMES_HOME = hermesHome;
 			process.env.SIGNET_AGENT_ID = "dot";
-			// biome-ignore lint/performance/noDelete: exercise the SIGNET_TOKEN fallback without a stale API key
 			delete process.env.SIGNET_API_KEY;
 			process.env.SIGNET_TOKEN = " test-token \n";
 			process.env.SIGNET_AGENT_READ_POLICY = "isolated";
-			// biome-ignore lint/performance/noDelete: this test exercises registration
 			delete process.env.SIGNET_SKIP_AGENT_REGISTER;
 
 			const result = await new HermesAgentConnector().install(tmpRoot);
@@ -772,7 +758,6 @@ describe("HermesAgentConnector.install()", () => {
 			process.env.HERMES_REPO = hermesRepo;
 			process.env.HERMES_HOME = hermesHome;
 			process.env.SIGNET_AGENT_ID = "dot";
-			// biome-ignore lint/performance/noDelete: this test exercises registration
 			delete process.env.SIGNET_SKIP_AGENT_REGISTER;
 
 			const result = await new HermesAgentConnector().install(tmpRoot);
@@ -1457,7 +1442,6 @@ describe("HermesAgentConnector — native bundle (SIGNET_DIR) plugin resolution"
 		process.env.SIGNET_DIR = signetDir;
 		const hermesHome = join(tmpRoot, ".hermes");
 		process.env.HERMES_HOME = hermesHome;
-		// biome-ignore lint/performance/noDelete: ensure no repo path
 		delete process.env.HERMES_REPO;
 
 		const result = await new HermesAgentConnector().install(tmpRoot);
@@ -1496,7 +1480,6 @@ describe("HermesAgentConnector — native bundle (SIGNET_DIR) plugin resolution"
 
 		process.env.SIGNET_DIR = signetDir;
 		process.env.HERMES_HOME = join(tmpRoot, ".hermes");
-		// biome-ignore lint/performance/noDelete: ensure no repo path
 		delete process.env.HERMES_REPO;
 
 		const result = await new HermesAgentConnector().install(tmpRoot);
@@ -1514,7 +1497,6 @@ describe("HermesAgentConnector — native bundle (SIGNET_DIR) plugin resolution"
 
 		process.env.SIGNET_DIR = signetDir;
 		process.env.HERMES_HOME = join(tmpRoot, ".hermes");
-		// biome-ignore lint/performance/noDelete: ensure no repo path
 		delete process.env.HERMES_REPO;
 
 		const result = await new HermesAgentConnector().install(tmpRoot);
@@ -1536,7 +1518,6 @@ describe("HermesAgentConnector — native bundle (SIGNET_DIR) plugin resolution"
 
 		process.env.SIGNET_DIR = signetDir;
 		process.env.HERMES_HOME = join(tmpRoot, ".hermes");
-		// biome-ignore lint/performance/noDelete: ensure no repo path
 		delete process.env.HERMES_REPO;
 
 		try {

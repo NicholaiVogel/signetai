@@ -1,8 +1,8 @@
-// @ts-nocheck
 import { describe, expect, it } from "bun:test";
+import type { SkillSearchResult } from "$lib/api";
 import { getFeaturedOfficialSkills, omitFeaturedSkills } from "./featured-skills";
 
-const items = [
+const items: SkillSearchResult[] = [
 	{
 		name: "community-top",
 		fullName: "someone/community-top",

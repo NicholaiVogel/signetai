@@ -64,15 +64,12 @@ let logEventSource: AuthEventStream | null = null;
 let streamEnabled = $state(true);
 let reconnectAttempt = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-// biome-ignore lint/style/useConst: reassigned from Svelte template callbacks.
 let logLevelFilter = $state<string>("");
-// biome-ignore lint/style/useConst: reassigned from Svelte template callbacks.
 let logCategoryFilter = $state<string>("");
 let logOrderChoice = $state<LogOrder | null>(null);
 let logAutoScroll = $state(false);
 let logAutoScrollPausedByScroll = $state(false);
 let initialLoadDone = $state(false);
-// biome-ignore lint/style/useConst: assigned through bind:viewportRef.
 let logViewport = $state<HTMLElement | null>(null);
 let selectedLogKey = $state<string | null>(null);
 let contextTrace = $state<BlackBoxSession | null>(null);

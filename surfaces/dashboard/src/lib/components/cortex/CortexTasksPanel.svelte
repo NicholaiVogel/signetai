@@ -17,9 +17,7 @@ import {
 import { Plus } from "$lib/icons";
 import { onMount } from "svelte";
 
-// biome-ignore lint/style/useConst: Mutated from template callback.
 let selectedColumn = $state(0);
-// biome-ignore lint/style/useConst: Mutated from template callback.
 let selectedTask = $state(0);
 
 const taskCount = $derived(ts.tasks.length);

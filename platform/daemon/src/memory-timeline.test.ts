@@ -1,12 +1,12 @@
-import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { describe, expect, test } from "bun:test";
 import { runMigrations } from "../../core/src/migrations";
 import type { ReadDb } from "./db-accessor";
 import { buildMemoryTimeline } from "./memory-timeline";
 
 function makeDb(): Database {
 	const db = new Database(":memory:");
-	runMigrations(db as any);
+	runMigrations(db);
 	return db;
 }
 

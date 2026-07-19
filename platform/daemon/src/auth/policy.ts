@@ -2,8 +2,8 @@
  * Permission matrix and scope enforcement.
  */
 
-import type { AuthMode, Permission, PolicyDecision, TokenClaims, TokenRole, TokenScope } from "./types";
 import { logger } from "../logger";
+import type { AuthMode, Permission, PolicyDecision, TokenClaims, TokenRole, TokenScope } from "./types";
 
 // Track which subs have been warned about empty scope to avoid log flooding.
 // Unbounded for the process lifetime — acceptable for typical deployments
@@ -57,7 +57,7 @@ export function checkPermission(
 	}
 
 	const allowed = permissionSets.get(claims.role);
-	if (!allowed || !allowed.has(permission)) {
+	if (!allowed?.has(permission)) {
 		return {
 			allowed: false,
 			reason: `role '${claims.role}' lacks '${permission}' permission`,

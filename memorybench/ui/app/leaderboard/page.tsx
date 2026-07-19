@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useMemo } from "react"
+import { useState, useEffect, useMemo, useCallback } from "react"
 import Link from "next/link"
 import { getLeaderboard, removeFromLeaderboard, type LeaderboardEntry } from "@/lib/api"
 import { FilterBar } from "@/components/filter-bar"
@@ -18,11 +18,7 @@ export default function LeaderboardPage() {
   const [selectedProviders, setSelectedProviders] = useState<string[]>([])
   const [selectedBenchmarks, setSelectedBenchmarks] = useState<string[]>([])
 
-  useEffect(() => {
-    loadLeaderboard()
-  }, [])
-
-  async function loadLeaderboard() {
+  const loadLeaderboard = useCallback(async () => {
     try {
       setLoading(true)
       const data = await getLeaderboard()
@@ -33,18 +29,22 @@ export default function LeaderboardPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
-  async function handleRemove(id: number) {
+  const handleRemove = useCallback(async (id: number) => {
     if (!confirm("Remove this entry from the leaderboard?")) return
 
     try {
       await removeFromLeaderboard(id)
-      setEntries(entries.filter((e) => e.id !== id))
+      setEntries((prev) => prev.filter((e) => e.id !== id))
     } catch (e) {
       alert(e instanceof Error ? e.message : "Failed to remove entry")
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    loadLeaderboard()
+  }, [loadLeaderboard])
 
   // Get unique providers and benchmarks for filter options
   const providers = useMemo(() => {
@@ -223,7 +223,7 @@ export default function LeaderboardPage() {
     })
 
     return cols
-  }, [visibleQuestionTypes, typeRegistry])
+  }, [visibleQuestionTypes, typeRegistry, handleRemove])
 
   const clearFilters = () => {
     setSearch("")

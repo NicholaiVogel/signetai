@@ -14,7 +14,7 @@ import { logger } from "./logger";
 // ---------------------------------------------------------------------------
 
 let flags: Readonly<Record<string, boolean>> = {};
-let initialized = false;
+let _initialized = false;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -68,7 +68,7 @@ function loadFlags(agentsDir: string): Record<string, boolean> {
 /** Initialise feature flags from agent.yaml. Call once at daemon startup. */
 export function initFeatureFlags(agentsDir: string): void {
 	flags = loadFlags(agentsDir);
-	initialized = true;
+	_initialized = true;
 }
 
 /** Get a single feature flag. Returns false for unknown flags. */

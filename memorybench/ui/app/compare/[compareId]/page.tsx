@@ -167,15 +167,32 @@ export default function CompareDetailPage() {
       setCompare(compareData)
       setReport(reportData)
       setError(null)
-    } catch (e) {
+    } catch (_e) {
       // Silent fail on poll
+    }
+  }, [compareId])
+
+  const loadData = useCallback(async () => {
+    try {
+      setLoading(true)
+      const [compareData, reportData] = await Promise.all([
+        getCompare(compareId),
+        getCompareReport(compareId).catch(() => null),
+      ])
+      setCompare(compareData)
+      setReport(reportData)
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load comparison")
+    } finally {
+      setLoading(false)
     }
   }, [compareId])
 
   // Initial load
   useEffect(() => {
     loadData()
-  }, [compareId])
+  }, [loadData])
 
   // Polling when comparison is in progress
   useEffect(() => {
@@ -194,23 +211,6 @@ export default function CompareDetailPage() {
       }
     }
   }, [isRunning, refreshData])
-
-  async function loadData() {
-    try {
-      setLoading(true)
-      const [compareData, reportData] = await Promise.all([
-        getCompare(compareId),
-        getCompareReport(compareId).catch(() => null),
-      ])
-      setCompare(compareData)
-      setReport(reportData)
-      setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load comparison")
-    } finally {
-      setLoading(false)
-    }
-  }
 
   async function handleStop() {
     if (stopping) return

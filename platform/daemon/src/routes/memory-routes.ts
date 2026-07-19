@@ -8,15 +8,15 @@ import { ensureAgentRegistered, getAgentScope, resolveAgentId } from "../agent-i
 import { aggregateRecall, parseAggregateRecallBudget, readAggregateRecallBudgetInput } from "../aggregate-recall";
 import { checkScope, requirePermission, requireRateLimit } from "../auth";
 import { normalizeAndHashContent } from "../content-normalization";
-import { type WriteDb, getDbAccessor } from "../db-accessor";
+import { getDbAccessor, type WriteDb } from "../db-accessor";
 import { syncVecDeleteBySourceId, syncVecInsert, vectorToBlob } from "../db-helpers";
 import { fetchEmbedding } from "../embedding-fetch";
 import { buildEmbeddingHealth } from "../embedding-health";
 import { getInferenceRouterOrNull } from "../inference-router";
 import { linkMemoryToEntities } from "../inline-entity-linker";
 import { logger } from "../logger";
-import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
-import { type RecallParams, type RecallResponse, buildAgentScopeClause, hybridRecall } from "../memory-search";
+import { loadMemoryConfig, type ResolvedMemoryConfig } from "../memory-config";
+import { buildAgentScopeClause, hybridRecall, type RecallParams, type RecallResponse } from "../memory-search";
 import { recordMemorySearchTelemetry } from "../memory-search-telemetry";
 import { resolveMemorySearchTelemetryProject } from "../memory-search-telemetry-project";
 import { buildMemoryTimeline } from "../memory-timeline";
@@ -29,9 +29,6 @@ import { txForgetMemory, txIngestEnvelope, txModifyMemory, txRecoverMemory, txSu
 import { cacheProjection, computeProjection, computeProjectionForQuery, getCachedProjection } from "../umap-projection";
 import {
 	AGENTS_DIR,
-	INTERNAL_SELF_HOST,
-	PORT,
-	PROJECTION_ERROR_TTL_MS,
 	authBatchForgetLimiter,
 	authConfig,
 	authForgetLimiter,
@@ -39,19 +36,22 @@ import {
 	authRecallLlmLimiter,
 	embeddingTrackerHandle,
 	hasMemoriesSessionIdColumnCache,
+	INTERNAL_SELF_HOST,
+	PORT,
+	PROJECTION_ERROR_TTL_MS,
 	projectionErrors,
 	projectionInFlight,
 	queueExtractionJob,
 } from "./state";
 import {
-	type FilterParams,
-	type ForgetCandidatesRequest,
 	blobToVector,
 	buildForgetConfirmToken,
 	buildWhere,
 	buildWhereRaw,
 	checkEmbeddingProvider,
 	chunkBySentence,
+	type FilterParams,
+	type ForgetCandidatesRequest,
 	inferType,
 	isMissingEmbeddingsTableError,
 	loadForgetCandidates,
@@ -479,7 +479,9 @@ function getScopedChunkIdempotencyRows(
 		});
 }
 
-function hasMemoriesSessionIdColumn(db: any): boolean {
+function hasMemoriesSessionIdColumn(db: {
+	prepare: (sql: string) => { all: () => Array<{ name?: unknown }> };
+}): boolean {
 	if (hasMemoriesSessionIdColumnCache !== null) {
 		return hasMemoriesSessionIdColumnCache;
 	}
@@ -1010,8 +1012,8 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					// FTS path
 					const { clause, args } = buildWhere(filterParams);
 					try {
-						rows = (
-							db.prepare(`
+						rows = db
+							.prepare(`
             SELECT m.id, m.content, m.created_at, m.who, m.importance, m.tags,
                    m.type, m.pinned, bm25(memories_fts) as score
             FROM memories_fts
@@ -1019,26 +1021,26 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
             WHERE memories_fts MATCH ?${clause}
             ORDER BY score
             LIMIT ${limit ?? 20}
-          `) as any
-						).all(query, ...args);
+          `)
+							.all(query, ...args);
 					} catch {
 						// FTS not available — fall back to LIKE
 						const { clause: rc, args: rargs } = buildWhereRaw(filterParams);
-						rows = (
-							db.prepare(`
+						rows = db
+							.prepare(`
             SELECT id, content, created_at, who, importance, tags, type, pinned
             FROM memories
             WHERE (content LIKE ? OR tags LIKE ?)${rc}
             ORDER BY created_at DESC
             LIMIT ${limit ?? 20}
-          `) as any
-						).all(`%${query}%`, `%${query}%`, ...rargs);
+          `)
+							.all(`%${query}%`, `%${query}%`, ...rargs);
 					}
 				} else if (hasFilters) {
 					// Pure filter path
 					const { clause, args } = buildWhereRaw(filterParams);
-					rows = (
-						db.prepare(`
+					rows = db
+						.prepare(`
           SELECT id, content, created_at, who, importance, tags, type, pinned,
                  CASE WHEN pinned = 1 THEN 1.0
                       ELSE importance * MAX(0.1, POWER(0.95,
@@ -1048,8 +1050,8 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
           WHERE 1=1${clause}
           ORDER BY score DESC
           LIMIT ${limit ?? 50}
-        `) as any
-					).all(...args);
+        `)
+						.all(...args);
 				}
 
 				return rows;
@@ -1189,7 +1191,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		ensureAgentRegistered(agentId);
 		const visibility = body.visibility === "private" ? "private" : "global";
 		const dedupeScope = { agentId, visibility, project: body.project ?? null, scope };
-		const hasBodyTags = Object.prototype.hasOwnProperty.call(body, "tags");
+		const hasBodyTags = Object.hasOwn(body, "tags");
 		const bodyTags = hasBodyTags ? parseTagsMutation(body.tags) : undefined;
 		if (hasBodyTags && bodyTags === undefined) {
 			return c.json({ error: "tags must be a string, string array, or null" }, 400);
@@ -1226,8 +1228,8 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 
 			const who = body.who ?? "daemon";
 			const project = body.project ?? null;
-			const sourceType = body.sourceType?.trim() || "manual";
-			const sourceId = body.sourceId?.trim() || null;
+			const _sourceType = body.sourceType?.trim() || "manual";
+			const _sourceId = body.sourceId?.trim() || null;
 			const parsedPrefixes = parsePrefixes(raw);
 			const importance = body.importance ?? parsedPrefixes.importance;
 			const pinned = (body.pinned ?? parsedPrefixes.pinned) ? 1 : 0;
@@ -1853,7 +1855,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		const body = await c.req.json().catch(() => ({}));
 		const headers: Record<string, string> = { "Content-Type": "application/json" };
 		const authHdr = c.req.header("authorization");
-		if (authHdr) headers["authorization"] = authHdr;
+		if (authHdr) headers.authorization = authHdr;
 		const sessionKey = c.req.header("x-signet-session-key");
 		if (sessionKey) headers["x-signet-session-key"] = sessionKey;
 		return fetch(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
@@ -1870,7 +1872,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		const body = await c.req.json().catch(() => ({}));
 		const headers: Record<string, string> = { "Content-Type": "application/json" };
 		const authHdr = c.req.header("authorization");
-		if (authHdr) headers["authorization"] = authHdr;
+		if (authHdr) headers.authorization = authHdr;
 		const sessionKey = c.req.header("x-signet-session-key");
 		if (sessionKey) headers["x-signet-session-key"] = sessionKey;
 		return fetch(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
@@ -2110,7 +2112,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			return c.json({ error: "reason is required" }, 400);
 		}
 
-		const hasIfVersionInBody = Object.prototype.hasOwnProperty.call(payload, "if_version");
+		const hasIfVersionInBody = Object.hasOwn(payload, "if_version");
 		const ifVersionBody = parseOptionalInt(payload.if_version);
 		if (hasIfVersionInBody && ifVersionBody === undefined) {
 			return c.json({ error: "if_version must be a positive integer" }, 400);
@@ -2207,7 +2209,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			return c.json({ error: "reason is required" }, 400);
 		}
 
-		const hasIfVersion = Object.prototype.hasOwnProperty.call(payload, "if_version");
+		const hasIfVersion = Object.hasOwn(payload, "if_version");
 		const ifVersion = parseOptionalInt(payload.if_version);
 		if (hasIfVersion && ifVersion === undefined) {
 			return c.json({ error: "if_version must be a positive integer" }, 400);
@@ -2319,7 +2321,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			return c.json({ error: "reason is required" }, 400);
 		}
 
-		const hasForceInBody = Object.prototype.hasOwnProperty.call(payload, "force");
+		const hasForceInBody = Object.hasOwn(payload, "force");
 		const forceFromBody = parseOptionalBoolean(payload.force);
 		if (hasForceInBody && forceFromBody === undefined) {
 			return c.json({ error: "force must be a boolean" }, 400);
@@ -2327,7 +2329,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		const forceFromQuery = parseOptionalBoolean(c.req.query("force"));
 		const force = forceFromBody ?? forceFromQuery ?? false;
 
-		const hasIfVersionInBody = Object.prototype.hasOwnProperty.call(payload, "if_version");
+		const hasIfVersionInBody = Object.hasOwn(payload, "if_version");
 		const ifVersionBody = parseOptionalInt(payload.if_version);
 		if (hasIfVersionInBody && ifVersionBody === undefined) {
 			return c.json({ error: "if_version must be a positive integer" }, 400);
@@ -2576,7 +2578,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			return c.json({ error: "mode must be preview or execute" }, 400);
 		}
 
-		const hasLimit = Object.prototype.hasOwnProperty.call(payload, "limit");
+		const hasLimit = Object.hasOwn(payload, "limit");
 		const parsedLimit = parseOptionalInt(payload.limit);
 		if (hasLimit && parsedLimit === undefined) {
 			return c.json({ error: "limit must be a positive integer" }, 400);
@@ -2584,7 +2586,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		const limit = Math.max(1, Math.min(parsedLimit ?? 20, MAX_MUTATION_BATCH));
 
 		let ids: string[] = [];
-		if (Object.prototype.hasOwnProperty.call(payload, "ids")) {
+		if (Object.hasOwn(payload, "ids")) {
 			if (!Array.isArray(payload.ids)) {
 				return c.json({ error: "ids must be an array of strings" }, 400);
 			}
@@ -2653,13 +2655,13 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			return c.json({ error: "reason is required for execute mode" }, 400);
 		}
 
-		const hasForce = Object.prototype.hasOwnProperty.call(payload, "force");
+		const hasForce = Object.hasOwn(payload, "force");
 		const force = parseOptionalBoolean(payload.force);
 		if (hasForce && force === undefined) {
 			return c.json({ error: "force must be a boolean" }, 400);
 		}
 
-		if (Object.prototype.hasOwnProperty.call(payload, "if_version")) {
+		if (Object.hasOwn(payload, "if_version")) {
 			return c.json(
 				{
 					error: "if_version is not supported for batch forget; use DELETE /api/memory/:id for version-guarded deletes",
@@ -2796,7 +2798,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				continue;
 			}
 
-			const hasIfVersion = Object.prototype.hasOwnProperty.call(patchPayload, "if_version");
+			const hasIfVersion = Object.hasOwn(patchPayload, "if_version");
 			const ifVersion = parseOptionalInt(patchPayload.if_version);
 			if (hasIfVersion && ifVersion === undefined) {
 				results.push({
@@ -3063,7 +3065,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					),
 				);
 
-				return vectorSearch(db as any, queryVector, {
+				return vectorSearch(db, queryVector, {
 					limit: k + 1,
 					type: type as "fact" | "preference" | "decision" | undefined,
 				});

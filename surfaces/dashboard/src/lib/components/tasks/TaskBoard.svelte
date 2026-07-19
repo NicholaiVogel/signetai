@@ -12,7 +12,6 @@ interface Props {
 	ontoggle: (id: string, enabled: boolean) => void;
 }
 
-// biome-ignore lint/style/useConst: Svelte props can update after initial mount.
 let {
 	tasks,
 	loading,

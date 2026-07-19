@@ -2,19 +2,17 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
 	BaseConnector,
-	type InstallResult,
-	MANAGED_AGENT_ID_DEFAULT,
-	MANAGED_DAEMON_URL_DEFAULT,
-	type UninstallResult,
 	buildManagedExtensionEnvBootstrap,
+	type InstallResult,
 	isManagedExtensionFile,
+	MANAGED_DAEMON_URL_DEFAULT,
 	managedExtensionFilePath,
-	readManagedTrimmedEnv,
 	removeManagedExtensionFile,
 	resolveSignetAgentId,
 	resolveSignetApiKey,
 	resolveSignetDaemonUrl,
 	resolveSignetWorkspacePath,
+	type UninstallResult,
 } from "@signet/connector-base";
 import {
 	clearConfiguredOhMyPiAgentDir,
@@ -66,10 +64,6 @@ export class OhMyPiConnector extends BaseConnector {
 
 	private getManagedExtensionPath(): string {
 		return join(resolveOhMyPiExtensionsDir(), OH_MY_PI_MANAGED_FILENAME);
-	}
-
-	private getLegacyManagedExtensionPath(): string {
-		return join(resolveOhMyPiExtensionsDir(), OH_MY_PI_LEGACY_MANAGED_FILENAME);
 	}
 
 	private getManagedCandidatePaths(filename: string): readonly string[] {

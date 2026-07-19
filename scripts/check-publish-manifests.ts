@@ -142,7 +142,7 @@ export function collectManifestIssues(
 			for (const [dep, spec] of getRuntimeDependencies(pkg, field)) {
 				const workspaceDep = workspacePackages.get(dep);
 				if (spec.startsWith("workspace:")) {
-					if (!workspaceDep || !workspaceDep.publishable) {
+					if (!workspaceDep?.publishable) {
 						issues.push({
 							file,
 							packageName,

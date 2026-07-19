@@ -26,10 +26,9 @@ import { logger } from "./logger";
 import { loadMemoryConfig } from "./memory-config";
 import {
 	type AcpxHooksMode,
-	type LlmProviderStreamEvent,
-	type LlmProviderStreamResult,
-	type StreamCapableLlmProvider,
 	generateWithTracking,
+	type LlmProviderStreamEvent,
+	type StreamCapableLlmProvider,
 } from "./pipeline/provider";
 import { getSecret } from "./secrets";
 

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { type WriteDb, getDbAccessor } from "./db-accessor";
+import { getDbAccessor, type WriteDb } from "./db-accessor";
 import { logger } from "./logger";
 import { effectiveScore } from "./memory-classification";
 import { buildAgentScopeClause } from "./memory-search";

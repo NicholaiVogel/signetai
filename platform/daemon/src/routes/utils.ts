@@ -686,16 +686,16 @@ export function loadForgetCandidates(
 
 		if (withQuery) {
 			try {
-				const rows = (
-					db.prepare(
+				const rows = db
+					.prepare(
 						`SELECT m.id, m.pinned, m.version, bm25(memories_fts) AS raw_score
 						 FROM memories_fts
 						 JOIN memories m ON memories_fts.rowid = m.rowid
 						 WHERE memories_fts MATCH ? AND m.is_deleted = 0${clause}${scopeSql}
 						 ORDER BY raw_score
 						 LIMIT ?`,
-					) as any
-				).all(req.query, ...args, ...scopeArgs, limit) as Array<{
+					)
+					.all(req.query, ...args, ...scopeArgs, limit) as Array<{
 					id: string;
 					pinned: number;
 					version: number;
@@ -711,16 +711,16 @@ export function loadForgetCandidates(
 				// Fall through to LIKE fallback.
 			}
 
-			const fallbackRows = (
-				db.prepare(
+			const fallbackRows = db
+				.prepare(
 					`SELECT m.id, m.pinned, m.version
 					 FROM memories m
 					 WHERE m.is_deleted = 0
 					   AND (m.content LIKE ? OR m.tags LIKE ?)${clause}${scopeSql}
 					 ORDER BY m.updated_at DESC
 					 LIMIT ?`,
-				) as any
-			).all(`%${req.query}%`, `%${req.query}%`, ...args, ...scopeArgs, limit) as Array<{
+				)
+				.all(`%${req.query}%`, `%${req.query}%`, ...args, ...scopeArgs, limit) as Array<{
 				id: string;
 				pinned: number;
 				version: number;
@@ -733,15 +733,15 @@ export function loadForgetCandidates(
 			}));
 		}
 
-		const rows = (
-			db.prepare(
+		const rows = db
+			.prepare(
 				`SELECT m.id, m.pinned, m.version
 				 FROM memories m
 				 WHERE m.is_deleted = 0${clause}${scopeSql}
 				 ORDER BY m.pinned DESC, m.importance DESC, m.updated_at DESC
 				 LIMIT ?`,
-			) as any
-		).all(...args, ...scopeArgs, limit) as Array<{
+			)
+			.all(...args, ...scopeArgs, limit) as Array<{
 			id: string;
 			pinned: number;
 			version: number;
@@ -819,7 +819,7 @@ export function parseModifyPatch(
 	let changed = false;
 	let contentForEmbedding: string | null = null;
 
-	const hasField = (field: string): boolean => Object.prototype.hasOwnProperty.call(payload, field);
+	const hasField = (field: string): boolean => Object.hasOwn(payload, field);
 
 	if (hasField("content")) {
 		if (typeof payload.content !== "string") {

@@ -170,7 +170,7 @@ describe("fetchEmbedding", () => {
 
 	it("falls back to llama.cpp when native fails, skipping ollama", async () => {
 		let capturedUrl: string | undefined;
-		globalThis.fetch = mock((url: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = mock((url: string | URL | Request, _init?: RequestInit) => {
 			const urlStr = url.toString();
 			if (urlStr.includes("localhost:8080")) {
 				if (urlStr.includes("/v1/models")) {

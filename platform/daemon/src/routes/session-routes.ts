@@ -4,9 +4,7 @@ import { requirePermission } from "../auth";
 import { buildBlackBoxSession, listBlackBoxSessions } from "../black-box.js";
 import { listAgentPresence, touchAgentPresence } from "../cross-agent.js";
 import { getDbAccessor } from "../db-accessor.js";
-import { logger } from "../logger.js";
 import {
-	type RuntimePath,
 	bypassSession,
 	getActiveSessions,
 	isSessionBypassed,

@@ -718,7 +718,7 @@ function normalizeMcpConfig(value: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Mar
 
 export function extractStandardMcpConfig(markdown: string): DetailConfig {
 	const titleMatch = markdown.match(/^([^\n]+)\n[-=]{3,}\n/m);
-	const title = titleMatch ? titleMatch[1].trim() : undefined;
+	const _title = titleMatch ? titleMatch[1].trim() : undefined;
 
 	let description = "";
 	if (titleMatch) {

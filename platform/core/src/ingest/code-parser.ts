@@ -13,11 +13,11 @@
  * patterns, and recent development activity.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "fs";
-import { join, basename, extname, relative } from "path";
-import { execFileSync } from "child_process";
-import type { ParsedDocument, ParsedSection } from "./types";
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { basename, extname, join, relative } from "node:path";
 import { findGit } from "./git-utils";
+import type { ParsedDocument, ParsedSection } from "./types";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -465,7 +465,7 @@ function parseGitLog(repoPath: string, maxCommits: number): ParsedSection[] {
 
 			if (filteredCommits.length > 0) {
 				const commitLines = filteredCommits.map((line) => {
-					const [hash, author, date, ...subjectParts] = line.split("|");
+					const [_hash, author, date, ...subjectParts] = line.split("|");
 					const subject = subjectParts.join("|");
 					return `[${date}] ${author}: ${subject}`;
 				});

@@ -9,8 +9,6 @@ import { loadMemoryConfig } from "../memory-config.js";
 import { clusterEntities } from "../pipeline/community-detection.js";
 import { DEFAULT_RETENTION, runRetentionSweepOnce } from "../pipeline/retention-worker.js";
 import {
-	type RepairContext,
-	type RepairResult,
 	backfillSkippedSessions,
 	checkFtsConsistency,
 	cleanOrphanedEmbeddings,
@@ -23,8 +21,10 @@ import {
 	pruneChunkGroupEntities,
 	pruneGenericEntities,
 	pruneSingletonExtractedEntities,
-	reclassifyEntities,
+	type RepairContext,
+	type RepairResult,
 	rebuildDerivedIndexes,
+	reclassifyEntities,
 	reembedMissingMemories,
 	releaseStaleLeases,
 	requeueDeadJobs,

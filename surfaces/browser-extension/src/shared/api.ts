@@ -26,7 +26,7 @@ async function getHeaders(): Promise<Record<string, string>> {
 		"Content-Type": "application/json",
 	};
 	if (config.authToken) {
-		headers["Authorization"] = `Bearer ${config.authToken}`;
+		headers.Authorization = `Bearer ${config.authToken}`;
 	}
 	return headers;
 }

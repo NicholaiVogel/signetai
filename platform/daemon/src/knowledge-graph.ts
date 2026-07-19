@@ -20,7 +20,7 @@ import type {
 	TaskMeta,
 	TaskStatus,
 } from "@signet/core";
-import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
+import type { DbAccessor, ReadDb } from "./db-accessor";
 import { requireDependencyReason } from "./dependency-history";
 
 // ---------------------------------------------------------------------------

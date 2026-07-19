@@ -7,8 +7,8 @@
  * Phase 1a implementation (Buba)
  */
 
-import { Command } from "commander";
 import chalk from "chalk";
+import type { Command } from "commander";
 
 // ============================================================================
 // Types
@@ -113,7 +113,7 @@ function makeEventId(): string {
 type EventTransport = (event: SignetOSEvent) => void;
 
 let activeTransport: EventTransport = (event) => {
-	process.stdout.write(JSON.stringify(event) + "\n");
+	process.stdout.write(`${JSON.stringify(event)}\n`);
 };
 
 /** Replace the default stdout transport (Phase 3 hook point) */
@@ -179,7 +179,7 @@ class CDPClient {
 				this.connectReject = null;
 			};
 
-			this.ws.onerror = (evt: Event) => {
+			this.ws.onerror = (_evt: Event) => {
 				const err = new Error(`CDP WebSocket error: ${this.wsUrl}`);
 				if (this.connectReject) {
 					this.connectReject(err);
@@ -264,7 +264,7 @@ class CDPClient {
 
 	send(method: string, params?: Record<string, unknown>): Promise<unknown> {
 		return new Promise((resolve, reject) => {
-			if (!this.ws || this.ws.readyState !== 1 /* OPEN */) {
+			if (this.ws?.readyState !== 1 /* OPEN */) {
 				reject(new Error("CDP WebSocket is not connected"));
 				return;
 			}
@@ -556,7 +556,7 @@ function detectCheckout(url: string, title: string, body: string): boolean {
 }
 
 /** Detect login page heuristics */
-function detectLogin(url: string, title: string, body: string): boolean {
+function detectLogin(url: string, title: string, _body: string): boolean {
 	const s = `${url} ${title}`.toLowerCase();
 	return (
 		s.includes("login") ||
@@ -761,7 +761,7 @@ async function enableCDPDomains(client: CDPClient): Promise<void> {
 
 async function cmdWatch(opts: { port: number; passive: boolean }): Promise<void> {
 	console.error(
-		chalk.dim(`  Attaching to Chrome CDP on port ${opts.port}...` + (opts.passive ? " (passive)" : " (active)")),
+		chalk.dim(`  Attaching to Chrome CDP on port ${opts.port}...${opts.passive ? " (passive)" : " (active)"}`),
 	);
 
 	const tabs = await getCDPTabs(opts.port);

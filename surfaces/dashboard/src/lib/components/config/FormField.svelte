@@ -9,7 +9,6 @@ interface Props {
 	layout?: "vertical" | "horizontal";
 }
 
-// biome-ignore lint/style/useConst: Svelte keeps prop bindings reactive.
 let { label, description, children, layout = "horizontal" }: Props = $props();
 </script>
 

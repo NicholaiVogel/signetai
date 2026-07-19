@@ -218,7 +218,7 @@ export async function createEmbeddingWorkerHandle(opts: EmbeddingHandleOptions =
 		pending.clear();
 	}
 
-	function sendRpc(kind: "embed" | "checkAvailable", timeoutMs: number, extra?: { text: string }): number {
+	function sendRpc(kind: "embed" | "checkAvailable", _timeoutMs: number, extra?: { text: string }): number {
 		const id = nextId++;
 		const msg: MainToWorkerMessage =
 			kind === "embed" ? { type: "embed", id, text: extra?.text ?? "" } : { type: "checkAvailable", id };

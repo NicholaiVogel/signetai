@@ -46,10 +46,7 @@ describe("embeddingProvider", () => {
 
 	it("reads provider from embedding.provider in agent.yaml", () => {
 		root = mkdtempSync(join(tmpdir(), "embed-provider-"));
-		writeFileSync(
-			join(root, "agent.yaml"),
-			"embedding:\n  provider: ollama\n  model: nomic-embed-text\n",
-		);
+		writeFileSync(join(root, "agent.yaml"), "embedding:\n  provider: ollama\n  model: nomic-embed-text\n");
 		expect(embeddingProvider(root)).toBe("ollama");
 	});
 
@@ -67,10 +64,7 @@ describe("embeddingProvider", () => {
 
 	it("reads from memory.embeddings.provider (nested path)", () => {
 		root = mkdtempSync(join(tmpdir(), "embed-provider-"));
-		writeFileSync(
-			join(root, "agent.yaml"),
-			"memory:\n  embeddings:\n    provider: openai\n",
-		);
+		writeFileSync(join(root, "agent.yaml"), "memory:\n  embeddings:\n    provider: openai\n");
 		expect(embeddingProvider(root)).toBe("openai");
 	});
 
@@ -82,10 +76,7 @@ describe("embeddingProvider", () => {
 
 	it("prefers embedding.provider over legacy paths", () => {
 		root = mkdtempSync(join(tmpdir(), "embed-provider-"));
-		writeFileSync(
-			join(root, "agent.yaml"),
-			"embedding:\n  provider: native\nembeddings:\n  provider: ollama\n",
-		);
+		writeFileSync(join(root, "agent.yaml"), "embedding:\n  provider: native\nembeddings:\n  provider: ollama\n");
 		expect(embeddingProvider(root)).toBe("native");
 	});
 
@@ -154,10 +145,11 @@ describe("acquireNativeSyncLock / releaseNativeSyncLock", () => {
 
 		const lock = await acquireNativeSyncLock(root);
 		expect(lock).not.toBeNull();
-		expect(existsSync(lock!.path)).toBe(true);
+		expect(existsSync(lock?.path)).toBe(true);
 
-		releaseNativeSyncLock(lock!);
-		expect(existsSync(lock!.path)).toBe(false);
+		if (!lock) throw new Error("lock acquisition failed");
+		releaseNativeSyncLock(lock);
+		expect(existsSync(lock?.path)).toBe(false);
 	});
 
 	it("returns null when lock is already held by this process", async () => {
@@ -179,7 +171,8 @@ describe("acquireNativeSyncLock / releaseNativeSyncLock", () => {
 		expect(lock2).toBeNull();
 		expect(elapsed).toBeGreaterThanOrEqual(14_000);
 
-		releaseNativeSyncLock(lock1!);
+		if (!lock1) throw new Error("first lock acquisition failed");
+		releaseNativeSyncLock(lock1);
 	}, 20_000);
 
 	it("clears stale lock from dead PID", async () => {
@@ -193,6 +186,7 @@ describe("acquireNativeSyncLock / releaseNativeSyncLock", () => {
 		const lock = await acquireNativeSyncLock(root);
 		expect(lock).not.toBeNull();
 
-		releaseNativeSyncLock(lock!);
+		if (!lock) throw new Error("lock acquisition failed");
+		releaseNativeSyncLock(lock);
 	});
 });

@@ -6,16 +6,16 @@
 import {
 	API_BASE,
 	type CronPreset,
-	type ScheduledTask,
-	type TaskRun,
 	createTask,
 	deleteTask,
 	getTask,
 	getTasks,
+	type ScheduledTask,
+	type TaskRun,
 	triggerTaskRun,
 	updateTask,
 } from "$lib/api";
-import { openAuthEventStream, type AuthEventStream } from "$lib/auth";
+import { type AuthEventStream, openAuthEventStream } from "$lib/auth";
 import { toast } from "$lib/stores/toast.svelte";
 
 export const ts = $state({
@@ -114,8 +114,15 @@ function isTaskStreamEvent(value: unknown): value is TaskStreamEvent {
 let detailEventSource: AuthEventStream | null = null;
 let detailReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-const ansiPattern =
-	/[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
+// Build via String.fromCharCode so the control bytes are explicit: a regex literal
+// trips noControlCharactersInRegex, and a static RegExp string trips useRegexLiterals.
+const ANSI_ESC = String.fromCharCode(0x1b);
+const ANSI_CSI = String.fromCharCode(0x9b);
+const ANSI_BEL = String.fromCharCode(0x07);
+const ansiPattern = new RegExp(
+	`[${ANSI_ESC}${ANSI_CSI}][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?${ANSI_BEL})|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))`,
+	"g",
+);
 
 interface OpenCodeJsonTextEvent {
 	readonly type: "text";

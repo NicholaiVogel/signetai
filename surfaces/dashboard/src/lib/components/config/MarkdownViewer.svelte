@@ -18,7 +18,6 @@ interface Props {
 	saveFeedback?: string;
 }
 
-// biome-ignore lint/style/useConst: Svelte keeps prop bindings reactive.
 let {
 	content,
 	filename,
@@ -49,7 +48,7 @@ function addBoxedHeadingClass(attrs: string): string {
 }
 
 function addSectionHeadingBoxes(markdownHtml: string): string {
-	return markdownHtml.replace(/<h([1-6])(\s[^>]*)?>([\s\S]*?)<\/h\1>/gi, (full, level, attrs = "", inner = "") => {
+	return markdownHtml.replace(/<h([1-6])(\s[^>]*)?>([\s\S]*?)<\/h\1>/gi, (_full, level, attrs = "", inner = "") => {
 		const attrsWithClass = addBoxedHeadingClass(attrs);
 		return `<h${level}${attrsWithClass}>${inner}</h${level}>`;
 	});
@@ -57,7 +56,6 @@ function addSectionHeadingBoxes(markdownHtml: string): string {
 
 const charCount = $derived(content?.length ?? 0);
 const budgetPct = $derived(charBudget ? Math.round((charCount / charBudget) * 100) : 0);
-// biome-ignore lint/style/useConst: Mutated from template callback.
 let editing = $state(false);
 
 const rendered = $derived.by(() => {

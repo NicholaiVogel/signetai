@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
 import {
@@ -86,9 +86,48 @@ export default function NewRunPage() {
     }
   }, [editingPhase])
 
+  const loadOptions = useCallback(async () => {
+    try {
+      const [providersRes, benchmarksRes, modelsRes, runsRes] = await Promise.all([
+        getProviders(),
+        getBenchmarks(),
+        getModels(),
+        getCompletedRuns(),
+      ])
+      setProviders(providersRes.providers)
+      setBenchmarks(benchmarksRes.benchmarks)
+      setModels(modelsRes.models)
+      setCompletedRuns(runsRes)
+
+      if (providersRes.providers.length > 0) {
+        const firstProvider = providersRes.providers[0]
+        const defaultConcurrency = firstProvider.concurrency?.default ?? 1
+        setForm((f) => ({
+          ...f,
+          provider: firstProvider.name,
+          concurrency: {
+            default: defaultConcurrency,
+            ingest: firstProvider.concurrency?.ingest,
+            indexing: firstProvider.concurrency?.indexing,
+            search: firstProvider.concurrency?.search,
+            answer: firstProvider.concurrency?.answer,
+            evaluate: firstProvider.concurrency?.evaluate,
+          },
+        }))
+      }
+      if (benchmarksRes.benchmarks.length > 0) {
+        setForm((f) => ({ ...f, benchmark: benchmarksRes.benchmarks[0].name }))
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load options")
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     loadOptions()
-  }, [])
+  }, [loadOptions])
 
   useEffect(() => {
     if (editingRunId && runIdInputRef.current) {
@@ -171,46 +210,7 @@ export default function NewRunPage() {
         },
       }))
     }
-  }, [form.provider, providers])
-
-  async function loadOptions() {
-    try {
-      const [providersRes, benchmarksRes, modelsRes, runsRes] = await Promise.all([
-        getProviders(),
-        getBenchmarks(),
-        getModels(),
-        getCompletedRuns(),
-      ])
-      setProviders(providersRes.providers)
-      setBenchmarks(benchmarksRes.benchmarks)
-      setModels(modelsRes.models)
-      setCompletedRuns(runsRes)
-
-      if (providersRes.providers.length > 0) {
-        const firstProvider = providersRes.providers[0]
-        const defaultConcurrency = firstProvider.concurrency?.default ?? 1
-        setForm((f) => ({
-          ...f,
-          provider: firstProvider.name,
-          concurrency: {
-            default: defaultConcurrency,
-            ingest: firstProvider.concurrency?.ingest,
-            indexing: firstProvider.concurrency?.indexing,
-            search: firstProvider.concurrency?.search,
-            answer: firstProvider.concurrency?.answer,
-            evaluate: firstProvider.concurrency?.evaluate,
-          },
-        }))
-      }
-      if (benchmarksRes.benchmarks.length > 0) {
-        setForm((f) => ({ ...f, benchmark: benchmarksRes.benchmarks[0].name }))
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load options")
-    } finally {
-      setLoading(false)
-    }
-  }
+  }, [selectedProvider.concurrency?.ingest, selectedProvider.concurrency?.evaluate, selectedProvider])
 
   function generateRunId() {
     const timestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "")

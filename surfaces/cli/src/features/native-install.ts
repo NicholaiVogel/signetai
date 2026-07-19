@@ -1,17 +1,8 @@
-import {
-	chmodSync,
-	copyFileSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	renameSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { spawnSync } from "node:child_process";
 import chalk from "chalk";
 
 export interface NativeInstallOptions {
@@ -56,9 +47,7 @@ function pathContains(dir: string): boolean {
 function verifySha256(path: string, expected: string): void {
 	const actual = createHash("sha256").update(readFileSync(path)).digest("hex").toLowerCase();
 	if (actual !== expected.toLowerCase()) {
-		throw new Error(
-			`SHA-256 mismatch for ${path}: expected ${expected.toLowerCase()}, got ${actual}`,
-		);
+		throw new Error(`SHA-256 mismatch for ${path}: expected ${expected.toLowerCase()}, got ${actual}`);
 	}
 }
 
@@ -81,10 +70,7 @@ function extractConnectorAssets(archivePath: string, extractRoot: string): void 
  * to `<binDir>/../runtime/connectors/`, mirroring the layout the npm
  * wrapper uses after `install-native.js` runs.
  */
-function installConnectorAssetsFromManifest(
-	tarballPath: string,
-	binDir: string,
-): string {
+function installConnectorAssetsFromManifest(tarballPath: string, binDir: string): string {
 	// Look up the expected SHA-256 from the manifest. The manifest is
 	// resolved relative to the wrapper's `native-manifest.json` if it
 	// exists, otherwise we fall back to trusting the tarball as-is
@@ -107,9 +93,7 @@ function installConnectorAssetsFromManifest(
 			if (typeof expectedSize === "number") {
 				const actual = readFileSync(tarballPath).length;
 				if (actual !== expectedSize) {
-					throw new Error(
-						`Tarball size mismatch: expected ${expectedSize}, got ${actual}`,
-					);
+					throw new Error(`Tarball size mismatch: expected ${expectedSize}, got ${actual}`);
 				}
 			}
 			break;
@@ -176,9 +160,7 @@ export function printNativeInstallResult(result: NativeInstallResult, json = fal
 	}
 
 	if (result.connectorAssetsDir) {
-		console.log(
-			chalk.green(`Installed connector assets to ${result.connectorAssetsDir}`),
-		);
+		console.log(chalk.green(`Installed connector assets to ${result.connectorAssetsDir}`));
 	}
 
 	if (result.pathHint) {

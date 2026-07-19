@@ -3,10 +3,10 @@
  * Handles communication with the Signet daemon
  */
 
-import { authFetch, setDashboardAuthApiBase } from "$lib/auth";
-import { desktopApiBase } from "$lib/desktop-shell";
 import type { ModelRegistryEntry } from "@signet/core";
 import { marked } from "marked";
+import { authFetch, setDashboardAuthApiBase } from "$lib/auth";
+import { desktopApiBase } from "$lib/desktop-shell";
 
 // When served by the daemon or Vite dev server, use relative URLs.
 // The Electron desktop shell loads from file://, so it needs an absolute daemon URL.
@@ -467,10 +467,11 @@ export async function loginWithPassword(username: string, password: string): Pro
 				error: typeof body?.error === "string" ? body.error : `Login failed with HTTP ${response.status}`,
 			};
 		}
+		const result = body as Partial<LoginResult> | null;
 		return {
 			ok: true,
-			token: typeof body?.token === "string" ? body.token : undefined,
-			expiresAt: typeof body?.expiresAt === "string" ? body.expiresAt : undefined,
+			token: typeof result?.token === "string" ? result.token : undefined,
+			expiresAt: typeof result?.expiresAt === "string" ? result.expiresAt : undefined,
 		};
 	} catch (error) {
 		return { ok: false, error: error instanceof Error ? error.message : "Login failed" };
@@ -2460,9 +2461,7 @@ export async function getMarketplaceMcpTools(refresh = false): Promise<{
 	}
 }
 
-export async function testMarketplaceMcpConfig(input: {
-	config: MarketplaceMcpConfig;
-}): Promise<{
+export async function testMarketplaceMcpConfig(input: { config: MarketplaceMcpConfig }): Promise<{
 	success: boolean;
 	toolCount?: number;
 	tools?: string[];
@@ -3009,13 +3008,7 @@ export interface EntityHealth {
 }
 
 export async function getKnowledgeEntities(
-	filters: {
-		type?: string;
-		query?: string;
-		limit?: number;
-		offset?: number;
-		agentId?: string;
-	} = {},
+	filters: { type?: string; query?: string; limit?: number; offset?: number; agentId?: string } = {},
 ): Promise<{ items: KnowledgeEntityListItem[]; limit: number; offset: number }> {
 	try {
 		const params = new URLSearchParams();
@@ -3166,11 +3159,7 @@ export async function unpinKnowledgeEntity(id: string, agentId = "default"): Pro
 }
 
 export async function getKnowledgeEntityHealth(
-	filters: {
-		agentId?: string;
-		since?: string;
-		minComparisons?: number;
-	} = {},
+	filters: { agentId?: string; since?: string; minComparisons?: number } = {},
 ): Promise<EntityHealth[]> {
 	try {
 		const params = new URLSearchParams();

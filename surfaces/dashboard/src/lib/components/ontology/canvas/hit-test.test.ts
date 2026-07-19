@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { describe, expect, it } from "bun:test";
 import { SpatialIndex } from "./hit-test";
 import type { GraphCanvasNode } from "./types";
@@ -12,6 +11,8 @@ function node(overrides: Partial<GraphCanvasNode>): GraphCanvasNode {
 		y: 0,
 		size: 20,
 		color: "#fff",
+		dimColor: "#444",
+		data: null,
 		...overrides,
 	};
 }

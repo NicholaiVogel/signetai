@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { describe, expect, it } from "bun:test";
 import { KnowledgeForceSimulation } from "./simulation";
 import type { GraphCanvasEdge, GraphCanvasNode } from "./types";
@@ -28,7 +27,7 @@ describe("knowledge graph edge identity", () => {
 			source: "a",
 			target: "b",
 			label: "depends on",
-			kind: "dependency",
+			kind: "about",
 			strength: 0.2,
 		};
 		const sim = new KnowledgeForceSimulation();

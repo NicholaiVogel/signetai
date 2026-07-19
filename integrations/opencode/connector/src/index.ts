@@ -22,8 +22,20 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
-import { BaseConnector, type InstallResult, type UninstallResult, atomicWriteJson, isSignetGeneratedFile } from "@signet/connector-base";
-import { OPENCODE_PIPELINE_AGENT, OPENCODE_PIPELINE_SYSTEM_PROMPT, expandHome, hasValidIdentity, loadIdentityMode } from "@signet/core";
+import {
+	atomicWriteJson,
+	BaseConnector,
+	type InstallResult,
+	isSignetGeneratedFile,
+	type UninstallResult,
+} from "@signet/connector-base";
+import {
+	expandHome,
+	hasValidIdentity,
+	loadIdentityMode,
+	OPENCODE_PIPELINE_AGENT,
+	OPENCODE_PIPELINE_SYSTEM_PROMPT,
+} from "@signet/core";
 import { PLUGIN_BUNDLE } from "./plugin-bundle.js";
 
 // ============================================================================

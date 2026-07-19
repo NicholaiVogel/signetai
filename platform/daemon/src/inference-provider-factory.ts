@@ -1,7 +1,6 @@
 import type { PipelineClaudeCodeConfig, RoutingConfig } from "@signet/core";
 import {
 	type AcpxHooksMode,
-	type StreamCapableLlmProvider,
 	createAcpxProvider,
 	createAnthropicProvider,
 	createClaudeCodeProvider,
@@ -12,6 +11,7 @@ import {
 	createOpenCodeProvider,
 	createOpenRouterProvider,
 	resolveDefaultOllamaFallbackMaxContextTokens,
+	type StreamCapableLlmProvider,
 } from "./pipeline/provider";
 
 const DEFAULT_OPENCODE_BASE_URL = "http://127.0.0.1:4096";

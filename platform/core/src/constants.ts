@@ -1,5 +1,5 @@
-import { homedir } from "os";
-import { join } from "path";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export function resolveDefaultBasePath(): string {
 	return process.env.SIGNET_PATH || join(homedir(), ".agents");

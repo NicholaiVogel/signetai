@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { DbAccessor, WriteDb } from "../db-accessor";
+import type { DbAccessor } from "../db-accessor";
 import { syncVecDeleteByEmbeddingIds, syncVecInsert, vectorToBlob } from "../db-helpers";
 import { logger } from "../logger";
 import type { EmbeddingConfig, PipelineV2Config } from "../memory-config";

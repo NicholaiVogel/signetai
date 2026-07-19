@@ -508,21 +508,21 @@ body {
   /* ALL beats: centered horizontally, full width */
   .beat {
     width: min(300px, 85vw);
-    left: 50% !important;
-    transform: translateX(-50%) !important;
+    left: 50%;
+    transform: translateX(-50%);
     text-align: center;
   }
 
   /* Fear beats — ABOVE the form */
   .beat[data-zone="top"] {
-    top: 4% !important;
-    bottom: auto !important;
+    top: 4%;
+    bottom: auto;
   }
 
   /* Timeline/evidence beats — BELOW the form */
   .beat[data-zone="bottom"] {
-    top: auto !important;
-    bottom: 3% !important;
+    top: auto;
+    bottom: 3%;
   }
 
   .beat h2 {
@@ -596,11 +596,11 @@ body {
   }
 
   .beat[data-zone="top"] {
-    top: 2% !important;
+    top: 2%;
   }
 
   .beat[data-zone="bottom"] {
-    bottom: 2% !important;
+    bottom: 2%;
   }
 
   .beat h2 {
@@ -673,7 +673,7 @@ body {
     <p>Years of conversations. Patterns only it can see.</p>
     <div class="beat-svg">
       <!-- SVG: Neural Network -->
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" aria-hidden="true">
         <style>
           .nn-link{stroke:#333;stroke-width:1;fill:none}
           .nn-pulse{stroke:#fff;stroke-width:2;fill:none;stroke-linecap:round;stroke-dasharray:2 62}
@@ -705,7 +705,7 @@ body {
     <p>The tools you trust are under siege. Your data is the prize.</p>
     <div class="beat-svg">
       <!-- SVG: Cracking Shield -->
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" aria-hidden="true">
         <style>
           .sh-outline{fill:none;stroke:#888;stroke-width:2;stroke-linejoin:round}
           .sh-crack{fill:none;stroke:#fff;stroke-width:1.5;stroke-linecap:round;stroke-dasharray:80;stroke-dashoffset:80;animation:shCrack 3s ease forwards infinite}
@@ -735,7 +735,7 @@ body {
     <p>Regulators aren't waiting. Your AI's memory is on the chopping block.</p>
     <div class="beat-svg">
       <!-- SVG: Pulsing Alert Rings -->
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" aria-hidden="true">
         <style>
           .ar-ring{fill:none;stroke:#fff;transform-origin:100px 100px;animation:arPulse 4s cubic-bezier(.165,.84,.44,1) infinite}
           .ar-ring:nth-child(1){animation-delay:0s}
@@ -762,7 +762,7 @@ body {
     <p>When the switch flips, there's no undo button. Years of context — gone.</p>
     <div class="beat-svg">
       <!-- SVG: Dissolving Identity Grid -->
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" aria-hidden="true">
         <style>
           .dg-cell{fill:none;stroke:#aaa;stroke-width:.8;animation:dgDissolve 4s ease-in-out infinite}
           @keyframes dgDissolve{
@@ -806,7 +806,7 @@ body {
     <p>Portable. Sovereign. Yours. Take your AI memory everywhere.</p>
     <div class="beat-svg">
       <!-- SVG: Convergence -->
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" aria-hidden="true">
         <style>
           .cv-dot{fill:#fff;animation:cvConverge 3.5s ease-in-out infinite}
           .cv-ring{fill:none;stroke:#fff;stroke-width:2;cx:100;cy:100;r:28;opacity:0;animation:cvRing 3.5s ease-in-out infinite}
@@ -851,13 +851,13 @@ body {
 <div class="scroll-spacer"></div>
 
 <script>
-(function() {
+(() => {
   'use strict';
 
   // ===== CONFIG =====
   const BEATS = document.querySelectorAll('.beat');
   const NUM_BEATS = BEATS.length; // 8 story beats (0-7)
-  const TOTAL_POSITIONS = NUM_BEATS + 1; // +1 for final CTA (return to form)
+  const _TOTAL_POSITIONS = NUM_BEATS + 1; // +1 for final CTA (return to form)
   
   // Scroll zones: each beat gets an equal slice of scroll
   // Total scroll height = 1000vh, so about 111vh per beat  
@@ -865,11 +865,11 @@ body {
   const orbitTrack = document.getElementById('orbitTrack');
   const spotlight = document.getElementById('spotlightOverlay');
   const scrollHint = document.getElementById('scrollHint');
-  const viewportLayer = document.getElementById('viewportLayer');
+  const _viewportLayer = document.getElementById('viewportLayer');
 
   // Radius from CSS custom property
   function getRadius() {
-    const style = getComputedStyle(document.documentElement);
+    const _style = getComputedStyle(document.documentElement);
     // Parse min(42vw, 42vh) from CSS custom property
     const vw = window.innerWidth * 0.42;
     const vh = window.innerHeight * 0.42;
@@ -881,18 +881,18 @@ body {
   for (let i = 0; i < 20; i++) {
     const frag = document.createElement('div');
     frag.className = 'frag';
-    frag.style.left = Math.random() * 100 + '%';
-    frag.style.top = (100 + Math.random() * 20) + '%';
-    frag.style.animationDuration = (8 + Math.random() * 12) + 's';
-    frag.style.animationDelay = Math.random() * 10 + 's';
-    frag.style.width = (0.5 + Math.random() * 1.5) + 'px';
+    frag.style.left = `${Math.random() * 100}%`;
+    frag.style.top = `${100 + Math.random() * 20}%`;
+    frag.style.animationDuration = `${8 + Math.random() * 12}s`;
+    frag.style.animationDelay = `${Math.random() * 10}s`;
+    frag.style.width = `${0.5 + Math.random() * 1.5}px`;
     frag.style.height = frag.style.width;
     ambient.appendChild(frag);
   }
 
   // ===== SCROLL HANDLER =====
   let ticking = false;
-  let lastScrollY = 0;
+  let _lastScrollY = 0;
 
   function getScrollProgress() {
     const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
@@ -926,7 +926,7 @@ body {
   }
 
   function easeInOutCubic(t) {
-    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    return t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
   }
 
   function update() {
@@ -968,8 +968,8 @@ body {
 
     // Position the orbit dot
     const dotPos = positionOnCircle(currentAngle, radius);
-    orbitDot.style.left = dotPos.x + 'px';
-    orbitDot.style.top = dotPos.y + 'px';
+    orbitDot.style.left = `${dotPos.x}px`;
+    orbitDot.style.top = `${dotPos.y}px`;
 
     // Show/hide orbit dot
     const inContent = progress > introEnd && progress < 0.93;
@@ -988,8 +988,8 @@ body {
         const beatHalfH = 100;
         const clampedX = Math.max(beatHalfW, Math.min(window.innerWidth - beatHalfW, pos.x));
         const clampedY = Math.max(beatHalfH, Math.min(window.innerHeight - beatHalfH, pos.y));
-        beat.style.left = clampedX + 'px';
-        beat.style.top = clampedY + 'px';
+        beat.style.left = `${clampedX}px`;
+        beat.style.top = `${clampedY}px`;
       }
       // On mobile, CSS handles positioning via data-zone (top/bottom)
 
@@ -1040,20 +1040,20 @@ body {
       const finalProgress = (progress - outroStart) / (1 - outroStart);
       spotlight.style.opacity = Math.min(1, finalProgress * 2);
       spotlight.classList.add('active');
-      orbitTrack.style.borderColor = 'rgba(138,138,150,' + (0.12 * (1 - finalProgress)) + ')';
+      orbitTrack.style.borderColor = `rgba(138,138,150,${0.12 * (1 - finalProgress)})`;
     } else {
       spotlight.classList.remove('active');
       spotlight.style.opacity = 0;
       // Pulse orbit track subtly when near content
       const trackOpacity = inContent ? 0.18 : 0.12;
-      orbitTrack.style.borderColor = 'rgba(138,138,150,' + trackOpacity + ')';
+      orbitTrack.style.borderColor = `rgba(138,138,150,${trackOpacity})`;
     }
 
     ticking = false;
   }
 
   function onScroll() {
-    lastScrollY = window.scrollY;
+    _lastScrollY = window.scrollY;
     if (!ticking) {
       requestAnimationFrame(update);
       ticking = true;
@@ -1067,7 +1067,7 @@ body {
   update();
 
   // ===== FORM SUBMISSION =====
-  document.getElementById('leadForm').addEventListener('submit', function(e) {
+  document.getElementById('leadForm').addEventListener('submit', (e) => {
     e.preventDefault();
     const form = e.target;
     const btn = form.querySelector('button');
@@ -1077,7 +1077,7 @@ body {
 
     const data = new FormData(form);
     const body = {};
-    data.forEach((v, k) => body[k] = v);
+    data.forEach((v, k) => { body[k] = v; });
 
     fetch(form.action, {
       method: 'POST',

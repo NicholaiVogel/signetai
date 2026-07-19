@@ -1,4 +1,4 @@
-import { constants, accessSync, existsSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
 	disableGraphiqState,
@@ -185,7 +185,7 @@ async function updateGraphiq(): Promise<{ success: boolean; message?: string; er
 	}
 }
 
-function isExecutable(path: string): boolean {
+function _isExecutable(path: string): boolean {
 	try {
 		accessSync(path, constants.X_OK);
 		return true;

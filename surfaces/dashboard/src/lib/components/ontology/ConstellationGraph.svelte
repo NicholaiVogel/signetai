@@ -197,7 +197,6 @@ const ATTRIBUTE_FOCUS_ZOOM = 0.92;
 const ENTITY_DESELECT_ZOOM = 0.36;
 const ASPECT_DESELECT_ZOOM = 0.44;
 
-// biome-ignore lint/style/useConst: Svelte bind:this assigns to this rune.
 let canvas = $state<HTMLCanvasElement | null>(null);
 let simNodes = $state<GraphCanvasNode[]>([]);
 const entityLegendItems = $derived(entityLegendItemsFor(simNodes));
@@ -209,7 +208,6 @@ let hoveredId = $state<string | null>(null);
 let relatedIds = $state(new Set<string>());
 let loading = $state(false);
 let error = $state<string | null>(null);
-// biome-ignore lint/style/useConst: Svelte $state primitive is reassigned by event handlers.
 let legendOpen = $state(true);
 let width = $state(800);
 let height = $state(600);

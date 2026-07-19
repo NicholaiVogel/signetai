@@ -4,10 +4,10 @@
  * and virtual environment setup with optional zvec support.
  */
 
-import { spawn } from "child_process";
-import { existsSync, readdirSync, readFileSync } from "fs";
-import { join } from "path";
-import { homedir, platform } from "os";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir, platform } from "node:os";
+import { join } from "node:path";
 
 export interface PythonVersion {
 	major: number;
@@ -55,7 +55,7 @@ export interface DepsResult {
 
 const isWindows = platform() === "win32";
 const isMac = platform() === "darwin";
-const isLinux = platform() === "linux";
+const _isLinux = platform() === "linux";
 
 /**
  * Parse Python version string (e.g., "Python 3.12.1")
@@ -237,7 +237,7 @@ export async function installPyenv(): Promise<InstallResult> {
 		};
 	}
 
-	const result = await runCommand("curl", ["https://pyenv.run", "|", "bash"]);
+	const _result = await runCommand("curl", ["https://pyenv.run", "|", "bash"]);
 
 	// curl | bash needs shell
 	const shellResult = await runCommand("bash", ["-c", "curl https://pyenv.run | bash"]);

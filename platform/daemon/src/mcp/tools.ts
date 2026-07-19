@@ -8,11 +8,11 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
-	SIGNET_GRAPHIQ_PLUGIN_ID,
 	applyRecallScoreThreshold,
 	buildRecallRequestBody,
 	buildRememberRequestBody,
 	formatRecallText,
+	SIGNET_GRAPHIQ_PLUGIN_ID,
 } from "@signet/core";
 import { z } from "zod";
 import { getActiveGraphiqDbPath, runGraphiqCli } from "../graphiq.js";
@@ -119,7 +119,7 @@ interface MarketplaceProxyState {
 	contextKey: string;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function _isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -553,7 +553,7 @@ export async function refreshMarketplaceProxyTools(
 	},
 ): Promise<{ changed: boolean; count: number; error?: string }> {
 	const state = marketplaceProxyState.get(server);
-	if (!state || !state.enabled) {
+	if (!state?.enabled) {
 		return { changed: false, count: 0 };
 	}
 

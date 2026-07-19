@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { describe, expect, it } from "bun:test";
 import type { ConstellationGraph } from "$lib/api";
 import { buildKnowledgeMapFromConstellation } from "./knowledge-map-data";
@@ -83,6 +82,7 @@ const graph: ConstellationGraph = {
 							content: "Pinned non-person/project entities should stay out of constellation view.",
 							kind: "attribute",
 							importance: 0.99,
+							memoryId: null,
 						},
 					],
 				},

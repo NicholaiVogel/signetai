@@ -36,8 +36,8 @@ import { getDbAccessor } from "./db-accessor";
 import { fetchEmbedding } from "./embedding-fetch";
 import {
 	DEFAULT_SESSION_START_MAX_INJECT_TOKENS,
-	type HooksConfig,
 	getDefaultHooksConfig,
+	type HooksConfig,
 	loadHooksConfig as loadHooksConfigFromDisk,
 	resolveHooksConfigForHarness,
 	resolveUserPromptMinScore,
@@ -54,16 +54,16 @@ import { propagateMemoryStatus } from "./knowledge-graph";
 import { logger } from "./logger";
 import { buildAgentScopeClause } from "./memory-access-scope";
 import * as memoryCandidates from "./memory-candidates";
-import { type ScoredMemory, buildActiveConstraintsSection } from "./memory-candidates";
+import { buildActiveConstraintsSection, type ScoredMemory } from "./memory-candidates";
 import { effectiveScore, inferType, isDuplicate } from "./memory-classification";
-import { type ResolvedMemoryConfig, loadMemoryConfig } from "./memory-config";
-import { type RecallResponse, type RecallResult, hybridRecall } from "./memory-search";
+import { loadMemoryConfig, type ResolvedMemoryConfig } from "./memory-config";
+import { hybridRecall, type RecallResponse, type RecallResult } from "./memory-search";
 import { recordMemorySearchTelemetry } from "./memory-search-telemetry";
 import {
-	type SynthesisRequest,
-	type SynthesisResponse,
 	getSynthesisWorker,
 	handleSynthesisRequest,
+	type SynthesisRequest,
+	type SynthesisResponse,
 	setSynthesisWorker,
 	writeMemoryMd,
 } from "./memory-synthesis";
@@ -79,9 +79,9 @@ import { countTokens } from "./pipeline/tokenizer";
 import { getDefaultPluginHost } from "./plugins/index";
 import type { PluginPromptTargetV1 } from "./plugins/types";
 import {
-	type PromptEntityContextMemory,
 	buildEntityContextInject,
 	buildEntityPromptContext,
+	type PromptEntityContextMemory,
 } from "./prompt-entity-context";
 import { buildRecallQueryShape, queryAnchorsMissingFromRecall, stripUntrustedMetadata } from "./prompt-text";
 import { listSecrets } from "./secrets";
@@ -98,10 +98,10 @@ import {
 } from "./session-checkpoints";
 import { deriveSessionEndFallbackId, recoverMissingSessionEndOnClearStart } from "./session-end-recovery";
 import {
-	type SessionMemoryCandidate,
 	parseFeedback,
 	recordAgentFeedback,
 	recordSessionCandidates,
+	type SessionMemoryCandidate,
 	trackFtsHits,
 } from "./session-memories";
 import { isNoiseSession } from "./session-noise";
@@ -124,12 +124,8 @@ import {
 	sessionStartRecallKey,
 } from "./session-start-state";
 import { getExpiryWarning } from "./session-tracker";
-import {
-	ensureCanonicalTranscriptHistory,
-	getSessionTranscriptContent,
-	upsertSessionTranscript,
-} from "./session-transcripts";
-import { type StructuralCandidateSource, type StructuralFeatures, getStructuralFeatures } from "./structural-features";
+import { getSessionTranscriptContent, upsertSessionTranscript } from "./session-transcripts";
+import { getStructuralFeatures, type StructuralCandidateSource, type StructuralFeatures } from "./structural-features";
 import { assembleInheritedContextBlock, resolveParentSession } from "./subagent-context";
 import { searchTemporalFallback } from "./temporal-fallback";
 import { writeTranscriptAudit } from "./transcript-audit";
@@ -387,10 +383,8 @@ export interface RecallRequest {
 // Shared Helpers
 // ============================================================================
 
-export { resetSessionStartDedupe };
-export { effectiveScore, inferType, isDuplicate };
-
 export { applyTokenBudget, selectWithBudget, selectWithTokenBudget } from "./context-budget";
+export { effectiveScore, inferType, isDuplicate, resetSessionStartDedupe };
 
 function buildPluginPromptContributionSection(target: PluginPromptTargetV1, log: typeof logger): string {
 	try {
@@ -576,7 +570,7 @@ function getRecentMemories(
 /**
  * Get memories created after a given timestamp, ordered by recency.
  */
-function getMemoriesSince(
+function _getMemoriesSince(
 	sinceMs: number,
 	limit: number,
 ): Array<{
@@ -2357,5 +2351,5 @@ export function handleRemember(req: RememberRequest): RememberResponse {
 // Memory Synthesis
 // ============================================================================
 
-export { getSynthesisWorker, handleSynthesisRequest, setSynthesisWorker, writeMemoryMd };
 export type { SynthesisRequest, SynthesisResponse };
+export { getSynthesisWorker, handleSynthesisRequest, setSynthesisWorker, writeMemoryMd };

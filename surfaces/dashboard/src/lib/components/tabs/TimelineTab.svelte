@@ -20,8 +20,7 @@ interface Props {
 
 let { ontimelinegeneratedforchange }: Props = $props();
 
-const railButtonBase =
-	"h-8 px-3 rounded-lg border text-[10px] uppercase tracking-[0.08em] font-mono transition-colors";
+const railButtonBase = "h-8 px-3 rounded-lg border text-[10px] uppercase tracking-[0.08em] font-mono transition-colors";
 
 let loading = $state(false);
 let error = $state<string | null>(null);

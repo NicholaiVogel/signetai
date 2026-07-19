@@ -315,10 +315,18 @@ svg.lucide {
 
 /* === Font contract === */
 @layer utilities {
-	.font-body { font-family: var(--sig-font-body) !important; }
-	.font-display { font-family: var(--sig-font-display) !important; }
-	.font-mono { font-family: var(--sig-font-mono) !important; }
-	.font-micro { font-family: var(--sig-font-micro) !important; }
+	.font-body {
+		font-family: var(--sig-font-body);
+	}
+	.font-display {
+		font-family: var(--sig-font-display);
+	}
+	.font-mono {
+		font-family: var(--sig-font-mono);
+	}
+	.font-micro {
+		font-family: var(--sig-font-micro);
+	}
 }
 
 /* === Base layer === */
@@ -359,7 +367,7 @@ svg.lucide {
 	[role="combobox"],
 	[role="menuitem"],
 	[data-sidebar] {
-		font-family: var(--sig-font-mono) !important;
+		font-family: var(--sig-font-mono);
 	}
 }
 
@@ -372,7 +380,9 @@ html {
 	line-height: 1.55;
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
-	transition: background 0.4s var(--ease), color 0.4s var(--ease);
+	transition:
+		background 0.4s var(--ease),
+		color 0.4s var(--ease);
 }
 
 body {
@@ -383,9 +393,12 @@ body {
 	background:
 		linear-gradient(var(--sig-grid-line) 1px, transparent 1px),
 		linear-gradient(90deg, var(--sig-grid-line) 1px, transparent 1px),
-		radial-gradient(circle at 78% 18%, var(--sig-blueprint), transparent 32%),
-		var(--sig-bg);
-	background-size: 56px 56px, 56px 56px, 100% 100%, auto;
+		radial-gradient(circle at 78% 18%, var(--sig-blueprint), transparent 32%), var(--sig-bg);
+	background-size:
+		56px 56px,
+		56px 56px,
+		100% 100%,
+		auto;
 }
 
 /* Grain overlay — enhanced with denser noise */
@@ -429,14 +442,18 @@ body::after {
 	background: var(--sidebar);
 	border-color: var(--sig-border-strong);
 	border-radius: var(--sig-radius);
-	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.03) inset, inset 0 1px 0
-		rgba(255, 255, 255, 0.04);
+	box-shadow:
+		0 2px 6px rgba(0, 0, 0, 0.4),
+		0 0 0 1px rgba(255, 255, 255, 0.03) inset,
+		inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 [data-theme="light"] [data-variant="floating"] [data-sidebar="sidebar"] {
 	border-color: var(--sig-border-strong);
-	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(255, 255, 255, 0.6) inset, inset 0 1px 0
-		rgba(255, 255, 255, 0.8);
+	box-shadow:
+		0 2px 6px rgba(0, 0, 0, 0.1),
+		0 0 0 1px rgba(255, 255, 255, 0.6) inset,
+		inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
 /* Subtle scrollbars */
@@ -465,12 +482,11 @@ body::after {
 }
 
 [data-slot="skeleton"] {
-	background:
-		linear-gradient(90deg, transparent, var(--sig-skeleton-sheen), transparent),
-		var(--sig-skeleton) !important;
-	background-size: 200% 100%, auto;
+	background: linear-gradient(90deg, transparent, var(--sig-skeleton-sheen), transparent), var(--sig-skeleton);
+	background-size:
+		200% 100%,
+		auto;
 }
-
 
 /* Element transitions */
 button,
@@ -478,7 +494,10 @@ a,
 input,
 select,
 textarea {
-	transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+	transition:
+		background-color var(--dur) var(--ease),
+		border-color var(--dur) var(--ease),
+		color var(--dur) var(--ease);
 }
 
 /* Typography */
@@ -515,7 +534,7 @@ h3 {
 
 /* Terminal / CRT font utility */
 .font-terminal {
-	font-family: "VT323", monospace !important;
+	font-family: "VT323", monospace;
 	font-size: 1.05em;
 	line-height: 1.4;
 }
@@ -670,12 +689,18 @@ h3 {
 	border: 1px solid rgba(255, 255, 255, 0.08);
 	border-radius: var(--radius);
 	overflow: hidden;
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 4px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.08),
+		0 2px 4px rgba(0, 0, 0, 0.5),
+		0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 
 [data-theme="light"] .sig-panel {
 	border: 1px solid var(--sig-border);
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.7),
+		0 1px 3px rgba(0, 0, 0, 0.08),
+		0 0 0 1px rgba(0, 0, 0, 0.04);
 }
 
 /* Panel header — stamped label plate */
@@ -705,7 +730,9 @@ h3 {
 	background: rgba(255, 255, 255, 0.03);
 	border: 1px solid rgba(255, 255, 255, 0.1);
 	border-radius: 3px;
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.4);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.08),
+		0 1px 2px rgba(0, 0, 0, 0.4);
 	transition:
 		color var(--dur) var(--ease),
 		border-color var(--dur) var(--ease),
@@ -723,13 +750,17 @@ h3 {
 .sig-switch:active {
 	transform: translateY(0.5px);
 	background: rgba(0, 0, 0, 0.1);
-	box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+	box-shadow:
+		inset 0 2px 4px rgba(0, 0, 0, 0.5),
+		inset 0 0 0 1px rgba(0, 0, 0, 0.2);
 }
 
 [data-theme="light"] .sig-switch {
 	background: rgba(255, 255, 255, 0.4);
 	border: 1px solid var(--sig-border-strong);
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 1px 2px rgba(0, 0, 0, 0.06);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.6),
+		0 1px 2px rgba(0, 0, 0, 0.06);
 }
 
 [data-theme="light"] .sig-switch:hover {
@@ -738,7 +769,9 @@ h3 {
 
 [data-theme="light"] .sig-switch:active {
 	background: rgba(0, 0, 0, 0.04);
-	box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1), 0 0 0 rgba(0, 0, 0, 0);
+	box-shadow:
+		inset 0 1px 3px rgba(0, 0, 0, 0.1),
+		0 0 0 rgba(0, 0, 0, 0);
 }
 
 /* Etched groove — double-line channel for dividers */
@@ -756,12 +789,16 @@ h3 {
 .sig-track {
 	background: rgba(0, 0, 0, 0.5);
 	border-radius: 2px;
-	box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.6), 0 1px 0 rgba(255, 255, 255, 0.05);
+	box-shadow:
+		inset 0 1px 3px rgba(0, 0, 0, 0.6),
+		0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 [data-theme="light"] .sig-track {
 	background: rgba(0, 0, 0, 0.06);
-	box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.1), 0 0.5px 0 rgba(255, 255, 255, 0.5);
+	box-shadow:
+		inset 0 1px 2px rgba(0, 0, 0, 0.1),
+		0 0.5px 0 rgba(255, 255, 255, 0.5);
 }
 
 /* === Component utilities === */
@@ -936,9 +973,9 @@ svg.lucide [stroke] {
 	*,
 	*::before,
 	*::after {
-		animation-duration: 0.01ms !important;
-		animation-iteration-count: 1 !important;
-		transition-duration: 0.01ms !important;
+		animation-duration: 0.01ms;
+		animation-iteration-count: 1;
+		transition-duration: 0.01ms;
 	}
 }
 
@@ -978,7 +1015,9 @@ svg.lucide [stroke] {
 	}
 
 	50% {
-		box-shadow: 0 0 12px var(--sig-highlight), 0 0 24px var(--sig-highlight-dim);
+		box-shadow:
+			0 0 12px var(--sig-highlight),
+			0 0 24px var(--sig-highlight-dim);
 	}
 }
 

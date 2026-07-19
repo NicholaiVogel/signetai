@@ -160,7 +160,7 @@ export function hexToRgb(hex: string): [number, number, number] {
 }
 
 export function sourceColorRgba(who: string | undefined, alpha: number): string {
-	const [r, g, b] = hexToRgb(sourceColors[who ?? "unknown"] ?? sourceColors["unknown"]);
+	const [r, g, b] = hexToRgb(sourceColors[who ?? "unknown"] ?? sourceColors.unknown);
 	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
@@ -453,7 +453,7 @@ export function nodeFillStyle(
 	if (colorMode === "newness") {
 		if (newnessBucket(node.data.createdAt, nowMs) === "older") {
 			const source = node.data.who ?? "unknown";
-			if (sourceFocusSources !== null && sourceFocusSources.has(source)) {
+			if (sourceFocusSources?.has(source)) {
 				return sourceColorRgba(source, 0.85);
 			}
 		}
@@ -515,13 +515,13 @@ export function nodeColor3D(
 	if (noColorMode) return "#a8a8a8";
 	if (colorMode === "newness") {
 		if (newnessBucket(createdAt, nowMs) === "older") {
-			if (sourceFocusSources !== null && sourceFocusSources.has(who)) {
-				return sourceColors[who] ?? sourceColors["unknown"];
+			if (sourceFocusSources?.has(who)) {
+				return sourceColors[who] ?? sourceColors.unknown;
 			}
 		}
 		return newnessFillStyle(newnessIntensity(createdAt, nowMs), 1);
 	}
-	return sourceColors[who] ?? sourceColors["unknown"];
+	return sourceColors[who] ?? sourceColors.unknown;
 }
 
 export function edgeColor3D(
@@ -559,7 +559,7 @@ export const entityTypeColors: Record<string, string> = {
 };
 
 export function entityTypeColor(entityType: string): string {
-	return entityTypeColors[entityType.toLowerCase()] ?? entityTypeColors["unknown"];
+	return entityTypeColors[entityType.toLowerCase()] ?? entityTypeColors.unknown;
 }
 
 export function entityMass(entity: ConstellationEntity): number {
@@ -661,7 +661,7 @@ for (const [key, hex] of Object.entries(entityTypeColors)) {
 /** Fast source color lookup — uses pre-computed table for common alphas. */
 export function sourceRgbaFast(who: string | undefined, alpha: number): string {
 	const key = who ?? "unknown";
-	const cached = sourceRgbaCache[key]?.[alpha] ?? sourceRgbaCache["unknown"]?.[alpha];
+	const cached = sourceRgbaCache[key]?.[alpha] ?? sourceRgbaCache.unknown?.[alpha];
 	if (cached) return cached;
 	return sourceColorRgba(who, alpha);
 }
@@ -669,7 +669,7 @@ export function sourceRgbaFast(who: string | undefined, alpha: number): string {
 /** Fast entity fill lookup — uses pre-computed table for common alphas. */
 export function entityFillFast(entityType: string, alpha: number): string {
 	const key = entityType.toLowerCase();
-	const cached = entityRgbaCache[key]?.[alpha] ?? entityRgbaCache["unknown"]?.[alpha];
+	const cached = entityRgbaCache[key]?.[alpha] ?? entityRgbaCache.unknown?.[alpha];
 	if (cached) return cached;
 	return entityFillStyle(entityType, alpha);
 }
@@ -786,7 +786,7 @@ export class NodeColorCache {
 			const intensity = newnessIntensityFast(createdMs, nowMs);
 			if (newnessBucketFromIntensity(intensity) === "older") {
 				const source = node.data.who ?? "unknown";
-				if (sourceFocus !== null && sourceFocus.has(source)) {
+				if (sourceFocus?.has(source)) {
 					return sourceRgbaFast(source, 0.85);
 				}
 			}

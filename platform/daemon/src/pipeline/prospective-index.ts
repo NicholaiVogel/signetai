@@ -9,8 +9,8 @@
 
 import type { LlmProvider, PipelineHintsConfig } from "@signet/core";
 import type { DbAccessor, WriteDb } from "../db-accessor";
-import type { PipelineV2Config } from "../memory-config";
 import { logger } from "../logger";
+import type { PipelineV2Config } from "../memory-config";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -203,7 +203,7 @@ export function startHintsWorker(deps: {
 }): HintsWorkerHandle {
 	const { accessor, provider, pipelineCfg } = deps;
 	const rawCfg = pipelineCfg.hints;
-	if (!rawCfg || !rawCfg.enabled) {
+	if (!rawCfg?.enabled) {
 		return { stop: async () => {}, running: false };
 	}
 	const cfg = rawCfg;

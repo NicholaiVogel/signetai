@@ -1,5 +1,5 @@
 ---
-const memoryFlow = [
+const _memoryFlow = [
 	"Harness hook fires (session-start, user-prompt, or session-end)",
 	"Connector calls daemon HTTP API",
 	"/api/hooks/remember enqueues extraction job",
@@ -12,7 +12,7 @@ const memoryFlow = [
 	"Scoped ranking, provenance, and dampening keep recall inspectable and bounded",
 ];
 
-const configFlow = [
+const _configFlow = [
 	"User edits ~/.agents/AGENTS.md (or any identity file)",
 	"File watcher detects the change via chokidar",
 	"2-second debounced sync: regenerate CLAUDE.md, .cursorrules, etc.",

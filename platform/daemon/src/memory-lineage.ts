@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { LlmProvider } from "@signet/core";
 import { resolveDefaultBasePath } from "@signet/core";
@@ -1603,7 +1603,7 @@ function buildLedger(agentId: string): ReadonlyArray<LedgerSession> {
 		const stamp = Date.parse(membershipTs(group));
 		if (!Number.isFinite(stamp) || stamp < floor || stamp > now) continue;
 		const picked = chooseSentence(group);
-		if (!picked || !picked.memory_sentence) continue;
+		if (!picked?.memory_sentence) continue;
 		if (
 			isNoiseSession({
 				project: sessionProject(group),

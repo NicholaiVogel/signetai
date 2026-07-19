@@ -1,25 +1,21 @@
 ---
 import { getCollection } from "astro:content";
-import Base from "../../layouts/Base.astro";
-import Nav from "../../components/Nav.astro";
-import Footer from "../../components/Footer.astro";
-import StructuredData from "../../components/StructuredData.astro";
 import "../../styles/blog.css";
 
 const posts = (await getCollection("blog"))
 	.filter((post) => !post.data.draft)
 	.sort((a, b) => b.data.date.getTime() - a.data.date.getTime());
 
-const siteUrl = Astro.site?.toString().replace(/\/$/, "") ?? "https://signetai.sh";
+const _siteUrl = Astro.site?.toString().replace(/\/$/, "") ?? "https://signetai.sh";
 
-const featured = posts[0];
-const rest = posts.slice(1);
+const _featured = posts[0];
+const _rest = posts.slice(1);
 
-function formatDate(date: Date) {
-	return date.toLocaleDateString('en-US', {
-		year: 'numeric',
-		month: 'long',
-		day: 'numeric',
+function _formatDate(date: Date) {
+	return date.toLocaleDateString("en-US", {
+		year: "numeric",
+		month: "long",
+		day: "numeric",
 	});
 }
 ---

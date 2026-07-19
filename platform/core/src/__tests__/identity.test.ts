@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAgentMemoryConfig, getAgentIdentityFiles, normalizeAgentRosterEntry, scaffoldAgent } from "../agents";
 import {
-	STATIC_IDENTITY_SESSION_START_TIMEOUT_STATUS,
 	detectExistingSetup,
 	loadIdentityMode,
 	readStaticIdentity,
 	resolvePromptSubmitTimeoutMs,
 	resolveSessionStartTimeoutMs,
 	resolveStartupIdentityFiles,
+	STATIC_IDENTITY_SESSION_START_TIMEOUT_STATUS,
 } from "../identity";
 import { parseSimpleYaml } from "../yaml";
 
@@ -23,25 +23,21 @@ const ORIGINAL_FORGE_CONFIG = process.env.FORGE_CONFIG;
 beforeEach(() => mkdirSync(TMP, { recursive: true }));
 afterEach(() => {
 	if (ORIGINAL_HOME === undefined) {
-		// biome-ignore lint/performance/noDelete: assigning undefined stores the string "undefined"
 		delete process.env.HOME;
 	} else {
 		process.env.HOME = ORIGINAL_HOME;
 	}
 	if (ORIGINAL_HERMES_REPO === undefined) {
-		// biome-ignore lint/performance/noDelete: assigning undefined stores the string "undefined"
 		delete process.env.HERMES_REPO;
 	} else {
 		process.env.HERMES_REPO = ORIGINAL_HERMES_REPO;
 	}
 	if (ORIGINAL_HERMES_HOME === undefined) {
-		// biome-ignore lint/performance/noDelete: assigning undefined stores the string "undefined"
 		delete process.env.HERMES_HOME;
 	} else {
 		process.env.HERMES_HOME = ORIGINAL_HERMES_HOME;
 	}
 	if (ORIGINAL_FORGE_CONFIG === undefined) {
-		// biome-ignore lint/performance/noDelete: assigning undefined stores the string "undefined"
 		delete process.env.FORGE_CONFIG;
 	} else {
 		process.env.FORGE_CONFIG = ORIGINAL_FORGE_CONFIG;

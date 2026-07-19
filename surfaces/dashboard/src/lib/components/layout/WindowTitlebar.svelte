@@ -6,7 +6,6 @@ import { type DecorationMode, titlebar } from "$lib/stores/titlebar.svelte";
 const isDesktop = isDesktopShell();
 
 let maximized = $state(false);
-// biome-ignore lint/style/useConst: Svelte state is reassigned by event handlers.
 let hovered = $state(false);
 
 $effect(() => {

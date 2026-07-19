@@ -10,13 +10,13 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-	type PackageManagerFamily,
-	type WorkspaceSourceRepoSyncResult,
 	getGlobalInstallCommand,
+	type PackageManagerFamily,
 	parseSimpleYaml,
 	resolveGlobalPackagePath,
 	resolvePrimaryPackageManager,
 	syncWorkspaceSourceRepoAsync,
+	type WorkspaceSourceRepoSyncResult,
 } from "@signet/core";
 import { logger } from "./logger";
 import { compareVersions, isMajorUpgrade, isVersionNewer } from "./version";
@@ -1093,11 +1093,10 @@ export function stopUpdateTimer(): void {
 // Config mutation (used by route handler)
 // ---------------------------------------------------------------------------
 
-export function setUpdateConfig(patch: {
-	autoInstall?: boolean;
-	checkInterval?: number;
-	channel?: UpdateChannel;
-}): { config: UpdateConfig; persisted: boolean } {
+export function setUpdateConfig(patch: { autoInstall?: boolean; checkInterval?: number; channel?: UpdateChannel }): {
+	config: UpdateConfig;
+	persisted: boolean;
+} {
 	if (patch.autoInstall !== undefined) {
 		updateConfig.autoInstall = patch.autoInstall;
 	}

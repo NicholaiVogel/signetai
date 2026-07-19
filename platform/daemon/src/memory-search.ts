@@ -27,10 +27,10 @@ import { buildAgentScopeClause } from "./memory-access-scope";
 import type { EmbeddingConfig, MemorySearchConfig, ResolvedMemoryConfig } from "./memory-config";
 import { NATIVE_MEMORY_BRIDGE_SOURCE_NODE_ID } from "./native-memory-constants";
 import { constructContextBlocks } from "./pipeline/context-construction";
-import { DEFAULT_DAMPENING, type ScoredRow, applyDampening } from "./pipeline/dampening";
+import { applyDampening, DEFAULT_DAMPENING, type ScoredRow } from "./pipeline/dampening";
 import { getGraphBoostIds, tokenizeGraphQuery } from "./pipeline/graph-search";
 import { resolveFocalEntities, setTraversalStatus, traverseKnowledgeGraph } from "./pipeline/graph-traversal";
-import { type RerankCandidate, noopReranker, rerank } from "./pipeline/reranker";
+import { noopReranker, type RerankCandidate, rerank } from "./pipeline/reranker";
 import { createEmbeddingReranker } from "./pipeline/reranker-embedding";
 import { createLlmReranker, summarizeRecallWithLlm } from "./pipeline/reranker-llm";
 import { FTS_STOP } from "./pipeline/stop-words";
@@ -40,14 +40,14 @@ import {
 	shapeStructuredEvidence,
 } from "./pipeline/structured-evidence";
 import {
-	type StructuredClaimCandidate,
 	findStructuredClaimCandidates,
 	findStructuredPathCandidates,
+	type StructuredClaimCandidate,
 	scoreStructuredPathEvidence,
 } from "./pipeline/structured-path-evidence";
-import { type RecallDedupeMeta, applyRecallDedupe } from "./session-recall-dedupe";
+import { applyRecallDedupe, type RecallDedupeMeta } from "./session-recall-dedupe";
 import { escapeLike } from "./sql-utils";
-import { type TemporalTimeOptions, resolveTemporalRecall } from "./temporal-recall";
+import { resolveTemporalRecall, type TemporalTimeOptions } from "./temporal-recall";
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -620,15 +620,25 @@ function mergeCandidate(
 	}
 }
 
-function hasColumn(db: { prepare: (sql: string) => { all: () => Array<{ name?: unknown }> } }, table: string, column: string): boolean {
+function hasColumn(
+	db: { prepare: (sql: string) => { all: () => Array<{ name?: unknown }> } },
+	table: string,
+	column: string,
+): boolean {
 	try {
-		return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column);
+		return db
+			.prepare(`PRAGMA table_info(${table})`)
+			.all()
+			.some((row) => row.name === column);
 	} catch {
 		return false;
 	}
 }
 
-function memorySupersessionSql(db: { prepare: (sql: string) => { all: () => Array<{ name?: unknown }> } }, alias = "m"): string {
+function memorySupersessionSql(
+	db: { prepare: (sql: string) => { all: () => Array<{ name?: unknown }> } },
+	alias = "m",
+): string {
 	return hasColumn(db, "memories", "superseded_by") ? ` AND ${alias}.superseded_by IS NULL` : "";
 }
 
@@ -1303,8 +1313,8 @@ export async function hybridRecall(
 			getDbAccessor().withReadDb((db) => {
 				// CROSS JOIN keeps SQLite from scanning memories first via
 				// low-selectivity filters before applying the FTS rowid match.
-				const ftsRows = (
-					db.prepare(`
+				const ftsRows = db
+					.prepare(`
         SELECT m.id, bm25(memories_fts) AS raw_score
         FROM memories_fts
         CROSS JOIN memories m ON memories_fts.rowid = m.rowid
@@ -1313,8 +1323,8 @@ export async function hybridRecall(
           ${memorySupersessionSql(db)}${filter.sql}
         ORDER BY raw_score
         LIMIT ?
-      `) as any
-				).all(keywordQuery, ...filter.args, cfg.search.top_k) as Array<{
+      `)
+					.all(keywordQuery, ...filter.args, cfg.search.top_k) as Array<{
 					id: string;
 					raw_score: number;
 				}>;
@@ -1358,7 +1368,7 @@ export async function hybridRecall(
 					const agentId = params.agentId ?? "default";
 					const args = [keywordQuery, agentId, ...filter.args, cfg.search.top_k];
 
-					const rows = (db.prepare(sql) as any).all(...args) as Array<{
+					const rows = db.prepare(sql).all(...args) as Array<{
 						id: string;
 						raw_score: number;
 					}>;
@@ -1407,7 +1417,7 @@ export async function hybridRecall(
 		try {
 			timings.time("vector_search", () => {
 				getDbAccessor().withReadDb((db) => {
-					const vecResults = vectorSearch(db as any, queryVector, {
+					const vecResults = vectorSearch(db, queryVector, {
 						limit: vecLimit,
 						type: params.type as "fact" | "preference" | "decision" | undefined,
 						excludeAggregateRecall,

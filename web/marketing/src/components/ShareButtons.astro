@@ -9,7 +9,7 @@ const { url, title } = Astro.props;
 const encodedUrl = encodeURIComponent(url);
 const encodedTitle = encodeURIComponent(title);
 
-const links = [
+const _links = [
 	{
 		label: "Share on X",
 		href: `https://x.com/intent/tweet?url=${encodedUrl}&text=${encodedTitle}`,

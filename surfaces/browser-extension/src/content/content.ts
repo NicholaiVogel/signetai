@@ -5,8 +5,7 @@
  */
 
 import { getConfig } from "../shared/config.js";
-import { applyTheme, resolveTheme } from "../shared/theme.js";
-import type { ThemeMode } from "../shared/types.js";
+import { resolveTheme } from "../shared/theme.js";
 
 // --- Extension presence marker (for dashboard detection) ---
 document.documentElement.dataset.signetExtension = "true";
@@ -391,7 +390,7 @@ function createPanel(theme: "dark" | "light"): void {
 			const config = await getConfig();
 			const headers: Record<string, string> = { "Content-Type": "application/json" };
 			if (config.authToken) {
-				headers["Authorization"] = `Bearer ${config.authToken}`;
+				headers.Authorization = `Bearer ${config.authToken}`;
 			}
 
 			const response = await fetch(`${config.daemonUrl}/api/memory/remember`, {

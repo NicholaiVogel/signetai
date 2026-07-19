@@ -1,8 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { runMigrations } from "../../../core/src/migrations";
 import { Hono } from "hono";
-import { mountMcpAnalyticsRoutes } from "./mcp-analytics.js";
+import { runMigrations } from "../../../core/src/migrations";
 
 /**
  * Tests for MCP analytics API routes.
@@ -46,7 +45,7 @@ function seedInvocations(
 
 describe("mcp-analytics routes", () => {
 	let db: Database;
-	let app: Hono;
+	let _app: Hono;
 
 	// We need to mock getDbAccessor — the simplest way is to use the module
 	// system. Since mcp-analytics.ts imports from ../db-accessor.js, we
@@ -60,7 +59,7 @@ describe("mcp-analytics routes", () => {
 	beforeEach(() => {
 		db = new Database(":memory:");
 		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
-		app = new Hono();
+		_app = new Hono();
 
 		// Monkey-patch: make the module use our test DB
 		// This relies on the analytics routes using getDbAccessor().withReadDb()

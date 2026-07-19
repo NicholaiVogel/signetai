@@ -1,5 +1,6 @@
 <script lang="ts">
 import { forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY } from "d3-force";
+import type { Simulation } from "d3-force";
 import type { EmbeddingPoint } from "../../api";
 import {
 	type GraphEdge,
@@ -39,7 +40,6 @@ interface Props {
 	onhovernode: (embedding: EmbeddingPoint | null) => void;
 }
 
-// biome-ignore lint/style/useConst: Svelte keeps prop bindings reactive.
 let {
 	nodes,
 	edges,
@@ -60,7 +60,6 @@ let {
 	onhovernode,
 }: Props = $props();
 
-// biome-ignore lint/style/useConst: Mutated by bind:this.
 let canvas = $state<HTMLCanvasElement | null>(null);
 
 // Camera state (internal)
@@ -79,7 +78,7 @@ let panCamStartX = 0;
 let panCamStartY = 0;
 const DRAG_THRESHOLD = 4;
 
-let simulation: ReturnType<typeof forceSimulation> | null = null;
+let simulation: Simulation<GraphNode, undefined> | null = null;
 let animFrame = 0;
 let interactionCleanup: (() => void) | null = null;
 let resizeListenerAttached = false;
@@ -181,14 +180,14 @@ export function startSimulation(
 	simulation?.stop();
 	initialFitDone = false;
 	const physics = clampGraphPhysics(nextPhysics);
-	simulation = forceSimulation(graphNodes as any)
+	simulation = forceSimulation(graphNodes)
 		.force("link", forceLink(graphEdges).distance(physics.linkDistance).strength(physics.linkForce))
 		.force("charge", forceManyBody().strength(physics.repelForce))
 		.force("x", forceX(0).strength(physics.centerForce))
 		.force("y", forceY(0).strength(physics.centerForce))
 		.force(
 			"collide",
-			forceCollide().radius((entry: any) => entry.radius + 2),
+			forceCollide<GraphNode>().radius((entry) => entry.radius + 2),
 		)
 		.alphaDecay(0.04)
 		.on("tick", () => {
@@ -206,8 +205,8 @@ export function startKnowledgeGraphSimulation(graphNodes: GraphNode[], graphEdge
 	initialFitDone = false;
 
 	// Tier-aware link distances and strengths
-	const linkForce = forceLink(graphEdges)
-		.distance((d: any) => {
+	const linkForce = forceLink<GraphNode, GraphEdge>(graphEdges)
+		.distance((d) => {
 			const s = d.source as GraphNode;
 			const t = d.target as GraphNode;
 			if (d.edgeType === "dependency") return 120;
@@ -216,7 +215,7 @@ export function startKnowledgeGraphSimulation(graphNodes: GraphNode[], graphEdge
 			if (s.nodeType === "attribute" && t.nodeType === "memory") return 20;
 			return 50;
 		})
-		.strength((d: any) => {
+		.strength((d) => {
 			if (d.edgeType === "dependency") return 0.05;
 			const s = d.source as GraphNode;
 			const t = d.target as GraphNode;
@@ -227,16 +226,16 @@ export function startKnowledgeGraphSimulation(graphNodes: GraphNode[], graphEdge
 		});
 
 	// Tier-aware charge
-	const charge = forceManyBody().strength((d: any) => tierChargeStrength(d.nodeType));
+	const charge = forceManyBody<GraphNode>().strength((d) => tierChargeStrength(d.nodeType));
 
-	simulation = forceSimulation(graphNodes as any)
+	simulation = forceSimulation(graphNodes)
 		.force("link", linkForce)
 		.force("charge", charge)
 		.force("x", forceX(0).strength(0.03))
 		.force("y", forceY(0).strength(0.03))
 		.force(
 			"collide",
-			forceCollide().radius((entry: any) => entry.radius + 2),
+			forceCollide<GraphNode>().radius((entry) => entry.radius + 2),
 		)
 		.alphaDecay(0.04)
 		.on("tick", () => {
@@ -516,7 +515,7 @@ function handleMinimapMouseUp(): void {
 function draw(ctx: CanvasRenderingContext2D, now: number): void {
 	if (!canvas) return;
 
-	const alpha = (simulation as any)?.alpha?.() ?? 0;
+	const alpha = simulation?.alpha() ?? 0;
 	const simActive = alpha > 0.001;
 
 	// Phase 7: Progressive frame skip — stop RAF when settled and no interaction
@@ -884,7 +883,7 @@ function setupInteractions(): void {
 				userAdjustedCamera = true;
 				dragNode.fx = dragNode.x;
 				dragNode.fy = dragNode.y;
-				(simulation as any)?.alphaTarget(0.3).restart();
+				simulation?.alphaTarget(0.3).restart();
 			}
 			const [wx, wy] = screenToWorld(event.clientX, event.clientY);
 			dragNode.fx = wx;
@@ -911,7 +910,7 @@ function setupInteractions(): void {
 			if (didDrag) {
 				dragNode.fx = null;
 				dragNode.fy = null;
-				(simulation as any)?.alphaTarget(0);
+				simulation?.alphaTarget(0);
 			}
 			dragNode = null;
 			isDragging = false;

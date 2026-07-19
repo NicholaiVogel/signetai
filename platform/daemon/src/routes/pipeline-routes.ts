@@ -30,21 +30,21 @@ import { getTranscriptCaptureStatus } from "../transcript-capture-worker.js";
 import { getTranscriptHealthReport } from "../transcript-health.js";
 import {
 	AGENTS_DIR,
-	BIND_HOST,
-	CURRENT_VERSION,
-	HOST,
-	LOG_DIR,
-	MEMORY_DB,
-	NETWORK_MODE,
-	PORT,
 	analyticsCollector,
 	authAdminLimiter,
 	authConfig,
+	BIND_HOST,
 	buildOpenClawHealth,
+	CURRENT_VERSION,
 	getCachedDiagnosticsReport,
 	getUpdateState,
+	HOST,
 	invalidateDiagnosticsCache,
+	LOG_DIR,
+	MEMORY_DB,
+	NETWORK_MODE,
 	openClawHeartbeat,
+	PORT,
 	pipelineTransition,
 	providerRuntimeResolution,
 	readEnvTrimmed,
@@ -57,7 +57,7 @@ import {
 	setPipelineTransition,
 	telemetryRef,
 } from "./state.js";
-import { STATUS_CACHE_TTL, cachedEmbeddingStatus, resolveScopedAgentId, statusCacheTime } from "./utils.js";
+import { cachedEmbeddingStatus, resolveScopedAgentId, STATUS_CACHE_TTL, statusCacheTime } from "./utils.js";
 
 const pipelineAdminGuard = async (c: Context, next: () => Promise<void>): Promise<Response | undefined> => {
 	const permDenied = await requirePermission("admin", authConfig)(c, () => Promise.resolve());

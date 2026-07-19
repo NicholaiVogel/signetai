@@ -26,11 +26,7 @@ interface Props {
 	showViewTabs?: boolean;
 	currentView?: "browse" | "installed";
 	onviewchange?: (view: "browse" | "installed") => void;
-	onreviewrequest?: (payload: {
-		targetType: "mcp";
-		targetId: string;
-		targetLabel: string;
-	}) => void | Promise<void>;
+	onreviewrequest?: (payload: { targetType: "mcp"; targetId: string; targetLabel: string }) => void | Promise<void>;
 }
 
 let { embedded = false, showViewTabs = true, currentView = "browse", onviewchange }: Props = $props();

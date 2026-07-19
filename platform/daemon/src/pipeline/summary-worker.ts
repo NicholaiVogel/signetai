@@ -23,10 +23,10 @@ import { countChanges } from "../db-helpers";
 import { getInferenceProvider } from "../llm";
 import { logger } from "../logger";
 import { inferType, isDuplicate } from "../memory-classification";
-import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
+import { loadMemoryConfig, type ResolvedMemoryConfig } from "../memory-config";
 import {
-	IMMUTABLE_ARTIFACT_ERROR_PREFIX,
 	ensureCanonicalManifest,
+	IMMUTABLE_ARTIFACT_ERROR_PREFIX,
 	updateManifest,
 	writeSummaryArtifact,
 } from "../memory-lineage";
@@ -38,12 +38,12 @@ import { isDurableBoundary, normalizeBoundaryReason } from "./boundary-reason";
 import { addDreamingTokens } from "./dreaming";
 import { enqueueExtractionJobInTx } from "./extraction-queue";
 import {
+	awaitSubprocessWithDeadline,
 	ClaudeCodeCircuitOpenError,
 	RateLimitExceededError,
 	SemaphoreTimeoutError,
-	awaitSubprocessWithDeadline,
 } from "./provider";
-import { type SignificanceConfig, assessSignificance } from "./significance-gate";
+import { assessSignificance, type SignificanceConfig } from "./significance-gate";
 import { countTokens } from "./tokenizer";
 
 // ---------------------------------------------------------------------------

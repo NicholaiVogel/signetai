@@ -5,8 +5,8 @@
  * source file, section, page, line range, and ingestion timestamp.
  */
 
-import { createHash } from "crypto";
-import { readFileSync, statSync } from "fs";
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import type { ChunkResult, DatabaseLike, ProvenanceRecord } from "./types";
 
 // ---------------------------------------------------------------------------

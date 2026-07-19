@@ -15,14 +15,8 @@
  * attempts must succeed). This accounts for LLM output variability.
  */
 
-import { describe, test, expect, beforeAll } from "bun:test";
-import {
-	SMALL_TRANSCRIPT,
-	MEDIUM_TRANSCRIPT,
-	LARGE_TRANSCRIPT,
-	MINIMAL_TRANSCRIPT,
-	UNICODE_TRANSCRIPT,
-} from "./fixtures/transcripts";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { LARGE_TRANSCRIPT, MEDIUM_TRANSCRIPT, SMALL_TRANSCRIPT, UNICODE_TRANSCRIPT } from "./fixtures/transcripts";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -419,11 +413,11 @@ interface ExtractionOutput {
 	}>;
 }
 
-function validateExtractionOutput(parsed: unknown): {
-	valid: boolean;
-	output?: ExtractionOutput;
-	errors: string[];
-} {
+function validateExtractionOutput(
+	parsed: unknown,
+):
+	| { valid: true; output: ExtractionOutput; errors: string[] }
+	| { valid: false; output?: undefined; errors: string[] } {
 	const errors: string[] = [];
 
 	if (typeof parsed !== "object" || parsed === null) {
@@ -477,11 +471,10 @@ function validateExtractionOutput(parsed: unknown): {
 		});
 	}
 
-	return {
-		valid: facts.length > 0,
-		output: { facts, entities },
-		errors,
-	};
+	if (facts.length === 0) {
+		return { valid: false, errors };
+	}
+	return { valid: true, output: { facts, entities }, errors };
 }
 
 interface DecisionOutput {
@@ -491,11 +484,9 @@ interface DecisionOutput {
 	reason: string;
 }
 
-function validateDecisionOutput(parsed: unknown): {
-	valid: boolean;
-	output?: DecisionOutput;
-	errors: string[];
-} {
+function validateDecisionOutput(
+	parsed: unknown,
+): { valid: true; output: DecisionOutput; errors: string[] } | { valid: false; output?: undefined; errors: string[] } {
 	const errors: string[] = [];
 
 	if (typeof parsed !== "object" || parsed === null) {
@@ -513,8 +504,11 @@ function validateDecisionOutput(parsed: unknown): {
 		errors.push("Missing or empty reason");
 	}
 
+	if (errors.length > 0) {
+		return { valid: false, errors };
+	}
 	return {
-		valid: errors.length === 0,
+		valid: true,
 		output: {
 			action: obj.action,
 			targetId: typeof obj.targetId === "string" ? obj.targetId : undefined,
@@ -530,11 +524,9 @@ interface SummaryOutput {
 	facts: Array<{ content: string; importance?: number; type?: string }>;
 }
 
-function validateSummaryOutput(parsed: unknown): {
-	valid: boolean;
-	output?: SummaryOutput;
-	errors: string[];
-} {
+function validateSummaryOutput(
+	parsed: unknown,
+): { valid: true; output: SummaryOutput; errors: string[] } | { valid: false; output?: undefined; errors: string[] } {
 	const errors: string[] = [];
 
 	if (typeof parsed !== "object" || parsed === null) {
@@ -573,8 +565,11 @@ function validateSummaryOutput(parsed: unknown): {
 		});
 	}
 
+	if (errors.length > 0) {
+		return { valid: false, errors };
+	}
 	return {
-		valid: errors.length === 0,
+		valid: true,
 		output: { summary: obj.summary, facts },
 		errors,
 	};
@@ -617,7 +612,7 @@ describe("Extraction Quality", () => {
 				if (!validation.valid) {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("extraction/small", result);
@@ -657,7 +652,7 @@ describe("Extraction Quality", () => {
 				if (!validation.valid) {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("extraction/medium", result);
@@ -687,7 +682,7 @@ describe("Extraction Quality", () => {
 				if (!validation.valid) {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("extraction/large", result);
@@ -716,12 +711,14 @@ describe("Extraction Quality", () => {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
 				// Every fact type should be a recognized type
-				for (const fact of validation.output!.facts) {
+				const output = validation.output;
+				if (!output) throw new Error("Validation succeeded but output is missing");
+				for (const fact of output.facts) {
 					if (!VALID_FACT_TYPES.has(fact.type)) {
 						throw new Error(`Unknown fact type: "${fact.type}"`);
 					}
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("extraction/types", result);
@@ -745,12 +742,14 @@ describe("Extraction Quality", () => {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
 				// Entities should have non-empty source, relationship, target
-				for (const entity of validation.output!.entities) {
+				const output = validation.output;
+				if (!output) throw new Error("Validation succeeded but output is missing");
+				for (const entity of output.entities) {
 					if (!entity.source || !entity.target) {
 						throw new Error(`Entity missing source/target: ${JSON.stringify(entity)}`);
 					}
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("extraction/entities", result);
@@ -773,12 +772,14 @@ describe("Extraction Quality", () => {
 				if (!validation.valid) {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
-				for (const fact of validation.output!.facts) {
+				const output = validation.output;
+				if (!output) throw new Error("Validation succeeded but output is missing");
+				for (const fact of output.facts) {
 					if (fact.confidence < 0 || fact.confidence > 1) {
 						throw new Error(`Confidence out of range: ${fact.confidence}`);
 					}
 				}
-				for (const entity of validation.output!.entities) {
+				for (const entity of output.entities) {
 					if (entity.confidence < 0 || entity.confidence > 1) {
 						throw new Error(`Entity confidence out of range: ${entity.confidence}`);
 					}
@@ -829,7 +830,7 @@ describe("Decision Quality", () => {
 				if (!validation.valid) {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("decision/add-novel", result);
@@ -868,7 +869,7 @@ describe("Decision Quality", () => {
 				if (!validation.valid) {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("decision/duplicate", result);
@@ -905,7 +906,7 @@ describe("Decision Quality", () => {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
 				// Verify all required fields are present and well-formed
-				const output = validation.output!;
+				const output = validation.output;
 				if (output.reason.length < 5) {
 					throw new Error(`Reason too short: "${output.reason}"`);
 				}
@@ -941,7 +942,7 @@ describe("Summary Quality", () => {
 				if (!validation.valid) {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("summary/medium", result);
@@ -976,11 +977,11 @@ describe("Summary Quality", () => {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
 				// Summary should contain markdown headings
-				const hasHeading = /^#/m.test(validation.output!.summary);
+				const hasHeading = /^#/m.test(validation.output?.summary);
 				if (!hasHeading) {
 					throw new Error("Summary missing markdown headings");
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("summary/headings", result);
@@ -1004,12 +1005,14 @@ describe("Summary Quality", () => {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
 				// Each fact content should be at least 20 chars (meaningful sentence)
-				for (const fact of validation.output!.facts) {
+				const output = validation.output;
+				if (!output) throw new Error("Validation succeeded but output is missing");
+				for (const fact of output.facts) {
 					if (fact.content.length < 15) {
 						throw new Error(`Fact too short: "${fact.content}"`);
 					}
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("summary/facts-quality", result);
@@ -1107,7 +1110,7 @@ describe("Prompt Robustness", () => {
 				if (!validation.valid) {
 					throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
 				}
-				return { value: validation.output!, durationMs };
+				return { value: validation.output, durationMs };
 			});
 
 			logTimings("robustness/unicode", result);
@@ -1154,7 +1157,7 @@ describe("Prompt Robustness", () => {
 				const { text, durationMs } = await generate(prompt);
 				const parsed = tryParseJson(text);
 				if (parsed === null) throw new Error("Failed to parse JSON");
-				const validation = validateExtractionOutput(parsed);
+				const _validation = validateExtractionOutput(parsed);
 				// For very short input, we accept zero facts as valid too
 				if (typeof parsed !== "object") {
 					throw new Error("Output is not an object");
@@ -1239,8 +1242,8 @@ describe("Schema Compliance (parsing)", () => {
 			],
 		});
 		expect(result.valid).toBe(true);
-		expect(result.output!.facts.length).toBe(1);
-		expect(result.output!.entities.length).toBe(1);
+		expect(result.output?.facts.length).toBe(1);
+		expect(result.output?.entities.length).toBe(1);
 	});
 
 	test("validateDecisionOutput accepts valid actions", () => {

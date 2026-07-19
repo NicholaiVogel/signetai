@@ -7,9 +7,7 @@ interface Props {
 	children: Snippet;
 }
 
-// biome-ignore lint/style/useConst: Svelte keeps prop bindings reactive.
 let { title = "Advanced", children }: Props = $props();
-// biome-ignore lint/style/useConst: Mutated from template callback.
 let open = $state(false);
 </script>
 

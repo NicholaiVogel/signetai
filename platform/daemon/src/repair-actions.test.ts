@@ -9,8 +9,8 @@ import { runMigrations } from "../../core/src/migrations";
 import { normalizeAndHashContent } from "./content-normalization";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { toFtsSchemaQueryDb } from "./db-accessor";
-import { DEFAULT_PIPELINE_V2 } from "./memory-config";
 import type { EmbeddingConfig, PipelineV2Config } from "./memory-config";
+import { DEFAULT_PIPELINE_V2 } from "./memory-config";
 import {
 	checkFtsConsistency,
 	checkRepairGate,
@@ -250,7 +250,7 @@ describe("createRateLimiter", () => {
 	});
 
 	it("resets hourly count after the hour window expires", () => {
-		const limiter = createRateLimiter();
+		const _limiter = createRateLimiter();
 		// Record, then directly verify that a past hourResetAt causes reset.
 		// We can observe this indirectly: record with budget=1, then once
 		// the hour resets the check should pass with cooldown=0.

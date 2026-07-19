@@ -91,11 +91,7 @@ export interface OpenClawPluginApi {
 		},
 	): void;
 	registerCli(fn: (ctx: { program: unknown }) => void, opts?: { commands?: readonly string[] }): void;
-	registerService(service: {
-		id: string;
-		start(): void | Promise<void>;
-		stop(): void | Promise<void>;
-	}): void;
+	registerService(service: { id: string; start(): void | Promise<void>; stop(): void | Promise<void> }): void;
 
 	// Typed overloads for known hooks
 	on(

@@ -11,10 +11,6 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { getBypassedSessionKeys, resetSessions } from "../session-tracker";
 import {
-	DEFAULT_OLLAMA_FALLBACK_MAX_CONTEXT_TOKENS,
-	LlmConcurrencySemaphore,
-	type LlmProviderStreamEvent,
-	SemaphoreTimeoutError,
 	awaitSubprocessWithDeadline,
 	configureLlmConcurrency,
 	createAcpxProvider,
@@ -26,11 +22,15 @@ import {
 	createOpenAiCompatibleProvider,
 	createOpenCodeProvider,
 	createOpenRouterProvider,
+	DEFAULT_OLLAMA_FALLBACK_MAX_CONTEXT_TOKENS,
 	getClaudeCodeCircuitStatus,
 	getLlmConcurrencyStatus,
+	LlmConcurrencySemaphore,
+	type LlmProviderStreamEvent,
 	resetClaudeCodeCircuit,
 	resolveDefaultOllamaFallbackMaxContextTokens,
 	resolveDefaultOllamaFallbackModel,
+	SemaphoreTimeoutError,
 } from "./provider";
 
 // ---------------------------------------------------------------------------
@@ -1614,7 +1614,7 @@ describe("createCodexProvider", () => {
 		process.env.SIGNET_CODEX_RUNTIME_DIR = runtimeRoot;
 
 		let capturedEnv: Record<string, string | undefined> | undefined;
-		Bun.spawn = mock((args: string[], opts?: { env?: Record<string, string | undefined> }) => {
+		Bun.spawn = mock((_args: string[], opts?: { env?: Record<string, string | undefined> }) => {
 			capturedEnv = opts?.env;
 			const srcAuth = join(liveCodex, "auth.json");
 			const srcVersion = join(liveCodex, "version.json");
@@ -1681,7 +1681,7 @@ describe("createCodexProvider", () => {
 		writeFileSync(marker, "keep");
 
 		let capturedEnv: Record<string, string | undefined> | undefined;
-		Bun.spawn = mock((args: string[], opts?: { env?: Record<string, string | undefined> }) => {
+		Bun.spawn = mock((_args: string[], opts?: { env?: Record<string, string | undefined> }) => {
 			capturedEnv = opts?.env;
 			expect(existsSync(marker)).toBe(true);
 			expect(capturedEnv?.HOME).not.toBe(sibling);
@@ -2796,7 +2796,7 @@ describe("createOpenCodeProvider", () => {
 	it("generate() does not disable structured output on an unrelated 400", async () => {
 		let attempts = 0;
 		mockFetch(
-			withParentSession(async (url, init) => {
+			withParentSession(async (url, _init) => {
 				if (url.includes("/session") && !url.includes("/message")) {
 					return Response.json({
 						id: `ses_unrelated_${attempts}`,
@@ -3448,7 +3448,7 @@ describe("LlmConcurrencySemaphore", () => {
 	it("reconfigures the global semaphore without stranding active or queued callers", async () => {
 		configureLlmConcurrency(1);
 		const gate = new AbortController();
-		let running = 0;
+		let _running = 0;
 		const waitForStatus = async (expected: { running: number; pending: number; limit: number }): Promise<void> => {
 			for (let i = 0; i < 40; i += 1) {
 				const status = getLlmConcurrencyStatus();
@@ -3465,13 +3465,13 @@ describe("LlmConcurrencySemaphore", () => {
 		};
 
 		mockFetch((_url, init) => {
-			running += 1;
+			_running += 1;
 			return new Promise<Response>((resolve, reject) => {
 				let settled = false;
 				const finish = () => {
 					if (settled) return;
 					settled = true;
-					running -= 1;
+					_running -= 1;
 					resolve(Response.json({ response: "ok" }));
 				};
 				if (gate.signal.aborted) finish();
@@ -3479,7 +3479,7 @@ describe("LlmConcurrencySemaphore", () => {
 				init?.signal?.addEventListener("abort", () => {
 					if (settled) return;
 					settled = true;
-					running -= 1;
+					_running -= 1;
 					reject(new DOMException("aborted", "AbortError"));
 				});
 			});

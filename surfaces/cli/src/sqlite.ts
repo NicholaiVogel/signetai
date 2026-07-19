@@ -18,7 +18,7 @@ interface SQLiteDatabase {
 }
 
 // Detect runtime once at module load
-const isBun = typeof (globalThis as any).Bun !== "undefined";
+const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
 
 /**
  * Create a SQLite database connection

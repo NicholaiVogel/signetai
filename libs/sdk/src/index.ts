@@ -4,12 +4,9 @@
  */
 
 import { SignetClientP2 } from "./client-p2.js";
-import { SignetClientHelpers, applyRecallMinScore } from "./helpers.js";
+import { applyRecallMinScore, SignetClientHelpers } from "./helpers.js";
 import { SignetTransport } from "./transport.js";
 import type {
-	AggregateRecallUsage,
-	AggregateRecallUsageStage,
-	BatchModifyItemResult,
 	BatchModifyResponse,
 	BitwardenConnectResult,
 	BitwardenMigrationResult,
@@ -58,7 +55,6 @@ import type {
 	RememberResult,
 	SecretExecJob,
 	SecretExecOptions,
-	SecretExecResult,
 	SecretListResponse,
 	SessionInfo,
 	SessionListResponse,
@@ -73,8 +69,6 @@ import type {
 	TaskCreateResult,
 	TaskGetResponse,
 	TaskListResponse,
-	TaskRecord,
-	TaskRun,
 	TaskRunListResponse,
 	TaskUpdatePayload,
 	TelemetryEventsResponse,
@@ -455,9 +449,7 @@ export class SignetClient extends SignetClientHelpers {
 	 * }
 	 * ```
 	 */
-	async getTelemetryStats(opts?: {
-		readonly since?: string;
-	}): Promise<TelemetryStatsResponse> {
+	async getTelemetryStats(opts?: { readonly since?: string }): Promise<TelemetryStatsResponse> {
 		return this.transport.get<TelemetryStatsResponse>("/api/telemetry/stats", {
 			since: opts?.since,
 		});
@@ -472,10 +464,7 @@ export class SignetClient extends SignetClientHelpers {
 	 * const events = ndjson.split("\n").map(JSON.parse);
 	 * ```
 	 */
-	async exportTelemetry(opts?: {
-		readonly since?: string;
-		readonly limit?: number;
-	}): Promise<string> {
+	async exportTelemetry(opts?: { readonly since?: string; readonly limit?: number }): Promise<string> {
 		return this.transport.get<string>("/api/telemetry/export", {
 			since: opts?.since,
 			limit: opts?.limit,
@@ -616,9 +605,7 @@ export class SignetClient extends SignetClientHelpers {
 	 * }
 	 * ```
 	 */
-	async getEmbeddingProjection(opts?: {
-		readonly dimensions?: 2 | 3;
-	}): Promise<EmbeddingProjectionResponse> {
+	async getEmbeddingProjection(opts?: { readonly dimensions?: 2 | 3 }): Promise<EmbeddingProjectionResponse> {
 		return this.transport.get<EmbeddingProjectionResponse>("/api/embeddings/projection", {
 			dimensions: opts?.dimensions,
 		});
@@ -668,10 +655,7 @@ export class SignetClient extends SignetClientHelpers {
 	 * console.log(checkpoints.count);
 	 * ```
 	 */
-	async listCheckpoints(opts: {
-		readonly project: string;
-		readonly limit?: number;
-	}): Promise<CheckpointListResponse> {
+	async listCheckpoints(opts: { readonly project: string; readonly limit?: number }): Promise<CheckpointListResponse> {
 		return this.transport.get<CheckpointListResponse>("/api/checkpoints", {
 			project: opts.project,
 			limit: opts.limit,
@@ -1325,17 +1309,22 @@ export const SignetSDK = SignetClient;
 /** @deprecated Use SignetClient instead */
 export const Signet = SignetClient;
 
-// Re-export everything consumers need
-export type { SignetTransport } from "./transport.js";
 export {
 	SignetApiError,
 	SignetError,
 	SignetNetworkError,
 	SignetTimeoutError,
 } from "./errors.js";
+// Re-export everything consumers need
+export type { SignetTransport } from "./transport.js";
 export type {
+	AggregateRecallUsage,
+	AggregateRecallUsageStage,
 	BatchModifyItemResult,
 	BatchModifyResponse,
+	BitwardenConnectResult,
+	BitwardenMigrationResult,
+	BitwardenStatus,
 	CheckpointListResponse,
 	ConfigListResponse,
 	ConfigWriteResponse,
@@ -1364,6 +1353,7 @@ export type {
 	HistoryEvent,
 	HistoryResponse,
 	IdentityResponse,
+	InstalledSkill,
 	JobStatus,
 	MemoryListResponse,
 	MemoryRecord,
@@ -1371,9 +1361,6 @@ export type {
 	MemorySearchTelemetryResponse,
 	MemorySearchTelemetryResult,
 	ModifyResult,
-	BitwardenConnectResult,
-	BitwardenMigrationResult,
-	BitwardenStatus,
 	OnePasswordConnectResult,
 	OnePasswordImportResult,
 	OnePasswordStatus,
@@ -1400,8 +1387,6 @@ export type {
 	PluginSurfaceBase,
 	PluginSurfaceSummary,
 	PluginToolSummary,
-	AggregateRecallUsage,
-	AggregateRecallUsageStage,
 	RecallResponse,
 	RecallResult,
 	RecoverResult,
@@ -1433,5 +1418,4 @@ export type {
 	TelemetryStatsResponse,
 	TimelineExportResponse,
 	TimelineResponse,
-	InstalledSkill,
 } from "./types.js";

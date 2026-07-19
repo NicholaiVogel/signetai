@@ -9,7 +9,7 @@ interface Props {
 	type?: string;
 }
 
-const SITE_NAME = "SignetAI";
+const _SITE_NAME = "SignetAI";
 const DEFAULT_TITLE = "SignetAI | Portable Agent State";
 const DEFAULT_DESCRIPTION =
 	"Local-first identity, memory, and secrets for AI agents. Portable state across models and harnesses.";
@@ -22,8 +22,8 @@ const {
 	type = "website",
 } = Astro.props;
 
-const canonicalUrl = new URL(Astro.url.pathname, Astro.site ?? "https://signetai.sh");
-const imageUrl = new URL(image, Astro.site ?? "https://signetai.sh");
+const _canonicalUrl = new URL(Astro.url.pathname, Astro.site ?? "https://signetai.sh");
+const _imageUrl = new URL(image, Astro.site ?? "https://signetai.sh");
 ---
 
 <!doctype html>

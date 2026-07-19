@@ -86,7 +86,7 @@ export function buildFtsMatchQuery(query: string): string | null {
  * Convert a Blob/Buffer to Float32Array for vector operations.
  * Uses zero-copy typed array view — no FFI needed here.
  */
-function blobToVector(blob: Buffer | ArrayBuffer): Float32Array {
+function _blobToVector(blob: Buffer | ArrayBuffer): Float32Array {
 	if (blob instanceof ArrayBuffer) {
 		return new Float32Array(blob);
 	}

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { describe, expect, it } from "bun:test";
 import { skillIdentityKey, skillRenderKey } from "./skill-identity";
 

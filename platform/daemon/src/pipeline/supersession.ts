@@ -170,7 +170,7 @@ export function detectAttributeContradiction(
 
 		if (gap > dayMs) {
 			const newHasTemporal = newTokens.some((t) => TEMPORAL_MARKERS.has(t));
-			const oldHasTemporal = oldTokens.some((t) => TEMPORAL_MARKERS.has(t));
+			const _oldHasTemporal = oldTokens.some((t) => TEMPORAL_MARKERS.has(t));
 
 			if (newHasTemporal) {
 				return {
@@ -315,7 +315,7 @@ export async function checkAndSupersedeForAttributes(
 			} satisfies EntityAttribute;
 		});
 
-		if (!attr || !attr.aspectId || attr.status !== "active" || attr.kind === "constraint") {
+		if (!attr?.aspectId || attr.status !== "active" || attr.kind === "constraint") {
 			skipped++;
 			continue;
 		}

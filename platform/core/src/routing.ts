@@ -1,5 +1,5 @@
-import type { PipelineCommandConfig, PipelineExtractionConfig, PipelineSynthesisConfig } from "./types";
 import { defaultPipelineModel } from "./pipeline-providers";
+import type { PipelineCommandConfig, PipelineExtractionConfig, PipelineSynthesisConfig } from "./types";
 
 export const ROUTING_ACCOUNT_KINDS = ["subscription_session", "api"] as const;
 export const ROUTING_TARGET_KINDS = ["subscription_session", "api", "local", "gateway"] as const;
@@ -454,7 +454,7 @@ export function parseRoutingTargetRef(
 	const trimmed = value.trim();
 	const slash = trimmed.indexOf("/");
 	if (slash <= 0 || slash === trimmed.length - 1) {
-		return err("invalid-target-ref", `Invalid target ref \"${value}\". Expected target/model.`);
+		return err("invalid-target-ref", `Invalid target ref "${value}". Expected target/model.`);
 	}
 	return ok({
 		targetId: trimmed.slice(0, slash),
@@ -946,7 +946,7 @@ export function parseRoutingConfig(raw: unknown, legacyConfig?: RoutingConfig): 
 	const defaultPolicy = explicitDefaultPolicy ?? base.defaultPolicy ?? Object.keys(policies)[0];
 
 	if (defaultPolicy && !policies[defaultPolicy] && Object.keys(policies).length > 0) {
-		return err("invalid-config", `Routing default policy \"${defaultPolicy}\" was not found.`, {
+		return err("invalid-config", `Routing default policy "${defaultPolicy}" was not found.`, {
 			availablePolicies: Object.keys(policies),
 		});
 	}
@@ -1088,7 +1088,7 @@ function orderedPreferenceLists(
 	if (!policy) {
 		return {
 			code: "policy-not-found",
-			message: `Routing policy \"${policyId}\" was not found.`,
+			message: `Routing policy "${policyId}" was not found.`,
 		};
 	}
 

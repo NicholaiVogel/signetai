@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
 import { Highlight, themes } from "prism-react-renderer"
@@ -16,11 +16,7 @@ export default function QuestionDetailPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    loadQuestion()
-  }, [runId, questionId])
-
-  async function loadQuestion() {
+  const loadQuestion = useCallback(async () => {
     try {
       setLoading(true)
       const data = await getQuestion(runId, questionId)
@@ -30,7 +26,11 @@ export default function QuestionDetailPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [runId, questionId])
+
+  useEffect(() => {
+    loadQuestion()
+  }, [loadQuestion])
 
   if (loading) {
     return (
@@ -203,10 +203,8 @@ export default function QuestionDetailPage() {
             {searchResults.map((result: any, idx: number) => {
               const jsonStr = JSON.stringify(result, null, 2)
               return (
-                <div
-                  key={idx}
-                  className="bg-[#0d0d0d] rounded border border-border overflow-hidden"
-                >
+                // biome-ignore lint/suspicious/noArrayIndexKey: search results are arbitrary JSON with no stable id
+                <div key={idx} className="bg-[#0d0d0d] rounded border border-border overflow-hidden">
                   <div className="flex items-center justify-between px-3 py-2 bg-bg-elevated border-b border-border">
                     <span className="text-xs font-mono text-accent">Result #{idx + 1}</span>
                     {result.score !== undefined && (
@@ -223,8 +221,10 @@ export default function QuestionDetailPage() {
                         style={{ ...style, background: "transparent", margin: 0 }}
                       >
                         {tokens.map((line, i) => (
+                          // biome-ignore lint/suspicious/noArrayIndexKey: syntax tokens have no stable id; position is their identity
                           <div key={i} {...getLineProps({ line })}>
                             {line.map((token, key) => (
+                              // biome-ignore lint/suspicious/noArrayIndexKey: syntax tokens have no stable id; position is their identity
                               <span key={key} {...getTokenProps({ token })} />
                             ))}
                           </div>

@@ -10,10 +10,10 @@
  * Filters out bot messages, join/leave events, and noise.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "fs";
-import { join, basename } from "path";
-import type { ParsedDocument, ParsedSection } from "./types";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { batchByTimeGap } from "./chat-utils";
+import type { ParsedDocument, ParsedSection } from "./types";
 
 // ---------------------------------------------------------------------------
 // Slack JSON types (subset of the export schema)
@@ -125,7 +125,7 @@ export function parseSlackExport(
 
 	// Filter channels if requested
 	const targetChannels = options?.channels
-		? channelDirs.filter((d) => options.channels!.includes(basename(d)))
+		? channelDirs.filter((d) => options.channels?.includes(basename(d)))
 		: channelDirs;
 
 	const allSections: ParsedSection[] = [];
@@ -134,7 +134,7 @@ export function parseSlackExport(
 
 	for (const channelDir of targetChannels) {
 		const channelName = basename(channelDir);
-		const channelMeta = channels.get(channelName);
+		const _channelMeta = channels.get(channelName);
 
 		// Load all messages from this channel
 		const messages = loadChannelMessages(channelDir);

@@ -63,9 +63,7 @@ describe("native Hermes release smoke", () => {
 				PYTHON: process.env.PYTHON?.trim() || "python3",
 				SIGNET_SKIP_AGENT_REGISTER: "1",
 			};
-			// biome-ignore lint/performance/noDelete: clean-home smoke must not inherit source/runtime fallbacks
 			delete env.SIGNET_DIR;
-			// biome-ignore lint/performance/noDelete: prove the binary materializes and sets its own embedded asset tree
 			delete env.SIGNET_CONNECTOR_ASSETS_DIR;
 
 			const sync = run(binary, ["sync"], env, root);

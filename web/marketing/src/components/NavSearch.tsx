@@ -133,6 +133,7 @@ export default function NavSearch() {
 					<input
 						ref={inputRef}
 						type="text"
+						role="combobox"
 						className="nav-search-input"
 						value={query}
 						onChange={(e) => setQuery(e.target.value)}
@@ -145,7 +146,6 @@ export default function NavSearch() {
 						aria-activedescendant={results[selected] ? `nav-search-option-${selected}` : undefined}
 					/>
 					{results.length > 0 && (
-						/* biome-ignore lint/a11y/useSemanticElements: popup search results use listbox semantics for screen readers */
 						<div id="nav-search-results" className="nav-search-results" role="listbox" tabIndex={-1}>
 							{results.map((r, i) => {
 								const option = (
@@ -159,7 +159,9 @@ export default function NavSearch() {
 									>
 										<a href={r.item.url} onClick={() => setOpen(false)}>
 											<span className="nav-search-result-title">{r.item.title}</span>
-											<span className="nav-search-result-section">{r.item.sectionTitle || r.item.section || "Docs"}</span>
+											<span className="nav-search-result-section">
+												{r.item.sectionTitle || r.item.section || "Docs"}
+											</span>
 										</a>
 									</div>
 								);

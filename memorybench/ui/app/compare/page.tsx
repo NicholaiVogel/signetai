@@ -34,15 +34,28 @@ export default function ComparesPage() {
       const data = await getCompares()
       setCompares(data)
       setError(null)
-    } catch (e) {
+    } catch (_e) {
       // Silent fail on poll
+    }
+  }, [])
+
+  const loadCompares = useCallback(async () => {
+    try {
+      setLoading(true)
+      const data = await getCompares()
+      setCompares(data)
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load comparisons")
+    } finally {
+      setLoading(false)
     }
   }, [])
 
   // Initial load
   useEffect(() => {
     loadCompares()
-  }, [])
+  }, [loadCompares])
 
   // Polling when comparisons are in progress
   useEffect(() => {
@@ -62,20 +75,7 @@ export default function ComparesPage() {
     }
   }, [hasRunningCompares, refreshCompares])
 
-  async function loadCompares() {
-    try {
-      setLoading(true)
-      const data = await getCompares()
-      setCompares(data)
-      setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load comparisons")
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function handleDelete(compareId: string) {
+  const handleDelete = useCallback(async (compareId: string) => {
     if (!confirm(`Delete comparison "${compareId}"? This cannot be undone.`)) return
 
     try {
@@ -84,7 +84,7 @@ export default function ComparesPage() {
     } catch (e) {
       alert(e instanceof Error ? e.message : "Failed to delete comparison")
     }
-  }
+  }, [])
 
   // Get unique values for filter options
   const benchmarks = useMemo(() => {
@@ -158,9 +158,9 @@ export default function ComparesPage() {
         header: "Providers",
         render: (compare) => (
           <div className="flex flex-wrap gap-1.5">
-            {compare.providers.map((provider, idx) => (
+            {compare.providers.map((provider) => (
               <span
-                key={idx}
+                key={provider}
                 className="inline-flex items-center px-2 py-0.5 text-xs font-medium bg-[#222222] text-text-secondary font-display rounded-sm"
               >
                 {provider}
@@ -250,7 +250,7 @@ export default function ComparesPage() {
         ),
       },
     ],
-    []
+    [handleDelete]
   )
 
   const clearFilters = () => {

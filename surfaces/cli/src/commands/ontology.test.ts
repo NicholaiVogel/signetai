@@ -647,7 +647,7 @@ describe("registerOntologyCommands", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.method).toBe("POST");
 		expect(calls[0]?.path).toBe("/api/ontology/proposals/batch");
-		const body = calls[0]?.body as {
+		const body = (calls[0]?.body ?? {}) as {
 			readonly agent_id?: string;
 			readonly created_by?: string;
 			readonly proposals?: readonly { readonly operation?: string; readonly payload?: Record<string, unknown> }[];
@@ -747,11 +747,11 @@ describe("registerOntologyCommands", () => {
 		}
 
 		expect(calls[0]?.path).toBe("/api/ontology/operations/apply");
-		expect((calls[0]?.body as { readonly operation?: string }).operation).toBe("set_claim_value");
-		expect((calls[0]?.body as { readonly propose?: boolean }).propose).toBe(true);
+		expect(((calls[0]?.body ?? {}) as { readonly operation?: string }).operation).toBe("set_claim_value");
+		expect(((calls[0]?.body ?? {}) as { readonly propose?: boolean }).propose).toBe(true);
 		expect(calls[1]?.path).toBe("/api/ontology/operations/batch");
-		expect((calls[1]?.body as { readonly dry_run?: boolean }).dry_run).toBe(true);
-		expect((calls[1]?.body as { readonly operations?: readonly unknown[] }).operations).toHaveLength(1);
+		expect(((calls[1]?.body ?? {}) as { readonly dry_run?: boolean }).dry_run).toBe(true);
+		expect(((calls[1]?.body ?? {}) as { readonly operations?: readonly unknown[] }).operations).toHaveLength(1);
 	});
 
 	test("claim version commands call version read and archive/restore operation endpoints", async () => {
@@ -813,8 +813,8 @@ describe("registerOntologyCommands", () => {
 		expect(calls[1]?.path).toBe(
 			"/api/ontology/claims/version?entity=Signet&aspect=architecture&group=ontology&claim=control_plane&version=2&agent_id=ant",
 		);
-		expect((calls[2]?.body as { readonly operation?: string }).operation).toBe("archive_claim_value");
-		expect((calls[3]?.body as { readonly operation?: string }).operation).toBe("restore_claim_version");
+		expect(((calls[2]?.body ?? {}) as { readonly operation?: string }).operation).toBe("archive_claim_value");
+		expect(((calls[3]?.body ?? {}) as { readonly operation?: string }).operation).toBe("restore_claim_version");
 	});
 
 	test("aspect and link commands hit audited operation endpoints", async () => {
@@ -888,10 +888,12 @@ describe("registerOntologyCommands", () => {
 			"update_link",
 			"archive_link",
 		]);
-		expect((calls[0]?.body as { readonly agent_id?: string; readonly dry_run?: boolean }).agent_id).toBe("ant");
-		expect((calls[0]?.body as { readonly dry_run?: boolean }).dry_run).toBe(true);
-		expect((calls[1]?.body as { readonly propose?: boolean }).propose).toBe(true);
-		expect((calls[3]?.body as { readonly payload?: { readonly strength?: number } }).payload?.strength).toBe(0.8);
+		expect(((calls[0]?.body ?? {}) as { readonly agent_id?: string; readonly dry_run?: boolean }).agent_id).toBe("ant");
+		expect(((calls[0]?.body ?? {}) as { readonly dry_run?: boolean }).dry_run).toBe(true);
+		expect(((calls[1]?.body ?? {}) as { readonly propose?: boolean }).propose).toBe(true);
+		expect(((calls[3]?.body ?? {}) as { readonly payload?: { readonly strength?: number } }).payload?.strength).toBe(
+			0.8,
+		);
 	});
 
 	test("pipeline explain reads daemon status", async () => {
@@ -1005,8 +1007,10 @@ describe("registerOntologyCommands", () => {
 		expect(calls[0]?.path).toBe("/api/ontology/assertions?entity=Signet&status=active&agent_id=ant");
 		expect(calls[1]?.path).toBe("/api/ontology/assertions/assertion-1?agent_id=ant");
 		expect(calls[2]?.path).toBe("/api/ontology/assertions");
-		expect((calls[2]?.body as { readonly predicate?: string; readonly confidence?: number }).predicate).toBe("claims");
-		expect((calls[2]?.body as { readonly confidence?: number }).confidence).toBe(0.9);
+		expect(((calls[2]?.body ?? {}) as { readonly predicate?: string; readonly confidence?: number }).predicate).toBe(
+			"claims",
+		);
+		expect(((calls[2]?.body ?? {}) as { readonly confidence?: number }).confidence).toBe(0.9);
 		expect(calls[3]?.path).toBe("/api/ontology/assertions/assertion-1/link-claim");
 		expect(calls[4]?.path).toBe("/api/ontology/assertions/assertion-1/archive");
 		expect(calls[5]?.path).toBe("/api/ontology/assertions/assertion-1/supersede");

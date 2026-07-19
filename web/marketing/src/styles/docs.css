@@ -187,7 +187,9 @@
 .sidebar-chevron {
 	color: var(--color-text-muted);
 	opacity: 0.5;
-	transition: transform 0.3s var(--ease), opacity 0.2s ease;
+	transition:
+		transform 0.3s var(--ease),
+		opacity 0.2s ease;
 }
 
 .sidebar-section-trigger:hover .sidebar-chevron {
@@ -376,7 +378,7 @@
 .prose pre {
 	border-radius: 12px;
 	border: 1px solid var(--color-border-strong);
-	background: color-mix(in srgb, var(--color-surface) 50%, black) !important;
+	background: color-mix(in srgb, var(--color-surface) 50%, black);
 	padding: 4px;
 	margin: 32px 0;
 	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);

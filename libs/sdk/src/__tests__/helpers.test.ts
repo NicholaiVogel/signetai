@@ -56,7 +56,7 @@ function mockDaemon(responseOverride?: (req: RecordedRequest) => Response | unkn
 	return { server, client };
 }
 
-function lastRequest(): RecordedRequest {
+function _lastRequest(): RecordedRequest {
 	const req = recorded[recorded.length - 1];
 	if (!req) throw new Error("No requests recorded");
 	return req;

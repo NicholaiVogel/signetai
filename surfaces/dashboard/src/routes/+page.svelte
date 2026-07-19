@@ -51,7 +51,6 @@ const agentId = $derived.by(() => {
 	if (!browser) return fallback;
 	return new URLSearchParams(window.location.search).get("agent_id") ?? fallback;
 });
-// biome-ignore lint/style/useConst: Svelte state is rebound by UpgradeBanner.
 let bannerShowing = $state(false);
 let embeddingsPrefetchPromise: Promise<unknown[]> | null = null;
 let timelineGeneratedFor = $state("");

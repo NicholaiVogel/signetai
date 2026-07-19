@@ -53,11 +53,7 @@ describe("OpenCodeConnector.install — legacy SIGNET block migration", () => {
 	it("strips legacy block from AGENTS.md and reports path in filesWritten", async () => {
 		writeIdentity(tmpRoot);
 		const agentsPath = join(tmpRoot, "AGENTS.md");
-		writeFileSync(
-			agentsPath,
-			`before\n<!-- SIGNET:START -->\nmanaged block\n<!-- SIGNET:END -->\nafter\n`,
-			"utf-8",
-		);
+		writeFileSync(agentsPath, `before\n<!-- SIGNET:START -->\nmanaged block\n<!-- SIGNET:END -->\nafter\n`, "utf-8");
 		const result = await new OpenCodeConnector().install(tmpRoot);
 		expect(readFileSync(agentsPath, "utf-8")).toBe("before\nafter\n");
 		expect(result.filesWritten).toContain(agentsPath);
@@ -73,11 +69,7 @@ describe("OpenCodeConnector.install — legacy SIGNET block migration", () => {
 
 	it("does not strip AGENTS.md when identity check fails", async () => {
 		const agentsPath = join(tmpRoot, "AGENTS.md");
-		writeFileSync(
-			agentsPath,
-			`before\n<!-- SIGNET:START -->\nmanaged block\n<!-- SIGNET:END -->\nafter\n`,
-			"utf-8",
-		);
+		writeFileSync(agentsPath, `before\n<!-- SIGNET:START -->\nmanaged block\n<!-- SIGNET:END -->\nafter\n`, "utf-8");
 		const result = await new OpenCodeConnector().install(tmpRoot);
 		expect(result.success).toBe(false);
 		expect(readFileSync(agentsPath, "utf-8")).toContain("<!-- SIGNET:START -->");

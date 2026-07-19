@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
 import {
@@ -40,18 +40,7 @@ export default function NewComparePage() {
   const [editingCompareId, setEditingCompareId] = useState(false)
   const compareIdInputRef = useRef<HTMLInputElement>(null)
 
-  useEffect(() => {
-    loadOptions()
-  }, [])
-
-  useEffect(() => {
-    if (editingCompareId && compareIdInputRef.current) {
-      compareIdInputRef.current.focus()
-      compareIdInputRef.current.select()
-    }
-  }, [editingCompareId])
-
-  async function loadOptions() {
+  const loadOptions = useCallback(async () => {
     try {
       const [providersRes, benchmarksRes, modelsRes] = await Promise.all([
         getProviders(),
@@ -70,7 +59,18 @@ export default function NewComparePage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    loadOptions()
+  }, [loadOptions])
+
+  useEffect(() => {
+    if (editingCompareId && compareIdInputRef.current) {
+      compareIdInputRef.current.focus()
+      compareIdInputRef.current.select()
+    }
+  }, [editingCompareId])
 
   function generateCompareId() {
     const now = new Date()

@@ -9,7 +9,6 @@ type Props = {
 	onClear: () => void;
 };
 
-// biome-ignore lint/style/useConst: Svelte updates destructured $props bindings when parents pass new values.
 let { items, onRemove, onClear }: Props = $props();
 
 function itemKey(item: SkillSearchResult): string {

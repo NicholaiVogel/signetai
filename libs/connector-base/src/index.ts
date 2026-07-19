@@ -37,10 +37,10 @@ import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
-	type SymlinkOptions,
-	type SymlinkResult,
 	expandHome,
 	resolveSignetDaemonUrl as resolveCoreSignetDaemonUrl,
+	type SymlinkOptions,
+	type SymlinkResult,
 	stripSignetBlock,
 	symlinkSkills,
 } from "@signet/core";
@@ -148,7 +148,7 @@ export abstract class BaseConnector {
 	 * @param targetName - Name of the target harness
 	 */
 	protected generateHeader(sourcePath: string, targetName?: string): string {
-		const name = targetName || this.name;
+		const _name = targetName || this.name;
 		// Strip CR/LF so a malformed path can't break out of comment lines
 		const safe = (p: string) => p.replace(/[\n\r]/g, "");
 		const root = dirname(sourcePath);
@@ -242,9 +242,7 @@ export function isSignetGeneratedFile(raw: string): boolean {
 			// Daemon-generated: "# AUTO-GENERATED from <path> by Signet"
 			/^#\s+AUTO-GENERATED\s+from\s+.*\s+by\s+Signet/i.test(line) ||
 			// Connector-generated: "# Auto-generated from <path>" followed by "# Source: <path>" on the next line
-			(/^#\s+Auto-generated\s+from\s+/.test(line) &&
-				i + 1 < lines.length &&
-				/^#\s+Source:\s+/.test(lines[i + 1])),
+			(/^#\s+Auto-generated\s+from\s+/.test(line) && i + 1 < lines.length && /^#\s+Source:\s+/.test(lines[i + 1])),
 	);
 }
 

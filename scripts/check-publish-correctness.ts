@@ -10,8 +10,7 @@
  *   bun scripts/check-publish-correctness.ts attw
  *   bun scripts/check-publish-correctness.ts all
  */
-import { Glob } from "bun";
-import { $ } from "bun";
+import { $, Glob } from "bun";
 
 const mode = process.argv[2] ?? "all";
 if (!["publint", "attw", "all"].includes(mode)) {

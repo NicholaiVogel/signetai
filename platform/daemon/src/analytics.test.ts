@@ -2,13 +2,13 @@
  * Tests for the analytics collector and timeline builder.
  */
 
-import { describe, it, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { runMigrations } from "../../core/src/migrations";
-import { createAnalyticsCollector, type AnalyticsCollector, type ErrorEntry } from "./analytics";
-import { buildTimeline, type TimelineSources } from "./timeline";
+import { type AnalyticsCollector, createAnalyticsCollector, type ErrorEntry } from "./analytics";
 import type { ReadDb } from "./db-accessor";
 import type { LogEntry } from "./logger";
+import { buildTimeline, type TimelineSources } from "./timeline";
 
 // ---------------------------------------------------------------------------
 // Analytics Collector Tests
@@ -56,7 +56,7 @@ describe("AnalyticsCollector", () => {
 			collector.recordProvider("ollama", 500, false);
 
 			const usage = collector.getUsage();
-			const p = usage.providers["ollama"];
+			const p = usage.providers.ollama;
 			expect(p.calls).toBe(3);
 			expect(p.failures).toBe(1);
 			expect(p.totalLatencyMs).toBe(800);
@@ -167,8 +167,8 @@ describe("AnalyticsCollector", () => {
 			});
 
 			const summary = collector.getErrorSummary();
-			expect(summary["EXTRACTION_TIMEOUT"]).toBe(2);
-			expect(summary["MUTATION_CONFLICT"]).toBe(1);
+			expect(summary.EXTRACTION_TIMEOUT).toBe(2);
+			expect(summary.MUTATION_CONFLICT).toBe(1);
 		});
 	});
 
@@ -241,7 +241,7 @@ describe("buildTimeline", () => {
 
 	beforeEach(() => {
 		db = new Database(":memory:");
-		runMigrations(db as any);
+		runMigrations(db);
 	});
 
 	function makeSources(logs: LogEntry[] = [], errors: ErrorEntry[] = []): TimelineSources {

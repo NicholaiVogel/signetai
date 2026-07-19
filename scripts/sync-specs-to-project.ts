@@ -9,16 +9,16 @@
  *   bun scripts/sync-specs-to-project.ts --dry-run # preview changes
  */
 
+import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { execSync } from "node:child_process";
 
 // --- config ---
 
 const PROJECT_ID = "PVT_kwDOD4vxcc4BTHDc";
 const PROJECT_NUMBER = 1;
 const ORG = "Signet-AI";
-const REPO = "signetai";
+const _REPO = "signetai";
 
 const FIELD = {
 	title: "PVTF_lADOD4vxcc4BTHDczhAcoGA",

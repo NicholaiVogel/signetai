@@ -39,15 +39,77 @@ export default function RunsPage() {
       const data = await getRuns()
       setRuns(data)
       setError(null)
-    } catch (e) {
+    } catch (_e) {
       // Silent fail on poll
     }
   }, [])
 
+  const loadRuns = useCallback(async () => {
+    try {
+      setLoading(true)
+      const data = await getRuns()
+      setRuns(data)
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load runs")
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const handleDelete = useCallback(async (runId: string) => {
+    if (!confirm(`Delete run "${runId}"? This cannot be undone.`)) return
+
+    try {
+      await deleteRun(runId)
+      setRuns((prev) => prev.filter((r) => r.runId !== runId))
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to delete run")
+    }
+  }, [])
+
+  const handleTerminate = useCallback(
+    async (runId: string) => {
+      try {
+        await stopRun(runId)
+        await refreshRuns()
+      } catch (e) {
+        alert(e instanceof Error ? e.message : "Failed to terminate run")
+      }
+    },
+    [refreshRuns]
+  )
+
+  const handleAddToLeaderboard = useCallback(
+    async (runId: string, data: { version?: string; notes?: string }) => {
+      await addToLeaderboard(runId, data)
+      router.push("/leaderboard")
+    },
+    [router]
+  )
+
+  const handleContinue = useCallback(
+    async (run: RunSummary) => {
+      try {
+        await startRun({
+          provider: run.provider,
+          benchmark: run.benchmark,
+          runId: run.runId,
+          judgeModel: run.judge,
+          answeringModel: run.answeringModel,
+        })
+        await refreshRuns()
+      } catch (e) {
+        alert(e instanceof Error ? e.message : "Failed to continue run")
+      }
+    },
+    [refreshRuns]
+  )
+
   // Initial load
   useEffect(() => {
     loadRuns()
-  }, [])
+  }, [loadRuns])
 
   // Polling when runs are in progress
   useEffect(() => {
@@ -66,59 +128,6 @@ export default function RunsPage() {
       }
     }
   }, [hasRunningRuns, refreshRuns])
-
-  async function loadRuns() {
-    try {
-      setLoading(true)
-      const data = await getRuns()
-      setRuns(data)
-      setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load runs")
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function handleDelete(runId: string) {
-    if (!confirm(`Delete run "${runId}"? This cannot be undone.`)) return
-
-    try {
-      await deleteRun(runId)
-      setRuns((prev) => prev.filter((r) => r.runId !== runId))
-    } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to delete run")
-    }
-  }
-
-  async function handleTerminate(runId: string) {
-    try {
-      await stopRun(runId)
-      await refreshRuns()
-    } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to terminate run")
-    }
-  }
-
-  async function handleAddToLeaderboard(runId: string, data: { version?: string; notes?: string }) {
-    await addToLeaderboard(runId, data)
-    router.push("/leaderboard")
-  }
-
-  async function handleContinue(run: RunSummary) {
-    try {
-      await startRun({
-        provider: run.provider,
-        benchmark: run.benchmark,
-        runId: run.runId,
-        judgeModel: run.judge,
-        answeringModel: run.answeringModel,
-      })
-      await refreshRuns()
-    } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to continue run")
-    }
-  }
 
   // Get unique values for filter options
   const providers = useMemo(() => {
@@ -288,7 +297,7 @@ export default function RunsPage() {
         ),
       },
     ],
-    []
+    [handleContinue, handleDelete, handleTerminate, handleAddToLeaderboard]
   )
 
   const clearFilters = () => {

@@ -16,22 +16,22 @@ import { logger } from "../logger";
 import type { PipelineV2Config } from "../memory-config";
 import type { TelemetryCollector } from "../telemetry";
 import { txForgetMemory, txIngestEnvelope, txModifyMemory } from "../transactions";
-import { PROSPECTIVE_ANTONYM_PAIRS, hasAntonymConflict, hasNegation, overlapCount, tokenize } from "./antonyms";
+import { hasAntonymConflict, hasNegation, overlapCount, PROSPECTIVE_ANTONYM_PAIRS, tokenize } from "./antonyms";
 import { detectSemanticContradiction } from "./contradiction";
 import type { DecisionConfig, FactDecisionProposal } from "./decision";
 import { runShadowDecisions } from "./decision";
-import { type DurabilityConfig, assessDurability } from "./durability-gate";
+import { assessDurability, type DurabilityConfig } from "./durability-gate";
 import { extractFactsAndEntities } from "./extraction";
 import { escalate } from "./extraction-escalation";
 import { cancelExtractionJobForForgottenMemory } from "./extraction-queue";
 import { txPersistEntities } from "./graph-transactions";
 import { invalidateTraversalCache } from "./graph-traversal";
 import { enqueueHintsJob } from "./prospective-index";
-import { ClaudeCodeCircuitOpenError, type LlmProvider, RateLimitExceededError, generateWithTracking } from "./provider";
+import { ClaudeCodeCircuitOpenError, generateWithTracking, type LlmProvider, RateLimitExceededError } from "./provider";
 import { archiveToCold } from "./retention-worker";
-import { type SignificanceConfig, assessSignificance } from "./significance-gate";
-import { type StaleLeaseRecovery, recoverStaleLeases } from "./stale-leases";
-import { type WriteGateConfig, assessWriteGate } from "./write-gate";
+import { assessSignificance, type SignificanceConfig } from "./significance-gate";
+import { recoverStaleLeases, type StaleLeaseRecovery } from "./stale-leases";
+import { assessWriteGate, type WriteGateConfig } from "./write-gate";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1049,7 +1049,7 @@ export function startWorker(
 	const JITTER = 500;
 
 	// Progress tracking for watchdog and stats
-	let lastAttempt = runtime.now(); // updated on every tick (success or failure)
+	let _lastAttempt = runtime.now(); // updated on every tick (success or failure)
 	let lastSuccess = runtime.now(); // updated only on successful job completion
 	let processed = 0;
 	let overloaded = false;
@@ -1598,7 +1598,7 @@ export function startWorker(
 			try {
 				await processExtractJob(job);
 				consecutiveFailures = 0;
-				lastAttempt = runtime.now();
+				_lastAttempt = runtime.now();
 				lastSuccess = runtime.now();
 				processed++;
 				analytics?.recordLatency("jobs", runtime.now() - jobStart);
@@ -1606,7 +1606,7 @@ export function startWorker(
 				const msg = e instanceof Error ? e.message : String(e);
 				if ((!running && isCancellationError(e)) || e instanceof ClaudeCodeCircuitOpenError) {
 					accessor.withWriteTx((db) => restoreCancelledJobLease(db, job));
-					lastAttempt = runtime.now();
+					_lastAttempt = runtime.now();
 					return;
 				}
 				const nonRetryable = e instanceof RateLimitExceededError;
@@ -1655,12 +1655,12 @@ export function startWorker(
 					}
 				});
 				consecutiveFailures = nonRetryable || job.attempts >= effectiveMaxAttempts ? 0 : consecutiveFailures + 1;
-				lastAttempt = runtime.now();
+				_lastAttempt = runtime.now();
 			}
 		} catch (e) {
 			log.error("pipeline", "Worker tick error", e instanceof Error ? e : new Error(String(e)));
 			consecutiveFailures++;
-			lastAttempt = runtime.now();
+			_lastAttempt = runtime.now();
 		}
 	}
 
@@ -1674,7 +1674,7 @@ export function startWorker(
 	function scheduleTick(): void {
 		if (!running) return;
 		const loadPerCpu = runtime.getLoadPerCpu();
-		lastAttempt = runtime.now();
+		_lastAttempt = runtime.now();
 		lastLoadPerCpu = loadPerCpu;
 		const overloadedNow =
 			loadPerCpu !== null && Number.isFinite(loadPerCpu) && loadPerCpu > pipelineCfg.worker.maxLoadPerCpu;
