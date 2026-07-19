@@ -10,8 +10,7 @@
 	"summary": {
 		"native-rust-replay-proven": 320,
 		"native-rust-unit-only": 1,
-		"mounted-shallow": 7,
-		"missing": 2
+		"mounted-shallow": 9
 	},
 	"routes": [
 		{
@@ -518,7 +517,7 @@
 			"method": "GET",
 			"path": "/api/diagnostics/queue",
 			"file": "platform/daemon/src/routes/queue-diagnostics.ts",
-			"line": 178,
+			"line": 163,
 			"status": "native-rust-replay-proven",
 			"rustMounted": true,
 			"contractReplay": true,
@@ -528,7 +527,7 @@
 			"method": "POST",
 			"path": "/api/diagnostics/queue/repair",
 			"file": "platform/daemon/src/routes/queue-diagnostics.ts",
-			"line": 187,
+			"line": 172,
 			"status": "native-rust-unit-only",
 			"rustMounted": true,
 			"contractReplay": false,
@@ -2469,8 +2468,8 @@
 			"path": "/api/repair/integrity-check",
 			"file": "platform/daemon/src/routes/repair-routes.ts",
 			"line": 585,
-			"status": "missing",
-			"rustMounted": false,
+			"status": "mounted-shallow",
+			"rustMounted": true,
 			"contractReplay": false,
 			"parityRule": false
 		},
@@ -2519,8 +2518,8 @@
 			"path": "/api/repair/rebuild-indexes",
 			"file": "platform/daemon/src/routes/repair-routes.ts",
 			"line": 590,
-			"status": "missing",
-			"rustMounted": false,
+			"status": "mounted-shallow",
+			"rustMounted": true,
 			"contractReplay": false,
 			"parityRule": false
 		},

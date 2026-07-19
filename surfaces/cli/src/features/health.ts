@@ -362,8 +362,9 @@ function renderQueueRow(label: string, counts: QueueCountsForDisplay): string {
 export async function renderPipelineQueuesBlock(deps: { defaultPort: number }): Promise<void> {
 	const base = getDaemonBaseUrl(deps.defaultPort);
 	const report = await fetchPipelineQueueReport(base);
-	if (!report) return;
+	if (!report?.queues) return;
 	const { memory, summary, extraction } = report.queues;
+	if (!memory || !summary || !extraction) return;
 	const deadTotal = memory.dead + summary.dead + extraction.dead;
 	const heading = deadTotal > 0 ? chalk.yellow("Pipeline queues (dead jobs present)") : "Pipeline queues";
 	console.log("");

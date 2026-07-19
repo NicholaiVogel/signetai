@@ -431,6 +431,38 @@ pub struct CheckFtsBody {
     pub repair: bool,
 }
 
+fn fts_consistency(
+    conn: &rusqlite::Connection,
+    do_repair: bool,
+) -> Result<serde_json::Value, signet_core::CoreError> {
+    let fts_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories_fts", [], |r| r.get(0))
+        .unwrap_or(0);
+    let active_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories WHERE deleted = 0", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0);
+
+    let mismatch = (fts_count - active_count).unsigned_abs();
+
+    if do_repair && mismatch > 0 {
+        // Rebuild FTS
+        conn.execute("DELETE FROM memories_fts", [])?;
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, content) SELECT rowid, content FROM memories WHERE deleted = 0",
+            [],
+        )?;
+    }
+
+    Ok(serde_json::json!({
+        "fts_count": fts_count,
+        "active_count": active_count,
+        "mismatch": mismatch,
+        "repaired": do_repair && mismatch > 0,
+    }))
+}
+
 /// POST /api/repair/check-fts — verify/repair FTS index consistency.
 pub async fn check_fts(
     State(state): State<Arc<AppState>>,
@@ -441,34 +473,7 @@ pub async fn check_fts(
     let result = state
         .pool
         .write(signet_core::db::Priority::Low, move |conn| {
-            let fts_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM memories_fts", [], |r| r.get(0))
-                .unwrap_or(0);
-            let active_count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM memories WHERE deleted = 0",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-
-            let mismatch = (fts_count - active_count).unsigned_abs();
-
-            if do_repair && mismatch > 0 {
-                // Rebuild FTS
-                conn.execute("DELETE FROM memories_fts", [])?;
-                conn.execute(
-                    "INSERT INTO memories_fts(rowid, content) SELECT rowid, content FROM memories WHERE deleted = 0",
-                    [],
-                )?;
-            }
-
-            Ok(serde_json::json!({
-                "fts_count": fts_count,
-                "active_count": active_count,
-                "mismatch": mismatch,
-                "repaired": do_repair && mismatch > 0,
-            }))
+            fts_consistency(conn, do_repair)
         })
         .await;
 
@@ -493,6 +498,179 @@ pub async fn check_fts(
             Json(repair_result("check_fts", false, 0, &e.to_string())),
         ),
     }
+}
+
+/// GET /api/repair/integrity-check — run PRAGMA integrity_check.
+pub async fn integrity_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let result = state.pool.read(run_integrity_check).await;
+
+    match result {
+        Ok(report) => (StatusCode::OK, Json(report)),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "messages": [e.to_string()],
+            })),
+        ),
+    }
+}
+
+fn run_integrity_check(
+    conn: &rusqlite::Connection,
+) -> Result<serde_json::Value, signet_core::CoreError> {
+    let mut stmt = conn.prepare("PRAGMA integrity_check")?;
+    let messages = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    if messages.len() == 1 && messages[0] == "ok" {
+        Ok(serde_json::json!({ "ok": true, "messages": [] }))
+    } else {
+        Ok(serde_json::json!({ "ok": false, "messages": messages }))
+    }
+}
+
+/// POST /api/repair/rebuild-indexes — coordinated repair of derived indexes:
+/// integrity check, FTS rebuild, and re-embedding of missing memories.
+pub async fn rebuild_indexes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let integrity = match state.pool.read(run_integrity_check).await {
+        Ok(report) => report,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    let fts = match state
+        .pool
+        .write(signet_core::db::Priority::Low, |conn| {
+            fts_consistency(conn, true)
+        })
+        .await
+    {
+        Ok(info) => {
+            let repaired = info["repaired"].as_bool().unwrap_or(false);
+            let mismatch = info["mismatch"].as_u64().unwrap_or(0) as usize;
+            let message = if repaired {
+                format!("FTS index rebuilt, {mismatch} entries corrected")
+            } else if mismatch > 0 {
+                format!("FTS mismatch detected: {mismatch} entries differ")
+            } else {
+                "FTS index consistent".into()
+            };
+            serde_json::json!({ "repaired": repaired, "message": message })
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            );
+        }
+    };
+
+    // Re-embed up to 200 memories missing embeddings (single batch, no sweep).
+    let (written, selected) = match reembed_batch(&state, 200).await {
+        Ok(counts) => counts,
+        Err(message) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": message })),
+            );
+        }
+    };
+
+    let integrity_ok = integrity["ok"].as_bool().unwrap_or(false);
+    let integrity_issues = integrity["messages"]
+        .as_array()
+        .map(|messages| messages.len())
+        .unwrap_or(0);
+    let fts_repaired = fts["repaired"].as_bool().unwrap_or(false);
+
+    let mut parts = Vec::new();
+    if integrity_ok {
+        parts.push("integrity: ok".to_string());
+    } else {
+        parts.push(format!("integrity: {integrity_issues} issue(s)"));
+    }
+    if fts_repaired {
+        parts.push("FTS: repaired".to_string());
+    } else {
+        parts.push("FTS: consistent".to_string());
+    }
+    parts.push(format!(
+        "embeddings: re-embedded {written} of {selected} missing"
+    ));
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "integrity": integrity,
+            "fts": fts,
+            "embeddings": {
+                "reembedded": written,
+                "totalMissing": selected.saturating_sub(written),
+            },
+            "summary": parts.join(" · "),
+        })),
+    )
+}
+
+async fn reembed_batch(
+    state: &Arc<AppState>,
+    batch_size: i64,
+) -> Result<(usize, usize), String> {
+    let rows = state
+        .pool
+        .read(move |conn| Ok(list_unembedded_memories(conn, batch_size)?))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let selected = rows.len();
+    if selected == 0 {
+        return Ok((0, 0));
+    }
+
+    let Some(provider) = state.embedding.read().await.clone() else {
+        return Ok((0, selected));
+    };
+    let embedding_model = state
+        .config
+        .manifest
+        .embedding
+        .as_ref()
+        .map(|embedding| embedding.model.clone());
+
+    let mut vectors = Vec::new();
+    for row in rows {
+        if let Some(vector) = provider.embed(&row.content).await {
+            if vector.len() == provider.dimensions() {
+                vectors.push((row, vector));
+            }
+        }
+    }
+
+    if vectors.is_empty() {
+        return Ok((0, selected));
+    }
+
+    let written = state
+        .pool
+        .write(signet_core::db::Priority::Low, move |conn| {
+            Ok(serde_json::json!(write_embedding_batch(
+                conn,
+                &vectors,
+                embedding_model.as_deref(),
+            )?))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .as_u64()
+        .unwrap_or(0) as usize;
+
+    Ok((written, selected))
 }
 
 fn sqlite_table_exists(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<bool> {
