@@ -37,12 +37,6 @@ function resolveAgentsDir(): string {
 	return process.env.SIGNET_AGENTS_DIR ?? process.env.AGENTS_DIR ?? `${process.env.HOME ?? "/tmp"}/.agents`;
 }
 
-function resolveLimiter() {
-	if (repairLimiter) return repairLimiter;
-	const { createRateLimiter } = require("../repair-actions.js") as typeof import("../repair-actions.js");
-	return createRateLimiter();
-}
-
 interface QueueDiagnosticsResponse {
 	readonly timestamp: string;
 	readonly queues: {
