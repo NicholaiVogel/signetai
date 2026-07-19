@@ -74,15 +74,11 @@ pub struct OpenClawHeartbeat {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum UpdateChannel {
+    #[default]
     Stable,
     Nightly,
-}
-
-impl Default for UpdateChannel {
-    fn default() -> Self {
-        Self::Stable
-    }
 }
 
 impl UpdateChannel {
@@ -318,13 +314,13 @@ fn yaml_key(key: &str) -> serde_yml::Value {
 }
 
 fn yaml_string(map: &serde_yml::Mapping, key: &str) -> Option<String> {
-    map.get(&yaml_key(key))
+    map.get(yaml_key(key))
         .and_then(serde_yml::Value::as_str)
         .map(ToOwned::to_owned)
 }
 
 fn yaml_bool(map: &serde_yml::Mapping, key: &str) -> Option<bool> {
-    match map.get(&yaml_key(key)) {
+    match map.get(yaml_key(key)) {
         Some(value) => value
             .as_bool()
             .or_else(|| value.as_str().map(|raw| raw == "true")),
@@ -333,12 +329,12 @@ fn yaml_bool(map: &serde_yml::Mapping, key: &str) -> Option<bool> {
 }
 
 fn yaml_u64(map: &serde_yml::Mapping, key: &str) -> Option<u64> {
-    map.get(&yaml_key(key))
+    map.get(yaml_key(key))
         .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
 }
 
 fn yaml_i64(map: &serde_yml::Mapping, key: &str) -> Option<i64> {
-    map.get(&yaml_key(key))
+    map.get(yaml_key(key))
         .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
 }
 
@@ -347,13 +343,12 @@ fn detect_git_branch(base_path: &std::path::Path, remote: &str) -> String {
         .args(["symbolic-ref", &format!("refs/remotes/{remote}/HEAD")])
         .current_dir(base_path)
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let prefix = format!("refs/remotes/{remote}/");
-            if let Some(branch) = raw.strip_prefix(&prefix) {
-                return branch.to_string();
-            }
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let prefix = format!("refs/remotes/{remote}/");
+        if let Some(branch) = raw.strip_prefix(&prefix) {
+            return branch.to_string();
         }
     }
 
@@ -361,12 +356,11 @@ fn detect_git_branch(base_path: &std::path::Path, remote: &str) -> String {
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(base_path)
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !branch.is_empty() && branch != "HEAD" {
-                return branch;
-            }
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !branch.is_empty() && branch != "HEAD" {
+            return branch;
         }
     }
 

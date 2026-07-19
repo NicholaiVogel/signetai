@@ -494,7 +494,7 @@ struct ApiKeyRow {
 }
 
 impl ApiKeyRow {
-    fn to_json(self) -> Value {
+    fn to_json(&self) -> Value {
         json!({
             "id": self.id,
             "prefix": self.prefix,

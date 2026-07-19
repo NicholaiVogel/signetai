@@ -34,6 +34,8 @@ fn normalize_skill_name(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon route layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn record_skill_invocation(
     conn: &rusqlite::Connection,
     skill_name: &str,

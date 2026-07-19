@@ -286,7 +286,7 @@ fn require_authenticated_or_response(
     peer: SocketAddr,
     headers: &HeaderMap,
     permission: Permission,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let is_local = peer.ip().is_loopback();
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -296,7 +296,7 @@ fn require_authenticated_or_response(
         is_local,
     )
     .map_err(|resp| *resp)?;
-    require_permission_guard(&auth, permission, auth_runtime.mode, is_local).map_err(|resp| *resp)
+    require_permission_guard(&auth, permission, auth_runtime.mode, is_local)
 }
 
 /// GET /api/marketplace/reviews
@@ -308,7 +308,7 @@ pub async fn list(
 ) -> Response {
     if let Err(resp) = require_authenticated_or_response(&state, peer, &headers, Permission::Recall)
     {
-        return resp;
+        return *resp;
     }
     let target_type = parse_target_type(query.target_type);
     let target_id = parse_text(query.id);
@@ -362,7 +362,7 @@ pub async fn create(
 ) -> Response {
     if let Err(resp) = require_authenticated_or_response(&state, peer, &headers, Permission::Modify)
     {
-        return resp;
+        return *resp;
     }
     let target_type = parse_target_type(body.target_type);
     let target_id = parse_text(body.target_id);
@@ -448,7 +448,7 @@ pub async fn get_config(
 ) -> Response {
     if let Err(resp) = require_authenticated_or_response(&state, peer, &headers, Permission::Recall)
     {
-        return resp;
+        return *resp;
     }
     let config = read_config(&state);
     let pending = read_reviews(&state)
@@ -480,7 +480,7 @@ pub async fn patch_config(
 ) -> Response {
     if let Err(resp) = require_authenticated_or_response(&state, peer, &headers, Permission::Modify)
     {
-        return resp;
+        return *resp;
     }
     let current = read_config(&state);
     let endpoint_url = if let Some(endpoint_url) = body.endpoint_url.as_deref() {
@@ -530,7 +530,7 @@ pub async fn patch_review(
 ) -> Response {
     if let Err(resp) = require_authenticated_or_response(&state, peer, &headers, Permission::Modify)
     {
-        return resp;
+        return *resp;
     }
 
     let _guard = match REVIEWS_FILE_LOCK.lock() {
@@ -620,7 +620,7 @@ pub async fn delete_review(
 ) -> Response {
     if let Err(resp) = require_authenticated_or_response(&state, peer, &headers, Permission::Modify)
     {
-        return resp;
+        return *resp;
     }
 
     let _guard = match REVIEWS_FILE_LOCK.lock() {
@@ -663,7 +663,7 @@ pub async fn sync_reviews(
 ) -> Response {
     if let Err(resp) = require_authenticated_or_response(&state, peer, &headers, Permission::Modify)
     {
-        return resp;
+        return *resp;
     }
 
     let config = read_config(&state);

@@ -281,10 +281,10 @@ fn compact_excerpt(content: &str, quote: Option<&str>) -> String {
     if text.len() <= 1200 {
         return text;
     }
-    if let Some(quote) = quote.map(str::trim).filter(|q| !q.is_empty()) {
-        if quote.len() <= 1200 {
-            return quote.to_string();
-        }
+    if let Some(quote) = quote.map(str::trim).filter(|q| !q.is_empty())
+        && quote.len() <= 1200
+    {
+        return quote.to_string();
     }
     format!("{}...", text.chars().take(1197).collect::<String>().trim())
 }
@@ -880,73 +880,73 @@ fn resolve_ontology_evidence_ref(
     agent_id: &str,
     reference: &EvidenceRef,
 ) -> Result<JsonValue, CoreError> {
-    if reference.source_kind.as_deref() == Some("ontology_proposal") {
-        if let Some(source_id) = reference.source_id.as_deref() {
-            let proposal = conn
-                .query_row(
-                    &format!("{SELECT_PROPOSAL} WHERE id = ?1 AND agent_id = ?2 LIMIT 1"),
-                    rusqlite::params![source_id, agent_id],
-                    read_row,
-                )
-                .optional()?;
-            if let Some(proposal) = proposal {
-                let excerpt_source =
-                    reference
-                        .quote
-                        .as_deref()
-                        .unwrap_or(if proposal.rationale.is_empty() {
-                            &proposal.evidence
-                        } else {
-                            &proposal.rationale
-                        });
-                return Ok(json!({
-                    "kind": "ontology_proposal",
-                    "found": true,
-                    "sourceKind": "ontology_proposal",
-                    "sourceId": proposal.id,
-                    "sourcePath": reference.source_path,
-                    "label": format!("proposal:{}", proposal.id),
-                    "excerpt": compact_excerpt(excerpt_source, None),
-                    "reference": reference.reference,
-                }));
-            }
+    if reference.source_kind.as_deref() == Some("ontology_proposal")
+        && let Some(source_id) = reference.source_id.as_deref()
+    {
+        let proposal = conn
+            .query_row(
+                &format!("{SELECT_PROPOSAL} WHERE id = ?1 AND agent_id = ?2 LIMIT 1"),
+                rusqlite::params![source_id, agent_id],
+                read_row,
+            )
+            .optional()?;
+        if let Some(proposal) = proposal {
+            let excerpt_source =
+                reference
+                    .quote
+                    .as_deref()
+                    .unwrap_or(if proposal.rationale.is_empty() {
+                        &proposal.evidence
+                    } else {
+                        &proposal.rationale
+                    });
+            return Ok(json!({
+                "kind": "ontology_proposal",
+                "found": true,
+                "sourceKind": "ontology_proposal",
+                "sourceId": proposal.id,
+                "sourcePath": reference.source_path,
+                "label": format!("proposal:{}", proposal.id),
+                "excerpt": compact_excerpt(excerpt_source, None),
+                "reference": reference.reference,
+            }));
         }
     }
 
-    if let Some(source_path) = reference.source_path.as_deref() {
-        if table_exists(conn, "memory_artifacts")? {
-            let artifact = conn
-                .query_row(
-                    "SELECT source_path, source_kind, session_id, session_key, session_token, content
+    if let Some(source_path) = reference.source_path.as_deref()
+        && table_exists(conn, "memory_artifacts")?
+    {
+        let artifact = conn
+            .query_row(
+                "SELECT source_path, source_kind, session_id, session_key, session_token, content
                      FROM memory_artifacts
                      WHERE agent_id = ?1 AND COALESCE(is_deleted, 0) = 0 AND source_path = ?2
                      ORDER BY captured_at DESC
                      LIMIT 1",
-                    rusqlite::params![agent_id, source_path],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>("source_path")?,
-                            row.get::<_, String>("source_kind")?,
-                            row.get::<_, String>("session_id")?,
-                            row.get::<_, Option<String>>("session_key")?,
-                            row.get::<_, String>("session_token")?,
-                            row.get::<_, String>("content")?,
-                        ))
-                    },
-                )
-                .optional()?;
-            if let Some((path, kind, session_id, session_key, session_token, content)) = artifact {
-                return Ok(json!({
-                    "kind": "memory_artifact",
-                    "found": true,
-                    "sourceKind": kind,
-                    "sourceId": session_key.or(Some(session_id)).unwrap_or(session_token),
-                    "sourcePath": path,
-                    "label": path,
-                    "excerpt": compact_excerpt(&content, reference.quote.as_deref()),
-                    "reference": reference.reference,
-                }));
-            }
+                rusqlite::params![agent_id, source_path],
+                |row| {
+                    Ok((
+                        row.get::<_, String>("source_path")?,
+                        row.get::<_, String>("source_kind")?,
+                        row.get::<_, String>("session_id")?,
+                        row.get::<_, Option<String>>("session_key")?,
+                        row.get::<_, String>("session_token")?,
+                        row.get::<_, String>("content")?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((path, kind, session_id, session_key, session_token, content)) = artifact {
+            return Ok(json!({
+                "kind": "memory_artifact",
+                "found": true,
+                "sourceKind": kind,
+                "sourceId": session_key.or(Some(session_id)).unwrap_or(session_token),
+                "sourcePath": path,
+                "label": path,
+                "excerpt": compact_excerpt(&content, reference.quote.as_deref()),
+                "reference": reference.reference,
+            }));
         }
     }
 
@@ -1037,38 +1037,38 @@ fn resolve_ontology_evidence_ref(
         }
     }
 
-    if let Some(memory_id) = reference.memory_id.as_deref() {
-        if table_exists(conn, "memories")? {
-            let memory = conn
-                .query_row(
-                    "SELECT id, source_id, source_type, source_path, content
+    if let Some(memory_id) = reference.memory_id.as_deref()
+        && table_exists(conn, "memories")?
+    {
+        let memory = conn
+            .query_row(
+                "SELECT id, source_id, source_type, source_path, content
                      FROM memories
                      WHERE id = ?1 AND agent_id = ?2 AND COALESCE(is_deleted, 0) = 0
                      LIMIT 1",
-                    rusqlite::params![memory_id, agent_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>("id")?,
-                            row.get::<_, Option<String>>("source_id")?,
-                            row.get::<_, Option<String>>("source_type")?,
-                            row.get::<_, Option<String>>("source_path")?,
-                            row.get::<_, String>("content")?,
-                        ))
-                    },
-                )
-                .optional()?;
-            if let Some((id, source_id, source_type, source_path, content)) = memory {
-                return Ok(json!({
-                    "kind": "memory",
-                    "found": true,
-                    "sourceKind": source_type,
-                    "sourceId": source_id.unwrap_or_else(|| id.clone()),
-                    "sourcePath": source_path,
-                    "label": format!("memory:{id}"),
-                    "excerpt": compact_excerpt(&content, reference.quote.as_deref()),
-                    "reference": reference.reference,
-                }));
-            }
+                rusqlite::params![memory_id, agent_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>("id")?,
+                        row.get::<_, Option<String>>("source_id")?,
+                        row.get::<_, Option<String>>("source_type")?,
+                        row.get::<_, Option<String>>("source_path")?,
+                        row.get::<_, String>("content")?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((id, source_id, source_type, source_path, content)) = memory {
+            return Ok(json!({
+                "kind": "memory",
+                "found": true,
+                "sourceKind": source_type,
+                "sourceId": source_id.unwrap_or_else(|| id.clone()),
+                "sourcePath": source_path,
+                "label": format!("memory:{id}"),
+                "excerpt": compact_excerpt(&content, reference.quote.as_deref()),
+                "reference": reference.reference,
+            }));
         }
     }
 
@@ -1740,7 +1740,7 @@ fn read_artifact_source(
                 id: source_path.clone(),
                 source_path: Some(source_path),
                 source_kind: row.get::<_, String>(1)?,
-                source_id: source_node_id.or(session_key).unwrap_or_else(|| {
+                source_id: source_node_id.or(session_key).unwrap_or({
                     if session_id.is_empty() {
                         session_token
                     } else {
@@ -2338,16 +2338,15 @@ fn normalize_consolidation_promotions(root: &JsonValue) -> Vec<JsonValue> {
         .collect()
 }
 
-fn parse_consolidation_output(
-    raw: &str,
-    limit: usize,
-) -> (
+type ConsolidationOutput = (
     Vec<JsonValue>,
     Option<String>,
     Vec<JsonValue>,
     Vec<JsonValue>,
     Vec<JsonValue>,
-) {
+);
+
+fn parse_consolidation_output(raw: &str, limit: usize) -> ConsolidationOutput {
     for root in json_blocks(raw) {
         if !root.is_object() {
             continue;
@@ -3168,9 +3167,9 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-fn source_merge_specs(
-    payload: &JsonValue,
-) -> Result<Vec<(Option<String>, Option<String>)>, CoreError> {
+type MergeSpec = (Option<String>, Option<String>);
+
+fn source_merge_specs(payload: &JsonValue) -> Result<Vec<MergeSpec>, CoreError> {
     let mut selectors = Vec::new();
     for value in read_body_string_array(payload, "source_entities") {
         push_unique(&mut selectors, value);
@@ -4268,7 +4267,7 @@ fn insert_proposal(
         "{SELECT_PROPOSAL} WHERE id = ?1 AND agent_id = ?2"
     ))?;
     Ok(stmt
-        .query_row(rusqlite::params![id, agent], |row| read_row(row))
+        .query_row(rusqlite::params![id, agent], read_row)
         .map(row_to_value)?)
 }
 
@@ -4278,7 +4277,7 @@ fn scoped_agent_or_response(
     headers: &HeaderMap,
     requested: Option<&str>,
     permission: Permission,
-) -> Result<String, Response> {
+) -> Result<String, Box<Response>> {
     let is_local = peer.ip().is_loopback();
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -4290,8 +4289,9 @@ fn scoped_agent_or_response(
     .map_err(|resp| *resp)?;
     require_permission_guard(&auth, permission, auth_runtime.mode, is_local)
         .map_err(|resp| *resp)?;
-    resolve_scoped_agent(&auth, auth_runtime.mode, is_local, requested)
-        .map_err(|reason| (StatusCode::FORBIDDEN, Json(json!({"error": reason}))).into_response())
+    resolve_scoped_agent(&auth, auth_runtime.mode, is_local, requested).map_err(|reason| {
+        Box::new((StatusCode::FORBIDDEN, Json(json!({"error": reason}))).into_response())
+    })
 }
 
 pub async fn list(
@@ -4315,7 +4315,7 @@ pub async fn list(
         Permission::Recall,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let limit = parse_limit(query.limit.as_deref(), 50, 200);
     let offset = parse_offset(query.offset.as_deref());
@@ -4634,7 +4634,7 @@ pub async fn assertions_list(
         Permission::Recall,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -4666,7 +4666,7 @@ pub async fn assertions_create(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let created_by = read_json_string(&body, "created_by")
         .or_else(|| {
@@ -4710,7 +4710,7 @@ pub async fn assertion_get(
         Permission::Recall,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -4744,7 +4744,7 @@ pub async fn assertion_archive(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let actor = read_json_string(&body, "actor")
         .or_else(|| {
@@ -4788,7 +4788,7 @@ pub async fn assertion_link_claim(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let Some(attribute_id) = read_json_string(&body, "attribute_id") else {
         return json_error(StatusCode::BAD_REQUEST, "attribute_id is required");
@@ -4826,7 +4826,7 @@ pub async fn assertion_supersede(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let created_by = read_json_string(&body, "created_by")
         .or_else(|| {
@@ -4866,7 +4866,7 @@ pub async fn claim_versions(
         Permission::Recall,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -4896,7 +4896,7 @@ pub async fn claim_version(
         Permission::Recall,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -4930,7 +4930,7 @@ pub async fn entity_aliases(
         Permission::Recall,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let status = query.status.unwrap_or_else(|| "active".to_string());
     let result = state
@@ -5006,7 +5006,7 @@ pub async fn entity_alias_create(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -5075,7 +5075,7 @@ pub async fn entity_alias_delete(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let response_alias_id = alias_id.clone();
     let result = state
@@ -5122,7 +5122,7 @@ pub async fn operations_apply(
         Permission::Modify,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if read_body_string(&body, "operation").is_none() {
         return json_error(StatusCode::BAD_REQUEST, "operation is required");
@@ -5192,7 +5192,7 @@ pub async fn operations_batch(
         Permission::Modify,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let operations = body
         .get("operations")
@@ -5406,7 +5406,7 @@ pub async fn repair_merge_plan(
         Permission::Modify,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let write_proposal = read_body_bool(&body, "write_proposal")
         .or_else(|| read_body_bool(&body, "write_proposals"))
@@ -5510,7 +5510,7 @@ pub async fn get(
         Permission::Recall,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -5567,7 +5567,7 @@ pub async fn create(
         match scoped_agent_or_response(&state, peer, &headers, requested_agent, Permission::Modify)
         {
             Ok(id) => id,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     let result = state
         .pool
@@ -5600,7 +5600,7 @@ pub async fn batch(
         Permission::Modify,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let proposals = body.proposals.clone().unwrap_or_default();
     let result = state
@@ -5726,7 +5726,7 @@ pub async fn apply(
         Permission::Modify,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     transition(state, id, agent, body, "applied").await
 }
@@ -5746,7 +5746,7 @@ pub async fn reject(
         Permission::Modify,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     transition(state, id, agent, body, "rejected").await
 }
@@ -5766,7 +5766,7 @@ pub async fn evidence(
         Permission::Recall,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -5821,7 +5821,7 @@ pub async fn conflicts(
         Permission::Recall,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let limit = parse_limit(query.limit.as_deref(), 500, 1000);
     let result = state.pool.read(move |conn| {
@@ -5935,7 +5935,7 @@ pub async fn repair_duplicates(
         match scoped_agent_or_response(&state, peer, &headers, requested_agent, Permission::Modify)
         {
             Ok(id) => id,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
     let limit = body.limit.unwrap_or(25).clamp(1, 100);
     let write_proposals = body.write_proposals.unwrap_or(false);
@@ -6054,7 +6054,7 @@ pub async fn extract(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let Some(from) = clean(body.from_source.clone()) else {
         return json_error(StatusCode::BAD_REQUEST, "from is required");
@@ -6184,7 +6184,7 @@ pub async fn consolidate(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if body.limit.is_some_and(|l| l < 0) {
         return (
@@ -6411,7 +6411,7 @@ pub async fn claim_evidence(
         Permission::Recall,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let Some(entity_name) = clean(query.entity) else {
         return (
@@ -6613,7 +6613,7 @@ pub async fn link_evidence(
         Permission::Recall,
     ) {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool

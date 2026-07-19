@@ -538,10 +538,10 @@ pub async fn agent_state(
     if let Some(step) = body.get("step").and_then(Value::as_u64) {
         session.step = step.min(u32::MAX as u64) as u32;
     }
-    if let Some(status) = body.get("status").and_then(Value::as_str) {
-        if matches!(status, "running" | "done" | "error") {
-            session.status = status.to_string();
-        }
+    if let Some(status) = body.get("status").and_then(Value::as_str)
+        && matches!(status, "running" | "done" | "error")
+    {
+        session.status = status.to_string();
     }
     if let Some(result) = body.get("result") {
         session.result = Some(result.clone());
@@ -780,18 +780,16 @@ pub async fn install(
                 .cloned()
             {
                 let mut entry = tray_entry_for_server(&server);
-                if body.get("autoPlace").and_then(Value::as_bool) == Some(true) {
-                    if let Ok(entries) = load_tray(&state).await {
-                        let occupied = entries
-                            .iter()
-                            .filter(|entry| {
-                                entry.get("state").and_then(Value::as_str) == Some("grid")
-                            })
-                            .filter_map(|entry| entry.get("gridPosition").cloned())
-                            .collect::<Vec<_>>();
-                        entry["state"] = json!("grid");
-                        entry["gridPosition"] = json!(find_free_grid_position(&occupied, 4, 3));
-                    }
+                if body.get("autoPlace").and_then(Value::as_bool) == Some(true)
+                    && let Ok(entries) = load_tray(&state).await
+                {
+                    let occupied = entries
+                        .iter()
+                        .filter(|entry| entry.get("state").and_then(Value::as_str) == Some("grid"))
+                        .filter_map(|entry| entry.get("gridPosition").cloned())
+                        .collect::<Vec<_>>();
+                    entry["state"] = json!("grid");
+                    entry["gridPosition"] = json!(find_free_grid_position(&occupied, 4, 3));
                 }
                 let _ = upsert_tray_entry(&state, entry).await;
             }
@@ -1622,8 +1620,7 @@ async fn probe_mcp_http(
     let mut server_metadata = metadata_from_initialize(&initialize_result);
     if !metadata_has_declared_manifest(&server_metadata, &server.name)
         && let Some(uri) = manifest_resource_uri(&resources_result)
-    {
-        if let Ok(response) = send_mcp_http_request(
+        && let Ok(response) = send_mcp_http_request(
             &client,
             &headers,
             url,
@@ -1631,10 +1628,9 @@ async fn probe_mcp_http(
             &mcp_request_value(4, "resources/read", json!({"uri": uri})),
         )
         .await
-            && let Ok(content) = parse_mcp_http_response(response, Some(4)).await
-        {
-            server_metadata = metadata_from_resource_content(&content);
-        }
+        && let Ok(content) = parse_mcp_http_response(response, Some(4)).await
+    {
+        server_metadata = metadata_from_resource_content(&content);
     }
     Ok(ProbeMcpData {
         tools_result,
@@ -1988,16 +1984,16 @@ fn parse_declared_manifest(metadata: &Value, server_name: &str) -> Option<Value>
             manifest.insert(key.to_string(), json!(url));
         }
     }
-    if let Some(size) = block.get("defaultSize").and_then(Value::as_object) {
-        if let (Some(w), Some(h)) = (
+    if let Some(size) = block.get("defaultSize").and_then(Value::as_object)
+        && let (Some(w), Some(h)) = (
             size.get("w").and_then(Value::as_i64),
             size.get("h").and_then(Value::as_i64),
-        ) {
-            manifest.insert(
-                "defaultSize".to_string(),
-                json!({"w": w.clamp(1, 12), "h": h.clamp(1, 12)}),
-            );
-        }
+        )
+    {
+        manifest.insert(
+            "defaultSize".to_string(),
+            json!({"w": w.clamp(1, 12), "h": h.clamp(1, 12)}),
+        );
     }
     if let Some(events) = block.get("events").and_then(Value::as_object) {
         let mut out = serde_json::Map::new();

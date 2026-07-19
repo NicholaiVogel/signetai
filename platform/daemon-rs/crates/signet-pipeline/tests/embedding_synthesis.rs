@@ -278,8 +278,8 @@ async fn synthesis_manual_trigger_uses_per_agent_cooldown_and_force_override() {
     );
 
     let default_skip = handle.trigger_now(None).await;
-    assert_eq!(default_skip.success, false);
-    assert_eq!(default_skip.skipped, true);
+    assert!(!default_skip.success);
+    assert!(default_skip.skipped);
     assert_eq!(
         default_skip.reason.as_deref(),
         Some("Too recent — last run 5m ago, minimum is 60m")
@@ -292,7 +292,7 @@ async fn synthesis_manual_trigger_uses_per_agent_cooldown_and_force_override() {
             agent_id: Some("agent-b".to_string()),
         }))
         .await;
-    assert_eq!(scoped.success, true);
+    assert!(scoped.success);
     assert!(root.join("agents/agent-b/MEMORY.md").exists());
 
     let forced = handle
@@ -302,7 +302,7 @@ async fn synthesis_manual_trigger_uses_per_agent_cooldown_and_force_override() {
             agent_id: None,
         }))
         .await;
-    assert_eq!(forced.success, true);
+    assert!(forced.success);
     assert!(root.join("MEMORY.md").exists());
 
     handle.stop().await;

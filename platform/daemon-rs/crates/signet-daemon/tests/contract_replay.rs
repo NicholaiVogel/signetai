@@ -224,23 +224,21 @@ impl TestServer {
             if tokio::time::Instant::now() > deadline {
                 panic!("daemon did not start within 10s");
             }
-            if let Ok(resp) = client.get(format!("{base}/health")).send().await {
-                if resp.status().is_success() {
-                    break;
-                }
+            if let Ok(resp) = client.get(format!("{base}/health")).send().await
+                && resp.status().is_success()
+            {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        let test_server = Self {
+        Self {
             port,
             pid,
             base,
             client,
             _tmpdir: tmpdir,
-        };
-
-        test_server
+        }
     }
 
     fn db_path(&self) -> std::path::PathBuf {
@@ -2869,10 +2867,10 @@ fn clawhub_skill_archive(name: &str, description: &str) -> Vec<u8> {
 }
 
 fn daemon_binary() -> String {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_signet-daemon") {
-        if std::path::Path::new(&path).exists() {
-            return path;
-        }
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_signet-daemon")
+        && std::path::Path::new(&path).exists()
+    {
+        return path;
     }
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
         let path = std::path::PathBuf::from(target_dir).join("debug/signet-daemon");
@@ -2892,10 +2890,10 @@ fn daemon_binary() -> String {
     let workspace = std::env::var("CARGO_MANIFEST_DIR")
         .map(|d| std::path::PathBuf::from(d).join("../../target/debug/signet-daemon"))
         .ok();
-    if let Some(ref p) = workspace {
-        if p.exists() {
-            return p.to_str().unwrap().to_string();
-        }
+    if let Some(ref p) = workspace
+        && p.exists()
+    {
+        return p.to_str().unwrap().to_string();
     }
     // Fall back to PATH
     "signet-daemon".to_string()
@@ -5883,7 +5881,12 @@ async fn os_routes_replay_empty_state_and_validation_shapes() {
     let body = server.json(resp).await;
     assert_eq!(body["success"], true);
     assert_eq!(body["probe"]["ok"], false);
-    assert!(body["probe"]["error"].as_str().unwrap_or_default().len() > 0);
+    assert!(
+        !body["probe"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
+    );
     assert_eq!(body["probe"]["declaredManifest"], serde_json::Value::Null);
     assert_eq!(body["probe"]["autoCard"]["tools"], json!([]));
     assert_eq!(body["probe"]["autoCard"]["resources"], json!([]));
@@ -6837,19 +6840,17 @@ async fn connectors_unwrap_ts_style_config_settings() {
     assert!(connector["settings"].get("settings").is_none());
     assert_eq!(connector["display_name"], "Obsidian");
     assert_eq!(connector["status"], "idle");
-    assert_eq!(
+    assert!(
         connector["config_json"]
             .as_str()
             .unwrap()
-            .contains("connector-ts-full-config"),
-        true
+            .contains("connector-ts-full-config")
     );
-    assert_eq!(
+    assert!(
         connector["settings_json"]
             .as_str()
             .unwrap()
-            .contains("/tmp/vault"),
-        true
+            .contains("/tmp/vault")
     );
 
     let resp = server.get("/api/connectors/connector-ts-full-config").await;
@@ -6859,12 +6860,11 @@ async fn connectors_unwrap_ts_style_config_settings() {
     assert_eq!(body["settings"]["indexHidden"], true);
     assert!(body["settings"].get("settings").is_none());
     assert_eq!(body["display_name"], "Obsidian");
-    assert_eq!(
+    assert!(
         body["config_json"]
             .as_str()
             .unwrap()
-            .contains("connector-ts-full-config"),
-        true
+            .contains("connector-ts-full-config")
     );
 }
 
@@ -12454,7 +12454,12 @@ async fn remaining_public_routes_have_contract_replay_coverage() {
     let resp = server.post("/api/pipeline/models/refresh", json!({})).await;
     assert_status("POST /api/pipeline/models/refresh", &resp, &[200]);
     let body = server.json(resp).await;
-    assert!(body["models"].as_array().expect("refreshed models").len() >= 1);
+    assert!(
+        !body["models"]
+            .as_array()
+            .expect("refreshed models")
+            .is_empty()
+    );
 
     let resp = server.post("/api/repair/backfill-skipped", json!({})).await;
     assert_status("POST /api/repair/backfill-skipped", &resp, &[200]);

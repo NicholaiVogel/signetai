@@ -29,7 +29,7 @@ pub struct Constraint {
     pub importance: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TraversalResult {
     pub memory_ids: HashSet<String>,
     pub memory_scores: HashMap<String, f64>,
@@ -39,21 +39,6 @@ pub struct TraversalResult {
     pub timed_out: bool,
     pub active_aspect_ids: Vec<String>,
     pub focal_entity_ids: Vec<String>,
-}
-
-impl Default for TraversalResult {
-    fn default() -> Self {
-        Self {
-            memory_ids: HashSet::new(),
-            memory_scores: HashMap::new(),
-            memory_paths: HashMap::new(),
-            constraints: Vec::new(),
-            entity_count: 0,
-            timed_out: false,
-            active_aspect_ids: Vec::new(),
-            focal_entity_ids: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -171,8 +156,8 @@ fn get_pinned_entity_ids(conn: &rusqlite::Connection, agent_id: &str) -> Vec<Str
 
 fn extract_project_tokens(project_path: &str) -> Vec<String> {
     let parts: Vec<String> = project_path
-        .split(|c: char| c == '/' || c == '\\')
-        .map(|p| normalize_token(p))
+        .split(['/', '\\'])
+        .map(normalize_token)
         .filter(|p| p.len() >= 2)
         .collect();
     if parts.is_empty() {
@@ -346,33 +331,31 @@ pub fn resolve_focal_entities(
         "query"
     };
 
-    if let Some(checkpoint_ids) = checkpoint_entity_ids {
-        if !checkpoint_ids.is_empty() {
-            resolved_entity_ids =
-                sanitize_entity_ids(&checkpoint_ids.iter().map(|s| s.clone()).collect::<Vec<_>>());
-            source = "checkpoint";
+    if let Some(checkpoint_ids) = checkpoint_entity_ids
+        && !checkpoint_ids.is_empty()
+    {
+        resolved_entity_ids = sanitize_entity_ids(checkpoint_ids);
+        source = "checkpoint";
+    }
+
+    if resolved_entity_ids.is_empty()
+        && let Some(proj) = project
+    {
+        let project_ids = resolve_by_project(conn, agent_id, proj);
+        if !project_ids.is_empty() {
+            resolved_entity_ids = project_ids;
+            source = "project";
         }
     }
 
-    if resolved_entity_ids.is_empty() {
-        if let Some(proj) = project {
-            let project_ids = resolve_by_project(conn, agent_id, proj);
-            if !project_ids.is_empty() {
-                resolved_entity_ids = project_ids;
-                source = "project";
-            }
-        }
-    }
-
-    if resolved_entity_ids.is_empty() {
-        if let Some(tokens) = query_tokens {
-            if !tokens.is_empty() {
-                let query_ids = resolve_by_query_tokens(conn, agent_id, tokens);
-                if !query_ids.is_empty() {
-                    resolved_entity_ids = query_ids;
-                    source = "query";
-                }
-            }
+    if resolved_entity_ids.is_empty()
+        && let Some(tokens) = query_tokens
+        && !tokens.is_empty()
+    {
+        let query_ids = resolve_by_query_tokens(conn, agent_id, tokens);
+        if !query_ids.is_empty() {
+            resolved_entity_ids = query_ids;
+            source = "query";
         }
     }
 
@@ -508,20 +491,18 @@ impl<'a> TraversalState<'a> {
              WHERE asp.entity_id = ?1 AND asp.agent_id = ?2 AND ea.agent_id = ?2
                AND ea.kind = 'constraint' AND ea.status = 'active'
              ORDER BY ea.importance DESC",
-        ) {
-            if let Ok(rows) = stmt.query_map(params![entity_id, agent_id], |row| {
-                Ok(Constraint {
-                    entity_name: row.get::<_, String>(0)?,
-                    content: row.get::<_, String>(1)?,
-                    importance: row.get::<_, f64>(2)?,
-                })
-            }) {
-                for row in rows.flatten() {
-                    let key = format!("{}::{}", row.entity_name, row.content);
-                    if !self.constraint_keys.contains(&key) {
-                        self.constraint_keys.insert(key);
-                        self.constraints.push(row);
-                    }
+        ) && let Ok(rows) = stmt.query_map(params![entity_id, agent_id], |row| {
+            Ok(Constraint {
+                entity_name: row.get::<_, String>(0)?,
+                content: row.get::<_, String>(1)?,
+                importance: row.get::<_, f64>(2)?,
+            })
+        }) {
+            for row in rows.flatten() {
+                let key = format!("{}::{}", row.entity_name, row.content);
+                if !self.constraint_keys.contains(&key) {
+                    self.constraint_keys.insert(key);
+                    self.constraints.push(row);
                 }
             }
         }
@@ -779,20 +760,20 @@ pub fn traverse_knowledge_graph(
         let dep_refs: Vec<&dyn rusqlite::types::ToSql> =
             dep_args.iter().map(|a| a.as_ref()).collect();
 
-        if let Ok(mut stmt) = conn.prepare(&dep_sql) {
-            if let Ok(rows) = stmt.query_map(dep_refs.as_slice(), |row| {
+        if let Ok(mut stmt) = conn.prepare(&dep_sql)
+            && let Ok(rows) = stmt.query_map(dep_refs.as_slice(), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                 ))
-            }) {
-                for row in rows.flatten() {
-                    if state.timed_out || state.at_budget() {
-                        break;
-                    }
-                    state.collect_for_entity(&row.2, Some(&row.1), Some(&row.0));
+            })
+        {
+            for row in rows.flatten() {
+                if state.timed_out || state.at_budget() {
+                    break;
                 }
+                state.collect_for_entity(&row.2, Some(&row.1), Some(&row.0));
             }
         }
     }

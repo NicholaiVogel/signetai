@@ -67,13 +67,13 @@ pub fn begin_source_index_job_with_prefix(
 ) -> SourceIndexJob {
     let source_id = source_id.into();
     let mut guard = state().lock().expect("source index progress lock poisoned");
-    if let Some(existing) = guard.jobs.get(&source_id) {
-        if matches!(
+    if let Some(existing) = guard.jobs.get(&source_id)
+        && matches!(
             existing.status,
             SourceIndexJobStatus::Queued | SourceIndexJobStatus::Running
-        ) {
-            return existing.clone();
-        }
+        )
+    {
+        return existing.clone();
     }
 
     let job = SourceIndexJob {
@@ -218,14 +218,14 @@ pub fn clear_source_index_in_flight(source_id: &str) {
 
 pub fn cancel_source_index_job(source_id: &str) {
     let mut guard = state().lock().expect("source index progress lock poisoned");
-    if let Some(job) = guard.jobs.get(source_id) {
-        if matches!(
+    if let Some(job) = guard.jobs.get(source_id)
+        && matches!(
             job.status,
             SourceIndexJobStatus::Queued | SourceIndexJobStatus::Running
-        ) {
-            let job_id = job.id.clone();
-            guard.canceled_jobs.insert(job_id);
-        }
+        )
+    {
+        let job_id = job.id.clone();
+        guard.canceled_jobs.insert(job_id);
     }
     guard.jobs.remove(source_id);
 }

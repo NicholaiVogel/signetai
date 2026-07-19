@@ -77,14 +77,14 @@ pub async fn summary(
     let since = params.since;
     let limit = params.limit.unwrap_or(10).clamp(1, 100);
 
-    if let Some(ref since) = since {
-        if !is_iso_instant(since) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "since must be an ISO 8601 UTC timestamp"})),
-            )
-                .into_response();
-        }
+    if let Some(ref since) = since
+        && !is_iso_instant(since)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "since must be an ISO 8601 UTC timestamp"})),
+        )
+            .into_response();
     }
 
     let result = state

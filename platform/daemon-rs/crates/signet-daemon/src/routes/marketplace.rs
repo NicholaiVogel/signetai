@@ -223,9 +223,7 @@ fn normalize_mcp_config(value: Option<&Value>) -> Option<Value> {
     }
 
     let command_parts = to_string_array(object.get("command"));
-    let Some((command, args_from_command)) = command_parts.split_first() else {
-        return None;
-    };
+    let (command, args_from_command) = command_parts.split_first()?;
     if command.trim().is_empty() {
         return None;
     }
@@ -1164,10 +1162,10 @@ pub(crate) fn load_policy(state: &AppState) -> ExposurePolicy {
             let mut policy: ExposurePolicy = serde_json::from_str(&data).unwrap_or_default();
             // If the stored JSON lacked updated_at, use file mtime rather
             // than the process-start-time sentinel from Default.
-            if policy.updated_at == "1970-01-01T00:00:00.000Z" {
-                if let Some(mt) = mtime {
-                    policy.updated_at = mt;
-                }
+            if policy.updated_at == "1970-01-01T00:00:00.000Z"
+                && let Some(mt) = mtime
+            {
+                policy.updated_at = mt;
             }
             policy
         }

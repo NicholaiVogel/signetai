@@ -2266,7 +2266,7 @@ pub async fn prune_generic_entities(
             delete_entity_graph_rows(conn, &ids)?;
             let message = format!("deleted {} generic/non-concrete entities", ids.len());
             write_repair_audit(conn, action, &ctx, ids.len(), &message)?;
-            record_rate_limit(action).map_err(|err| rusqlite::Error::InvalidParameterName(err))?;
+            record_rate_limit(action).map_err(rusqlite::Error::InvalidParameterName)?;
             Ok(repair_result(action, true, ids.len(), &message))
         })
         .await;

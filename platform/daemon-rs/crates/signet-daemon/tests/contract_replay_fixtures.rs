@@ -266,10 +266,10 @@ impl TestServer {
                 "daemon did not start within 10s for fixture {}",
                 fixture.id
             );
-            if let Ok(resp) = client.get(format!("{base}/health")).send().await {
-                if resp.status().is_success() {
-                    break;
-                }
+            if let Ok(resp) = client.get(format!("{base}/health")).send().await
+                && resp.status().is_success()
+            {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -1585,10 +1585,10 @@ fn write_fake_executable(path: &Path, content: &str) {
 }
 
 fn daemon_binary() -> String {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_signet-daemon") {
-        if Path::new(&path).exists() {
-            return path;
-        }
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_signet-daemon")
+        && Path::new(&path).exists()
+    {
+        return path;
     }
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
         let path = PathBuf::from(target_dir).join("debug/signet-daemon");

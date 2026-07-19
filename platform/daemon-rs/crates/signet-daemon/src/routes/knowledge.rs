@@ -415,14 +415,16 @@ struct NavigationAttribute {
     updated_at: String,
 }
 
-fn trimmed_required(input: Option<String>, field: &str) -> Result<String, Response> {
+fn trimmed_required(input: Option<String>, field: &str) -> Result<String, Box<Response>> {
     let value = input.unwrap_or_default().trim().to_string();
     if value.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{field} is required")})),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("{field} is required")})),
+            )
+                .into_response(),
+        ));
     }
     Ok(value)
 }
@@ -767,7 +769,7 @@ pub async fn navigation_entity(
     let agent_id = params.agent_id.unwrap_or_else(|| "default".into());
     let name = match trimmed_required(params.name, "name") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -801,7 +803,7 @@ pub async fn navigation_tree(
     let agent_id = params.agent_id.unwrap_or_else(|| "default".into());
     let entity_name = match trimmed_required(params.entity, "entity") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let max_aspects = parse_navigation_limit(params.max_aspects, 20, 100);
     let max_groups = parse_navigation_limit(params.max_groups, 20, 100);
@@ -898,7 +900,7 @@ pub async fn navigation_aspects(
     let agent_id = params.agent_id.unwrap_or_else(|| "default".into());
     let entity_name = match trimmed_required(params.entity, "entity") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -933,11 +935,11 @@ pub async fn navigation_groups(
     let agent_id = params.agent_id.unwrap_or_else(|| "default".into());
     let entity_name = match trimmed_required(params.entity, "entity") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let aspect_name = match trimmed_required(params.aspect, "aspect") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -976,15 +978,15 @@ pub async fn navigation_claims(
     let agent_id = params.agent_id.unwrap_or_else(|| "default".into());
     let entity_name = match trimmed_required(params.entity, "entity") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let aspect_name = match trimmed_required(params.aspect, "aspect") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let group = match trimmed_required(params.group, "group") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -1023,19 +1025,19 @@ pub async fn navigation_attributes(
     let agent_id = params.agent_id.unwrap_or_else(|| "default".into());
     let entity_name = match trimmed_required(params.entity, "entity") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let aspect_name = match trimmed_required(params.aspect, "aspect") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let group = match trimmed_required(params.group, "group") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let claim = match trimmed_required(params.claim, "claim") {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     let offset = params.offset.unwrap_or(0);
@@ -1821,7 +1823,7 @@ fn scoped_agent_or_response(
     peer: SocketAddr,
     headers: &HeaderMap,
     requested: Option<&str>,
-) -> Result<String, Response> {
+) -> Result<String, Box<Response>> {
     let is_local = peer.ip().is_loopback();
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -1834,11 +1836,13 @@ fn scoped_agent_or_response(
     require_permission_guard(&auth, Permission::Recall, auth_runtime.mode, is_local)
         .map_err(|resp| *resp)?;
     resolve_scoped_agent(&auth, auth_runtime.mode, is_local, requested).map_err(|reason| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": reason})),
+        Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": reason})),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }
 
@@ -2025,7 +2029,7 @@ pub async fn expand(
     let agent_id = match scoped_agent_or_response(&state, peer, &headers, body.agent_id.as_deref())
     {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let aspect_filter = body
         .aspect
@@ -2081,7 +2085,7 @@ pub async fn expand_session(
     let agent_id = match scoped_agent_or_response(&state, peer, &headers, body.agent_id.as_deref())
     {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let session_id = body.session_id;
     let max_results = body.max_results.unwrap_or(10).clamp(1, 50);
@@ -2106,12 +2110,10 @@ pub async fn expand_session(
             } else {
                 ""
             };
-            let mut sql = format!(
-                "SELECT DISTINCT ss.id, ss.session_key, ss.content, ss.project, ss.latest_at
+            let mut sql = "SELECT DISTINCT ss.id, ss.session_key, ss.content, ss.project, ss.latest_at
                  FROM session_summaries ss
                  WHERE ss.agent_id = ? AND ss.kind = 'session'
-                   AND COALESCE(ss.source_type, 'summary') = 'summary'"
-            );
+                   AND COALESCE(ss.source_type, 'summary') = 'summary'".to_string();
             let mut args = vec![rusqlite::types::Value::Text(agent_id)];
             if let Some(session_id) = session_id.as_ref() {
                 sql.push_str(" AND ss.session_key = ?");

@@ -2521,7 +2521,7 @@ mod tests {
     use axum::extract::State;
     use signet_core::config::{
         AgentIdentity, AgentManifest, AuthConfig as ManifestAuthConfig, DaemonConfig,
-        EmbeddingConfig, MemoryManifestConfig, PipelineV2Config, RateLimitConfig,
+        EmbeddingConfig, ExtractionConfig, MemoryManifestConfig, PipelineV2Config, RateLimitConfig,
     };
     use signet_core::db::DbPool;
     use tempfile::tempdir;
@@ -2560,12 +2560,17 @@ mod tests {
             },
         );
 
-        let mut pipeline = PipelineV2Config::default();
-        pipeline.enabled = enabled;
-        pipeline.paused = paused;
-        pipeline.extraction.provider = provider.to_string();
-        pipeline.extraction.fallback_provider = fallback_provider.to_string();
-        pipeline.extraction.endpoint = endpoint.map(str::to_string);
+        let pipeline = PipelineV2Config {
+            enabled,
+            paused,
+            extraction: ExtractionConfig {
+                provider: provider.to_string(),
+                fallback_provider: fallback_provider.to_string(),
+                endpoint: endpoint.map(str::to_string),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let manifest = AgentManifest {
             agent: AgentIdentity {

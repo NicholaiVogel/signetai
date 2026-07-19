@@ -40,10 +40,10 @@ fn ephemeral_port() -> u16 {
 }
 
 fn daemon_binary() -> String {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_signet-daemon") {
-        if Path::new(&path).exists() {
-            return path;
-        }
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_signet-daemon")
+        && Path::new(&path).exists()
+    {
+        return path;
     }
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
         let path = PathBuf::from(target_dir).join("debug/signet-daemon");
@@ -180,10 +180,10 @@ async fn wait_for_daemon(client: &Client, base: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         assert!(Instant::now() <= deadline, "daemon did not become ready");
-        if let Ok(resp) = client.get(format!("{base}/health")).send().await {
-            if resp.status().is_success() {
-                return;
-            }
+        if let Ok(resp) = client.get(format!("{base}/health")).send().await
+            && resp.status().is_success()
+        {
+            return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

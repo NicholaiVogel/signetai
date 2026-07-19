@@ -424,7 +424,7 @@ fn normalize_pipeline_synthesis(
             extraction.endpoint.clone()
         }
     });
-    pipeline.synthesis.timeout = timeout.unwrap_or_else(|| {
+    pipeline.synthesis.timeout = timeout.unwrap_or({
         if provider_won || !inherits_extraction {
             fallback.timeout
         } else {
@@ -1655,22 +1655,12 @@ pub struct ExtractionConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
+#[derive(Default)]
 pub struct ExtractionCommandConfig {
     pub bin: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
     pub env: Option<HashMap<String, String>>,
-}
-
-impl Default for ExtractionCommandConfig {
-    fn default() -> Self {
-        Self {
-            bin: String::new(),
-            args: Vec::new(),
-            cwd: None,
-            env: None,
-        }
-    }
 }
 
 impl Default for ExtractionConfig {

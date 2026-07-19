@@ -386,15 +386,16 @@ fn compute_continuity_signals(
     let cutoff = continuity_cutoff_iso();
 
     // same_directory: recent stores in the same project within the window
-    let same_directory = input.source_project.as_ref().map_or(false, |project| {
-        count_recent_scoped(conn, input, project, &cutoff) > 0
-    });
+    let same_directory = input
+        .source_project
+        .as_ref()
+        .is_some_and(|project| count_recent_scoped(conn, input, project, &cutoff) > 0);
 
     // recent_stores: enough stores in this scope within the window
     let recent_stores = count_recent(conn, input, &cutoff) >= CONTINUITY_RECENT_MIN;
 
     // semantic_similarity: high similarity with recent scoped memories
-    let semantic_similarity = query.map_or(false, |q| check_semantic_continuity(conn, input, q));
+    let semantic_similarity = query.is_some_and(|q| check_semantic_continuity(conn, input, q));
 
     WriteGateSignals {
         same_directory,

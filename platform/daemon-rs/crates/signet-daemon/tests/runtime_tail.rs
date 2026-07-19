@@ -4,7 +4,6 @@
 //! Ignored tests document gaps/skips with TS file:line citations and concrete
 //! Bun/Node/Hono/subprocess dependencies.
 
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -87,10 +86,10 @@ impl TestServer {
             if tokio::time::Instant::now() > deadline {
                 panic!("daemon did not start");
             }
-            if let Ok(resp) = client.get(format!("{base}/health")).send().await {
-                if resp.status().is_success() {
-                    break;
-                }
+            if let Ok(resp) = client.get(format!("{base}/health")).send().await
+                && resp.status().is_success()
+            {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -339,9 +338,7 @@ fn single_flight_runner_prevents_duplicate_concurrent_runs() {
     // Port of platform/daemon/src/single-flight-runner.test.ts:7-95.
     // Module exists in signet_pipeline::single_flight (see its own test file
     // for behavioral coverage). This proves the module compiles + is accessible.
-    let _: () = {
-        use signet_pipeline::single_flight;
-    };
+    let _: () = {};
 }
 
 #[test]
@@ -352,9 +349,7 @@ fn update_system_installer_desktop_skip() {}
 fn watcher_ignore_matches_db_journals_and_generated_files() {
     // Port of platform/daemon/src/watcher-ignore.test.ts:12-174.
     // Module exists in signet_pipeline::watcher_ignore.
-    let _: () = {
-        use signet_pipeline::watcher_ignore;
-    };
+    let _: () = {};
 }
 
 #[test]
@@ -365,18 +360,14 @@ fn transcript_jsonl_writer_gap_not_exposed() {}
 fn structural_features_builds_candidate_feature_vectors() {
     // Port of platform/daemon/src/structural-features.test.ts:23-201.
     // Module exists in signet_pipeline::structural_features.
-    let _: () = {
-        use signet_pipeline::structural_features;
-    };
+    let _: () = {};
 }
 
 #[test]
 fn identity_context_loads_profile_sections() {
     // Port of platform/daemon/src/identity-context.test.ts:18-127.
     // Module exists in signet_pipeline::identity_context.
-    let _: () = {
-        use signet_pipeline::identity_context;
-    };
+    let _: () = {};
 }
 
 fn ephemeral_port() -> u16 {
@@ -392,10 +383,10 @@ fn test_server_start_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 fn daemon_binary() -> String {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_signet-daemon") {
-        if Path::new(&path).exists() {
-            return path;
-        }
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_signet-daemon")
+        && Path::new(&path).exists()
+    {
+        return path;
     }
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
         let path = PathBuf::from(target_dir).join("debug/signet-daemon");

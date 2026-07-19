@@ -317,11 +317,9 @@ fn upsert_aspect(
 
 struct StoredAttribute {
     id: String,
-    content: String,
     normalized_content: String,
     group_key: Option<String>,
     claim_key: String,
-    memory_id: Option<String>,
     created_at: String,
 }
 
@@ -357,11 +355,9 @@ fn mark_superseded_siblings(
         |row| {
             Ok(StoredAttribute {
                 id: row.get(0)?,
-                content: row.get(1)?,
                 normalized_content: row.get(2)?,
                 group_key: row.get(3)?,
                 claim_key: row.get(4)?,
-                memory_id: row.get(5)?,
                 created_at: row.get(6)?,
             })
         },
@@ -468,7 +464,7 @@ pub fn persist_structured(
                 |row| row.get(0),
             )
             .ok();
-        if let Some(_) = existing_rel {
+        if existing_rel.is_some() {
             result.relations_updated += 1;
         } else {
             let rel_id = Uuid::new_v4().to_string();
@@ -573,48 +569,47 @@ pub fn persist_structured(
             let group_key = normalize_group_key(attr.group_key.as_deref());
             let claim_key = normalize_claim_key(attr.claim_key.as_deref());
 
-            match conn.execute(
-                "INSERT INTO entity_attributes
+            if conn
+                .execute(
+                    "INSERT INTO entity_attributes
                  (id, aspect_id, agent_id, memory_id, kind, content, normalized_content,
                   group_key, claim_key, confidence, importance, status, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active', ?12, ?12)",
-                params![
-                    attribute_id,
-                    aspect_id,
-                    agent_id,
-                    source_memory_id,
-                    kind,
-                    attr.content,
-                    normalized,
-                    group_key,
-                    claim_key,
-                    confidence,
-                    importance,
-                    now,
-                ],
-            ) {
-                Ok(_) => {
-                    result.attributes_created += 1;
-                    // Check for supersession among siblings
-                    if kind == "attribute" && claim_key.is_some() {
-                        result.attributes_superseded += mark_superseded_siblings(
-                            conn,
-                            &StoredAttribute {
-                                id: attribute_id,
-                                content: attr.content.clone(),
-                                normalized_content: normalized,
-                                group_key,
-                                claim_key: claim_key.unwrap_or_default(),
-                                memory_id: Some(source_memory_id.to_string()),
-                                created_at: now.to_string(),
-                            },
-                            &aspect_id,
-                            agent_id,
-                            now,
-                        );
-                    }
+                    params![
+                        attribute_id,
+                        aspect_id,
+                        agent_id,
+                        source_memory_id,
+                        kind,
+                        attr.content,
+                        normalized,
+                        group_key,
+                        claim_key,
+                        confidence,
+                        importance,
+                        now,
+                    ],
+                )
+                .is_ok()
+            {
+                // On UNIQUE constraint conflict the insert fails and we skip.
+                result.attributes_created += 1;
+                // Check for supersession among siblings
+                if kind == "attribute" && claim_key.is_some() {
+                    result.attributes_superseded += mark_superseded_siblings(
+                        conn,
+                        &StoredAttribute {
+                            id: attribute_id,
+                            normalized_content: normalized,
+                            group_key,
+                            claim_key: claim_key.unwrap_or_default(),
+                            created_at: now.to_string(),
+                        },
+                        &aspect_id,
+                        agent_id,
+                        now,
+                    );
                 }
-                Err(_) => {} // UNIQUE constraint — skip
             }
         }
     }

@@ -81,7 +81,7 @@ fn document_access_or_response(
     headers: &HeaderMap,
     requested_agent: Option<&str>,
     requested_project: Option<&str>,
-) -> Result<DocumentAccess, Response> {
+) -> Result<DocumentAccess, Box<Response>> {
     let is_local = peer.ip().is_loopback();
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -111,18 +111,20 @@ fn document_access_or_response(
         .claims
         .as_ref()
         .is_some_and(|claims| claims.role == TokenRole::Admin);
-    if enforce_scope && !is_admin {
-        if let (Some(token_project), Some(requested_project)) = (token_project, requested_project) {
-            if token_project != requested_project {
-                return Err((
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({"error": format!(
-                        "scope restricted to project '{token_project}'"
-                    )})),
-                )
-                    .into_response());
-            }
-        }
+    if enforce_scope
+        && !is_admin
+        && let (Some(token_project), Some(requested_project)) = (token_project, requested_project)
+        && token_project != requested_project
+    {
+        return Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": format!(
+                    "scope restricted to project '{token_project}'"
+                )})),
+            )
+                .into_response(),
+        ));
     }
 
     let scoped = enforce_scope;
@@ -171,7 +173,7 @@ pub async fn list(
 ) -> Response {
     let access = match document_access_or_response(&state, peer, &headers, None, None) {
         Ok(access) => access,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if access.scoped {
         return (
@@ -276,7 +278,7 @@ pub async fn ingest(
         requested_project,
     ) {
         Ok(access) => access,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let agent_id = access.agent_id;
     let project = access.project_filter;
@@ -352,7 +354,7 @@ pub async fn get(
 ) -> Response {
     let access = match document_access_or_response(&state, peer, &headers, None, None) {
         Ok(access) => access,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if access.scoped {
         return (
@@ -397,7 +399,7 @@ pub async fn chunks(
     let requested_agent = params.requested_agent(&headers);
     let access = match document_access_or_response(&state, peer, &headers, requested_agent, None) {
         Ok(access) => access,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let result = state
         .pool
@@ -485,7 +487,7 @@ pub async fn delete(
     let requested_agent = params.requested_agent(&headers);
     let access = match document_access_or_response(&state, peer, &headers, requested_agent, None) {
         Ok(access) => access,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let reason = params.reason.unwrap_or_default();
     let result = state

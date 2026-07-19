@@ -244,18 +244,17 @@ pub async fn home_greeting(State(state): State<Arc<AppState>>) -> impl IntoRespo
             ),
         )
         .await
+            && let Ok(Some(text)) = text
         {
-            if let Ok(Some(text)) = text {
-                let greeting = text.text.trim().trim_matches(['"', '\'']).to_string();
-                if !greeting.is_empty() {
-                    return (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "greeting": greeting,
-                            "cachedAt": chrono::Utc::now().to_rfc3339(),
-                        })),
-                    );
-                }
+            let greeting = text.text.trim().trim_matches(['"', '\'']).to_string();
+            if !greeting.is_empty() {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "greeting": greeting,
+                        "cachedAt": chrono::Utc::now().to_rfc3339(),
+                    })),
+                );
             }
         }
     }
@@ -1895,16 +1894,23 @@ mod tests {
         std::fs::create_dir_all(root.join("memory")).expect("create temp memory dir");
         let db_path = root.join("memory").join("memories.db");
         let (pool, _writer) = DbPool::open(&db_path).expect("open test db");
-        let mut pipeline = PipelineV2Config::default();
-        pipeline.worker.max_llm_concurrency = 1;
-        let mut manifest = AgentManifest::default();
-        manifest.memory = Some(MemoryManifestConfig {
-            database: None,
-            vectors: None,
-            session_budget: None,
-            decay_rate: None,
-            pipeline_v2: Some(pipeline),
-        });
+        let pipeline = PipelineV2Config {
+            worker: signet_core::config::WorkerConfig {
+                max_llm_concurrency: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let manifest = AgentManifest {
+            memory: Some(MemoryManifestConfig {
+                database: None,
+                vectors: None,
+                session_budget: None,
+                decay_rate: None,
+                pipeline_v2: Some(pipeline),
+            }),
+            ..Default::default()
+        };
         let config = DaemonConfig {
             base_path: root,
             db_path,

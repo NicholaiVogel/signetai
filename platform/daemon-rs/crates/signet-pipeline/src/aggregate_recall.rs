@@ -965,6 +965,8 @@ fn unsaved_aggregate_result(content: &str, key: &str, project: Option<&str>) -> 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn resolve_aggregate_duplicate(
     conn: &Connection,
     key: &str,

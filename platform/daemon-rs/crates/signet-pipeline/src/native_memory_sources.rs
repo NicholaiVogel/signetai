@@ -185,10 +185,10 @@ pub fn safe_relative_path(root: impl AsRef<Path>, file_path: impl AsRef<Path>) -
     Some(rel)
 }
 
-pub fn matches_pattern<'a>(
-    source: &'a NativeMemorySource,
+pub fn matches_pattern(
+    source: &NativeMemorySource,
     file_path: impl AsRef<Path>,
-) -> Option<&'a NativeMemoryFilePattern> {
+) -> Option<&NativeMemoryFilePattern> {
     let normalized = normalize_slashes(file_path.as_ref());
     let root = normalized_root(&source.root);
     let rel = normalized

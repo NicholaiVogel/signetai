@@ -430,14 +430,14 @@ pub fn build_reflection_prompt(context: &ReflectionSourceContext, count: usize) 
                 &reflection.created_at[..reflection.created_at.len().min(10)],
                 trim_line(&reflection.summary, 220)
             ));
-            if let Some(question) = &reflection.question {
-                if normalize_insight(question) != normalize_insight(&reflection.summary) {
-                    lines.push(format!(
-                        "  [{}] {}",
-                        &reflection.created_at[..reflection.created_at.len().min(10)],
-                        trim_line(question, 220)
-                    ));
-                }
+            if let Some(question) = &reflection.question
+                && normalize_insight(question) != normalize_insight(&reflection.summary)
+            {
+                lines.push(format!(
+                    "  [{}] {}",
+                    &reflection.created_at[..reflection.created_at.len().min(10)],
+                    trim_line(question, 220)
+                ));
             }
         }
         lines.push(String::new());

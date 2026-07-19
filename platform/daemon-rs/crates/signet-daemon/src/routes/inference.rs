@@ -79,7 +79,7 @@ fn require_access(
     peer: SocketAddr,
     headers: &HeaderMap,
     permission: Permission,
-) -> Result<AuthState, Response> {
+) -> Result<AuthState, Box<Response>> {
     let local = is_local(peer);
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -99,7 +99,7 @@ fn safe_hint(value: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
 }
 
-fn parse_hint(value: Option<&Value>, field: &str) -> Result<Option<String>, Response> {
+fn parse_hint(value: Option<&Value>, field: &str) -> Result<Option<String>, Box<Response>> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -107,45 +107,47 @@ fn parse_hint(value: Option<&Value>, field: &str) -> Result<Option<String>, Resp
         return Ok(None);
     }
     let Some(raw) = value.as_str() else {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("{field} must be a string"),
-        ));
+        )));
     };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
     if trimmed.len() > MAX_HINT_CHARS {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!("{field} exceeds {MAX_HINT_CHARS} characters"),
-        ));
+        )));
     }
     if !safe_hint(trimmed) {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("{field} contains unsupported characters"),
-        ));
+        )));
     }
     Ok(Some(trimmed.to_string()))
 }
 
-fn parse_gateway_hint(headers: &HeaderMap, name: &str) -> Result<Option<String>, Response> {
+fn parse_gateway_hint(headers: &HeaderMap, name: &str) -> Result<Option<String>, Box<Response>> {
     let Some(raw) = headers.get(name).and_then(|value| value.to_str().ok()) else {
         return Ok(None);
     };
     let value = Value::String(raw.to_string());
-    parse_hint(Some(&value), name).map_err(|resp| match resp.into_response().status() {
-        StatusCode::BAD_REQUEST => gateway_error(
-            StatusCode::BAD_REQUEST,
-            format!("{name} contains unsupported characters"),
-        ),
-        status => gateway_error(status, format!("{name} is invalid")),
+    parse_hint(Some(&value), name).map_err(|resp| {
+        Box::new(match resp.into_response().status() {
+            StatusCode::BAD_REQUEST => gateway_error(
+                StatusCode::BAD_REQUEST,
+                format!("{name} contains unsupported characters"),
+            ),
+            status => gateway_error(status, format!("{name} is invalid")),
+        })
     })
 }
 
-fn parse_bool(value: Option<&Value>, field: &str) -> Result<Option<bool>, Response> {
+fn parse_bool(value: Option<&Value>, field: &str) -> Result<Option<bool>, Box<Response>> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -153,10 +155,10 @@ fn parse_bool(value: Option<&Value>, field: &str) -> Result<Option<bool>, Respon
         return Ok(None);
     }
     value.as_bool().map(Some).ok_or_else(|| {
-        error(
+        Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("{field} must be a boolean"),
-        )
+        ))
     })
 }
 
@@ -164,7 +166,7 @@ fn parse_bounded_number(
     value: Option<&Value>,
     field: &str,
     max: u64,
-) -> Result<Option<u64>, Response> {
+) -> Result<Option<u64>, Box<Response>> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -172,27 +174,27 @@ fn parse_bounded_number(
         return Ok(None);
     }
     let Some(raw) = value.as_f64() else {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("{field} must be a finite number"),
-        ));
+        )));
     };
     if !raw.is_finite() {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("{field} must be a finite number"),
-        ));
+        )));
     }
     if raw < 0.0 {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("{field} must be non-negative"),
-        ));
+        )));
     }
     Ok(Some((raw.floor() as u64).min(max)))
 }
 
-fn parse_explicit_targets(body: &Map<String, Value>) -> Result<Vec<String>, Response> {
+fn parse_explicit_targets(body: &Map<String, Value>) -> Result<Vec<String>, Box<Response>> {
     let Some(value) = body.get("explicitTargets") else {
         return Ok(Vec::new());
     };
@@ -200,16 +202,16 @@ fn parse_explicit_targets(body: &Map<String, Value>) -> Result<Vec<String>, Resp
         return Ok(Vec::new());
     }
     let Some(items) = value.as_array() else {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             "explicitTargets must be an array of target refs",
-        ));
+        )));
     };
     if items.len() > MAX_EXPLICIT_TARGETS {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("explicitTargets may contain at most {MAX_EXPLICIT_TARGETS} entries"),
-        ));
+        )));
     }
     let mut refs = Vec::new();
     for item in items {
@@ -218,10 +220,10 @@ fn parse_explicit_targets(body: &Map<String, Value>) -> Result<Vec<String>, Resp
         };
         let parts = target.split('/').collect::<Vec<_>>();
         if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
-            return Err(error(
+            return Err(Box::new(error(
                 StatusCode::BAD_REQUEST,
                 format!("invalid explicit target ref '{target}'"),
-            ));
+            )));
         }
         if !refs.contains(&target) {
             refs.push(target);
@@ -257,7 +259,7 @@ fn yaml_keys(mapping: Option<&serde_yml::Mapping>) -> Vec<String> {
     keys
 }
 
-fn load_inference_config(state: &AppState) -> Result<InferenceConfig, Response> {
+fn load_inference_config(state: &AppState) -> Result<InferenceConfig, Box<Response>> {
     let path = state.config.base_path.join("agent.yaml");
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -268,10 +270,10 @@ fn load_inference_config(state: &AppState) -> Result<InferenceConfig, Response> 
             });
         }
         Err(err) => {
-            return Err(error(
+            return Err(Box::new(error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("failed to read agent.yaml: {err}"),
-            ));
+            )));
         }
     };
     let root: serde_yml::Value = serde_yml::from_str(&raw).map_err(|err| {
@@ -329,12 +331,12 @@ fn load_inference_config(state: &AppState) -> Result<InferenceConfig, Response> 
     })
 }
 
-fn read_json_object(bytes: Bytes, max_bytes: usize) -> Result<Map<String, Value>, Response> {
+fn read_json_object(bytes: Bytes, max_bytes: usize) -> Result<Map<String, Value>, Box<Response>> {
     if bytes.len() > max_bytes {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!("payload exceeds {max_bytes} byte limit"),
-        ));
+        )));
     }
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         return Ok(Map::new());
@@ -342,25 +344,31 @@ fn read_json_object(bytes: Bytes, max_bytes: usize) -> Result<Map<String, Value>
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|_| error(StatusCode::BAD_REQUEST, "request body must be valid JSON"))?;
     value.as_object().cloned().ok_or_else(|| {
-        error(
+        Box::new(error(
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
-        )
+        ))
     })
 }
 
-fn parse_prompt(body: &Map<String, Value>) -> Result<String, Response> {
+fn parse_prompt(body: &Map<String, Value>) -> Result<String, Box<Response>> {
     let Some(value) = body.get("prompt").and_then(Value::as_str) else {
-        return Err(error(StatusCode::BAD_REQUEST, "prompt is required"));
+        return Err(Box::new(error(
+            StatusCode::BAD_REQUEST,
+            "prompt is required",
+        )));
     };
     if value.trim().is_empty() {
-        return Err(error(StatusCode::BAD_REQUEST, "prompt is required"));
+        return Err(Box::new(error(
+            StatusCode::BAD_REQUEST,
+            "prompt is required",
+        )));
     }
     if value.chars().count() > MAX_PROMPT_CHARS {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!("prompt exceeds {MAX_PROMPT_CHARS} characters"),
-        ));
+        )));
     }
     Ok(value.to_string())
 }
@@ -378,17 +386,20 @@ fn agent_roster(config: &InferenceConfig, agent_id: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn validate_route_request(config: &InferenceConfig, req: &RouteRequest) -> Result<(), Response> {
+fn validate_route_request(
+    config: &InferenceConfig,
+    req: &RouteRequest,
+) -> Result<(), Box<Response>> {
     if req.privacy.as_deref() == Some("local_only")
         && req
             .explicit_targets
             .iter()
             .any(|target| !target.starts_with("local/"))
     {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             "Explicit target overrides are not allowed by the active agent roster or policy.",
-        ));
+        )));
     }
 
     let roster = agent_roster(config, &req.agent_id);
@@ -398,10 +409,10 @@ fn validate_route_request(config: &InferenceConfig, req: &RouteRequest) -> Resul
             .iter()
             .any(|target| !roster.contains(target))
     {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             "Explicit target overrides are not allowed by the active agent roster or policy.",
-        ));
+        )));
     }
     Ok(())
 }
@@ -414,7 +425,7 @@ fn build_route_request(
     config: &InferenceConfig,
     header_agent_id: Option<&str>,
     header_explicit_target: Option<&str>,
-) -> Result<RouteRequest, Response> {
+) -> Result<RouteRequest, Box<Response>> {
     let auth_runtime = state.auth_snapshot();
     let requested = match header_agent_id {
         Some(agent_id) => Some(agent_id.to_string()),
@@ -433,10 +444,10 @@ fn build_route_request(
     if let Some(target) = header_explicit_target {
         let parts = target.split('/').collect::<Vec<_>>();
         if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
-            return Err(error(
+            return Err(Box::new(error(
                 StatusCode::BAD_REQUEST,
                 format!("invalid explicit target ref '{target}'"),
-            ));
+            )));
         }
         if !explicit_targets.contains(&target.to_string()) {
             explicit_targets.push(target.to_string());
@@ -452,7 +463,7 @@ fn build_route_request(
     Ok(req)
 }
 
-fn validate_execute_options(body: &Map<String, Value>) -> Result<(), Response> {
+fn validate_execute_options(body: &Map<String, Value>) -> Result<(), Box<Response>> {
     let _ = parse_bounded_number(body.get("timeoutMs"), "timeoutMs", MAX_TIMEOUT_MS)?;
     let _ = parse_bounded_number(body.get("maxTokens"), "maxTokens", MAX_RESPONSE_TOKENS)?;
     let _ = parse_bool(body.get("refresh"), "refresh")?;
@@ -552,21 +563,21 @@ async fn execute_command_target(
     target: &serde_yml::Mapping,
     prompt: &str,
     timeout_ms: u64,
-) -> Result<Response, Response> {
+) -> Result<Response, Box<Response>> {
     if yaml_string(target, "executor").as_deref() != Some("command") {
-        return Err(unavailable("inference router not initialized"));
+        return Err(Box::new(unavailable("inference router not initialized")));
     }
     let Some(command) = mapping_child(target, "command") else {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("Missing command config for target {target_ref}"),
-        ));
+        )));
     };
     let Some(bin) = yaml_string(command, "bin") else {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             format!("Missing command bin for target {target_ref}"),
-        ));
+        )));
     };
     let mut child = Command::new(bin);
     child.args(
@@ -621,7 +632,7 @@ async fn execute_command_target(
         )
     })??;
     if !output.status.success() {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_GATEWAY,
             format!(
                 "command:{target_ref} exited {:?}: {}",
@@ -631,14 +642,14 @@ async fn execute_command_target(
                     .take(300)
                     .collect::<String>()
             ),
-        ));
+        )));
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if text.is_empty() {
-        return Err(error(
+        return Err(Box::new(error(
             StatusCode::BAD_GATEWAY,
             format!("command:{target_ref} returned empty response"),
-        ));
+        )));
     }
     Ok(Json(json!({
         "text": text,
@@ -653,11 +664,11 @@ pub async fn status(
     headers: HeaderMap,
 ) -> Response {
     if let Err(resp) = require_access(&state, peer, &headers, Permission::Diagnostics) {
-        return resp;
+        return *resp;
     }
     let config = match load_inference_config(&state) {
         Ok(config) => config,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     Json(json!({
         "enabled": config.enabled,
@@ -678,7 +689,7 @@ pub async fn history(
     headers: HeaderMap,
 ) -> Response {
     if let Err(resp) = require_access(&state, peer, &headers, Permission::Diagnostics) {
-        return resp;
+        return *resp;
     }
     Json(json!({
         "enabled": false,
@@ -696,24 +707,24 @@ pub async fn explain(
 ) -> Response {
     let auth = match require_access(&state, peer, &headers, Permission::Recall) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let body = match read_json_object(bytes, MAX_EXPLAIN_BYTES) {
         Ok(body) => body,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let config = match load_inference_config(&state) {
         Ok(config) => config,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !config.enabled {
         return unavailable("inference router not initialized");
     }
     if let Err(resp) = build_route_request(&state, peer, &auth, &body, &config, None, None) {
-        return resp;
+        return *resp;
     }
     if let Err(resp) = parse_bool(body.get("refresh"), "refresh") {
-        return resp;
+        return *resp;
     }
     unavailable("inference router not initialized")
 }
@@ -726,34 +737,34 @@ pub async fn execute(
 ) -> Response {
     let auth = match require_access(&state, peer, &headers, Permission::Admin) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let body = match read_json_object(bytes, MAX_EXECUTE_BYTES) {
         Ok(body) => body,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let prompt = match parse_prompt(&body) {
         Ok(prompt) => prompt,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let config = match load_inference_config(&state) {
         Ok(config) => config,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !config.enabled {
         return unavailable("inference router not initialized");
     }
     let req = match build_route_request(&state, peer, &auth, &body, &config, None, None) {
         Ok(req) => req,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if let Err(resp) = validate_execute_options(&body) {
-        return resp;
+        return *resp;
     }
     let timeout_ms = match parse_bounded_number(body.get("timeoutMs"), "timeoutMs", MAX_TIMEOUT_MS)
     {
         Ok(value) => value.unwrap_or(60_000),
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let Some(target_ref) = resolve_default_target_ref(&config, &req) else {
         return unavailable("inference router not initialized");
@@ -763,7 +774,7 @@ pub async fn execute(
     };
     match execute_command_target(&state, &target_ref, target, &prompt, timeout_ms).await {
         Ok(resp) => resp,
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -775,27 +786,27 @@ pub async fn stream(
 ) -> Response {
     let auth = match require_access(&state, peer, &headers, Permission::Admin) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let body = match read_json_object(bytes, MAX_EXECUTE_BYTES) {
         Ok(body) => body,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if let Err(resp) = parse_prompt(&body) {
-        return resp;
+        return *resp;
     }
     let config = match load_inference_config(&state) {
         Ok(config) => config,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !config.enabled {
         return unavailable("inference router not initialized");
     }
     if let Err(resp) = build_route_request(&state, peer, &auth, &body, &config, None, None) {
-        return resp;
+        return *resp;
     }
     if let Err(resp) = validate_execute_options(&body) {
-        return resp;
+        return *resp;
     }
     unavailable("inference router not initialized")
 }
@@ -807,7 +818,7 @@ pub async fn request_delete(
     Path(_id): Path<String>,
 ) -> Response {
     if let Err(resp) = require_access(&state, peer, &headers, Permission::Admin) {
-        return resp;
+        return *resp;
     }
     error(StatusCode::NOT_FOUND, "inference request not found")
 }
@@ -818,11 +829,11 @@ pub async fn gateway_models(
     headers: HeaderMap,
 ) -> Response {
     if let Err(resp) = require_access(&state, peer, &headers, Permission::Admin) {
-        return resp;
+        return *resp;
     }
     let config = match load_inference_config(&state) {
         Ok(config) => config,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !config.enabled {
         return gateway_error(
@@ -847,46 +858,46 @@ pub async fn gateway_models(
     .into_response()
 }
 
-fn parse_gateway_messages(body: &Map<String, Value>) -> Result<(), Response> {
+fn parse_gateway_messages(body: &Map<String, Value>) -> Result<(), Box<Response>> {
     let Some(messages) = body.get("messages").and_then(Value::as_array) else {
-        return Err(gateway_error(
+        return Err(Box::new(gateway_error(
             StatusCode::BAD_REQUEST,
             "messages are required",
-        ));
+        )));
     };
     if messages.is_empty() {
-        return Err(gateway_error(
+        return Err(Box::new(gateway_error(
             StatusCode::BAD_REQUEST,
             "messages are required",
-        ));
+        )));
     }
     if messages.len() > MAX_GATEWAY_MESSAGES {
-        return Err(gateway_error(
+        return Err(Box::new(gateway_error(
             StatusCode::BAD_REQUEST,
             format!("messages may contain at most {MAX_GATEWAY_MESSAGES} entries"),
-        ));
+        )));
     }
     let mut total = 0usize;
     let mut has_content = false;
     for message in messages {
-        if let Some(content) = message.get("content").and_then(Value::as_str) {
-            if !content.trim().is_empty() {
-                has_content = true;
-                total += content.chars().count();
-            }
+        if let Some(content) = message.get("content").and_then(Value::as_str)
+            && !content.trim().is_empty()
+        {
+            has_content = true;
+            total += content.chars().count();
         }
     }
     if total > MAX_PROMPT_CHARS {
-        return Err(gateway_error(
+        return Err(Box::new(gateway_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!("messages exceed {MAX_PROMPT_CHARS} characters"),
-        ));
+        )));
     }
     if !has_content {
-        return Err(gateway_error(
+        return Err(Box::new(gateway_error(
             StatusCode::BAD_REQUEST,
             "messages must contain string content",
-        ));
+        )));
     }
     Ok(())
 }
@@ -899,11 +910,11 @@ pub async fn gateway_chat_completions(
 ) -> Response {
     let auth = match require_access(&state, peer, &headers, Permission::Admin) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let config = match load_inference_config(&state) {
         Ok(config) => config,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !config.enabled {
         return gateway_error(
@@ -919,15 +930,15 @@ pub async fn gateway_chat_completions(
         return gateway_error(resp.status(), "stream must be a boolean");
     }
     if let Err(resp) = parse_gateway_messages(&body) {
-        return resp;
+        return *resp;
     }
     let header_agent_id = match parse_gateway_hint(&headers, "x-signet-agent-id") {
         Ok(agent_id) => agent_id,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let header_explicit_target = match parse_gateway_hint(&headers, "x-signet-explicit-target") {
         Ok(target) => target,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if let Err(resp) = build_route_request(
         &state,

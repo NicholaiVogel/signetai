@@ -281,10 +281,10 @@ fn first_evidence_source(raw: Option<&str>) -> Option<String> {
             "memory_id",
             "source",
         ] {
-            if let Some(value) = obj.get(key).and_then(|value| value.as_str()) {
-                if !value.trim().is_empty() {
-                    return Some(value.to_string());
-                }
+            if let Some(value) = obj.get(key).and_then(|value| value.as_str())
+                && !value.trim().is_empty()
+            {
+                return Some(value.to_string());
             }
         }
     }
@@ -527,16 +527,18 @@ pub async fn recall(
             .and_then(|m| m.pipeline_v2.as_ref())
             .map(|p| (p.reranker.enabled, p.reranker.use_extraction_model))
             .unwrap_or((false, false));
-        if reranker_enabled && use_extraction_model && auth_runtime.mode != AuthMode::Local {
-            if let Err(resp) = require_rate_limit_guard(
+        if reranker_enabled
+            && use_extraction_model
+            && auth_runtime.mode != AuthMode::Local
+            && let Err(resp) = require_rate_limit_guard(
                 &auth,
                 "recallLlm",
                 &auth_runtime.recall_llm_limiter,
                 auth_runtime.mode,
                 None,
-            ) {
-                return (*resp).into_response();
-            }
+            )
+        {
+            return (*resp).into_response();
         }
         (scoped, auth)
     };
@@ -554,19 +556,19 @@ pub async fn recall(
         .as_ref()
         .and_then(|c| c.scope.project.as_deref())
         .map(|s| s.to_string());
-    if let Some(ref scope_proj) = scoped_project {
-        if let Some(ref body_proj) = body.project {
-            let body_proj = body_proj.trim();
-            if !body_proj.is_empty() && body_proj != scope_proj.as_str() {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({
-                        "error": "project scope mismatch",
-                        "scoped_project": scope_proj,
-                    })),
-                )
-                    .into_response();
-            }
+    if let Some(ref scope_proj) = scoped_project
+        && let Some(ref body_proj) = body.project
+    {
+        let body_proj = body_proj.trim();
+        if !body_proj.is_empty() && body_proj != scope_proj.as_str() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "project scope mismatch",
+                    "scoped_project": scope_proj,
+                })),
+            )
+                .into_response();
         }
     }
     let search_cfg = state.config.manifest.search.clone().unwrap_or_default();
@@ -610,7 +612,7 @@ pub async fn recall(
         .map(ToOwned::to_owned);
     // #3 REVIEW FIX: use scoped_project when body.project is omitted.
     // A token scoped to project A must not recall all projects by omitting it.
-    let project = scoped_project.as_ref().map(|s| s.clone()).or_else(|| {
+    let project = scoped_project.clone().or_else(|| {
         body.project
             .as_deref()
             .map(str::trim)
@@ -979,45 +981,45 @@ pub async fn recall(
                     // Inject summary card only when limit >= 2: one slot for
                     // the summary, at least one slot for a real memory to
                     // verify against. Matches TS daemon parity contract.
-                    if limit >= 2 {
-                        if let Some(text) = summary {
-                            let content =
-                                format!("[model summary, verify against source memories] {text}");
-                            let top_score = resp.results.first().map(|h| h.score).unwrap_or(0.5);
-                            let score = top_score.clamp(0.01, 1.0);
+                    if limit >= 2
+                        && let Some(text) = summary
+                    {
+                        let content =
+                            format!("[model summary, verify against source memories] {text}");
+                        let top_score = resp.results.first().map(|h| h.score).unwrap_or(0.5);
+                        let score = top_score.clamp(0.01, 1.0);
 
-                            // SHA-1 digest of query for stable id, matching TS daemon.
-                            use sha1::Digest;
-                            let hash = sha1::Sha1::digest(resp.query.as_bytes());
-                            let digest = format!("{hash:x}");
-                            let digest = &digest[..12];
+                        // SHA-1 digest of query for stable id, matching TS daemon.
+                        use sha1::Digest;
+                        let hash = sha1::Sha1::digest(resp.query.as_bytes());
+                        let digest = format!("{hash:x}");
+                        let digest = &digest[..12];
 
-                            if resp.results.len() >= limit {
-                                resp.results.pop();
-                            }
-                            resp.results.insert(
-                                0,
-                                RecallHit {
-                                    id: format!("summary:{digest}"),
-                                    content: content.clone(),
-                                    content_length: content.len(),
-                                    truncated: false,
-                                    score,
-                                    source: "llm_summary".to_string(),
-                                    memory_type: "semantic".to_string(),
-                                    tags: None,
-                                    pinned: false,
-                                    importance: 0.9,
-                                    who: None,
-                                    project: None,
-                                    visibility: None,
-                                    scope: None,
-                                    created_at: chrono::Utc::now().to_rfc3339(),
-                                    source_id: None,
-                                    supplementary: Some(true),
-                                },
-                            );
+                        if resp.results.len() >= limit {
+                            resp.results.pop();
                         }
+                        resp.results.insert(
+                            0,
+                            RecallHit {
+                                id: format!("summary:{digest}"),
+                                content: content.clone(),
+                                content_length: content.len(),
+                                truncated: false,
+                                score,
+                                source: "llm_summary".to_string(),
+                                memory_type: "semantic".to_string(),
+                                tags: None,
+                                pinned: false,
+                                importance: 0.9,
+                                who: None,
+                                project: None,
+                                visibility: None,
+                                scope: None,
+                                created_at: chrono::Utc::now().to_rfc3339(),
+                                source_id: None,
+                                supplementary: Some(true),
+                            },
+                        );
                     }
                 }
             }

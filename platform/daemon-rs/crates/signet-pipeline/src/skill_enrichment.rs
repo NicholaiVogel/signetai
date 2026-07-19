@@ -158,10 +158,10 @@ fn strip_fences(raw: &str) -> String {
     }
 
     let trimmed = stripped.trim();
-    if let Some(brace) = trimmed.find('{') {
-        if brace > 0 {
-            return trimmed[brace..].to_string();
-        }
+    if let Some(brace) = trimmed.find('{')
+        && brace > 0
+    {
+        return trimmed[brace..].to_string();
     }
     trimmed.to_string()
 }
@@ -302,10 +302,10 @@ fn extract_balanced(raw: &str, open: char, close: char) -> Vec<String> {
             depth += 1;
         } else if ch == close && depth > 0 {
             depth -= 1;
-            if depth == 0 {
-                if let Some(start_idx) = start.take() {
-                    out.push(raw[start_idx..idx + ch.len_utf8()].to_string());
-                }
+            if depth == 0
+                && let Some(start_idx) = start.take()
+            {
+                out.push(raw[start_idx..idx + ch.len_utf8()].to_string());
             }
         }
     }

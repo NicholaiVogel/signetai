@@ -483,7 +483,7 @@ pub async fn audit(
     Query(query): Query<AuditQuery>,
 ) -> Response {
     if let Err(resp) = require_audit_read(&state, peer, &headers) {
-        return resp;
+        return *resp;
     }
     let limit = parse_limit(query.limit.as_deref());
     let since = parse_time(query.since.as_deref());
@@ -600,7 +600,7 @@ pub async fn patch(
             .into_response();
     }
     if let Err(resp) = require_admin_mutation(&state, peer, &headers) {
-        return resp;
+        return *resp;
     }
     if id != SIGNET_SECRETS_PLUGIN_ID {
         return (
@@ -636,7 +636,7 @@ fn require_admin_mutation(
     state: &AppState,
     peer: SocketAddr,
     headers: &HeaderMap,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let is_local = peer.ip().is_loopback();
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -647,14 +647,13 @@ fn require_admin_mutation(
     )
     .map_err(|resp| *resp)?;
     require_permission_guard(&auth, Permission::Admin, auth_runtime.mode, is_local)
-        .map_err(|resp| *resp)
 }
 
 fn require_audit_read(
     state: &AppState,
     peer: SocketAddr,
     headers: &HeaderMap,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let is_local = peer.ip().is_loopback();
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -665,5 +664,4 @@ fn require_audit_read(
     )
     .map_err(|resp| *resp)?;
     require_permission_guard(&auth, Permission::Analytics, auth_runtime.mode, is_local)
-        .map_err(|resp| *resp)
 }

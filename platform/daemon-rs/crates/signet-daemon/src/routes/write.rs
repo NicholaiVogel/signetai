@@ -218,7 +218,7 @@ pub async fn codex_native_note(
     let tags = tags.filter(|value| !value.is_empty());
     let notes_dir = codex_notes_dir();
     let created_at = chrono::Utc::now().to_rfc3339();
-    let timestamp = created_at.replace(':', "-").replace('.', "-");
+    let timestamp = created_at.replace([':', '.'], "-");
     let slug = codex_note_slug(title, content);
     let mut body = String::new();
     body.push_str("---\nsource: signet_save_note\ncreated_at: ");
@@ -435,7 +435,7 @@ pub async fn patch(
         Permission::Modify,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let project = mutation_project(&auth);
 
@@ -1258,7 +1258,7 @@ fn auth_for_mutation(
     peer: &SocketAddr,
     requested: Option<&str>,
     permission: Permission,
-) -> Result<(String, AuthState), axum::response::Response> {
+) -> Result<(String, AuthState), Box<axum::response::Response>> {
     let is_local = is_loopback(peer);
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -1266,17 +1266,17 @@ fn auth_for_mutation(
         auth_runtime.secret.as_deref(),
         headers,
         is_local,
-    )
-    .map_err(|resp| *resp)?;
-    require_permission_guard(&auth, permission, auth_runtime.mode, is_local)
-        .map_err(|resp| *resp)?;
+    )?;
+    require_permission_guard(&auth, permission, auth_runtime.mode, is_local)?;
     let agent =
         resolve_scoped_agent(&auth, auth_runtime.mode, is_local, requested).map_err(|reason| {
-            (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": reason})),
+            Box::new(
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": reason})),
+                )
+                    .into_response(),
             )
-                .into_response()
         })?;
     Ok((agent, auth))
 }
@@ -1364,9 +1364,8 @@ fn dead_letter_blocked_extraction_memory(
         |row| row.get(0),
     )?;
 
-    if updated == 0 {
-        if leased_count == 0 {
-            conn.execute(
+    if updated == 0 && leased_count == 0 {
+        conn.execute(
                 "INSERT INTO memory_jobs
                  (id, memory_id, job_type, status, error, attempts, max_attempts, failed_at, created_at, updated_at)
                  VALUES (?1, ?2, 'extract', 'dead', ?3, 0, ?4, ?5, ?5, ?5)",
@@ -1378,7 +1377,6 @@ fn dead_letter_blocked_extraction_memory(
                     now
                 ],
             )?;
-        }
     }
 
     if leased_count == 0 && completed_jobs_count == 0 && completed_memory_count == 0 {
@@ -1693,7 +1691,7 @@ fn persist_structured_payload(
         result.aspects_created += 1;
 
         let mut attributes = aspect.attributes.clone();
-        if let Some(value) = aspect.value.as_ref().map(String::as_str).map(str::trim)
+        if let Some(value) = aspect.value.as_deref().map(str::trim)
             && !value.is_empty()
         {
             attributes.push(StructuredAttribute {
@@ -3575,7 +3573,7 @@ pub async fn forget_batch(
         Permission::Forget,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let project = mutation_project(&auth);
 
@@ -3890,7 +3888,7 @@ pub async fn delete(
         Permission::Forget,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let project = mutation_project(&auth);
 
@@ -4034,7 +4032,7 @@ pub async fn recover(
         Permission::Recover,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let project = mutation_project(&auth);
 
@@ -4165,7 +4163,7 @@ pub async fn modify_batch(
         Permission::Modify,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let project = mutation_project(&auth);
     let reason = body.reason;

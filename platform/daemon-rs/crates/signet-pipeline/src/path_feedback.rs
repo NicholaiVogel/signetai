@@ -677,6 +677,8 @@ fn infer_feedback_path(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn upsert_path_feedback_stats(
     conn: &rusqlite::Connection,
     agent_id: &str,

@@ -1000,6 +1000,7 @@ const ENTITY_CONTEXT_MAX_ATTRIBUTES_PER_ASPECT: i64 = 48;
 ///   1. Try `canonicalize()` (resolves symlinks + `..`).
 ///   2. Fall back to string normalization: backslash → slash, trim trailing
 ///      slash, lowercase.
+///
 /// Returns `None` when the input is empty or blank.
 fn normalize_project(raw: Option<&str>) -> Option<String> {
     let s = raw?.trim();
@@ -1334,6 +1335,8 @@ fn upsert_session_transcript(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon route layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn delete_session_transcript(
     conn: &rusqlite::Connection,
     session_key: &str,
@@ -1349,6 +1352,8 @@ fn delete_session_transcript(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon route layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn enqueue_summary_job(
     conn: &rusqlite::Connection,
     harness: &str,
@@ -2911,14 +2916,14 @@ pub async fn prompt_submit(
         })
         .await;
 
-    return match result {
+    match result {
         Ok(val) => (StatusCode::OK, Json(val)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
-    };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3946,14 +3951,14 @@ pub async fn compaction_complete(
     }
 
     // Honor bypass — same early-return as TS daemon compaction-complete.
-    if let Some(key) = &body.session_key {
-        if state.sessions.is_bypassed(key) {
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({"success": true, "bypassed": true})),
-            )
-                .into_response();
-        }
+    if let Some(key) = &body.session_key
+        && state.sessions.is_bypassed(key)
+    {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"success": true, "bypassed": true})),
+        )
+            .into_response();
     }
 
     // Compaction artifacts are canonical lineage and must be written regardless
@@ -4233,7 +4238,7 @@ const CHECKPOINT_MIN_DELTA: usize = 500;
 
 /// Returns the transcript slice starting at `cursor`, or None if the
 /// delta is absent or below the minimum size threshold.
-fn extract_delta<'a>(full: &'a str, cursor: i64) -> Option<&'a str> {
+fn extract_delta(full: &str, cursor: i64) -> Option<&str> {
     let mut start = cursor.max(0) as usize;
     if start >= full.len() {
         return None;
@@ -4571,10 +4576,14 @@ mod tests {
         let tmp = tempfile::Builder::new().prefix(name).tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("memory")).unwrap();
         std::fs::create_dir_all(tmp.path().join(".daemon/logs")).unwrap();
-        let mut manifest = AgentManifest::default();
-        let mut memory = MemoryManifestConfig::default();
-        memory.pipeline_v2 = Some(PipelineV2Config::default());
-        manifest.memory = Some(memory);
+        let manifest = AgentManifest {
+            memory: Some(MemoryManifestConfig {
+                pipeline_v2: Some(PipelineV2Config::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut manifest = manifest;
         configure(&mut manifest);
         let cfg = DaemonConfig {
             base_path: tmp.path().to_path_buf(),

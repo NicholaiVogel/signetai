@@ -142,7 +142,7 @@ fn auth_for_permission(
     peer: SocketAddr,
     headers: &HeaderMap,
     permission: Permission,
-) -> Result<AuthState, Response> {
+) -> Result<AuthState, Box<Response>> {
     let is_local = crate::auth::middleware::is_loopback_ip(peer.ip());
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -214,16 +214,22 @@ fn invalid_json_body() -> Response {
         .into_response()
 }
 
-fn parse_json_object_body(body: &Bytes, allow_empty: bool) -> Result<Map<String, Value>, Response> {
+fn parse_json_object_body(
+    body: &Bytes,
+    allow_empty: bool,
+) -> Result<Map<String, Value>, Box<Response>> {
     if body.iter().all(u8::is_ascii_whitespace) {
         return if allow_empty {
             Ok(Map::new())
         } else {
-            Err(invalid_json_body())
+            Err(Box::new(invalid_json_body()))
         };
     }
     let value: Value = serde_json::from_slice(body).map_err(|_| invalid_json_body())?;
-    value.as_object().cloned().ok_or_else(invalid_json_body)
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| Box::new(invalid_json_body()))
 }
 
 fn optional_payload_string(payload: &Map<String, Value>, key: &str) -> Option<String> {
@@ -248,7 +254,7 @@ fn apply_mutation_rate_limit(
     auth: &AuthState,
     _headers: &HeaderMap,
     operation: &str,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let auth_runtime = state.auth_snapshot();
     require_rate_limit_guard(
         auth,
@@ -257,7 +263,6 @@ fn apply_mutation_rate_limit(
         auth_runtime.mode,
         None,
     )
-    .map_err(|resp| *resp)
 }
 
 fn mutation_actor(
@@ -298,7 +303,7 @@ fn scoped_agent_or_response(
     headers: &HeaderMap,
     requested: Option<&str>,
     permission: Permission,
-) -> Result<(String, AuthState), Response> {
+) -> Result<(String, AuthState), Box<Response>> {
     let is_local = crate::auth::middleware::is_loopback_ip(peer.ip());
     let auth_runtime = state.auth_snapshot();
     let auth = auth_for_permission(state, peer, headers, permission)?;
@@ -506,6 +511,8 @@ fn delete_aggregate_memory_source_links(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon route layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn insert_memory_history(
     conn: &rusqlite::Connection,
     memory_id: &str,
@@ -571,7 +578,7 @@ pub async fn list(
         Permission::Recall,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let limit = params.limit.unwrap_or(100);
     let offset = params.offset.unwrap_or(0);
@@ -672,7 +679,7 @@ pub async fn most_used(
         Permission::Recall,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let limit = params.limit.unwrap_or(6).clamp(1, 200);
     let memories = state
@@ -735,7 +742,7 @@ pub async fn curator_slices(
         Permission::Recall,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let min_sessions = params.min_sessions.unwrap_or(3).clamp(1, 100) as i64;
     let limit = params.limit.unwrap_or(100).clamp(1, 500) as i64;
@@ -870,7 +877,7 @@ pub async fn tombstone(
 ) -> Response {
     let payload = match parse_json_object_body(&body, true) {
         Ok(payload) => payload,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let memory_id = id.trim().to_string();
     if memory_id.is_empty() {
@@ -882,13 +889,13 @@ pub async fn tombstone(
     }
     let auth = match auth_for_permission(&state, peer, &headers, Permission::Forget) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if let Some(resp) = check_mutations_frozen(&state) {
         return resp;
     }
     if let Err(resp) = apply_mutation_rate_limit(&state, &auth, &headers, "forget") {
-        return resp;
+        return *resp;
     }
     let reason = optional_payload_string(&payload, "reason")
         .or_else(|| clean_text(query.reason.as_deref()))
@@ -994,7 +1001,7 @@ pub async fn supersede(
 ) -> Response {
     let payload = match parse_json_object_body(&body, false) {
         Ok(payload) => payload,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let memory_id = id.trim().to_string();
     let superseded_by = optional_payload_string(&payload, "superseded_by").unwrap_or_default();
@@ -1021,13 +1028,13 @@ pub async fn supersede(
     }
     let auth = match auth_for_permission(&state, peer, &headers, Permission::Modify) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if let Some(resp) = check_mutations_frozen(&state) {
         return resp;
     }
     if let Err(resp) = apply_mutation_rate_limit(&state, &auth, &headers, "modify") {
-        return resp;
+        return *resp;
     }
     let reason = optional_payload_string(&payload, "reason");
     let actor = mutation_actor(
@@ -1157,7 +1164,7 @@ pub async fn similar(
         Permission::Recall,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let _limit = params.k.unwrap_or(10).clamp(1, 100);
 
@@ -1222,7 +1229,7 @@ pub async fn get(
         Permission::Recall,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let row = state
         .pool
@@ -1321,7 +1328,7 @@ pub async fn history(
         Permission::Recall,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let result = state
@@ -1436,7 +1443,7 @@ pub async fn review_queue(
         Permission::Recall,
     ) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -2031,6 +2038,8 @@ fn infer_feedback_path(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon route layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn upsert_path_feedback_stats(
     conn: &rusqlite::Connection,
     agent_id: &str,

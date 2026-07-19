@@ -275,7 +275,7 @@ fn current_load_per_cpu() -> Option<f64> {
         if cpus <= 0.0 {
             return None;
         }
-        return Some(loads[0] / cpus);
+        Some(loads[0] / cpus)
     }
 
     #[cfg(not(unix))]
@@ -462,6 +462,14 @@ async fn process_extract(
         .to_string();
     let source_memory_id = memory_id.clone();
 
+    type MemoryJobRow = (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+    );
     let (content, agent_id, extraction_status, source_project, source_scope, source_visibility) =
         pool.read(move |conn| {
             let mut stmt = conn.prepare_cached(
@@ -471,14 +479,7 @@ async fn process_extract(
                      FROM memories
                      WHERE id = ?1 AND COALESCE(is_deleted, 0) = 0",
             )?;
-            let row: Option<(
-                String,
-                Option<String>,
-                String,
-                Option<String>,
-                Option<String>,
-                String,
-            )> = stmt
+            let row: Option<MemoryJobRow> = stmt
                 .query_row(rusqlite::params![memory_id], |r| {
                     Ok((
                         r.get(0)?,
@@ -835,6 +836,8 @@ struct DecisionAuditMeta {
     skipped_reason: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 async fn insert_extracted_fact_memory(
     pool: &DbPool,
     fact: &extraction::ExtractedFact,

@@ -77,7 +77,7 @@ fn auth_scoped_agent(
     headers: &HeaderMap,
     requested: Option<&str>,
     permission: Permission,
-) -> Result<String, Response> {
+) -> Result<String, Box<Response>> {
     let is_local = peer.ip().is_loopback();
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -90,11 +90,13 @@ fn auth_scoped_agent(
     require_permission_guard(&auth, permission, auth_runtime.mode, is_local)
         .map_err(|resp| *resp)?;
     resolve_scoped_agent(&auth, auth_runtime.mode, is_local, requested).map_err(|reason| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": reason})),
+        Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": reason})),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }
 
@@ -255,7 +257,7 @@ pub async fn list_presence(
         Permission::Recall,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let limit = params.limit.unwrap_or(50).clamp(1, 500);
     let session_key = clean(params.session_key.as_deref());
@@ -330,7 +332,7 @@ pub async fn stream(
         params.agent_id.as_deref(),
         Permission::Recall,
     ) {
-        return resp;
+        return *resp;
     }
     (
         [
@@ -367,7 +369,7 @@ pub async fn upsert_presence(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let project = read_body_string(&body, "project");
     let runtime_path = read_body_string(&body, "runtimePath")
@@ -441,7 +443,7 @@ pub async fn remove_presence(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let result = state
         .pool
@@ -489,7 +491,7 @@ pub async fn list_messages(
         Permission::Recall,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let limit = params.limit.unwrap_or(100).clamp(1, 500);
     let session_key = clean(params.session_key.as_deref());
@@ -603,7 +605,7 @@ pub async fn send_message(
         Permission::Modify,
     ) {
         Ok(agent) => agent,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let to_agent =
         read_body_string(&body, "toAgentId").or_else(|| read_body_string(&body, "to_agent_id"));

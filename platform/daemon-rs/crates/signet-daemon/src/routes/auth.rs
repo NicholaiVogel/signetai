@@ -33,7 +33,7 @@ fn require_admin_auth(
     state: &AppState,
     peer: &SocketAddr,
     headers: &HeaderMap,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let is_local = is_loopback(peer);
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -161,13 +161,15 @@ fn is_valid_login_string(value: Option<&Value>, max_length: usize) -> Option<&st
     }
 }
 
-fn json_body(bytes: Bytes) -> Result<Value, Response> {
+fn json_body(bytes: Bytes) -> Result<Value, Box<Response>> {
     serde_json::from_slice::<Value>(&bytes).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid request body"})),
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid request body"})),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }
 
@@ -183,27 +185,27 @@ fn db_error(err: impl std::fmt::Display) -> Response {
         .into_response()
 }
 
-fn parse_role(raw: Option<&str>) -> Result<TokenRole, Response> {
+fn parse_role(raw: Option<&str>) -> Result<TokenRole, Box<Response>> {
     match raw {
         Some("admin") => Ok(TokenRole::Admin),
         Some("operator") => Ok(TokenRole::Operator),
         Some("agent") => Ok(TokenRole::Agent),
         Some("readonly") => Ok(TokenRole::Readonly),
-        _ => Err(invalid(
+        _ => Err(Box::new(invalid(
             "role must be one of: admin, operator, agent, readonly",
-        )),
+        ))),
     }
 }
 
-fn parse_optional_role(raw: Option<&Value>) -> Result<Option<TokenRole>, Response> {
+fn parse_optional_role(raw: Option<&Value>) -> Result<Option<TokenRole>, Box<Response>> {
     match raw.and_then(Value::as_str) {
         Some("admin") => Ok(Some(TokenRole::Admin)),
         Some("operator") => Ok(Some(TokenRole::Operator)),
         Some("agent") => Ok(Some(TokenRole::Agent)),
         Some("readonly") => Ok(Some(TokenRole::Readonly)),
-        Some(_) => Err(invalid(
+        Some(_) => Err(Box::new(invalid(
             "role must be one of: admin, operator, agent, readonly",
-        )),
+        ))),
         None => Ok(None),
     }
 }
@@ -292,11 +294,9 @@ pub async fn whoami(
         is_local,
     )
     .map_err(|resp| *resp)?;
-    let effective_access = auth_runtime.mode == crate::auth::types::AuthMode::Local
-        || auth.result.authenticated
-        || (auth_runtime.mode == crate::auth::types::AuthMode::Hybrid
-            && is_local
-            && !auth.result.authenticated);
+    let effective_access = auth.result.authenticated
+        || auth_runtime.mode == crate::auth::types::AuthMode::Local
+        || (auth_runtime.mode == crate::auth::types::AuthMode::Hybrid && is_local);
 
     Ok(Json(json!({
         "authenticated": auth.result.authenticated,
@@ -349,7 +349,7 @@ pub async fn login(
 ) -> Response {
     let auth_runtime = state.auth_snapshot();
     let limit_key = format!("login:{}", peer.ip());
-    let check = auth_runtime.admin_limiter.check(&"login", &limit_key);
+    let check = auth_runtime.admin_limiter.check("login", &limit_key);
     if !check.allowed {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -372,7 +372,7 @@ pub async fn login(
     let payload = match json_body(body) {
         Ok(Value::Object(map)) => map,
         Ok(_) => return invalid("invalid request body"),
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let Some(username) = is_valid_login_string(payload.get("username"), MAX_USERNAME_LENGTH) else {
         return invalid("username is required");
@@ -464,7 +464,7 @@ pub async fn list_api_keys(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, Response> {
-    require_admin_auth(&state, &peer, &headers)?;
+    require_admin_auth(&state, &peer, &headers).map_err(|resp| *resp)?;
     let api_keys = state
         .pool
         .read(|conn| api_keys::list_api_keys(conn).map_err(CoreError::from))
@@ -480,11 +480,11 @@ pub async fn create_api_key(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, Response> {
-    require_admin_auth(&state, &peer, &headers)?;
+    require_admin_auth(&state, &peer, &headers).map_err(|resp| *resp)?;
     let payload = match json_body(body) {
         Ok(Value::Object(map)) => map,
         Ok(_) => return Err(invalid("invalid request body")),
-        Err(resp) => return Err(resp),
+        Err(resp) => return Err(*resp),
     };
     let name = payload
         .get("name")
@@ -493,7 +493,7 @@ pub async fn create_api_key(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| invalid("name is required"))?
         .to_string();
-    let role = parse_optional_role(payload.get("role"))?;
+    let role = parse_optional_role(payload.get("role")).map_err(|resp| *resp)?;
     let input = ApiKeyCreateInput {
         name,
         role,
@@ -527,7 +527,7 @@ pub async fn revoke_api_key(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Response> {
-    require_admin_auth(&state, &peer, &headers)?;
+    require_admin_auth(&state, &peer, &headers).map_err(|resp| *resp)?;
     let revoked = state
         .pool
         .write_tx(Priority::High, move |conn| {
@@ -581,7 +581,7 @@ pub async fn token(
         )
             .into_response());
     };
-    let role = parse_role(body.role.as_deref())?;
+    let role = parse_role(body.role.as_deref()).map_err(|resp| *resp)?;
     let ttl = body
         .ttl_seconds
         .filter(|ttl| *ttl > 0)

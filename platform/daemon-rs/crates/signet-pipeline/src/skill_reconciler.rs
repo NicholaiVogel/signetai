@@ -688,10 +688,10 @@ fn build_embedding_text(fm: &SkillFrontmatter) -> String {
     if !fm.description.is_empty() {
         parts.push(fm.description.clone());
     }
-    if let Some(triggers) = &fm.triggers {
-        if !triggers.is_empty() {
-            parts.push(triggers.join(", "));
-        }
+    if let Some(triggers) = &fm.triggers
+        && !triggers.is_empty()
+    {
+        parts.push(triggers.join(", "));
     }
     parts.join(" — ")
 }

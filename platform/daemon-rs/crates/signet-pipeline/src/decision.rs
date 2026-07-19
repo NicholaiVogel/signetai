@@ -440,11 +440,11 @@ fn parse_decision(
             warnings.push(format!("{action_str} decision missing targetId"));
             return None;
         }
-        if let Some(ref tid) = target_id {
-            if !candidate_ids.contains(tid) {
-                warnings.push(format!("Decision references non-candidate ID: \"{tid}\""));
-                return None;
-            }
+        if let Some(ref tid) = target_id
+            && !candidate_ids.contains(tid)
+        {
+            warnings.push(format!("Decision references non-candidate ID: \"{tid}\""));
+            return None;
         }
     }
 
@@ -541,6 +541,8 @@ fn extract_json_object(s: &str) -> Option<String> {
 /// `precomputed_embeddings` is an optional map from fact content hash to
 /// its pre-computed embedding vector. If missing for a fact, only BM25
 /// search is used for candidate retrieval.
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 pub async fn run_shadow_decisions(
     facts: &[ExtractedFact],
     pool: &DbPool,

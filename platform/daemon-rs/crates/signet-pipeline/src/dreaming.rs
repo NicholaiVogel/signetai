@@ -1112,6 +1112,8 @@ fn resolve_or_create_aspect(
 }
 
 /// Insert a single attribute row, deduplicating by normalized_content.
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn insert_attr(
     conn: &rusqlite::Connection,
     aspect_id: &str,
@@ -1774,7 +1776,7 @@ fn apply_mutations(
                     let r = apply_merge_entities(conn, agent_id, source, target);
                     applied += r.applied;
                     skipped += r.skipped;
-                    return None; // handled inline
+                    None // handled inline
                 }
                 DreamingMutation::CreateEntity {
                     name,

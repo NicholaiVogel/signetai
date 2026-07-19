@@ -928,20 +928,19 @@ pub async fn delete(
             let Some(record) = connector_sync_record(conn, &id)? else {
                 return Err(CoreError::NotFound("connector".into()));
             };
-            if cascade {
-                if let Some(root_path) =
+            if cascade
+                && let Some(root_path) =
                     connector_root_path(&record).map_err(signet_core::CoreError::Invalid)?
-                {
-                    let now = Utc::now().to_rfc3339();
-                    conn.execute(
-                        "UPDATE documents
+            {
+                let now = Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE documents
                          SET status = 'deleted',
                              error = 'Connector removed',
                              updated_at = ?1
                          WHERE source_url LIKE ?2 ESCAPE '\\'",
-                        rusqlite::params![now, escape_like_prefix(&root_path)],
-                    )?;
-                }
+                    rusqlite::params![now, escape_like_prefix(&root_path)],
+                )?;
             }
             let changed = conn.execute("DELETE FROM connectors WHERE id = ?1", [&id])?;
             Ok(serde_json::json!({"deleted": changed > 0}))

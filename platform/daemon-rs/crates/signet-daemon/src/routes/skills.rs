@@ -119,7 +119,7 @@ pub async fn delete(
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
     if let Err(resp) = require_admin_mutation(&state, peer, &headers) {
-        return resp;
+        return *resp;
     }
     let Ok(name) = validate_skill_name(&name) else {
         return (
@@ -207,7 +207,7 @@ pub async fn install(
     Json(req): Json<InstallRequest>,
 ) -> impl IntoResponse {
     if let Err(resp) = require_admin_mutation(&state, peer, &headers) {
-        return resp;
+        return *resp;
     }
     let Some(name) = req.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
         return (
@@ -229,6 +229,7 @@ pub async fn install(
             return match install_clawhub_skill(&state, &slug).await {
                 Ok(output) => {
                     schedule_skill_graph_install(state.clone(), slug.clone());
+
                     Json(json!({
                         "success": true,
                         "name": slug,
@@ -273,6 +274,7 @@ pub async fn install(
     match run_skill_install_command(command).await {
         Ok(output) => {
             schedule_skill_graph_install(state.clone(), name.to_string());
+
             Json(json!({
                 "success": true,
                 "name": name,
@@ -741,16 +743,15 @@ async fn install_skill_graph_node(state: Arc<AppState>, name: String) -> Result<
         }
     }
 
-    if let Some(provider) = llm_provider.as_ref() {
-        if let Err(error) =
+    if let Some(provider) = llm_provider.as_ref()
+        && let Err(error) =
             extract_skill_body_entities(&state, provider, &entity_id, &content).await
-        {
-            warn!(
-                skill = %skill_name,
-                error = %error,
-                "skill body extraction failed"
-            );
-        }
+    {
+        warn!(
+            skill = %skill_name,
+            error = %error,
+            "skill body extraction failed"
+        );
     }
 
     Ok(())
@@ -1271,7 +1272,7 @@ fn require_admin_mutation(
     state: &AppState,
     peer: SocketAddr,
     headers: &HeaderMap,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let is_local = peer.ip().is_loopback();
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -1282,7 +1283,6 @@ fn require_admin_mutation(
     )
     .map_err(|resp| *resp)?;
     require_permission_guard(&auth, Permission::Admin, auth_runtime.mode, is_local)
-        .map_err(|resp| *resp)
 }
 
 fn skills_dir(state: &AppState) -> std::io::Result<PathBuf> {

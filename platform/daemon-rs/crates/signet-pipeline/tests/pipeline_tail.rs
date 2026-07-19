@@ -194,11 +194,11 @@ async fn synthesis_worker_renders_projection_from_existing_summaries() {
     let projection = root.join("MEMORY.md");
     let mut rendered = String::new();
     for _ in 0..100 {
-        if let Ok(content) = std::fs::read_to_string(&projection) {
-            if content.contains("Tail synthesis summary") {
-                rendered = content;
-                break;
-            }
+        if let Ok(content) = std::fs::read_to_string(&projection)
+            && content.contains("Tail synthesis summary")
+        {
+            rendered = content;
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
@@ -290,10 +290,10 @@ fn dreaming_worker_discovers_agents_and_supports_manual_trigger() {
     // The module implements agent discovery + manual async trigger scoping.
     // Verify it compiles + exposes the expected interface (cites TS
     // dreaming-worker.test.ts:74-102 for the behavioral contract).
-    let _ = dreaming_worker::DreamingWorkerConfig::default();
+    let config = dreaming_worker::DreamingWorkerConfig::default();
     assert!(
-        true,
-        "dreaming_worker module compiles with expected interface"
+        config.check_interval > std::time::Duration::ZERO,
+        "dreaming_worker default config exposes a positive check interval"
     );
 }
 
@@ -401,10 +401,10 @@ fn reflection_worker_schedules_and_collects_sources() {
     use signet_pipeline::reflection_worker;
     // The module implements scheduling, source collection, insight persistence,
     // dedupe, and agent fanout (cites TS reflection-worker.test.ts:104-260).
-    let _ = reflection_worker::ReflectionConfig::default();
+    let config = reflection_worker::ReflectionConfig::default();
     assert!(
-        true,
-        "reflection_worker module compiles with expected interface"
+        config.max_memories > 0 && config.timeout_ms > 0 && !config.schedule.is_empty(),
+        "reflection_worker default config exposes sane limits and schedule"
     );
 }
 

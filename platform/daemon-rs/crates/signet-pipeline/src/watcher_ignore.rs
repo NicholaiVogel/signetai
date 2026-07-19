@@ -88,12 +88,10 @@ impl AgentsWatcherIgnoreMatcher {
         }
 
         if matches!(relative_path_within(&self.memory_dir, &normalized_path), Some(rel) if !rel.as_os_str().is_empty())
+            && let Some(filename) = normalized_path.file_name().and_then(|name| name.to_str())
+            && (is_artifact_filename(filename) || is_memory_backup_filename(filename))
         {
-            if let Some(filename) = normalized_path.file_name().and_then(|name| name.to_str()) {
-                if is_artifact_filename(filename) || is_memory_backup_filename(filename) {
-                    return true;
-                }
-            }
+            return true;
         }
 
         let is_generated_workspace_path = relative_path_within(&self.agent_root, &normalized_path)

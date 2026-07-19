@@ -207,12 +207,11 @@ pub async fn auth_middleware(
     // secrets-routes.ts:91-95). Enforce the same here in the global middleware
     // so every handler under these paths requires admin, not just basic auth.
     let path = req.uri().path();
-    if is_admin_required_path(path) {
-        if let Err(resp) =
+    if is_admin_required_path(path)
+        && let Err(resp) =
             require_permission_guard(&auth, Permission::Admin, auth_runtime.mode, is_local)
-        {
-            return *resp;
-        }
+    {
+        return *resp;
     }
 
     req.extensions_mut().insert(auth);

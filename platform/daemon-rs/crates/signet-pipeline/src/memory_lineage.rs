@@ -391,6 +391,8 @@ fn manifest_value(frontmatter: &BTreeMap<String, YamlValue>, key: &str) -> Optio
     read_string(frontmatter, key)
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn ensure_manifest_record(
     conn: &Connection,
     root: &Path,
@@ -473,6 +475,8 @@ fn find_manifest(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn ensure_canonical_manifest(
     conn: &Connection,
     root: &Path,
@@ -1727,7 +1731,7 @@ fn render_ledger_section(
         render_section(&format!("## {LEDGER_HEADING}"), &lines)
     }
 
-    if fits_budget(&[base, &[render_count(sessions, sessions.len())].as_slice()].concat())? {
+    if fits_budget(&[base, [render_count(sessions, sessions.len())].as_slice()].concat())? {
         let refs = sessions
             .iter()
             .filter_map(|session| session.manifest_path.clone())
@@ -1741,7 +1745,7 @@ fn render_ledger_section(
     while low <= high {
         let mid = (low + high) / 2;
         let block = render_count(sessions, mid);
-        if fits_budget(&[base, &[block].as_slice()].concat())? {
+        if fits_budget(&[base, [block].as_slice()].concat())? {
             best = mid;
             low = mid + 1;
         } else {
@@ -1782,7 +1786,7 @@ fn render_index_section(index_block: &str, base: &[String]) -> Result<String, St
     if index_block.trim().is_empty() {
         return Ok(String::new());
     }
-    if fits_budget(&[base, &[index_block.to_string()].as_slice()].concat())? {
+    if fits_budget(&[base, [index_block.to_string()].as_slice()].concat())? {
         return Ok(index_block.to_string());
     }
 
@@ -1793,7 +1797,7 @@ fn render_index_section(index_block: &str, base: &[String]) -> Result<String, St
     while lines.len() > 2 {
         lines.pop();
         let next = lines.join("\n").trim_end().to_string();
-        if fits_budget(&[base, &[next.clone()].as_slice()].concat())? {
+        if fits_budget(&[base, [next.clone()].as_slice()].concat())? {
             return Ok(next);
         }
     }
@@ -2036,6 +2040,8 @@ pub fn write_memory_projection(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 pub fn upsert_thread_head(
     conn: &Connection,
     agent_id: &str,
@@ -2126,6 +2132,8 @@ pub struct SummaryFact {
     pub kind: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 pub fn write_summary_to_dag(
     conn: &Connection,
     agent_id: &str,

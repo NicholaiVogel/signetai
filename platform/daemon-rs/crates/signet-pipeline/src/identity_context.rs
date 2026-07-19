@@ -371,35 +371,31 @@ pub fn parse_identity_markdown(content: &str) -> AgentIdentity {
 }
 
 pub fn load_identity(agents_dir: &Path, identity_files: Option<&IdentityFileMap>) -> AgentIdentity {
-    if let Some(identity_md) = identity_files.and_then(|files| files.get("IDENTITY.md")) {
-        if identity_md.exists() {
-            if let Ok(content) = fs::read_to_string(identity_md) {
-                return parse_identity_markdown(&content);
-            }
-        }
+    if let Some(identity_md) = identity_files.and_then(|files| files.get("IDENTITY.md"))
+        && identity_md.exists()
+        && let Ok(content) = fs::read_to_string(identity_md)
+    {
+        return parse_identity_markdown(&content);
     }
 
     let agent_yaml = agents_dir.join("agent.yaml");
-    if agent_yaml.exists() {
-        if let Ok(content) = fs::read_to_string(&agent_yaml) {
-            if let Ok(config) = serde_yml::from_str::<AgentYamlRoot>(&content) {
-                if let Some(agent) = config.agent {
-                    if let Some(name) = agent.name.filter(|name| !name.is_empty()) {
-                        return AgentIdentity {
-                            name,
-                            description: agent.description,
-                        };
-                    }
-                }
-            }
-        }
+    if agent_yaml.exists()
+        && let Ok(content) = fs::read_to_string(&agent_yaml)
+        && let Ok(config) = serde_yml::from_str::<AgentYamlRoot>(&content)
+        && let Some(agent) = config.agent
+        && let Some(name) = agent.name.filter(|name| !name.is_empty())
+    {
+        return AgentIdentity {
+            name,
+            description: agent.description,
+        };
     }
 
     let root_identity_md = agents_dir.join("IDENTITY.md");
-    if root_identity_md.exists() {
-        if let Ok(content) = fs::read_to_string(root_identity_md) {
-            return parse_identity_markdown(&content);
-        }
+    if root_identity_md.exists()
+        && let Ok(content) = fs::read_to_string(root_identity_md)
+    {
+        return parse_identity_markdown(&content);
     }
 
     AgentIdentity {

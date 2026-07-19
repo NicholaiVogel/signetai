@@ -138,7 +138,7 @@ pub async fn add_obsidian(
     Json(req): Json<AddObsidianSourceRequest>,
 ) -> impl IntoResponse {
     if let Err(resp) = require_admin_mutation(&state, peer, &headers) {
-        return resp;
+        return *resp;
     }
     let Some(raw_root) = req.root.or(req.path).map(|s| s.trim().to_string()) else {
         return (
@@ -345,7 +345,7 @@ pub async fn add_discord(
     Json(req): Json<AddDiscordSourceRequest>,
 ) -> impl IntoResponse {
     if let Err(resp) = require_admin_mutation(&state, peer, &headers) {
-        return resp;
+        return *resp;
     }
     let guild_ids = filtered_strings(req.guild_ids)
         .or_else(|| clean_name(req.guild_id.as_deref()).map(|guild_id| vec![guild_id]))
@@ -367,14 +367,14 @@ pub async fn add_discord(
         )
             .into_response();
     }
-    if let Some(token_ref) = clean_name(req.token_ref.as_deref()) {
-        if looks_like_raw_discord_token(&token_ref) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Discord tokenRef must be a secret reference, not a raw token"})),
-            )
-                .into_response();
-        }
+    if let Some(token_ref) = clean_name(req.token_ref.as_deref())
+        && looks_like_raw_discord_token(&token_ref)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Discord tokenRef must be a secret reference, not a raw token"})),
+        )
+            .into_response();
     }
 
     let mut sorted_guild_ids = guild_ids;
@@ -430,7 +430,7 @@ pub async fn add_github(
     Json(req): Json<AddGitHubSourceRequest>,
 ) -> impl IntoResponse {
     if let Err(resp) = require_admin_mutation(&state, peer, &headers) {
-        return resp;
+        return *resp;
     }
     let repos = filtered_strings(req.repos)
         .or_else(|| clean_name(req.repo.as_deref()).map(|repo| vec![repo]))
@@ -449,16 +449,14 @@ pub async fn add_github(
         )
             .into_response();
     }
-    if let Some(token_ref) = clean_name(req.token_ref.as_deref()) {
-        if looks_like_raw_github_token(&token_ref) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error": "GitHub tokenRef must be a secret reference, not a raw token"}),
-                ),
-            )
-                .into_response();
-        }
+    if let Some(token_ref) = clean_name(req.token_ref.as_deref())
+        && looks_like_raw_github_token(&token_ref)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "GitHub tokenRef must be a secret reference, not a raw token"})),
+        )
+            .into_response();
     }
 
     let mut sorted_repos = repos;
@@ -600,7 +598,7 @@ pub async fn delete_source(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(resp) = require_admin_mutation(&state, peer, &headers) {
-        return resp;
+        return *resp;
     }
     if id.trim().is_empty() || id.contains("../") || id.contains('/') || id.contains('\\') {
         return (
@@ -729,7 +727,7 @@ fn require_admin_mutation(
     state: &AppState,
     peer: SocketAddr,
     headers: &HeaderMap,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let is_local = peer.ip().is_loopback();
     let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
@@ -740,7 +738,6 @@ fn require_admin_mutation(
     )
     .map_err(|resp| *resp)?;
     require_permission_guard(&auth, Permission::Admin, auth_runtime.mode, is_local)
-        .map_err(|resp| *resp)
 }
 
 fn sources_path(state: &AppState) -> std::io::Result<PathBuf> {

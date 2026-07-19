@@ -208,12 +208,11 @@ impl SynthesisState {
     }
 
     fn rotate_pending_force(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            if inner.pending_queue.len() > 1
-                && let Some(entry) = inner.pending_queue.pop_front()
-            {
-                inner.pending_queue.push_back(entry);
-            }
+        if let Ok(mut inner) = self.inner.lock()
+            && inner.pending_queue.len() > 1
+            && let Some(entry) = inner.pending_queue.pop_front()
+        {
+            inner.pending_queue.push_back(entry);
         }
     }
 }

@@ -483,11 +483,9 @@ fn split_sentences(content: &str) -> Vec<String> {
             continue;
         }
         current.push(ch);
-        if matches!(ch, '.' | '!' | '?') {
-            if !current.trim().is_empty() {
-                out.push(normalize_sentence(&current));
-                current.clear();
-            }
+        if matches!(ch, '.' | '!' | '?') && !current.trim().is_empty() {
+            out.push(normalize_sentence(&current));
+            current.clear();
         }
     }
     if !current.trim().is_empty() {

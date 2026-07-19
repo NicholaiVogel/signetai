@@ -42,11 +42,11 @@ fn key(name: &str) -> Value {
 }
 
 fn read_mapping<'a>(map: &'a Mapping, name: &str) -> Option<&'a Mapping> {
-    map.get(&key(name)).and_then(Value::as_mapping)
+    map.get(key(name)).and_then(Value::as_mapping)
 }
 
 fn read_bool(map: &Mapping, name: &str) -> Option<bool> {
-    map.get(&key(name)).and_then(Value::as_bool)
+    map.get(key(name)).and_then(Value::as_bool)
 }
 
 fn read_pipeline_mode_from_value(
@@ -130,11 +130,11 @@ fn set_pipeline_paused(
         Value::Mapping(map) => map,
         _ => Mapping::new(),
     };
-    let mut mem = match root.remove(&key("memory")) {
+    let mut mem = match root.remove(key("memory")) {
         Some(Value::Mapping(map)) => map,
         _ => Mapping::new(),
     };
-    let mut p2 = match mem.remove(&key("pipelineV2")) {
+    let mut p2 = match mem.remove(key("pipelineV2")) {
         Some(Value::Mapping(map)) => map,
         _ => Mapping::new(),
     };
@@ -255,15 +255,16 @@ async fn apply_pause_state(state: &AppState, paused: bool) {
         // Preserve "blocked" and "disabled" states so write routes keep the
         // startup block guard active while paused.
         let mut guard = state.extraction_state.write().await;
-        if let Some(es) = guard.as_mut() {
-            if es.status != "disabled" && es.status != "blocked" {
-                es.status = "paused".to_string();
-                es.effective = "none".to_string();
-                es.degraded = false;
-                es.fallback_applied = false;
-                es.reason = None;
-                es.since = None;
-            }
+        if let Some(es) = guard.as_mut()
+            && es.status != "disabled"
+            && es.status != "blocked"
+        {
+            es.status = "paused".to_string();
+            es.effective = "none".to_string();
+            es.degraded = false;
+            es.fallback_applied = false;
+            es.reason = None;
+            es.since = None;
         }
     } else {
         // On resume, re-check provider availability and update status,

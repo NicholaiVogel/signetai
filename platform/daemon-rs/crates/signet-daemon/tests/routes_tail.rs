@@ -115,10 +115,10 @@ impl TestServer {
             if tokio::time::Instant::now() > deadline {
                 panic!("daemon did not start");
             }
-            if let Ok(resp) = client.get(format!("{base}/health")).send().await {
-                if resp.status().is_success() {
-                    break;
-                }
+            if let Ok(resp) = client.get(format!("{base}/health")).send().await
+                && resp.status().is_success()
+            {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -750,7 +750,7 @@ fn pipeline_models_returns_static_catalog_matching_ts() {
         "static model catalog should be non-empty"
     );
     assert!(
-        catalog.iter().all(|m| m.label.len() > 0),
+        catalog.iter().all(|m| !m.label.is_empty()),
         "all models have names"
     );
 }
@@ -793,6 +793,8 @@ fn seed_reflection(
     .expect("seed reflection");
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn seed_entity(
     server: &TestServer,
     id: &str,
@@ -823,6 +825,8 @@ fn seed_aspect(server: &TestServer, id: &str, entity_id: &str, name: &str, agent
     .expect("seed aspect");
 }
 
+#[allow(clippy::too_many_arguments)]
+// Mirrors the TS daemon data layer 1:1 (parity); arg-object refactor is deferred to keep the ports reviewable.
 fn seed_attribute(
     server: &TestServer,
     id: &str,
@@ -876,10 +880,10 @@ fn test_server_start_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 fn daemon_binary() -> String {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_signet-daemon") {
-        if Path::new(&path).exists() {
-            return path;
-        }
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_signet-daemon")
+        && Path::new(&path).exists()
+    {
+        return path;
     }
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
         let path = PathBuf::from(target_dir).join("debug/signet-daemon");

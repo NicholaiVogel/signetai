@@ -226,7 +226,7 @@ fn reject_if_capability_denied(
     path: &str,
     method: &str,
     required: &[&str],
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let Some(check) = check_secret_capabilities(state, required) else {
         return Ok(());
     };
@@ -237,16 +237,18 @@ fn reject_if_capability_denied(
         "status": check.status,
         "missingCapabilities": check.missing_capabilities,
     });
-    Err((check.http_status, Json(body)).into_response())
+    Err(Box::new((check.http_status, Json(body)).into_response()))
 }
 
-fn parse_json_body(bytes: Bytes) -> Result<serde_json::Value, Response> {
+fn parse_json_body(bytes: Bytes) -> Result<serde_json::Value, Box<Response>> {
     serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid JSON body"})),
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid JSON body"})),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }
 
@@ -758,24 +760,21 @@ fn sanitize_import_segment(value: &str) -> String {
         .to_string()
 }
 
+fn import_segment_or(value: &str, fallback: &str) -> String {
+    let segment = sanitize_import_segment(value);
+    if segment.is_empty() {
+        fallback.to_string()
+    } else {
+        segment
+    }
+}
+
 fn build_imported_secret_name(prefix: &str, vault: &str, item: &str, field: &str) -> String {
     let candidate = [
-        sanitize_import_segment(prefix)
-            .is_empty()
-            .then_some("OP".to_string())
-            .unwrap_or_else(|| sanitize_import_segment(prefix)),
-        sanitize_import_segment(vault)
-            .is_empty()
-            .then_some("VAULT".to_string())
-            .unwrap_or_else(|| sanitize_import_segment(vault)),
-        sanitize_import_segment(item)
-            .is_empty()
-            .then_some("ITEM".to_string())
-            .unwrap_or_else(|| sanitize_import_segment(item)),
-        sanitize_import_segment(field)
-            .is_empty()
-            .then_some("PASSWORD".to_string())
-            .unwrap_or_else(|| sanitize_import_segment(field)),
+        import_segment_or(prefix, "OP"),
+        import_segment_or(vault, "VAULT"),
+        import_segment_or(item, "ITEM"),
+        import_segment_or(field, "PASSWORD"),
     ]
     .join("_");
     if valid_name(&candidate) {
@@ -848,7 +847,7 @@ macro_rules! guarded_state_route {
     ($name:ident, $inner:ident, $path:literal, $method:literal, [$($capability:literal),+ $(,)?]) => {
         pub async fn $name(State(state): State<Arc<AppState>>) -> Response {
             if let Err(response) = reject_if_capability_denied(&state, $path, $method, &[$($capability),+]) {
-                return response;
+                return *response;
             }
             $inner(State(state)).await.into_response()
         }
@@ -859,11 +858,11 @@ macro_rules! guarded_body_route {
     ($name:ident, $inner:ident, $path:literal, $method:literal, [$($capability:literal),+ $(,)?]) => {
         pub async fn $name(State(state): State<Arc<AppState>>, bytes: Bytes) -> Response {
             if let Err(response) = reject_if_capability_denied(&state, $path, $method, &[$($capability),+]) {
-                return response;
+                return *response;
             }
             let body = match parse_json_body(bytes) {
                 Ok(body) => body,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             $inner(State(state), Json(body)).await.into_response()
         }
@@ -874,7 +873,7 @@ macro_rules! guarded_path_route {
     ($name:ident, $inner:ident, $path_ty:ty, $param:ident, $path:literal, $method:literal, [$($capability:literal),+ $(,)?]) => {
         pub async fn $name(State(state): State<Arc<AppState>>, Path($param): Path<$path_ty>) -> Response {
             if let Err(response) = reject_if_capability_denied(&state, $path, $method, &[$($capability),+]) {
-                return response;
+                return *response;
             }
             $inner(State(state), Path($param)).await.into_response()
         }
@@ -889,11 +888,11 @@ macro_rules! guarded_path_body_route {
             bytes: Bytes,
         ) -> Response {
             if let Err(response) = reject_if_capability_denied(&state, $path, $method, &[$($capability),+]) {
-                return response;
+                return *response;
             }
             let body = match parse_json_body(bytes) {
                 Ok(body) => body,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             $inner(State(state), Path($param), Json(body)).await.into_response()
         }
@@ -1023,7 +1022,7 @@ pub async fn run_with_secrets_guarded(
     if let Err(response) =
         reject_if_capability_denied(&state, "/api/secrets/exec", "POST", &["secrets:exec"])
     {
-        return response;
+        return *response;
     }
     run_with_secrets(State(state), bytes).await.into_response()
 }
