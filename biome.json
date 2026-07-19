@@ -31,14 +31,20 @@
 			"preset": "recommended",
 			"suspicious": {
 				"noAssignInExpressions": "off",
-				"noExplicitAny": "warn"
+				"noExplicitAny": "error"
 			},
 			"style": {
-				"noNonNullAssertion": "warn"
+				"noNonNullAssertion": "error"
 			},
 			"complexity": {
-				"noForEach": "warn",
-				"noBannedTypes": "warn"
+				"noForEach": "error",
+				"noBannedTypes": "error"
+			},
+			"a11y": {
+				"recommended": true
+			},
+			"security": {
+				"recommended": true
 			}
 		}
 	},
@@ -55,7 +61,13 @@
 	"overrides": [
 		{
 			"includes": ["**/*.svelte"],
-			"assist": { "actions": { "source": { "organizeImports": "off" } } },
+			"assist": {
+				"actions": {
+					"source": {
+						"organizeImports": "off"
+					}
+				}
+			},
 			"linter": {
 				"rules": {
 					"correctness": {
@@ -70,7 +82,13 @@
 			"formatter": {
 				"enabled": false
 			},
-			"assist": { "actions": { "source": { "organizeImports": "off" } } },
+			"assist": {
+				"actions": {
+					"source": {
+						"organizeImports": "off"
+					}
+				}
+			},
 			"linter": {
 				"enabled": true,
 				"rules": {
@@ -96,6 +114,12 @@
 					},
 					"suspicious": {
 						"noExplicitAny": "off"
+					},
+					"a11y": {
+						"recommended": false
+					},
+					"security": {
+						"recommended": false
 					}
 				}
 			}
