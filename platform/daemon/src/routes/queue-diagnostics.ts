@@ -155,29 +155,20 @@ function repairHttpStatus(result: RepairResult): 200 | 429 | 500 {
 	return 500;
 }
 
-function dispatchRepair(
-	ctx: RepairContext,
-	cfg: ReturnType<typeof loadMemoryConfig>["pipelineV2"],
-	parsed: NonNullable<ReturnType<typeof parseRepairBody>>,
-): RepairResult {
-	const limiter = resolveLimiter();
-	const options = { dryRun: parsed.dryRun, ...parsed.options };
-	if (parsed.action === "requeue") return requeueDeadJobs(getDbAccessor(), cfg, ctx, limiter, options);
-	if (parsed.action === "cancel") return cancelObsoleteJobs(getDbAccessor(), cfg, ctx, limiter, options);
-	return pruneTerminalJobs(getDbAccessor(), cfg, ctx, limiter, options);
-}
-
 export function registerQueueDiagnosticsRoutes(
 	app: Hono,
 	deps: { accessor?: DbAccessor; limiter?: ReturnType<typeof createRateLimiter> } = {},
 ): void {
 	const adminGuard = requirePermission("admin", authConfig);
-	const accessor = deps.accessor ?? getDbAccessor();
 	const limiter = deps.limiter ?? repairLimiter ?? createRateLimiter();
+
+	function resolveAccessor(): DbAccessor {
+		return deps.accessor ?? getDbAccessor();
+	}
 
 	app.get("/api/diagnostics/queue", adminGuard, (c) => {
 		try {
-			const response = accessor.withReadDb((db) => buildQueueDiagnosticsResponse(db));
+			const response = resolveAccessor().withReadDb((db) => buildQueueDiagnosticsResponse(db));
 			return c.json(response);
 		} catch (err) {
 			return c.json({ error: (err as Error).message }, 500);
@@ -197,7 +188,7 @@ export function registerQueueDiagnosticsRoutes(
 		}
 		const ctx = resolveRepairContext(c);
 		const options = { dryRun: parsed.dryRun, ...parsed.options };
-		const result = dispatchRepairWith(ctx, accessor, limiter, parsed.action, options);
+		const result = dispatchRepairWith(ctx, resolveAccessor(), limiter, parsed.action, options);
 		const code = repairHttpStatus(result);
 		return c.json(result, code as 200 | 429 | 500);
 	});
