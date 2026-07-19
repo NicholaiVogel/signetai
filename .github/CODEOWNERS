@@ -1,0 +1,20 @@
+# CODEOWNERS — quality-critical paths require owner review.
+# Keep in sync with CONTRIBUTING.md "Required checks" section.
+
+# CI / quality gates
+.github/workflows/**          @Signet-AI/maintainer
+biome.json                    @Signet-AI/maintainer
+knip.json                     @Signet-AI/maintainer
+tsconfig.json                 @Signet-AI/maintainer
+.github/CODEOWNERS            @Signet-AI/maintainer
+
+# Rust shadow daemon
+platform/daemon-rs/**         @Signet-AI/maintainer
+
+# Database migrations
+**/migrations/**              @Signet-AI/maintainer
+
+# Release / publish scripts
+scripts/release/**            @Signet-AI/maintainer
+scripts/version-sync.ts       @Signet-AI/maintainer
+.github/workflows/release.yml @Signet-AI/maintainer

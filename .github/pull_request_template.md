@@ -39,10 +39,12 @@
      touch the frontend without screenshots will not be merged. -->
 
 
-## PR Readiness (MANDATORY)
+## Human Review (MANDATORY)
 
-<!-- Derived from AGENTS.md recurring review failures. These checks are
-     required and enforced by CI. -->
+<!-- Human-only review items. Machine-checkable gates — biome, tsc
+     --noEmit, the full test suite, and the cargo fmt/clippy/check/test/
+     deny suite — are enforced by the required status checks in
+     .github/workflows/ci.yml and are NOT self-attested here. -->
 
 - [ ] Spec alignment validated (`INDEX.md` + `dependencies.yaml`)
 - [ ] Agent scoping verified on all new/changed data queries
@@ -51,7 +53,6 @@
 - [ ] Security checks applied to admin/mutation endpoints
 - [ ] Docs updated for API/spec/status changes
 - [ ] Regression tests added for each bug fix
-- [ ] Lint/typecheck/tests pass locally
 
 
 ## Migration Notes (if applicable)
@@ -64,11 +65,10 @@
 
 ## Testing
 
-<!-- How did you verify this works? -->
+<!-- How did you verify this works? Lint, typecheck, and the full test
+     suite run as required CI checks (.github/workflows/ci.yml) — do not
+     self-attest them here. Describe runtime/manual verification only. -->
 
-- [ ] `bun test` passes
-- [ ] `bun run typecheck` passes
-- [ ] `bun run lint` passes
 - [ ] Tested against running daemon
 - [ ] N/A
 

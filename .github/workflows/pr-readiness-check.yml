@@ -19,14 +19,10 @@ jobs:
         with:
           script: |
             const pr = context.payload.pull_request;
-            const labels = (pr.labels || []).map((l) => l.name);
-            if (labels.includes("checklist-exception")) {
-              core.notice(
-                "Bypassing mandatory readiness checklist because PR has label: checklist-exception",
-              );
-              return;
-            }
-
+            // Human-only review items. Machine-checkable gates (lint,
+            // typecheck, tests, cargo suite) are enforced by the required
+            // status checks in .github/workflows/ci.yml, not by
+            // self-attested checkboxes. There is no label bypass (#919).
             const body = pr.body || "";
             const required = [
               "Spec alignment validated (`INDEX.md` + `dependencies.yaml`)",
@@ -36,7 +32,6 @@ jobs:
               "Security checks applied to admin/mutation endpoints",
               "Docs updated for API/spec/status changes",
               "Regression tests added for each bug fix",
-              "Lint/typecheck/tests pass locally",
             ];
 
             const missing = required.filter((item) => {
@@ -51,7 +46,7 @@ jobs:
                   "Missing required checked PR readiness items:",
                   ...missing.map((m) => `- ${m}`),
                   "",
-                  "Please update the PR body checklist in .github/pull_request_template.md.\nTo bypass intentionally, apply label: checklist-exception",
+                  "Please update the PR body checklist in .github/pull_request_template.md.",
                 ].join("\n"),
               );
             }

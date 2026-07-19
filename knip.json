@@ -1,0 +1,20 @@
+{
+	"$schema": "https://unpkg.com/knip@5/schema.json",
+	"workspaces": {
+		".": {
+			"entry": ["scripts/**/*.ts"],
+			"project": ["scripts/**/*.ts"]
+		},
+		"platform/*": {},
+		"libs/*": {},
+		"surfaces/*": {},
+		"integrations/*/*": {},
+		"dist/*": {},
+		"web/marketing": {},
+		"web/workers/*": {},
+		"memorybench": {}
+	},
+	"ignore": ["references/**", "**/dist/**", "**/_app/**", "**/*.generated.*"],
+	"ignoreBinaries": ["biome"],
+	"ignoreDependencies": ["bun-types"]
+}
