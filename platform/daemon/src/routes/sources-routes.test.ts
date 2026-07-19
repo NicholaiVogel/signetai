@@ -222,7 +222,7 @@ describe("Sources routes", () => {
 			if (text.includes("/issues?") || text.includes("/pulls?")) return Promise.resolve(Response.json([]));
 			if (text.includes("/contents/")) return Promise.resolve(new Response("missing", { status: 404 }));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const res = await makeApp().request("/api/sources/github", {
 			method: "POST",

@@ -99,7 +99,7 @@ export function getConnector(accessor: DbAccessor, id: string): ConnectorRow | u
  */
 export function listConnectors(accessor: DbAccessor): readonly ConnectorRow[] {
 	return accessor.withReadDb((db) => {
-		return db.prepare("SELECT * FROM connectors ORDER BY created_at DESC").all() as ConnectorRow[];
+		return db.prepare("SELECT * FROM connectors ORDER BY created_at DESC").all() as unknown as ConnectorRow[];
 	});
 }
 

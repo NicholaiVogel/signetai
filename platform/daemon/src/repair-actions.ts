@@ -1836,7 +1836,7 @@ export function pruneGenericEntities(
 		);
 
 		for (;;) {
-			const rows = selectPage.all(agentId, pageSize, offset) as GenericEntityCandidate[];
+			const rows = selectPage.all(agentId, pageSize, offset) as unknown as GenericEntityCandidate[];
 			if (rows.length === 0) break;
 			for (const row of rows) {
 				const quality = classifyEntityQuality(row.name, row.entity_type);

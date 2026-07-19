@@ -167,7 +167,7 @@ function searchFromThreadHeads(params: {
 			}
 			parts.push("ORDER BY rank DESC, latest_at DESC LIMIT ?");
 			args.push(params.limit * 4);
-			return db.prepare(parts.join("\n")).all(...args) as TemporalRow[];
+			return db.prepare(parts.join("\n")).all(...args) as unknown as TemporalRow[];
 		});
 
 		return toHits(rows, params.query, params.project, params.termCount, params.anchorCount, params.limit);
@@ -216,7 +216,7 @@ function searchFromSessionSummaries(params: {
 			}
 			parts.push("ORDER BY rank DESC, latest_at DESC LIMIT ?");
 			args.push(params.limit * 4);
-			return db.prepare(parts.join("\n")).all(...args) as TemporalRow[];
+			return db.prepare(parts.join("\n")).all(...args) as unknown as TemporalRow[];
 		});
 
 		return toHits(rows, params.query, params.project, params.termCount, params.anchorCount, params.limit);

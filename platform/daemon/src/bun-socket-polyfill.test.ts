@@ -7,7 +7,7 @@ describe("destroySoon polyfill", () => {
 
 	beforeEach(() => {
 		originalDestroySoon = Duplex.prototype.destroySoon;
-		delete (Duplex.prototype as Record<string, unknown>).destroySoon;
+		delete (Duplex.prototype as unknown as Record<string, unknown>).destroySoon;
 	});
 
 	afterEach(() => {

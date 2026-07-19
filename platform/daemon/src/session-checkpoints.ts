@@ -229,7 +229,7 @@ export function getLatestCheckpoint(
 				 ORDER BY created_at DESC, rowid DESC
 				 LIMIT 1`,
 			)
-			.get(projectNormalized, cutoff) as CheckpointRow | null;
+			.get(projectNormalized, cutoff) as unknown as CheckpointRow | null;
 		return row ?? undefined;
 	});
 }
@@ -244,7 +244,7 @@ export function getLatestCheckpointBySession(db: DbAccessor, sessionKey: string)
 				 ORDER BY created_at DESC, rowid DESC
 				 LIMIT 1`,
 			)
-			.get(sessionKey) as CheckpointRow | null;
+			.get(sessionKey) as unknown as CheckpointRow | null;
 		return row ?? undefined;
 	});
 }

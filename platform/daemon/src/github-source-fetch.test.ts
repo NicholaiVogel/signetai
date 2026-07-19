@@ -26,7 +26,7 @@ describe("github-source-fetch", () => {
 					{ full_name: "owner/privateXarchive", name: "privateXarchive" },
 				]),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await expandRepoGlob("owner", "private.*", undefined, 2);
 
@@ -56,7 +56,7 @@ describe("github-source-fetch", () => {
 					},
 				]),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await fetchIssues({ owner: "o", repo: "r" }, undefined, "all", 1);
 
@@ -73,7 +73,7 @@ describe("github-source-fetch", () => {
 			if (delay === 30_000) {
 				const handle = { id: `request-${requestTimeouts.length + 1}` };
 				requestTimeouts.push(handle);
-				return handle as ReturnType<typeof setTimeout>;
+				return handle as Runknown as eunknown as turnType<typeof setTimeout>;
 			}
 			return originalSetTimeout(callback, 0, ...args);
 		}) as typeof setTimeout;
@@ -84,7 +84,7 @@ describe("github-source-fetch", () => {
 			}
 			originalClearTimeout(handle);
 		}) as typeof clearTimeout;
-		globalThis.fetch = mock(() => Promise.reject(new Error("network down"))) as typeof fetch;
+		globalThis.fetch = mock(() => Promise.reject(new Error("network down"))) as unknown as typeof fetch;
 
 		try {
 			await expect(fetchRepoInfo({ owner: "o", repo: "r" })).rejects.toThrow("network down");
@@ -100,7 +100,7 @@ describe("github-source-fetch", () => {
 		globalThis.fetch = mock((url: string | URL | Request) => {
 			requested = String(url);
 			return Promise.resolve(Response.json({ items: [] }));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		await fetchPullRequestsBySearch({ owner: "o", repo: "r" }, ['quoted"label'], undefined, "open", 10);
 
@@ -154,7 +154,7 @@ describe("github-source-fetch", () => {
 					items: page === "1" ? Array.from({ length: 100 }, (_, index) => makePull(index + 1)) : [makePull(101)],
 				}),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await fetchPullRequestsBySearch({ owner: "o", repo: "r" }, ["bug"], undefined, "open", 101);
 
@@ -208,7 +208,7 @@ describe("github-source-fetch", () => {
 					review_comments: 3,
 				}),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await fetchPullRequestsBySearch({ owner: "o", repo: "r" }, ["sources"], undefined, "all", 1);
 
@@ -246,7 +246,7 @@ describe("github-source-fetch", () => {
 					},
 				]),
 			),
-		) as typeof fetch;
+		) as unknown as typeof fetch;
 
 		const result = await fetchPullRequests({ owner: "o", repo: "r" }, undefined, "open", 1);
 
@@ -281,7 +281,7 @@ describe("github-source-fetch", () => {
 					},
 				}),
 			),
-		) as typeof fetch;
+		) as unknown as typeof fetch;
 
 		const result = await fetchDiscussions({ owner: "o", repo: "r", token: "token" }, undefined, "closed", 10);
 
@@ -321,7 +321,7 @@ describe("github-source-fetch", () => {
 					},
 				}),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await fetchDiscussions({ owner: "o", repo: "r", token: "token" }, undefined, "all", 2);
 
@@ -377,7 +377,7 @@ describe("github-source-fetch", () => {
 					},
 				}),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await fetchDiscussions({ owner: "o", repo: "r", token: "token" }, undefined, "open", 1);
 
@@ -415,7 +415,7 @@ describe("github-source-fetch", () => {
 					},
 				}),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await fetchDiscussions({ owner: "o", repo: "r", token: "token" }, undefined, "open", 1);
 
@@ -453,7 +453,7 @@ describe("github-source-fetch", () => {
 					},
 				}),
 			),
-		) as typeof fetch;
+		) as unknown as typeof fetch;
 
 		const comments = await fetchDiscussionComments({ owner: "o", repo: "r", token: "token" }, 7);
 
@@ -490,7 +490,7 @@ describe("github-source-fetch", () => {
 					},
 				}),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const comments = await fetchDiscussionComments({ owner: "o", repo: "r", token: "token" }, 7);
 
@@ -509,7 +509,7 @@ describe("github-source-fetch", () => {
 					data: { repository: { discussion: null } },
 				}),
 			),
-		) as typeof fetch;
+		) as unknown as typeof fetch;
 
 		await expect(fetchDiscussionComments({ owner: "o", repo: "r", token: "token" }, 7)).rejects.toThrow(
 			"Discussion comments GraphQL error: discussion comments unavailable",
@@ -527,7 +527,7 @@ describe("github-source-fetch", () => {
 					sha: "abc",
 				}),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await fetchRepoDocs({ owner: "o", repo: "r" }, ["docs/API.md"], "main", 1);
 
@@ -556,7 +556,7 @@ describe("github-source-fetch", () => {
 					sha: "abc",
 				}),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const direct = await fetchRepoDocs({ owner: "o", repo: "r" }, ["docs/*.md"], "main", 10);
 		const recursive = await fetchRepoDocs({ owner: "o", repo: "r" }, ["docs/**/*.md"], "main", 10);
@@ -585,7 +585,7 @@ describe("github-source-fetch", () => {
 					sha: "abc",
 				}),
 			);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await fetchRepoDocs({ owner: "o", repo: "r" }, ["docs/*.md"], "main", 1);
 

@@ -125,7 +125,7 @@ function findMaxSimilarityFallback(db: ReadDb, query: Float32Array, input: Write
 		args.push(input.sourceScope);
 	}
 	args.push(NEIGHBOR_LIMIT);
-	const rows = db.prepare(sql).all(...args) as ReadonlyArray<{ vector: Buffer }>;
+	const rows = db.prepare(sql).all(...args) as Runknown as eunknown as adonlyArray<{ vector: Buffer }>;
 
 	if (rows.length === 0) return null;
 	let max = 0;
@@ -222,7 +222,7 @@ function computeContinuitySignals(db: ReadDb, input: WriteGateInput, query: Floa
 			args.push(input.sourceProject);
 		}
 		args.push(RECENT_SIMILARITY_LIMIT);
-		const rows = db.prepare(sql).all(...args) as ReadonlyArray<{ vector: Buffer }>;
+		const rows = db.prepare(sql).all(...args) as Runknown as eunknown as adonlyArray<{ vector: Buffer }>;
 		if (rows.length === 0) return false;
 
 		let max = 0;

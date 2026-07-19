@@ -359,7 +359,7 @@ export function registerMiscRoutes(app: Hono): void {
 			(db) =>
 				db
 					.prepare("SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents ORDER BY name")
-					.all() as AgentRow[],
+					.all() as unknown as AgentRow[],
 		);
 		return c.json({ agents });
 	});

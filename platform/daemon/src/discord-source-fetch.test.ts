@@ -90,7 +90,7 @@ describe("discord-source-fetch", () => {
 			const handle = { handler, timeout, args };
 			handles.push(handle);
 			return handle;
-		}) as typeof setTimeout;
+		}) as unknown as typeof setTimeout;
 		globalThis.clearTimeout = ((handle?: string | number | Timer) => {
 			cleared.push(handle);
 		}) as typeof clearTimeout;

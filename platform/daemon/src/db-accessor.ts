@@ -307,7 +307,7 @@ export function resolveSqliteRuntimeConfig(opts?: {
 	const set =
 		opts?.set ??
 		((path: string) => {
-			if (typeof (Database as Record<string, unknown>).setCustomSQLite === "function") {
+			if (typeof (Database as unknown as Record<string, unknown>).setCustomSQLite === "function") {
 				(Database as { setCustomSQLite(p: string): void }).setCustomSQLite(path);
 			}
 		});

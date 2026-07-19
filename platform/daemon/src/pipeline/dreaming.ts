@@ -323,7 +323,7 @@ function fetchUnprocessedSummaries(
 		   ORDER BY latest_at ASC
 		   LIMIT ?`;
 	const args = since ? [agentId, since, limit] : [agentId, limit];
-	return db.prepare(query).all(...args) as SessionSummaryRow[];
+	return db.prepare(query).all(...args) as unknown as SessionSummaryRow[];
 }
 
 function fetchEntityGraph(

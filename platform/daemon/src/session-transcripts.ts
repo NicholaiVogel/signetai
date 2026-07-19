@@ -249,7 +249,7 @@ async function backfillDatabaseTranscripts(
 						FROM session_transcripts
 						ORDER BY agent_id, harness, session_key, rowid
 						LIMIT ? OFFSET ?`;
-				return db.prepare(sql).all(PAGE_SIZE, offset) as StoredTranscriptBackfillRow[];
+				return db.prepare(sql).all(PAGE_SIZE, offset) as unknown as StoredTranscriptBackfillRow[];
 			});
 			if (rows.length === 0) break;
 			for (const row of rows) {
@@ -616,7 +616,7 @@ export function searchTranscriptFallback(params: {
 						}
 						parts.push(`ORDER BY rank ASC, ${seenExpr} DESC LIMIT ?`);
 						args.push(limit * 2);
-						return db.prepare(parts.join("\n")).all(...args) as TranscriptRow[];
+						return db.prepare(parts.join("\n")).all(...args) as unknown as TranscriptRow[];
 					});
 
 					const hits = rows
@@ -684,7 +684,7 @@ export function searchTranscriptFallback(params: {
 			}
 			parts.push(`ORDER BY rank DESC, ${seenExpr} DESC LIMIT ?`);
 			args.push(limit);
-			return db.prepare(parts.join("\n")).all(...args) as TranscriptRow[];
+			return db.prepare(parts.join("\n")).all(...args) as unknown as TranscriptRow[];
 		});
 
 		return rows

@@ -77,7 +77,7 @@ describe("github-source-provider", () => {
 				);
 			}
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		const added = addGitHubSource(
 			{
 				repos: ["Signet-AI/signetai"],
@@ -142,7 +142,7 @@ describe("github-source-provider", () => {
 				);
 			}
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await githubSourceProvider.sync?.({
 			source,
@@ -174,7 +174,7 @@ describe("github-source-provider", () => {
 				maxItemsPerRepo: 5,
 			},
 		};
-		globalThis.fetch = mock(() => Promise.resolve(Response.json([]))) as typeof fetch;
+		globalThis.fetch = mock(() => Promise.resolve(Response.json([]))) as unknown as typeof fetch;
 
 		const result = await githubSourceProvider.sync?.({
 			source,
@@ -234,7 +234,7 @@ describe("github-source-provider", () => {
 				return originalDate.UTC(year, monthIndex, date, hours, minutes, seconds, ms);
 			}
 		} as DateConstructor;
-		globalThis.fetch = mock(() => Promise.resolve(Response.json([]))) as typeof fetch;
+		globalThis.fetch = mock(() => Promise.resolve(Response.json([]))) as unknown as typeof fetch;
 
 		try {
 			const result = await githubSourceProvider.sync?.({
@@ -301,7 +301,7 @@ describe("github-source-provider", () => {
 				);
 			}
 			throw new Error(`unexpected GitHub request after cap reached: ${text}`);
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await githubSourceProvider.sync?.({
 			source,
@@ -383,7 +383,7 @@ describe("github-source-provider", () => {
 				);
 			}
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await githubSourceProvider.sync?.({
 			source,
@@ -490,7 +490,7 @@ describe("github-source-provider", () => {
 				);
 			}
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		try {
 			const result = await githubSourceProvider.sync?.({
@@ -579,7 +579,7 @@ describe("github-source-provider", () => {
 				);
 			}
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await githubSourceProvider.sync?.({
 			source,
@@ -673,7 +673,7 @@ describe("github-source-provider", () => {
 				return Promise.resolve(Response.json({ message: "missing" }, { status: 404 }));
 			}
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await githubSourceProvider.sync?.({
 			source,
@@ -746,7 +746,7 @@ describe("github-source-provider", () => {
 				);
 			}
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await githubSourceProvider.sync?.({
 			source,
@@ -798,7 +798,7 @@ describe("github-source-provider", () => {
 				return Promise.resolve(Response.json({ message: "missing" }, { status: 404 }));
 			}
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		const added = addGitHubSource(
 			{
 				repos: ["Signet-AI/signetai"],
