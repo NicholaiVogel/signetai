@@ -5,6 +5,7 @@ import type { Context, Hono } from "hono";
 import { resolveAgentId, resolveDaemonAgentId } from "../agent-id.js";
 import { requirePermission, requireRateLimit } from "../auth";
 import { getDbAccessor } from "../db-accessor.js";
+import { getOldestDeadJob, getQueueCounts } from "../diagnostics-queue.js";
 import { DreamPromotionError, promoteDreamingEvidence } from "../dream-promotion.js";
 import { getInferenceProviderOrNull, getLlmProvider } from "../llm.js";
 import { loadMemoryConfig } from "../memory-config.js";
@@ -58,6 +59,43 @@ import {
 	telemetryRef,
 } from "./state.js";
 import { STATUS_CACHE_TTL, cachedEmbeddingStatus, resolveScopedAgentId, statusCacheTime } from "./utils.js";
+
+interface PipelineQueueBlock {
+	readonly memory: ReturnType<typeof getQueueCounts>;
+	readonly summary: ReturnType<typeof getQueueCounts>;
+	readonly extraction: ReturnType<typeof getQueueCounts>;
+	readonly oldestDeadSummaryJob: ReturnType<typeof getOldestDeadJob>;
+}
+
+const EMPTY_QUEUE_COUNTS_SHAPE: ReturnType<typeof getQueueCounts> = {
+	pending: 0,
+	leased: 0,
+	completed: 0,
+	failed: 0,
+	dead: 0,
+	oldestAgeSec: 0,
+	oldestDeadAgeSec: 0,
+	lastError: null,
+};
+
+function pipelineQueueBlock(): PipelineQueueBlock {
+	try {
+		const accessor = getDbAccessor();
+		return accessor.withReadDb((db) => ({
+			memory: getQueueCounts(db, "memory"),
+			summary: getQueueCounts(db, "summary"),
+			extraction: getQueueCounts(db, "extraction"),
+			oldestDeadSummaryJob: getOldestDeadJob(db, "summary"),
+		}));
+	} catch {
+		return {
+			memory: { ...EMPTY_QUEUE_COUNTS_SHAPE },
+			summary: { ...EMPTY_QUEUE_COUNTS_SHAPE },
+			extraction: { ...EMPTY_QUEUE_COUNTS_SHAPE },
+			oldestDeadSummaryJob: null,
+		};
+	}
+}
 
 const pipelineAdminGuard = async (c: Context, next: () => Promise<void>): Promise<Response | undefined> => {
 	const permDenied = await requirePermission("admin", authConfig)(c, () => Promise.resolve());
@@ -240,6 +278,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					overloadSince: extractionWorker.stats?.overloadSince ?? null,
 					nextTickInMs: extractionWorker.stats?.nextTickInMs ?? null,
 				},
+				queue: pipelineQueueBlock(),
 			},
 			providerResolution: providerRuntimeResolution,
 			logging: {

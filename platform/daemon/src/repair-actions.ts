@@ -46,6 +46,21 @@ export interface RepairResult {
 	readonly success: boolean;
 	readonly affected: number;
 	readonly message: string;
+	/** Present on dry-run previews; ids the action *would* touch (capped). */
+	readonly preview?: readonly string[];
+	/** Count of rows that matched the filter (capped for log size). */
+	readonly totalMatching?: number;
+}
+
+/** Filters accepted by `requeueDeadJobs` / `cancelObsoleteJobs` / `pruneTerminalJobs`. */
+export interface JobFilterOptions {
+	readonly dryRun?: boolean;
+	readonly ids?: readonly string[];
+	readonly tables?: readonly ("memory" | "summary")[];
+	readonly olderThanMs?: number;
+	readonly errorPattern?: string;
+	readonly retentionMs?: number;
+	readonly maxBatch?: number;
 }
 
 export interface RepairGateCheck {
@@ -182,18 +197,42 @@ const DEFAULT_REQUEUE_BATCH = 50;
 // FTS rebuilds are heavyweight; cap their hourly budget at 5
 const FTS_HOURLY_BUDGET = 5;
 
+// ---- Issue #901 shared constants ----
+/** Capped number of ids returned in dry-run previews. */
+const PREVIEW_CAP = 100;
+/** Hard cap on rows touched by a single apply/cancel/prune call. */
+const MAX_BATCH_HARD_CAP = 1000;
+
 /**
  * Reset dead jobs to pending so the worker will retry them.
+ *
+ * Issue #901 — accepts an `options` parameter for selective requeue:
+ * `dryRun` returns a preview without mutating data; `ids` targets a
+ * specific set; `olderThanMs` and `errorPattern` narrow further. All
+ * options compose, default behavior is preserved when `options` is
+ * omitted (existing callers stay correct).
  */
 export function requeueDeadJobs(
 	accessor: DbAccessor,
 	cfg: PipelineV2Config,
 	ctx: RepairContext,
 	limiter: RateLimiter,
-	maxBatch: number = DEFAULT_REQUEUE_BATCH,
+	maxBatchOrOptions: number | JobFilterOptions = DEFAULT_REQUEUE_BATCH,
 ): RepairResult {
 	const action = "requeueDeadJobs";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.requeueCooldownMs, cfg.repair.requeueHourlyBudget);
+	const options: JobFilterOptions =
+		typeof maxBatchOrOptions === "number" ? { maxBatch: maxBatchOrOptions } : maxBatchOrOptions;
+	const maxBatch = options.maxBatch ?? DEFAULT_REQUEUE_BATCH;
+	const dryRun = options.dryRun === true;
+
+	const gate = checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
 
 	if (!gate.allowed) {
 		return {
@@ -206,16 +245,34 @@ export function requeueDeadJobs(
 
 	// Requeue both memory_jobs and summary_jobs in a single transaction
 	// so the rate limiter only records on full success.
-	const { memoryCount, summaryCount } = accessor.withWriteTx((db) => {
+	const { memoryCount, summaryCount, preview, totalMatching } = accessor.withWriteTx((db) => {
 		// --- memory_jobs ---
-		let memoryCount = 0;
-		const dead = db.prepare("SELECT id FROM memory_jobs WHERE status = 'dead' LIMIT ?").all(maxBatch) as Array<{
-			id: string;
-		}>;
+		const memorySql = buildDeadRequeueSql(db, "memory_jobs", "memory_id", maxBatch, options);
+		const memoryIds = memorySql.ids;
 
-		if (dead.length > 0) {
-			const placeholders = dead.map(() => "?").join(", ");
-			const ids = dead.map((r) => r.id);
+		// Dry-run: collect without mutating.
+		if (dryRun) {
+			const memoryPreview: string[] = memoryIds.map((r) => r.id);
+			const summarySql = buildDeadRequeueSql(db, "summary_jobs", null, maxBatch - memoryPreview.length, {
+				...options,
+				tables: options.tables?.filter((t) => t === "summary"),
+			});
+			const summaryPreview: string[] = summarySql.ids.map((r) => r.id);
+			const previewIds = [...memoryPreview, ...summaryPreview].slice(0, PREVIEW_CAP);
+			const totalMatching =
+				(memorySql.totalMatching ?? 0) + (summarySql.totalMatching ?? 0);
+			return {
+				memoryCount: 0,
+				summaryCount: 0,
+				preview: previewIds,
+				totalMatching,
+			};
+		}
+
+		let memoryCount = 0;
+		if (memoryIds.length > 0) {
+			const placeholders = memoryIds.map(() => "?").join(", ");
+			const ids = memoryIds.map((r) => r.id);
 			const now = new Date().toISOString();
 			const result = db
 				.prepare(
@@ -231,21 +288,17 @@ export function requeueDeadJobs(
 		}
 
 		// --- summary_jobs (issue #181) ---
-		// Share the maxBatch budget: only requeue up to the remaining capacity
 		const summaryBudget = maxBatch - memoryCount;
 		let summaryCount = 0;
-		const tableExists = db
-			.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'summary_jobs'")
-			.get();
-
-		if (tableExists && summaryBudget > 0) {
-			const deadSummary = db
-				.prepare("SELECT id FROM summary_jobs WHERE status = 'dead' LIMIT ?")
-				.all(summaryBudget) as Array<{ id: string }>;
-
-			if (deadSummary.length > 0) {
-				const placeholders = deadSummary.map(() => "?").join(", ");
-				const ids = deadSummary.map((r) => r.id);
+		if (summaryBudget > 0 && tableExistsInternal(db, "summary_jobs")) {
+			const summarySql = buildDeadRequeueSql(db, "summary_jobs", null, summaryBudget, {
+				...options,
+				tables: options.tables?.filter((t) => t === "summary"),
+			});
+			const summaryIds = summarySql.ids;
+			if (summaryIds.length > 0) {
+				const placeholders = summaryIds.map(() => "?").join(", ");
+				const ids = summaryIds.map((r) => r.id);
 				const result = db
 					.prepare(
 						`UPDATE summary_jobs
@@ -259,25 +312,40 @@ export function requeueDeadJobs(
 			}
 		}
 
-		return { memoryCount, summaryCount };
+		return {
+			memoryCount,
+			summaryCount,
+			preview: undefined as readonly string[] | undefined,
+			totalMatching: undefined as number | undefined,
+		};
 	});
 
 	const totalAffected = memoryCount + summaryCount;
 
-	limiter.record(action);
+	if (!dryRun) {
+		limiter.record(action);
+	}
 	logger.info("pipeline", "repair: requeued dead jobs", {
 		memoryJobs: memoryCount,
 		summaryJobs: summaryCount,
 		total: totalAffected,
+		dryRun,
+		previewCount: preview?.length ?? 0,
+		totalMatching,
 		actor: ctx.actor,
 		reason: ctx.reason,
 	});
 
+	const baseMessage = dryRun
+		? `dry-run: ${totalMatching} job(s) match requeue filter; preview shows ${preview?.length ?? 0}`
+		: `requeued ${memoryCount} dead memory job(s) and ${summaryCount} dead summary job(s) to pending`;
 	return {
 		action,
 		success: true,
-		affected: totalAffected,
-		message: `requeued ${memoryCount} dead memory job(s) and ${summaryCount} dead summary job(s) to pending`,
+		affected: dryRun ? 0 : totalAffected,
+		message: baseMessage,
+		preview: dryRun ? preview : undefined,
+		totalMatching: dryRun ? totalMatching : undefined,
 	};
 }
 
@@ -2283,5 +2351,866 @@ export async function rebuildDerivedIndexes(
 		fts: { repaired: ftsResult.affected > 0, message: ftsResult.message },
 		embeddings: { reembedded: reembedResult.written, totalMissing: reembedResult.selected - reembedResult.written },
 		summary: parts.join(" · "),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers shared by selective repair actions (issue #901)
+// ---------------------------------------------------------------------------
+
+function tableExistsInternal(db: ReadDb, name: string): boolean {
+	const row = db
+		.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+		.get(name) as { name: string } | undefined;
+	return row !== undefined;
+}
+
+interface DeadMatchRow {
+	readonly id: string;
+}
+
+interface BuiltSql {
+	readonly sql: string;
+	readonly params: readonly unknown[];
+	readonly ids: readonly DeadMatchRow[];
+	readonly totalMatching: number;
+}
+
+/**
+ * Build a parameterized SELECT that enumerates dead rows matching the
+ * filter. The `placeholderIdColumn` arg identifies the column that
+ * uniquely identifies the row inside the table — `memory_id` for
+ * `memory_jobs`, `null` for `summary_jobs` whose primary key is `id`.
+ */
+function buildDeadRequeueSql(
+	db: ReadDb,
+	table: "memory_jobs" | "summary_jobs",
+	_placeholderIdColumn: "memory_id" | null,
+	limit: number,
+	options: JobFilterOptions,
+): BuiltSql {
+	if (limit <= 0) {
+		return { sql: "", params: [], ids: [], totalMatching: 0 };
+	}
+	if (!tableExistsInternal(db, table)) {
+		return { sql: "", params: [], ids: [], totalMatching: 0 };
+	}
+
+	const where: string[] = ["status = 'dead'"];
+	const params: unknown[] = [];
+
+	if (options.ids && options.ids.length > 0) {
+		const placeholders = options.ids.map(() => "?").join(", ");
+		where.push(`id IN (${placeholders})`);
+		params.push(...options.ids);
+	}
+	if (options.olderThanMs !== undefined && options.olderThanMs > 0) {
+		const cutoff = new Date(Date.now() - options.olderThanMs).toISOString();
+		where.push("created_at < ?");
+		params.push(cutoff);
+	}
+	if (options.errorPattern !== undefined && options.errorPattern !== "") {
+		where.push("error LIKE ?");
+		params.push(`%${options.errorPattern}%`);
+	}
+
+	const baseWhere = `WHERE ${where.join(" AND ")}`;
+	const countStmt = db.prepare(`SELECT COUNT(*) AS cnt FROM ${table} ${baseWhere}`);
+	const totalMatching =
+		((countStmt.get(...params) as { cnt: number } | undefined)?.cnt ?? 0);
+
+	const stmt = db.prepare(
+		`SELECT id FROM ${table} ${baseWhere} ORDER BY created_at ASC LIMIT ?`,
+	);
+	const ids = stmt.all(...params, limit) as DeadMatchRow[];
+	return { sql: "", params: [...params, limit], ids, totalMatching };
+}
+
+interface CancelPruneMatchRow {
+	readonly id: string;
+	readonly payload: Record<string, unknown>;
+}
+
+interface CancelPruneBuilt {
+	readonly rows: readonly CancelPruneMatchRow[];
+	readonly totalMatching: number;
+}
+
+/**
+ * Build a parameterized SELECT for `cancelObsoleteJobs` and
+ * `pruneTerminalJobs`. Captures the full row as JSON so the action can
+ * copy it to the audit/archive table inside the same write tx.
+ */
+function buildCancelPruneSql(
+	db: ReadDb,
+	table: "memory_jobs" | "summary_jobs",
+	statusList: readonly string[],
+	options: JobFilterOptions & { retentionMsByStatus?: Record<string, number> },
+): CancelPruneBuilt {
+	if (!tableExistsInternal(db, table)) {
+		return { rows: [], totalMatching: 0 };
+	}
+	if (statusList.length === 0) return { rows: [], totalMatching: 0 };
+
+	const placeholders = statusList.map(() => "?").join(", ");
+	const where: string[] = [`status IN (${placeholders})`];
+	const params: unknown[] = [...statusList];
+
+	if (options.ids && options.ids.length > 0) {
+		const ph = options.ids.map(() => "?").join(", ");
+		where.push(`id IN (${ph})`);
+		params.push(...options.ids);
+	}
+	if (options.olderThanMs !== undefined && options.olderThanMs > 0) {
+		const cutoff = new Date(Date.now() - options.olderThanMs).toISOString();
+		where.push("created_at < ?");
+		params.push(cutoff);
+	}
+	if (options.errorPattern !== undefined && options.errorPattern !== "") {
+		where.push("error LIKE ?");
+		params.push(`%${options.errorPattern}%`);
+	}
+
+	const baseWhere = `WHERE ${where.join(" AND ")}`;
+
+	const countStmt = db.prepare(`SELECT COUNT(*) AS cnt FROM ${table} ${baseWhere}`);
+	const totalMatching =
+		((countStmt.get(...params) as { cnt: number } | undefined)?.cnt ?? 0);
+
+	const limit = Math.min(
+		options.maxBatch ?? MAX_BATCH_HARD_CAP,
+		MAX_BATCH_HARD_CAP,
+	);
+	const stmt = db.prepare(`SELECT * FROM ${table} ${baseWhere} ORDER BY created_at ASC LIMIT ?`);
+	const rawRows = stmt.all(...params, limit) as Array<Record<string, unknown>>;
+	const rows: CancelPruneMatchRow[] = rawRows.map((r) => ({
+		id: String(r.id ?? ""),
+		payload: r,
+	}));
+	return { rows, totalMatching };
+}
+
+/** `cancelled` is the soft-cancel status #901 introduces; total prune is hard delete. */
+
+interface CancelResultMeta {
+	readonly affected: number;
+	readonly preview: readonly string[];
+	readonly totalMatching: number;
+}
+
+/**
+ * Cancel obsolete jobs by copying them to `job_cancellations` and flipping
+ * their source `status` to `cancelled`. Never hard-deletes the source
+ * row. Default selection: rows where `status IN ('dead','completed')`
+ * and `created_at < now - olderThanMs` (default 30 days).
+ */
+export function cancelObsoleteJobs(
+	accessor: DbAccessor,
+	cfg: PipelineV2Config,
+	ctx: RepairContext,
+	limiter: RateLimiter,
+	options: JobFilterOptions = {},
+): RepairResult {
+	const action = "cancelObsoleteJobs";
+	const dryRun = options.dryRun === true;
+
+	const gate = checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
+	if (!gate.allowed) {
+		return {
+			action,
+			success: false,
+			affected: 0,
+			message: gate.reason ?? "denied by policy gate",
+		};
+	}
+
+	const olderThanMs = options.olderThanMs ?? 30 * 24 * 60 * 60 * 1000;
+	const wantsMemory = !options.tables || options.tables.includes("memory");
+	const wantsSummary = !options.tables || options.tables.includes("summary");
+
+	const result = accessor.withWriteTx<CancelResultMeta>((db) => {
+		if (!tableExistsInternal(db, "job_cancellations")) {
+			throw new Error("job_cancellations table missing; run migrations");
+		}
+
+		const selection = {
+			...options,
+			olderThanMs,
+			maxBatch: options.maxBatch ?? MAX_BATCH_HARD_CAP,
+		};
+		const targets: Array<{
+			readonly table: "memory_jobs" | "summary_jobs";
+			readonly rows: readonly CancelPruneMatchRow[];
+			readonly totalMatching: number;
+		}> = [];
+		if (wantsMemory) {
+			const r = buildCancelPruneSql(db, "memory_jobs", ["dead", "completed"], selection);
+			targets.push({ table: "memory_jobs", rows: r.rows, totalMatching: r.totalMatching });
+		}
+		if (wantsSummary) {
+			const r = buildCancelPruneSql(db, "summary_jobs", ["dead", "completed"], selection);
+			targets.push({ table: "summary_jobs", rows: r.rows, totalMatching: r.totalMatching });
+		}
+
+		const totalMatching = targets.reduce((acc, t) => acc + t.totalMatching, 0);
+
+		if (dryRun) {
+			const previewIds: string[] = [];
+			for (const t of targets) {
+				for (const r of t.rows) previewIds.push(`${t.table}:${r.id}`);
+				if (previewIds.length >= PREVIEW_CAP) break;
+			}
+			return {
+				affected: 0,
+				preview: previewIds.slice(0, PREVIEW_CAP),
+				totalMatching,
+			};
+		}
+
+		let affected = 0;
+		const previewIds: string[] = [];
+		for (const t of targets) {
+			for (const row of t.rows) {
+				const cancellationId = `cancel-${t.table}-${row.id}-${Date.now()}`;
+				const now = new Date().toISOString();
+				db.prepare(
+					`INSERT INTO job_cancellations
+					 (id, source_table, source_id, status_before, payload_json,
+					  reason, actor, actor_type, request_id, created_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				).run(
+					cancellationId,
+					t.table,
+					row.id,
+					String(row.payload.status ?? ""),
+					JSON.stringify(row.payload),
+					ctx.reason,
+					ctx.actor,
+					ctx.actorType,
+					ctx.requestId ?? null,
+					now,
+				);
+
+				db.prepare(`UPDATE ${t.table} SET status = 'cancelled' WHERE id = ?`).run(row.id);
+				affected += 1;
+				if (previewIds.length < PREVIEW_CAP) previewIds.push(`${t.table}:${row.id}`);
+			}
+		}
+		writeRepairAudit(db, action, ctx, affected, `cancelled ${affected} obsolete job(s)`);
+		return { affected, preview: previewIds, totalMatching };
+	});
+
+	if (!dryRun) limiter.record(action);
+	logger.info("pipeline", "repair: cancelled obsolete jobs", {
+		affected: result.affected,
+		dryRun,
+		previewCount: result.preview.length,
+		totalMatching: result.totalMatching,
+		actor: ctx.actor,
+		reason: ctx.reason,
+	});
+
+	return {
+		action,
+		success: true,
+		affected: dryRun ? 0 : result.affected,
+		message: dryRun
+			? `dry-run: ${result.totalMatching} job(s) match cancel filter; preview shows ${result.preview.length}`
+			: `cancelled ${result.affected} obsolete job(s)`,
+		preview: dryRun ? result.preview : undefined,
+		totalMatching: dryRun ? result.totalMatching : undefined,
+	};
+}
+
+interface PruneResultMeta {
+	readonly affected: number;
+	readonly preview: readonly string[];
+	readonly totalMatching: number;
+}
+
+/**
+ * Prune terminal jobs (cancelled / completed / dead) older than the
+ * configured retention window. Before delete, copies the full row to
+ * `job_archive` to preserve provenance. Hard cap is 1000 rows per call.
+ */
+export function pruneTerminalJobs(
+	accessor: DbAccessor,
+	cfg: PipelineV2Config,
+	ctx: RepairContext,
+	limiter: RateLimiter,
+	options: JobFilterOptions = {},
+): RepairResult {
+	const action = "pruneTerminalJobs";
+	const dryRun = options.dryRun === true;
+
+	const gate = checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
+	if (!gate.allowed) {
+		return {
+			action,
+			success: false,
+			affected: 0,
+			message: gate.reason ?? "denied by policy gate",
+		};
+	}
+
+	const wantsMemory = !options.tables || options.tables.includes("memory");
+	const wantsSummary = !options.tables || options.tables.includes("summary");
+
+	const result = accessor.withWriteTx<PruneResultMeta>((db) => {
+		if (!tableExistsInternal(db, "job_archive")) {
+			throw new Error("job_archive table missing; run migrations");
+		}
+
+		const targets: Array<{
+			readonly table: "memory_jobs" | "summary_jobs";
+			readonly statusList: readonly string[];
+			readonly cutoff: number;
+		}> = [];
+		if (wantsMemory) {
+			targets.push({
+				table: "memory_jobs",
+				statusList: ["dead", "cancelled", "completed"],
+				cutoff: options.retentionMs ?? 90 * 24 * 60 * 60 * 1000,
+			});
+		}
+		if (wantsSummary) {
+			targets.push({
+				table: "summary_jobs",
+				statusList: ["dead", "cancelled", "completed"],
+				cutoff: options.retentionMs ?? 90 * 24 * 60 * 60 * 1000,
+			});
+		}
+
+		const perTable: Array<{
+			readonly rows: readonly CancelPruneMatchRow[];
+			readonly totalMatching: number;
+		}> = [];
+		let totalMatching = 0;
+		for (const t of targets) {
+			const selection: JobFilterOptions = {
+				...options,
+				olderThanMs: t.cutoff,
+				maxBatch: options.maxBatch ?? MAX_BATCH_HARD_CAP,
+			};
+			const r = buildCancelPruneSql(db, t.table, t.statusList, selection);
+			perTable.push({ rows: r.rows, totalMatching: r.totalMatching });
+			totalMatching += r.totalMatching;
+		}
+
+		if (dryRun) {
+			const previewIds: string[] = [];
+			for (let i = 0; i < perTable.length; i += 1) {
+				const t = targets[i];
+				if (!t) continue;
+				const pt = perTable[i];
+				if (!pt) continue;
+				for (const row of pt.rows) previewIds.push(`${t.table}:${row.id}`);
+				if (previewIds.length >= PREVIEW_CAP) break;
+			}
+			return {
+				affected: 0,
+				preview: previewIds.slice(0, PREVIEW_CAP),
+				totalMatching,
+			};
+		}
+
+		let affected = 0;
+		const previewIds: string[] = [];
+		for (let i = 0; i < perTable.length; i += 1) {
+			const t = targets[i];
+			if (!t) continue;
+			const pt = perTable[i];
+			if (!pt) continue;
+			for (const row of pt.rows) {
+				const archiveId = `archive-${t.table}-${row.id}-${Date.now()}`;
+				const now = new Date().toISOString();
+				db.prepare(
+					`INSERT INTO job_archive
+					 (id, source_table, source_id, status, payload_json,
+					  archived_at, archived_by, reason, created_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				).run(
+					archiveId,
+					t.table,
+					row.id,
+					String(row.payload.status ?? ""),
+					JSON.stringify(row.payload),
+					now,
+					ctx.actor,
+					ctx.reason,
+					now,
+				);
+				db.prepare(`DELETE FROM ${t.table} WHERE id = ?`).run(row.id);
+				affected += 1;
+				if (previewIds.length < PREVIEW_CAP) previewIds.push(`${t.table}:${row.id}`);
+			}
+		}
+		writeRepairAudit(db, action, ctx, affected, `pruned ${affected} terminal job(s)`);
+		return { affected, preview: previewIds, totalMatching };
+	});
+
+	if (!dryRun) limiter.record(action);
+	logger.info("pipeline", "repair: pruned terminal jobs", {
+		affected: result.affected,
+		dryRun,
+		previewCount: result.preview.length,
+		totalMatching: result.totalMatching,
+		actor: ctx.actor,
+		reason: ctx.reason,
+	});
+
+	return {
+		action,
+		success: true,
+		affected: dryRun ? 0 : result.affected,
+		message: dryRun
+			? `dry-run: ${result.totalMatching} job(s) match prune filter; preview shows ${result.preview.length}`
+			: `pruned ${result.affected} terminal job(s) (archived)`,
+		preview: dryRun ? result.preview : undefined,
+		totalMatching: dryRun ? result.totalMatching : undefined,
+	};
+}
+
+
+
+
+function tableExistsInternal(db: ReadDb, name: string): boolean {
+	const row = db
+		.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+		.get(name) as { name: string } | undefined;
+	return row !== undefined;
+}
+
+interface DeadMatchRow {
+	readonly id: string;
+}
+
+interface BuiltSql {
+	readonly sql: string;
+	readonly params: readonly unknown[];
+	readonly ids: readonly DeadMatchRow[];
+	readonly totalMatching: number;
+}
+
+/**
+ * Build a parameterized SELECT that enumerates dead rows matching the
+ * filter. `memory_jobs` uses `id` as the primary key like
+ * `summary_jobs`; both are filtered by the same id semantics. We
+ * ignore the legacy `memory_id` arg via underscore prefix.
+ */
+function buildDeadRequeueSql(
+	db: ReadDb,
+	table: "memory_jobs" | "summary_jobs",
+	_placeholderIdColumn: "memory_id" | null,
+	limit: number,
+	options: JobFilterOptions,
+): BuiltSql {
+	if (limit <= 0) {
+		return { sql: "", params: [], ids: [], totalMatching: 0 };
+	}
+	if (!tableExistsInternal(db, table)) {
+		return { sql: "", params: [], ids: [], totalMatching: 0 };
+	}
+
+	const where: string[] = ["status = 'dead'"];
+	const params: unknown[] = [];
+
+	if (options.ids && options.ids.length > 0) {
+		const placeholders = options.ids.map(() => "?").join(", ");
+		where.push(`id IN (${placeholders})`);
+		params.push(...options.ids);
+	}
+	if (options.olderThanMs !== undefined && options.olderThanMs > 0) {
+		const cutoff = new Date(Date.now() - options.olderThanMs).toISOString();
+		where.push("created_at < ?");
+		params.push(cutoff);
+	}
+	if (options.errorPattern !== undefined && options.errorPattern !== "") {
+		where.push("error LIKE ?");
+		params.push(`%${options.errorPattern}%`);
+	}
+
+	const baseWhere = `WHERE ${where.join(" AND ")}`;
+	const countStmt = db.prepare(`SELECT COUNT(*) AS cnt FROM ${table} ${baseWhere}`);
+	const totalMatching =
+		((countStmt.get(...params) as { cnt: number } | undefined)?.cnt ?? 0);
+
+	const stmt = db.prepare(
+		`SELECT id FROM ${table} ${baseWhere} ORDER BY created_at ASC LIMIT ?`,
+	);
+	const ids = stmt.all(...params, limit) as DeadMatchRow[];
+	return { sql: "", params: [...params, limit], ids, totalMatching };
+}
+
+interface CancelPruneMatchRow {
+	readonly id: string;
+	readonly payload: Record<string, unknown>;
+}
+
+interface CancelPruneBuilt {
+	readonly rows: readonly CancelPruneMatchRow[];
+	readonly totalMatching: number;
+}
+
+/**
+ * Build a parameterized SELECT for `cancelObsoleteJobs` and
+ * `pruneTerminalJobs`. Captures the full row as JSON so the action can
+ * copy it to the audit/archive table inside the same write tx.
+ */
+function buildCancelPruneSql(
+	db: ReadDb,
+	table: "memory_jobs" | "summary_jobs",
+	statusList: readonly string[],
+	options: JobFilterOptions & { retentionMsByStatus?: Record<string, number> },
+): CancelPruneBuilt {
+	if (!tableExistsInternal(db, table)) {
+		return { rows: [], totalMatching: 0 };
+	}
+	if (statusList.length === 0) return { rows: [], totalMatching: 0 };
+
+	const placeholders = statusList.map(() => "?").join(", ");
+	const where: string[] = [`status IN (${placeholders})`];
+	const params: unknown[] = [...statusList];
+
+	if (options.ids && options.ids.length > 0) {
+		const ph = options.ids.map(() => "?").join(", ");
+		where.push(`id IN (${ph})`);
+		params.push(...options.ids);
+	}
+	if (options.olderThanMs !== undefined && options.olderThanMs > 0) {
+		const cutoff = new Date(Date.now() - options.olderThanMs).toISOString();
+		where.push("created_at < ?");
+		params.push(cutoff);
+	}
+	if (options.errorPattern !== undefined && options.errorPattern !== "") {
+		where.push("error LIKE ?");
+		params.push(`%${options.errorPattern}%`);
+	}
+
+	const baseWhere = `WHERE ${where.join(" AND ")}`;
+
+	const countStmt = db.prepare(`SELECT COUNT(*) AS cnt FROM ${table} ${baseWhere}`);
+	const totalMatching =
+		((countStmt.get(...params) as { cnt: number } | undefined)?.cnt ?? 0);
+
+	const limit = Math.min(
+		options.maxBatch ?? MAX_BATCH_HARD_CAP,
+		MAX_BATCH_HARD_CAP,
+	);
+	const stmt = db.prepare(`SELECT * FROM ${table} ${baseWhere} ORDER BY created_at ASC LIMIT ?`);
+	const rawRows = stmt.all(...params, limit) as Array<Record<string, unknown>>;
+	const rows: CancelPruneMatchRow[] = rawRows.map((r) => ({
+		id: String(r.id ?? ""),
+		payload: r,
+	}));
+	return { rows, totalMatching };
+}
+
+/** `cancelled` is the soft-cancel status #901 introduces; total prune is hard delete. */
+
+interface CancelResultMeta {
+	readonly affected: number;
+	readonly preview: readonly string[];
+	readonly totalMatching: number;
+}
+
+/**
+ * Cancel obsolete jobs by copying them to `job_cancellations` and flipping
+ * their source `status` to `cancelled`. Never hard-deletes the source
+ * row. Default selection: rows where `status IN ('dead','completed')`
+ * and `created_at < now - olderThanMs` (default 30 days).
+ */
+export function cancelObsoleteJobs(
+	accessor: DbAccessor,
+	cfg: PipelineV2Config,
+	ctx: RepairContext,
+	limiter: RateLimiter,
+	options: JobFilterOptions = {},
+): RepairResult {
+	const action = "cancelObsoleteJobs";
+	const dryRun = options.dryRun === true;
+
+	const gate = checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
+	if (!gate.allowed) {
+		return {
+			action,
+			success: false,
+			affected: 0,
+			message: gate.reason ?? "denied by policy gate",
+		};
+	}
+
+	const olderThanMs = options.olderThanMs ?? 30 * 24 * 60 * 60 * 1000;
+	const wantsMemory = !options.tables || options.tables.includes("memory");
+	const wantsSummary = !options.tables || options.tables.includes("summary");
+
+	const result = accessor.withWriteTx<CancelResultMeta>((db) => {
+		if (!tableExistsInternal(db, "job_cancellations")) {
+			throw new Error("job_cancellations table missing; run migrations");
+		}
+
+		const selection = {
+			...options,
+			olderThanMs,
+			maxBatch: options.maxBatch ?? MAX_BATCH_HARD_CAP,
+		};
+		const targets: Array<{
+			readonly table: "memory_jobs" | "summary_jobs";
+			readonly rows: readonly CancelPruneMatchRow[];
+			readonly totalMatching: number;
+		}> = [];
+		if (wantsMemory) {
+			const r = buildCancelPruneSql(db, "memory_jobs", ["dead", "completed"], selection);
+			targets.push({ table: "memory_jobs", rows: r.rows, totalMatching: r.totalMatching });
+		}
+		if (wantsSummary) {
+			const r = buildCancelPruneSql(db, "summary_jobs", ["dead", "completed"], selection);
+			targets.push({ table: "summary_jobs", rows: r.rows, totalMatching: r.totalMatching });
+		}
+
+		const totalMatching = targets.reduce((acc, t) => acc + t.totalMatching, 0);
+
+		if (dryRun) {
+			const previewIds: string[] = [];
+			for (const t of targets) {
+				for (const r of t.rows) previewIds.push(`${t.table}:${r.id}`);
+				if (previewIds.length >= PREVIEW_CAP) break;
+			}
+			return {
+				affected: 0,
+				preview: previewIds.slice(0, PREVIEW_CAP),
+				totalMatching,
+			};
+		}
+
+		let affected = 0;
+		const previewIds: string[] = [];
+		for (const t of targets) {
+			for (const row of t.rows) {
+				const cancellationId = `cancel-${t.table}-${row.id}-${Date.now()}`;
+				const now = new Date().toISOString();
+				db.prepare(
+					`INSERT INTO job_cancellations
+					 (id, source_table, source_id, status_before, payload_json,
+					  reason, actor, actor_type, request_id, created_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				).run(
+					cancellationId,
+					t.table,
+					row.id,
+					String(row.payload.status ?? ""),
+					JSON.stringify(row.payload),
+					ctx.reason,
+					ctx.actor,
+					ctx.actorType,
+					ctx.requestId ?? null,
+					now,
+				);
+
+				db.prepare(`UPDATE ${t.table} SET status = 'cancelled' WHERE id = ?`).run(row.id);
+				affected += 1;
+				if (previewIds.length < PREVIEW_CAP) previewIds.push(`${t.table}:${row.id}`);
+			}
+		}
+		writeRepairAudit(db, action, ctx, affected, `cancelled ${affected} obsolete job(s)`);
+		return { affected, preview: previewIds, totalMatching };
+	});
+
+	if (!dryRun) limiter.record(action);
+	logger.info("pipeline", "repair: cancelled obsolete jobs", {
+		affected: result.affected,
+		dryRun,
+		previewCount: result.preview.length,
+		totalMatching: result.totalMatching,
+		actor: ctx.actor,
+		reason: ctx.reason,
+	});
+
+	return {
+		action,
+		success: true,
+		affected: dryRun ? 0 : result.affected,
+		message: dryRun
+			? `dry-run: ${result.totalMatching} job(s) match cancel filter; preview shows ${result.preview.length}`
+			: `cancelled ${result.affected} obsolete job(s)`,
+		preview: dryRun ? result.preview : undefined,
+		totalMatching: dryRun ? result.totalMatching : undefined,
+	};
+}
+
+interface PruneResultMeta {
+	readonly affected: number;
+	readonly preview: readonly string[];
+	readonly totalMatching: number;
+}
+
+/**
+ * Prune terminal jobs (cancelled / completed / dead) older than the
+ * configured retention window. Before delete, copies the full row to
+ * `job_archive` to preserve provenance. Hard cap is 1000 rows per call.
+ */
+export function pruneTerminalJobs(
+	accessor: DbAccessor,
+	cfg: PipelineV2Config,
+	ctx: RepairContext,
+	limiter: RateLimiter,
+	options: JobFilterOptions = {},
+): RepairResult {
+	const action = "pruneTerminalJobs";
+	const dryRun = options.dryRun === true;
+
+	const gate = checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
+	if (!gate.allowed) {
+		return {
+			action,
+			success: false,
+			affected: 0,
+			message: gate.reason ?? "denied by policy gate",
+		};
+	}
+
+	const wantsMemory = !options.tables || options.tables.includes("memory");
+	const wantsSummary = !options.tables || options.tables.includes("summary");
+
+	const result = accessor.withWriteTx<PruneResultMeta>((db) => {
+		if (!tableExistsInternal(db, "job_archive")) {
+			throw new Error("job_archive table missing; run migrations");
+		}
+
+		const targets: Array<{
+			readonly table: "memory_jobs" | "summary_jobs";
+			readonly statusList: readonly string[];
+			readonly cutoff: number;
+		}> = [];
+		if (wantsMemory) {
+			targets.push({
+				table: "memory_jobs",
+				statusList: ["dead", "cancelled", "completed"],
+				cutoff: options.retentionMs ?? 90 * 24 * 60 * 60 * 1000,
+			});
+		}
+		if (wantsSummary) {
+			targets.push({
+				table: "summary_jobs",
+				statusList: ["dead", "cancelled", "completed"],
+				cutoff: options.retentionMs ?? 90 * 24 * 60 * 60 * 1000,
+			});
+		}
+
+		const perTable: Array<{
+			readonly rows: readonly CancelPruneMatchRow[];
+			readonly totalMatching: number;
+		}> = [];
+		let totalMatching = 0;
+		for (const t of targets) {
+			const selection: JobFilterOptions = {
+				...options,
+				olderThanMs: t.cutoff,
+				maxBatch: options.maxBatch ?? MAX_BATCH_HARD_CAP,
+			};
+			const r = buildCancelPruneSql(db, t.table, t.statusList, selection);
+			perTable.push({ rows: r.rows, totalMatching: r.totalMatching });
+			totalMatching += r.totalMatching;
+		}
+
+		if (dryRun) {
+			const previewIds: string[] = [];
+			for (let i = 0; i < perTable.length; i += 1) {
+				const t = targets[i];
+				if (!t) continue;
+				const pt = perTable[i];
+				if (!pt) continue;
+				for (const row of pt.rows) previewIds.push(`${t.table}:${row.id}`);
+				if (previewIds.length >= PREVIEW_CAP) break;
+			}
+			return {
+				affected: 0,
+				preview: previewIds.slice(0, PREVIEW_CAP),
+				totalMatching,
+			};
+		}
+
+		let affected = 0;
+		const previewIds: string[] = [];
+		for (let i = 0; i < perTable.length; i += 1) {
+			const t = targets[i];
+			if (!t) continue;
+			const pt = perTable[i];
+			if (!pt) continue;
+			for (const row of pt.rows) {
+				const archiveId = `archive-${t.table}-${row.id}-${Date.now()}`;
+				const now = new Date().toISOString();
+				db.prepare(
+					`INSERT INTO job_archive
+					 (id, source_table, source_id, status, payload_json,
+					  archived_at, archived_by, reason, created_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				).run(
+					archiveId,
+					t.table,
+					row.id,
+					String(row.payload.status ?? ""),
+					JSON.stringify(row.payload),
+					now,
+					ctx.actor,
+					ctx.reason,
+					now,
+				);
+				db.prepare(`DELETE FROM ${t.table} WHERE id = ?`).run(row.id);
+				affected += 1;
+				if (previewIds.length < PREVIEW_CAP) previewIds.push(`${t.table}:${row.id}`);
+			}
+		}
+		writeRepairAudit(db, action, ctx, affected, `pruned ${affected} terminal job(s)`);
+		return { affected, preview: previewIds, totalMatching };
+	});
+
+	if (!dryRun) limiter.record(action);
+	logger.info("pipeline", "repair: pruned terminal jobs", {
+		affected: result.affected,
+		dryRun,
+		previewCount: result.preview.length,
+		totalMatching: result.totalMatching,
+		actor: ctx.actor,
+		reason: ctx.reason,
+	});
+
+	return {
+		action,
+		success: true,
+		affected: dryRun ? 0 : result.affected,
+		message: dryRun
+			? `dry-run: ${result.totalMatching} job(s) match prune filter; preview shows ${result.preview.length}`
+			: `pruned ${result.affected} terminal job(s) (archived)`,
+		preview: dryRun ? result.preview : undefined,
+		totalMatching: dryRun ? result.totalMatching : undefined,
 	};
 }

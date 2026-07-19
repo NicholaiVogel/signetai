@@ -160,6 +160,7 @@ import { mountOsAgentRoutes } from "./routes/os-agent.js";
 import { mountOsChatRoutes } from "./routes/os-chat.js";
 import { registerPipelineRoutes } from "./routes/pipeline-routes.js";
 import { registerPluginRoutes } from "./routes/plugins-routes.js";
+import { registerQueueDiagnosticsRoutes } from "./routes/queue-diagnostics.js";
 import { registerReflectionRoutes } from "./routes/reflection-routes.js";
 import { registerRepairRoutes } from "./routes/repair-routes.js";
 import { registerSecretRoutes } from "./routes/secrets-routes.js";
@@ -226,6 +227,7 @@ registerPipelineRoutes(app);
 registerReflectionRoutes(app);
 registerTelemetryRoutes(app);
 registerDatabaseDiagnosticsRoutes(app);
+registerQueueDiagnosticsRoutes(app);
 registerMiscRoutes(app);
 app.use("/api/inference", async (c, next) => {
 	if (c.req.method === "GET") return requirePermission("diagnostics", authConfig)(c, next);

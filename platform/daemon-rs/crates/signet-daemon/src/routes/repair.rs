@@ -3892,3 +3892,417 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #901 — `/api/diagnostics/queue/repair`
+//
+// Dispatcher that accepts `{ action, dryRun, ids, tables, olderThanMs, ... }`
+// and applies it against `memory_jobs` and `summary_jobs`. Dry-run returns a
+// preview without mutating. Cancelled and pruned rows go to
+// `job_cancellations` / `job_archive` for provenance.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueRepairRequest {
+    pub action: String,
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub tables: Option<Vec<String>>,
+    #[serde(default)]
+    pub older_than_ms: Option<i64>,
+    #[serde(default)]
+    pub error_pattern: Option<String>,
+    #[serde(default)]
+    pub retention_ms: Option<i64>,
+    #[serde(default)]
+    pub max_batch: Option<i64>,
+}
+
+const PREVIEW_CAP: usize = 100;
+
+fn queue_table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        rusqlite::params![name],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+fn ensure_audit_table(conn: &rusqlite::Connection, name: &str) -> rusqlite::Result<()> {
+    if name == "job_cancellations" {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS job_cancellations (
+                id TEXT PRIMARY KEY,
+                source_table TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                status_before TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                reason TEXT,
+                actor TEXT NOT NULL,
+                actor_type TEXT NOT NULL,
+                request_id TEXT,
+                created_at TEXT NOT NULL
+            )",
+        )?;
+    }
+    if name == "job_archive" {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS job_archive (
+                id TEXT PRIMARY KEY,
+                source_table TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                archived_at TEXT NOT NULL,
+                archived_by TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL
+            )",
+        )?;
+    }
+    Ok(())
+}
+
+fn where_clause_memory(opts: &QueueRepairRequest, status_list: &str) -> (String, Vec<rusqlite::types::Value>) {
+    let mut clauses: Vec<String> = vec![format!("status IN ({status_list})")];
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(ids) = &opts.ids {
+        if !ids.is_empty() {
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            clauses.push(format!("id IN ({placeholders})"));
+            for id in ids {
+                params.push(rusqlite::types::Value::Text(id.clone()));
+            }
+        }
+    }
+    if let Some(ms) = opts.older_than_ms {
+        if ms > 0 {
+            let cutoff = chrono::Utc::now() - chrono::Duration::milliseconds(ms);
+            clauses.push("created_at < ?".to_string());
+            params.push(rusqlite::types::Value::Text(cutoff.to_rfc3339()));
+        }
+    }
+    if let Some(pat) = &opts.error_pattern {
+        if !pat.is_empty() {
+            clauses.push("error LIKE ?".to_string());
+            params.push(rusqlite::types::Value::Text(format!("%{pat}%")));
+        }
+    }
+    (clauses.join(" AND "), params)
+}
+
+fn wants_table(opts: &QueueRepairRequest, name: &str) -> bool {
+    match &opts.tables {
+        Some(list) if !list.is_empty() => list.iter().any(|t| t == name),
+        _ => true,
+    }
+}
+
+pub async fn queue_repair(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<QueueRepairRequest>,
+) -> impl IntoResponse {
+    let action = req.action.to_ascii_lowercase();
+    if !matches!(action.as_str(), "requeue" | "cancel" | "prune") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(repair_result(
+                "queue_repair",
+                false,
+                0,
+                "missing or invalid action",
+            )),
+        );
+    }
+    let dry_run = req.dry_run.unwrap_or(true);
+    let max_batch = req
+        .max_batch
+        .map(|n| n.max(0) as usize)
+        .unwrap_or(usize::MAX)
+        .min(if action == "prune" { 1000 } else { 50 });
+
+    let action_name = match action.as_str() {
+        "requeue" => "requeueDeadJobs",
+        "cancel" => "cancelObsoleteJobs",
+        _ => "pruneTerminalJobs",
+    };
+
+    let outcome = state
+        .pool
+        .write(signet_core::db::Priority::Low, move |conn| {
+            let mut total_affected = 0usize;
+            let mut total_matching = 0usize;
+            let mut preview_ids: Vec<String> = Vec::new();
+
+            if action == "requeue" {
+                let (where_sql, params) = where_clause_memory(&req, "'dead'");
+                let limit = max_batch;
+                if wants_table(&req, "memory") && queue_table_exists(conn, "memory_jobs") {
+                    let count_sql = format!("SELECT COUNT(*) FROM memory_jobs WHERE {where_sql}");
+                    total_matching += conn
+                        .query_row(&count_sql, rusqlite::params_from_iter(params.iter()), |r| {
+                            r.get::<_, i64>(0)
+                        })
+                        .unwrap_or(0) as usize;
+                }
+                if wants_table(&req, "summary") && queue_table_exists(conn, "summary_jobs") {
+                    let count_sql = format!("SELECT COUNT(*) FROM summary_jobs WHERE {where_sql}");
+                    total_matching += conn
+                        .query_row(&count_sql, rusqlite::params_from_iter(params.iter()), |r| {
+                            r.get::<_, i64>(0)
+                        })
+                        .unwrap_or(0) as usize;
+                }
+                if dry_run {
+                    return Ok(serde_json::json!({
+                        "action": action_name,
+                        "success": true,
+                        "affected": 0,
+                        "message": format!("dry-run: {total_matching} job(s) match requeue filter"),
+                        "preview": preview_ids,
+                        "totalMatching": total_matching,
+                    }));
+                }
+                if wants_table(&req, "memory") && queue_table_exists(conn, "memory_jobs") {
+                    let sql = format!(
+                        "UPDATE memory_jobs SET status='pending', attempts=0, updated_at=datetime('now') \
+                         WHERE {where_sql} LIMIT {limit}"
+                    );
+                    let n = conn.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+                    total_affected += n;
+                }
+                if wants_table(&req, "summary") && queue_table_exists(conn, "summary_jobs") {
+                    let sql = format!(
+                        "UPDATE summary_jobs SET status='pending', attempts=0, error=NULL \
+                         WHERE {where_sql} LIMIT {limit}"
+                    );
+                    let n = conn.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+                    total_affected += n;
+                }
+                return Ok(serde_json::json!({
+                    "action": action_name,
+                    "success": true,
+                    "affected": total_affected,
+                    "message": format!("requeued {total_affected} dead job(s) to pending"),
+                }));
+            }
+
+            // cancel + prune share the selection pattern
+            let cancel_status_list = "'dead','completed'";
+            let prune_status_list = "'dead','cancelled','completed'";
+            let (status_list, retention_ms_default) = if action == "cancel" {
+                (cancel_status_list, 30 * 24 * 60 * 60 * 1000i64)
+            } else {
+                (prune_status_list, 90 * 24 * 60 * 60 * 1000i64)
+            };
+            let retention_ms = req
+                .retention_ms
+                .unwrap_or(retention_ms_default)
+                .max(retention_ms_default);
+            let mut cancel_opts = req.clone();
+            cancel_opts.older_than_ms = Some(retention_ms);
+
+            let (where_sql, params) = where_clause_memory(&cancel_opts, status_list);
+
+            if action == "cancel" {
+                ensure_audit_table(conn, "job_cancellations")?;
+            }
+            if action == "prune" {
+                ensure_audit_table(conn, "job_archive")?;
+            }
+
+            let tables = ["memory_jobs", "summary_jobs"];
+            for table in &tables {
+                if !queue_table_exists(conn, table) {
+                    continue;
+                }
+                let source_table = if *table == "memory_jobs" { "memory_jobs" } else { "summary_jobs" };
+                let count_sql = format!("SELECT COUNT(*) FROM {source_table} WHERE {where_sql}");
+                let m = conn
+                    .query_row(
+                        &count_sql,
+                        rusqlite::params_from_iter(params.iter()),
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0) as usize;
+                total_matching += m;
+
+                if dry_run {
+                    if preview_ids.len() < PREVIEW_CAP {
+                        let select_sql = format!(
+                            "SELECT id FROM {source_table} WHERE {where_sql} \
+                             ORDER BY created_at ASC LIMIT ?"
+                        );
+                        let mut stmt = conn.prepare(&select_sql)?;
+                        let rows = stmt
+                            .query_map(
+                                rusqlite::params_from_iter(
+                                    params
+                                        .iter()
+                                        .chain(std::iter::once(&rusqlite::types::Value::Integer(
+                                            (PREVIEW_CAP - preview_ids.len()) as i64,
+                                        ))),
+                                ),
+                                |r| r.get::<_, String>(0),
+                            )?;
+                        for row in rows {
+                            if preview_ids.len() >= PREVIEW_CAP {
+                                break;
+                            }
+                            if let Ok(id) = row {
+                                preview_ids.push(format!("{source_table}:{id}"));
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                let select_sql = format!(
+                    "SELECT * FROM {source_table} WHERE {where_sql} \
+                     ORDER BY created_at ASC LIMIT ?"
+                );
+                let mut stmt = conn.prepare(&select_sql)?;
+                let mut rows = stmt.query(rusqlite::params_from_iter(
+                    params
+                        .iter()
+                        .chain(std::iter::once(&rusqlite::types::Value::Integer(max_batch as i64))),
+                ))?;
+                while let Some(row) = rows.next()? {
+                    let id: String = row.get(0)?;
+                    let status_before: String = row.get::<_, String>(4).unwrap_or_default();
+                    let payload_json = match conn.prepare("SELECT json_object('id', id)") {
+                        Ok(_) => serde_json::to_string(&serde_json::json!({
+                            "id": id,
+                            "status": status_before,
+                        }))
+                        .unwrap_or_else(|_| "{\"id\":\"\"}".to_string()),
+                        Err(_) => "{\"id\":\"\"}".to_string(),
+                    };
+
+                    if action == "cancel" {
+                        let cancel_id = format!("cancel-{source_table}-{id}-now");
+                        conn.execute(
+                            "INSERT INTO job_cancellations \
+                             (id, source_table, source_id, status_before, payload_json, \
+                              reason, actor, actor_type, request_id, created_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            rusqlite::params![
+                                cancel_id,
+                                source_table,
+                                id,
+                                status_before,
+                                payload_json,
+                                "queue repair",
+                                "operator",
+                                "operator",
+                                Option::<String>::None,
+                                chrono::Utc::now().to_rfc3339(),
+                            ],
+                        )?;
+                        conn.execute(
+                            &format!("UPDATE {source_table} SET status='cancelled' WHERE id = ?1"),
+                            rusqlite::params![id],
+                        )?;
+                    } else {
+                        let archive_id = format!("archive-{source_table}-{id}-now");
+                        conn.execute(
+                            "INSERT INTO job_archive \
+                             (id, source_table, source_id, status, payload_json, \
+                              archived_at, archived_by, reason, created_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            rusqlite::params![
+                                archive_id,
+                                source_table,
+                                id,
+                                status_before,
+                                payload_json,
+                                chrono::Utc::now().to_rfc3339(),
+                                "operator",
+                                "queue repair",
+                                chrono::Utc::now().to_rfc3339(),
+                            ],
+                        )?;
+                        conn.execute(
+                            &format!("DELETE FROM {source_table} WHERE id = ?1"),
+                            rusqlite::params![id],
+                        )?;
+                    }
+                    total_affected += 1;
+                    if preview_ids.len() < PREVIEW_CAP {
+                        preview_ids.push(format!("{source_table}:{id}"));
+                    }
+                }
+            }
+
+            if dry_run {
+                Ok(serde_json::json!({
+                    "action": action_name,
+                    "success": true,
+                    "affected": 0,
+                    "message": format!(
+                        "dry-run: {total_matching} job(s) match {} filter",
+                        if action == "cancel" { "cancel" } else { "prune" }
+                    ),
+                    "preview": preview_ids,
+                    "totalMatching": total_matching,
+                }))
+            } else if action == "cancel" {
+                Ok(serde_json::json!({
+                    "action": action_name,
+                    "success": true,
+                    "affected": total_affected,
+                    "message": format!("cancelled {total_affected} obsolete job(s)"),
+                    "preview": preview_ids,
+                    "totalMatching": total_matching,
+                }))
+            } else {
+                Ok(serde_json::json!({
+                    "action": action_name,
+                    "success": true,
+                    "affected": total_affected,
+                    "message": format!("pruned {total_affected} terminal job(s) (archived)"),
+                    "preview": preview_ids,
+                    "totalMatching": total_matching,
+                }))
+            }
+        })
+        .await;
+
+    match outcome {
+        Ok(value) => {
+            let affected = value
+                .get("affected")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            (
+                StatusCode::OK,
+                Json(repair_result(
+                    action_name,
+                    true,
+                    affected,
+                    value
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("ok"),
+                )),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(repair_result(
+                action_name,
+                false,
+                0,
+                &err.to_string(),
+            )),
+        ),
+    }
+}

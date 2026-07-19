@@ -329,6 +329,12 @@
         "sqlite-vec-linux-x64": "^0.1.7-alpha.2",
         "sqlite-vec-windows-x64": "^0.1.7-alpha.2",
       },
+      "peerDependencies": {
+        "better-sqlite3": "*",
+      },
+      "optionalPeers": [
+        "better-sqlite3",
+      ],
     },
     "platform/daemon": {
       "name": "@signet/daemon",

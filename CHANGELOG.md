@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### Unreleased
+- Features: surface dead summary-job backlog (#901) via `GET /api/diagnostics/queue`, `POST /api/diagnostics/queue/repair`, additive `pipeline.queue` block on `GET /api/status`, `signet status` “Pipeline queues” row, and new `signet repair queue {requeue|cancel|prune}` subcommands. Add dry-run / selective filters to `requeueDeadJobs` and two new actions — `cancelObsoleteJobs` (audit-preserving soft cancel) and `pruneTerminalJobs` (archive-preserving hard prune). Rust daemon mirrors both new routes with parity rules and replay fixtures. Migrations `088-job-cancellations` and `089-job-archive` add provenance tables.
+
 ### 2026-07-15
 - Bug fixes: centralize canonical recall requests.
 

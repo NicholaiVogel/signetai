@@ -1120,6 +1120,14 @@ async fn main() -> anyhow::Result<()> {
         // Diagnostics routes
         .route("/api/diagnostics", get(routes::diagnostics::report))
         .route(
+            "/api/diagnostics/queue",
+            get(routes::diagnostics::queue_diagnostics),
+        )
+        .route(
+            "/api/diagnostics/queue/repair",
+            axum::routing::post(routes::repair::queue_repair),
+        )
+        .route(
             "/api/home/greeting",
             get(routes::diagnostics::home_greeting),
         )
