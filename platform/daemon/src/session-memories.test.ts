@@ -54,7 +54,7 @@ function setupDb(): Database {
 	return db;
 }
 
-function openTestDb(): Database {
+function openTestDb(): WriteDb {
 	return new Database(join(TEST_DIR, "memory", "memories.db"));
 }
 

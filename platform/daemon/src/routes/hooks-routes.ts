@@ -710,11 +710,11 @@ function registerRecall(app: Hono): void {
 			};
 			const result =
 				body.aggregate === true
-					? await aggregateRecall(params, cfg, {
+					? await aggregateRecall(params as unknown as RecallParams, cfg, {
 							router: getInferenceRouterOrNull(),
 							embedFn: fetchEmbedding,
 						})
-					: await hybridRecall(params, cfg, fetchEmbedding);
+					: await hybridRecall(params as unknown as RecallParams, cfg, fetchEmbedding);
 			return c.json(withHookRecallCompat(result));
 		} catch (e) {
 			logger.error("hooks", "Recall hook failed", e as Error);
