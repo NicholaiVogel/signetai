@@ -8,7 +8,7 @@
 		"deprecated-remove-from-ts-too": "Route is intentionally unsupported and must be removed or hidden from both daemons."
 	},
 	"summary": {
-		"native-rust-replay-proven": 323,
+		"native-rust-replay-proven": 323
 		"mounted-shallow": 7
 	},
 	"routes": [
