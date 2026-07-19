@@ -8,6 +8,8 @@ import { loadMemoryConfig, type ResolvedMemoryConfig } from "./memory-config";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
 import { buildAgentScopeClause, expandRecallKeywordQuery, hybridRecall, transcriptExcerpt } from "./memory-search";
 
+type Mutable<T> =
+	T extends ReadonlyArray<infer U> ? Mutable<U>[] : T extends object ? { -readonly [K in keyof T]: Mutable<T[K]> } : T;
 describe("hybridRecall", () => {
 	let dir = "";
 	let prevSignetPath: string | undefined;
@@ -1694,7 +1696,7 @@ describe("hybridRecall", () => {
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = true;
@@ -1741,7 +1743,7 @@ describe("hybridRecall", () => {
 			).run("hint-spotify", "mem-spotify", "What music streaming service has the user been using lately?", now);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = false;
@@ -1826,7 +1828,7 @@ describe("hybridRecall", () => {
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = true;
@@ -1909,7 +1911,7 @@ describe("hybridRecall", () => {
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = true;
@@ -1973,7 +1975,7 @@ describe("hybridRecall", () => {
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = false;
@@ -2021,7 +2023,7 @@ assistant: John Mulaney's Kid Gorgeous is an excellent example. Hasan Minhaj: Ho
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = false;
@@ -2104,7 +2106,7 @@ assistant: John Mulaney's Kid Gorgeous is an excellent example. Hasan Minhaj: Ho
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = false;

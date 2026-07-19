@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, getVectorRuntimeStatus, initDbAccessor } from "./db-accessor";
+import type { ResolvedMemoryConfig } from "./memory-config";
 import { type EmbeddingConfig, loadMemoryConfig } from "./memory-config";
 import { hybridRecall } from "./memory-search";
 import {
@@ -11,6 +12,9 @@ import {
 	purgeObsidianSourceEmbeddings,
 	purgeObsidianSourceFileEmbeddings,
 } from "./obsidian-source-embeddings";
+
+type Mutable<T> =
+	T extends ReadonlyArray<infer U> ? Mutable<U>[] : T extends object ? { -readonly [K in keyof T]: Mutable<T[K]> } : T;
 
 const embeddingConfig: EmbeddingConfig = {
 	provider: "native",
@@ -309,7 +313,7 @@ describe("Obsidian source embeddings", () => {
 			fetchEmbedding: async () => testVector(1),
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
 		cfg.embedding.provider = embeddingConfig.provider;
 		cfg.embedding.model = embeddingConfig.model;
 		cfg.embedding.dimensions = embeddingConfig.dimensions;
@@ -356,7 +360,7 @@ describe("Obsidian source embeddings", () => {
 			fetchEmbedding: async () => testVector(1),
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ResolvedMemoryConfig>;
 		cfg.embedding.provider = embeddingConfig.provider;
 		cfg.embedding.model = embeddingConfig.model;
 		cfg.embedding.dimensions = embeddingConfig.dimensions;
