@@ -133,7 +133,7 @@ describe("recordSessionCandidates", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-001");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows.length).toBe(3);
 
@@ -154,7 +154,7 @@ describe("recordSessionCandidates", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-002");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows[0].rank).toBe(0);
 		expect(rows[1].rank).toBe(1);
@@ -167,7 +167,7 @@ describe("recordSessionCandidates", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-003");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows[0].effective_score).toBeCloseTo(0.85, 2);
 		expect(rows[0].final_score).toBeCloseTo(0.85, 2);
@@ -191,7 +191,7 @@ describe("recordSessionCandidates", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-path-001");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows.length).toBe(1);
 		expect(rows[0].path_json).toContain("entity_ids");
@@ -204,7 +204,7 @@ describe("recordSessionCandidates", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-agent-001");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows.length).toBe(1);
 		expect(rows[0].agent_id).toBe("agent-a");
@@ -218,7 +218,7 @@ describe("recordSessionCandidates", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-004");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows.length).toBe(1);
 	});
@@ -230,7 +230,7 @@ describe("recordSessionCandidates", () => {
 
 		const testDb = openTestDb();
 		const count = testDb.prepare("SELECT COUNT(*) as cnt FROM session_memories").get() as { cnt: number };
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(count.cnt).toBe(0);
 	});
@@ -240,7 +240,7 @@ describe("recordSessionCandidates", () => {
 
 		const testDb = openTestDb();
 		const count = testDb.prepare("SELECT COUNT(*) as cnt FROM session_memories").get() as { cnt: number };
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(count.cnt).toBe(0);
 	});
@@ -252,7 +252,7 @@ describe("recordSessionCandidates", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-006");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows[0].source).toBe("effective");
 	});
@@ -274,7 +274,7 @@ describe("trackFtsHits", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-fts-1");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows.length).toBe(1);
 		expect(rows[0].fts_hit_count).toBe(1);
@@ -294,7 +294,7 @@ describe("trackFtsHits", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-fts-2");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows[0].fts_hit_count).toBe(3);
 	});
@@ -326,7 +326,7 @@ describe("trackFtsHits", () => {
 				 ORDER BY agent_id ASC`,
 			)
 			.all("session-fts-agent", "mem-aaa-111") as Array<{ agent_id: string; fts_hit_count: number }>;
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows).toEqual([
 			{ agent_id: "agent-a", fts_hit_count: 2 },
@@ -339,7 +339,7 @@ describe("trackFtsHits", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-fts-3");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows.length).toBe(1);
 		expect(rows[0].memory_id).toBe("mem-bbb-222");
@@ -353,7 +353,7 @@ describe("trackFtsHits", () => {
 
 		const testDb = openTestDb();
 		const count = testDb.prepare("SELECT COUNT(*) as cnt FROM session_memories").get() as { cnt: number };
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(count.cnt).toBe(0);
 	});
@@ -363,7 +363,7 @@ describe("trackFtsHits", () => {
 
 		const testDb = openTestDb();
 		const count = testDb.prepare("SELECT COUNT(*) as cnt FROM session_memories").get() as { cnt: number };
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(count.cnt).toBe(0);
 	});
@@ -379,7 +379,7 @@ describe("trackFtsHits", () => {
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-fts-5");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(rows.length).toBe(2);
 
@@ -483,7 +483,7 @@ describe("recordAgentFeedbackInner", () => {
 		recordAgentFeedbackInner(testDb, "session-fb-1", { "mem-aaa-111": 0.8 });
 
 		const result = getFeedbackColumns(testDb, "session-fb-1", "mem-aaa-111");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(result).toBeDefined();
 		expect(result?.agent_relevance_score).toBeCloseTo(0.8, 6);
@@ -502,7 +502,7 @@ describe("recordAgentFeedbackInner", () => {
 		recordAgentFeedbackInner(testDb, "session-fb-2", { "mem-aaa-111": 0.4 });
 
 		const result = getFeedbackColumns(testDb, "session-fb-2", "mem-aaa-111");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		// mean = (0.8 * 1 + 0.4) / 2 = 0.6
 		expect(result?.agent_relevance_score).toBeCloseTo(0.6, 6);
@@ -523,7 +523,7 @@ describe("recordAgentFeedbackInner", () => {
 		}
 
 		const result = getFeedbackColumns(testDb, "session-fb-3", "mem-aaa-111");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		const expectedMean = scores.reduce((a, b) => a + b, 0) / scores.length;
 		expect(result?.agent_relevance_score).toBeCloseTo(expectedMean, 4);
@@ -548,7 +548,7 @@ describe("recordAgentFeedbackInner", () => {
 
 		const a = getFeedbackColumns(testDb, "session-fb-4", "mem-aaa-111");
 		const b = getFeedbackColumns(testDb, "session-fb-4", "mem-bbb-222");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(a?.agent_relevance_score).toBeCloseTo(0.9, 6);
 		expect(b?.agent_relevance_score).toBeCloseTo(-0.5, 6);
@@ -570,7 +570,7 @@ describe("recordAgentFeedbackInner", () => {
 
 		const real = getFeedbackColumns(testDb, "session-fb-5", "mem-aaa-111");
 		const ghost = getFeedbackColumns(testDb, "session-fb-5", "mem-ghost");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(real?.agent_relevance_score).toBeCloseTo(0.5, 6);
 		expect(ghost).toBeFalsy();
@@ -593,7 +593,7 @@ describe("recordAgentFeedbackInner", () => {
 
 		const a = getFeedbackColumns(testDb, "session-fb-6a", "mem-aaa-111");
 		const b = getFeedbackColumns(testDb, "session-fb-6b", "mem-aaa-111");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(a?.agent_relevance_score).toBeCloseTo(0.7, 6);
 		expect(b?.agent_relevance_score).toBeNull();
@@ -618,7 +618,7 @@ describe("recordAgentFeedbackInner", () => {
 
 		const a = getFeedbackColumns(testDb, "session-fb-agent", "mem-aaa-111", "agent-a");
 		const b = getFeedbackColumns(testDb, "session-fb-agent", "mem-aaa-111", "agent-b");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(a?.agent_relevance_score).toBeCloseTo(0.9, 6);
 		expect(b?.agent_relevance_score).toBeNull();
@@ -636,7 +636,7 @@ describe("recordAgentFeedbackInner", () => {
 		recordAgentFeedbackInner(testDb, "session-fb-7", { "mem-aaa-111": -0.4 });
 
 		const result = getFeedbackColumns(testDb, "session-fb-7", "mem-aaa-111");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		// mean = (-0.8 * 1 + (-0.4)) / 2 = -0.6
 		expect(result?.agent_relevance_score).toBeCloseTo(-0.6, 6);
@@ -654,7 +654,7 @@ describe("recordAgentFeedbackInner", () => {
 		recordAgentFeedbackInner(testDb, "session-fb-8", {});
 
 		const result = getFeedbackColumns(testDb, "session-fb-8", "mem-aaa-111");
-		testDb.close();
+		(testDb as unknown as Database).close();
 
 		expect(result?.agent_relevance_score).toBeNull();
 		expect(result?.agent_feedback_count).toBe(0);

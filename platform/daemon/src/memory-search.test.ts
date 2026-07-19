@@ -574,8 +574,8 @@ describe("hybridRecall", () => {
 
 		expect(result.meta.temporal?.mode).toBe("timeline");
 		expect(result.results).toHaveLength(2);
-		expect(result.results[0]?.subject_type).toBe("session_summary");
-		expect(result.results[0]?.temporal_facet).toBe("session");
+		expect((result.results[0] as unknown as { subject_type?: string })?.subject_type).toBe("session_summary");
+		expect((result.results[0] as unknown as { temporal_facet?: unknown })?.temporal_facet).toBe("session");
 		expect(result.results[0]?.content).toContain("temporal recall");
 		expect(JSON.stringify(result)).not.toContain("Raw transcript text");
 		expect(result.results.some((row) => row.source_path === "/repo/notes/temporal.md")).toBe(true);

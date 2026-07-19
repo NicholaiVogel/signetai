@@ -909,8 +909,10 @@ describe("Sources routes", () => {
 		});
 		expect(second.status).toBe(409);
 
-		controller?.enqueue(new TextEncoder().encode(JSON.stringify(snapshot)));
-		controller?.close();
+		(controller as unknown as { enqueue: (data: Uint8Array) => void })?.enqueue(
+			new TextEncoder().encode(JSON.stringify(snapshot)) as unknown as Uint8Array,
+		);
+		(controller as unknown as { close: () => void })?.close();
 		expect((await first).status).toBe(200);
 	});
 

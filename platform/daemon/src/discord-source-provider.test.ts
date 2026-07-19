@@ -223,7 +223,7 @@ describe("discord-source-provider", () => {
 		});
 
 		expect(result?.failures).toEqual([]);
-		expect(socket?.sent.some((entry) => entry.includes('"op":2'))).toBe(true);
+		expect((socket as unknown as { sent: string[] })?.sent.some((entry) => entry.includes('"op":2'))).toBe(true);
 		const rows = sourceRows(added.source.id);
 		expect(rows.map((row) => row.source_kind)).toContain("source_discord_message");
 		expect(rows.map((row) => row.source_kind)).toContain("source_discord_message_event");

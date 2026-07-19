@@ -320,8 +320,8 @@ describe("startExtractionThread lifecycle", () => {
 		expect(handle.running).toBe(true);
 		expect(handle.stats.processed).toBe(7);
 		expect(worker.inits).toHaveLength(1);
-		expect(worker.options[0]?.type).toBe("module");
-		expect(worker.options[0]?.workerData).toEqual(testInit());
+		expect((worker.options[0] as unknown as { type?: string })?.type).toBe("module");
+		expect((worker.options[0] as unknown as { workerData?: unknown })?.workerData).toEqual(testInit());
 
 		handle.nudge();
 		expect(worker.messages).toContainEqual({ type: "nudge" });
