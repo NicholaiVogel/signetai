@@ -396,7 +396,7 @@ function loadVecExtension(db: SqliteDatabase): void {
 	}
 	if (vecExtPath) {
 		try {
-			db.loadExtension(vecExtPath);
+			(db as unknown as { loadExtension(p: string): void }).loadExtension(vecExtPath);
 			vecLoaded = true;
 			vecLoadError = null;
 		} catch (e) {
@@ -728,7 +728,7 @@ export function initDbAccessorLite(dbPathParam: string, vecExtensionPath: string
 
 	if (vecExtensionPath) {
 		try {
-			writeConn.loadExtension(vecExtensionPath);
+			(writeConn as unknown as { loadExtension(p: string): void }).loadExtension(vecExtensionPath);
 			vecLoaded = true;
 			vecLoadError = null;
 		} catch (e) {

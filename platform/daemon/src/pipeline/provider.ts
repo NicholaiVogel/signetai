@@ -2011,8 +2011,10 @@ export function createOllamaProvider(config?: Partial<OllamaProviderConfig>): Ll
 						signal: abort.signal,
 						options,
 						extraBody: {
-							...(opts?.responseFormat === "json" ? { format: "json" } : {}),
-							...(opts?.think !== undefined ? { think: opts.think } : {}),
+							...((opts as unknown as { responseFormat?: string; think?: unknown })?.responseFormat === "json"
+								? { format: "json" }
+								: {}),
+							...((opts as unknown as { think?: unknown })?.think !== undefined ? { think: opts.think } : {}),
 						},
 					});
 				} catch (e) {

@@ -73,7 +73,7 @@ describe("github-source-fetch", () => {
 			if (delay === 30_000) {
 				const handle = { id: `request-${requestTimeouts.length + 1}` };
 				requestTimeouts.push(handle);
-				return handle as Runknown as eunknown as turnType<typeof setTimeout>;
+				return handle as unknown as turnType<typeof setTimeout>;
 			}
 			return originalSetTimeout(callback, 0, ...args);
 		}) as typeof setTimeout;
