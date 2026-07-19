@@ -42,7 +42,7 @@ const selectContentClass =
 const selectItemClass = "font-mono text-[11px] rounded-lg";
 
 const EXTRACTION_SAFETY_TEXT =
-	"intended usage: claude code on haiku, codex cli on gpt-5.4-mini with a pro/max subscription, or local providers (llama.cpp or ollama) at qwen3:4b or larger. remote api extraction can stack up extreme fees fast. set provider to none on a vps if you do not want background extraction.";
+	"intended usage: claude code on haiku, codex cli on gpt-5.4-mini with a pro/max subscription, kimi cli on kimi-k2.7, or local providers (llama.cpp or ollama) at qwen3:4b or larger. remote api extraction can stack up extreme fees fast. set provider to none on a vps if you do not want background extraction.";
 
 const EXTRACTION_PROVIDER_OPTIONS = [
 	{ value: "none", label: "none (disable extraction)" },
@@ -51,6 +51,7 @@ const EXTRACTION_PROVIDER_OPTIONS = [
 	{ value: "ollama", label: "ollama" },
 	{ value: "claude-code", label: "claude-code" },
 	{ value: "codex", label: "codex" },
+	{ value: "kimi", label: "Kimi (Kimi CLI)" },
 	{ value: "opencode", label: "opencode" },
 	{ value: "anthropic", label: "anthropic" },
 	{ value: "openrouter", label: "openrouter" },
@@ -74,6 +75,9 @@ function pickPreferredModel(provider: string, presets: Array<{ value: string; la
 	}
 	if (provider === "codex") {
 		return vals.find((v) => v.toLowerCase().includes("mini")) ?? vals[0] ?? "";
+	}
+	if (provider === "kimi") {
+		return vals.find((v) => v === "kimi-k2.7") ?? vals[0] ?? "";
 	}
 	if (provider === "ollama") {
 		return vals.find((v) => v === "qwen3:4b") ?? vals[0] ?? "";
@@ -169,6 +173,7 @@ function modelNeedsCostWarning(provider: string, model: string): boolean {
 	if (!normalized) return false;
 	if (provider === "claude-code") return !normalized.includes("haiku");
 	if (provider === "codex") return normalized !== "gpt-5.4-mini";
+	if (provider === "kimi") return normalized !== "kimi-k2.7";
 	return false;
 }
 
@@ -425,7 +430,7 @@ const ADVANCED_FEATURE_KEYS = ["autonomousFrozen"] as const;
 			<Switch checked={st.aBool(["memory", "pipelineV2", PIPELINE_CORE_BOOLS[0].key])} onCheckedChange={setBool(["memory", "pipelineV2", PIPELINE_CORE_BOOLS[0].key])} />
 		</FormField>
 
-		<FormField label="Extraction provider" description="LLM backend for fact extraction. Ollama runs locally; claude-code uses Claude Code CLI; codex uses the local Codex CLI; opencode uses the OpenCode server; anthropic, openrouter, and openai-compatible use direct APIs.">
+		<FormField label="Extraction provider" description="LLM backend for fact extraction. Ollama runs locally; claude-code uses Claude Code CLI; codex uses the local Codex CLI; kimi uses the local Kimi CLI; opencode uses the OpenCode server; anthropic, openrouter, and openai-compatible use direct APIs.">
 			<div class="flex flex-col gap-2">
 				<Select.Root
 					type="single"
@@ -475,7 +480,7 @@ const ADVANCED_FEATURE_KEYS = ["autonomousFrozen"] as const;
 					<Input value={st.aStr(["memory", "pipelineV2", "extractionModel"])} oninput={setStr(["memory", "pipelineV2", "extractionModel"])} placeholder="custom model id" />
 				{/if}
 				{#if extractionModelNeedsCostWarning()}
-					<span class="text-[9px] text-[var(--sig-danger)] tracking-wider uppercase">recommended safety default is haiku for claude-code and gpt-5.4-mini for codex. larger models will burn more money.</span>
+					<span class="text-[9px] text-[var(--sig-danger)] tracking-wider uppercase">recommended safety default is haiku for claude-code, gpt-5.4-mini for codex, and kimi-k2.7 for kimi. larger models will burn more money.</span>
 				{/if}
 			</div>
 		</FormField>
@@ -544,7 +549,7 @@ const ADVANCED_FEATURE_KEYS = ["autonomousFrozen"] as const;
 				{/if}
 
 				{#if synthesisModelNeedsCostWarning()}
-					<span class="text-[9px] text-[var(--sig-danger)] tracking-wider uppercase">recommended safety default is haiku for claude-code and gpt-5.4-mini for codex. larger models will burn more money.</span>
+					<span class="text-[9px] text-[var(--sig-danger)] tracking-wider uppercase">recommended safety default is haiku for claude-code, gpt-5.4-mini for codex, and kimi-k2.7 for kimi. larger models will burn more money.</span>
 				{/if}
 
 				<Input value={synthesisEndpoint()} oninput={setStr(["memory", "pipelineV2", "synthesis", "endpoint"])} placeholder="endpoint override (optional)" />

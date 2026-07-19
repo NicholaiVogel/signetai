@@ -7,6 +7,7 @@ import {
 	createClaudeCodeProvider,
 	createCodexProvider,
 	createCommandLineProvider,
+	createKimiProvider,
 	createOllamaProvider,
 	createOpenAiCompatibleProvider,
 	createOpenCodeProvider,
@@ -77,6 +78,8 @@ export async function createRoutingProvider(opts: CreateRoutingProviderOptions):
 			return createClaudeCodeProvider({ model: model.model, ...opts.claudeCode });
 		case "codex":
 			return createCodexProvider({ model: model.model });
+		case "kimi":
+			return createKimiProvider({ model: model.model });
 		case "opencode":
 			return createOpenCodeProvider({
 				model: model.model,

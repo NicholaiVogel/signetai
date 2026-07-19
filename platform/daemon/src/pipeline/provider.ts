@@ -283,6 +283,7 @@ const RATE_LIMIT_PROVIDERS: ReadonlySet<string> = new Set([
 	"anthropic",
 	"openrouter",
 	"codex",
+	"kimi",
 	"opencode",
 ]);
 
@@ -294,6 +295,7 @@ const _exhaustiveCheck: Record<RemoteProvider, true> = {
 	anthropic: true,
 	openrouter: true,
 	codex: true,
+	kimi: true,
 	opencode: true,
 };
 void _exhaustiveCheck;
@@ -930,6 +932,85 @@ function createSterileCodexEnv(baseEnv: Record<string, string | undefined>): {
 			...baseEnv,
 			HOME: home,
 			CODEX_HOME: codexHome,
+			XDG_CONFIG_HOME: join(home, ".config"),
+		},
+		cleanup() {
+			if (cleaned) return;
+			cleaned = true;
+			rmSync(home, { recursive: true, force: true });
+		},
+	};
+}
+
+function kimiAuthPaths(baseEnv: Record<string, string | undefined>): string[] {
+	const liveHome = baseEnv.HOME ?? homedir();
+	const homeConfig = join(liveHome, ".kimi-code", "config.toml");
+	const kimiHomeConfig = baseEnv.KIMI_CODE_HOME ? join(baseEnv.KIMI_CODE_HOME, "config.toml") : homeConfig;
+	return kimiHomeConfig === homeConfig ? [homeConfig] : [kimiHomeConfig, homeConfig];
+}
+
+function kimiCredentialDirs(baseEnv: Record<string, string | undefined>): string[] {
+	const liveHome = baseEnv.HOME ?? homedir();
+	const kimiHome = baseEnv.KIMI_CODE_HOME ?? join(liveHome, ".kimi-code");
+	return [join(kimiHome, "credentials"), join(kimiHome, "oauth")];
+}
+
+function dirHasEntries(path: string): boolean {
+	try {
+		return readdirSync(path).length > 0;
+	} catch {
+		return false;
+	}
+}
+
+function hasKimiCredential(baseEnv: Record<string, string | undefined>): boolean {
+	const apiKey = baseEnv.KIMI_API_KEY?.trim();
+	return (
+		Boolean(apiKey) ||
+		kimiAuthPaths(baseEnv).some((path) => existsSync(path)) ||
+		kimiCredentialDirs(baseEnv).some(dirHasEntries)
+	);
+}
+
+function resolveKimiRuntimeRoot(baseEnv: Record<string, string | undefined>): string {
+	const configured = baseEnv.SIGNET_KIMI_RUNTIME_DIR?.trim();
+	if (configured) return configured;
+	return join(resolveDefaultBasePath(), ".daemon", "kimi-home");
+}
+
+function createSterileKimiEnv(baseEnv: Record<string, string | undefined>): {
+	readonly env: Record<string, string | undefined>;
+	cleanup(): void;
+} {
+	const root = resolveKimiRuntimeRoot(baseEnv);
+	mkdirSync(root, { recursive: true });
+	const home = mkdtempSync(join(root, "home-"));
+	const kimiHome = join(home, ".kimi-code");
+	mkdirSync(kimiHome, { recursive: true });
+	const liveHome = baseEnv.HOME ?? homedir();
+	const liveKimiHome = baseEnv.KIMI_CODE_HOME ?? join(liveHome, ".kimi-code");
+
+	const config = join(liveKimiHome, "config.toml");
+	if (existsSync(config)) {
+		const configDst = join(kimiHome, "config.toml");
+		cpSync(config, configDst);
+		chmodSync(configDst, 0o400);
+	}
+
+	for (const dirName of ["credentials", "oauth"]) {
+		const src = join(liveKimiHome, dirName);
+		if (existsSync(src)) {
+			cpSync(src, join(kimiHome, dirName), { recursive: true });
+		}
+	}
+
+	let cleaned = false;
+
+	return {
+		env: {
+			...baseEnv,
+			HOME: home,
+			KIMI_CODE_HOME: kimiHome,
 			XDG_CONFIG_HOME: join(home, ".config"),
 		},
 		cleanup() {
@@ -3132,6 +3213,163 @@ export function createCodexProvider(config?: Partial<CodexProviderConfig>): LlmP
 				return exitCode === 0 && hasCodexCredential(process.env);
 			} catch {
 				logger.debug("pipeline", "Codex CLI not available");
+				return false;
+			}
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Kimi Code via local CLI
+// ---------------------------------------------------------------------------
+
+export interface KimiProviderConfig {
+	readonly model: string;
+	readonly defaultTimeoutMs: number;
+	readonly workingDirectory: string;
+}
+
+const DEFAULT_KIMI_CONFIG: KimiProviderConfig = {
+	model: defaultPipelineModel("kimi"),
+	defaultTimeoutMs: 60000,
+	workingDirectory: homedir(),
+};
+
+function extractKimiContentText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	const parts = content.flatMap((part) => {
+		if (typeof part === "string") return [part];
+		if (typeof part !== "object" || part === null) return [];
+		const record = part as Record<string, unknown>;
+		return typeof record.text === "string" ? [record.text] : [];
+	});
+	return parts.join("\n");
+}
+
+function parseKimiJsonl(raw: string): LlmGenerateResult {
+	const messages: string[] = [];
+
+	for (const line of raw.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			continue;
+		}
+
+		if (typeof parsed !== "object" || parsed === null) continue;
+		const event = parsed as Record<string, unknown>;
+
+		// Kimi stream-json emits chat-shaped messages: assistant turns carry
+		// the model text, tool/meta lines are not conversational output.
+		if (event.role === "assistant") {
+			const text = extractKimiContentText(event.content).trim();
+			if (text.length > 0) messages.push(text);
+		}
+	}
+
+	const text = messages.join("\n").trim();
+	if (text.length === 0) {
+		throw new Error("kimi returned empty output");
+	}
+
+	return { text, usage: null };
+}
+
+export function createKimiProvider(config?: Partial<KimiProviderConfig>): LlmProvider {
+	const cfg = { ...DEFAULT_KIMI_CONFIG, ...config };
+
+	async function callKimi(prompt: string, opts?: LlmProviderCallOptions): Promise<LlmGenerateResult> {
+		const timeoutMs = opts?.timeoutMs ?? cfg.defaultTimeoutMs;
+		const deadline = performance.now() + timeoutMs;
+		if (!hasKimiCredential(process.env)) {
+			throw new Error(
+				"Kimi CLI auth unavailable: set KIMI_API_KEY or mount KIMI_CODE_HOME with config.toml/credentials",
+			);
+		}
+
+		return withLlmConcurrency(
+			async () => {
+				const remainingMs = deadline - performance.now();
+				if (remainingMs <= 0) {
+					throw new Error(`kimi timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore)`);
+				}
+				const args = ["-p", prompt, "--output-format", "stream-json", "-m", cfg.model];
+
+				const { SIGNET_NO_HOOKS: _, ...cleanEnv } = process.env;
+				const sterile = createSterileKimiEnv(cleanEnv);
+				let proc: SpawnResult;
+				try {
+					proc = spawnHidden(["kimi", ...args], {
+						env: {
+							...sterile.env,
+							NO_COLOR: "1",
+							SIGNET_NO_HOOKS: "1",
+						},
+					});
+				} catch (e) {
+					sterile.cleanup();
+					throw e;
+				}
+				proc.exited.finally(() => sterile.cleanup());
+
+				return awaitSubprocessWithDeadline(
+					proc,
+					remainingMs,
+					"kimi",
+					timeoutMs,
+					async (p) => {
+						const [stdout, stderr, exitCode] = await Promise.all([
+							new Response(p.stdout).text().catch(() => ""),
+							new Response(p.stderr).text().catch(() => ""),
+							p.exited.catch(() => -1),
+						]);
+
+						if (exitCode !== 0) {
+							const detail = stderr.trim() || stdout.trim();
+							throw new Error(`kimi exit ${exitCode}: ${detail.slice(0, 500)}`);
+						}
+						return parseKimiJsonl(stdout);
+					},
+					generateSignal(opts),
+				);
+			},
+			timeoutMs,
+			"kimi",
+			generateSignal(opts),
+		);
+	}
+
+	return {
+		name: `kimi:${cfg.model}`,
+
+		async generate(prompt, opts): Promise<string> {
+			const result = await callKimi(prompt, opts);
+			return result.text;
+		},
+
+		async generateWithUsage(prompt, opts): Promise<LlmGenerateResult> {
+			return callKimi(prompt, opts);
+		},
+
+		async available(): Promise<boolean> {
+			try {
+				const versionEnv = { ...process.env };
+				Reflect.deleteProperty(versionEnv, "KIMI_API_KEY");
+				const proc = spawnHidden(["kimi", "--version"], {
+					env: {
+						...versionEnv,
+						SIGNET_NO_HOOKS: "1",
+					},
+				});
+				const exitCode = await proc.exited;
+				return exitCode === 0 && hasKimiCredential(process.env);
+			} catch {
+				logger.debug("pipeline", "Kimi CLI not available");
 				return false;
 			}
 		},

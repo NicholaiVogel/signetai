@@ -21,6 +21,7 @@ import {
 	createClaudeCodeProvider,
 	createCodexProvider,
 	createCommandLineProvider,
+	createKimiProvider,
 	createLlamaCppProvider,
 	createOllamaProvider,
 	createOpenAiCompatibleProvider,
@@ -1745,6 +1746,289 @@ describe("createCodexProvider", () => {
 			defaultTimeoutMs: 1,
 		});
 		await expect(provider.generate("test")).rejects.toThrow(/codex timeout after 1ms/);
+	});
+});
+
+describe("createKimiProvider", () => {
+	let restoreKimiEnv: (() => void) | undefined;
+
+	afterEach(() => {
+		restoreSpawn();
+		restoreKimiEnv?.();
+		restoreKimiEnv = undefined;
+	});
+
+	function withTempKimiEnv(root: string, options: { auth?: boolean; apiKey?: string }): () => void {
+		const previous = {
+			HOME: process.env.HOME,
+			KIMI_CODE_HOME: process.env.KIMI_CODE_HOME,
+			KIMI_API_KEY: process.env.KIMI_API_KEY,
+			PATH: process.env.PATH,
+			SIGNET_KIMI_RUNTIME_DIR: process.env.SIGNET_KIMI_RUNTIME_DIR,
+		};
+		const home = join(root, "home");
+		const kimiHome = join(root, "kimi-home");
+		const binDir = join(root, "bin");
+		mkdirSync(home, { recursive: true });
+		mkdirSync(kimiHome, { recursive: true });
+		mkdirSync(binDir, { recursive: true });
+		const kimiBin = join(binDir, "kimi");
+		writeFileSync(kimiBin, "#!/usr/bin/env sh\n");
+		chmodSync(kimiBin, 0o755);
+		if (options.auth) writeFileSync(join(kimiHome, "config.toml"), 'default_model = "kimi-k2.7"\n');
+		process.env.HOME = home;
+		process.env.KIMI_CODE_HOME = kimiHome;
+		process.env.PATH = previous.PATH ? `${binDir}${delimiter}${previous.PATH}` : binDir;
+		process.env.SIGNET_KIMI_RUNTIME_DIR = join(root, "runtime");
+		if (options.apiKey === undefined) {
+			Reflect.deleteProperty(process.env, "KIMI_API_KEY");
+		} else {
+			process.env.KIMI_API_KEY = options.apiKey;
+		}
+
+		return () => {
+			for (const [key, value] of Object.entries(previous)) {
+				if (value === undefined) {
+					Reflect.deleteProperty(process.env, key);
+				} else {
+					process.env[key] = value;
+				}
+			}
+			rmSync(root, { recursive: true, force: true });
+		};
+	}
+
+	function useTempKimiEnv(options: { auth?: boolean; apiKey?: string } = { auth: true }): void {
+		const root = join(tmpdir(), `signet-kimi-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		restoreKimiEnv = withTempKimiEnv(root, options);
+	}
+
+	function mockKimiVersion(exitCode: number, forbiddenSecret?: string): () => number {
+		let calls = 0;
+		Bun.spawn = mock((args: string[], opts?: { env?: Record<string, string | undefined> }) => {
+			calls += 1;
+			expect(args.at(-1)).toBe("--version");
+			if (forbiddenSecret) {
+				expect(args.join("\0")).not.toContain(forbiddenSecret);
+				expect(Object.values(opts?.env ?? {}).join("\0")).not.toContain(forbiddenSecret);
+			}
+			return {
+				stdout: streamFromString("kimi 0.27.0\n"),
+				stderr: streamFromString(""),
+				exited: Promise.resolve(exitCode),
+				kill() {},
+			};
+		}) as unknown as typeof Bun.spawn;
+		return () => calls;
+	}
+
+	it("uses the default model (kimi-k2.7) when none is supplied", () => {
+		const provider = createKimiProvider();
+		expect(provider.name).toBe("kimi:kimi-k2.7");
+	});
+
+	it("returns a provider with the correct name", () => {
+		const provider = createKimiProvider({ model: "kimi-k3" });
+		expect(provider.name).toBe("kimi:kimi-k3");
+	});
+
+	it("available() returns true when kimi --version exits 0 and KIMI_CODE_HOME config exists", async () => {
+		const root = join(tmpdir(), `signet-kimi-available-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const restoreEnv = withTempKimiEnv(root, { auth: true });
+		const calls = mockKimiVersion(0);
+		try {
+			const provider = createKimiProvider();
+			expect(await provider.available()).toBe(true);
+			expect(calls()).toBe(1);
+		} finally {
+			restoreEnv();
+		}
+	});
+
+	it("available() returns true when kimi --version exits 0 and KIMI_API_KEY exists", async () => {
+		const root = join(tmpdir(), `signet-kimi-available-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const apiKey = "test-kimi-api-key";
+		const restoreEnv = withTempKimiEnv(root, { apiKey });
+		const calls = mockKimiVersion(0, apiKey);
+		try {
+			const provider = createKimiProvider();
+			expect(await provider.available()).toBe(true);
+			expect(calls()).toBe(1);
+		} finally {
+			restoreEnv();
+		}
+	});
+
+	it("available() returns false when kimi --version exits 0 without config or API key", async () => {
+		const root = join(tmpdir(), `signet-kimi-available-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const restoreEnv = withTempKimiEnv(root, {});
+		const calls = mockKimiVersion(0);
+		try {
+			const provider = createKimiProvider();
+			expect(await provider.available()).toBe(false);
+			expect(calls()).toBe(1);
+		} finally {
+			restoreEnv();
+		}
+	});
+
+	it("available() returns false when kimi --version fails", async () => {
+		const root = join(tmpdir(), `signet-kimi-available-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const restoreEnv = withTempKimiEnv(root, { auth: true });
+		const calls = mockKimiVersion(1);
+		try {
+			const provider = createKimiProvider();
+			expect(await provider.available()).toBe(false);
+			expect(calls()).toBe(1);
+		} finally {
+			restoreEnv();
+		}
+	});
+
+	it("generateWithUsage() parses stream-json assistant output", async () => {
+		useTempKimiEnv();
+		let capturedArgs: string[] = [];
+		let capturedEnv: Record<string, string | undefined> | undefined;
+		Bun.spawn = mock((args: string[], opts?: { env?: Record<string, string | undefined> }) => {
+			capturedArgs = args;
+			capturedEnv = opts?.env;
+			return {
+				stdout: streamFromString(
+					'{"role":"assistant","tool_calls":[{"type":"function","id":"tc_1","function":{"name":"Read","arguments":"{}"}}]}\n{"role":"tool","tool_call_id":"tc_1","content":"file contents"}\n{"role":"assistant","content":"done"}\n{"role":"meta","type":"session.resume_hint","session_id":"abc"}\n',
+				),
+				stderr: streamFromString(""),
+				exited: Promise.resolve(0),
+				kill() {},
+			};
+		}) as unknown as typeof Bun.spawn;
+
+		const provider = createKimiProvider({ model: "kimi-k2.7" });
+		if (!provider.generateWithUsage) {
+			throw new Error("expected generateWithUsage on Kimi provider");
+		}
+		const result = await provider.generateWithUsage("test prompt");
+		expect(result.text).toBe("done");
+		expect(result.usage).toBeNull();
+		expect(capturedArgs[0]?.endsWith("kimi")).toBe(true);
+		expect(capturedArgs.slice(1)).toEqual(["-p", "test prompt", "--output-format", "stream-json", "-m", "kimi-k2.7"]);
+		expect(typeof capturedEnv?.HOME).toBe("string");
+		expect(capturedEnv?.HOME).not.toBe(process.env.HOME);
+		expect(capturedEnv?.KIMI_CODE_HOME).toBe(join(capturedEnv?.HOME ?? "", ".kimi-code"));
+	});
+
+	it("parses array-form assistant content parts", async () => {
+		useTempKimiEnv();
+		Bun.spawn = mock((_args: string[]) => ({
+			stdout: streamFromString(
+				'{"role":"assistant","content":[{"type":"text","text":"hello"},{"type":"text","text":"world"}]}\n',
+			),
+			stderr: streamFromString(""),
+			exited: Promise.resolve(0),
+			kill() {},
+		})) as unknown as typeof Bun.spawn;
+
+		const provider = createKimiProvider({ model: "kimi-k3" });
+		if (!provider.generateWithUsage) {
+			throw new Error("expected generateWithUsage on Kimi provider");
+		}
+		const result = await provider.generateWithUsage("test");
+		expect(result.text).toBe("hello\nworld");
+	});
+
+	it("spawns Kimi with a sterile temp home and readonly copied config", async () => {
+		const root = join(tmpdir(), `signet-kimi-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const home = join(root, "home");
+		const liveKimi = join(root, "live-kimi");
+		const runtimeRoot = join(root, "runtime");
+		mkdirSync(join(liveKimi, "credentials"), { recursive: true });
+		writeFileSync(join(liveKimi, "config.toml"), 'default_model = "kimi-k2.7"\n');
+		writeFileSync(join(liveKimi, "credentials", "kimi.json"), '{"token":"test"}');
+
+		const prevHome = process.env.HOME;
+		const prevKimiHome = process.env.KIMI_CODE_HOME;
+		const prevKimiRuntimeDir = process.env.SIGNET_KIMI_RUNTIME_DIR;
+		process.env.HOME = home;
+		process.env.KIMI_CODE_HOME = liveKimi;
+		process.env.SIGNET_KIMI_RUNTIME_DIR = runtimeRoot;
+
+		let capturedEnv: Record<string, string | undefined> | undefined;
+		Bun.spawn = mock((args: string[], opts?: { env?: Record<string, string | undefined> }) => {
+			capturedEnv = opts?.env;
+			const srcConfig = join(liveKimi, "config.toml");
+			const dstConfig = join(capturedEnv?.KIMI_CODE_HOME ?? "", "config.toml");
+			expect(capturedEnv?.KIMI_CODE_HOME).toBe(join(capturedEnv?.HOME ?? "", ".kimi-code"));
+			expect(capturedEnv?.HOME?.startsWith(runtimeRoot)).toBe(true);
+			expect(existsSync(dstConfig)).toBe(existsSync(srcConfig));
+			if (existsSync(srcConfig)) {
+				expect(lstatSync(dstConfig).isSymbolicLink()).toBe(false);
+				expect(readFileSync(dstConfig, "utf8")).toBe(readFileSync(srcConfig, "utf8"));
+				expect(lstatSync(dstConfig).mode & 0o200).toBe(0);
+			}
+			expect(existsSync(join(capturedEnv?.KIMI_CODE_HOME ?? "", "credentials", "kimi.json"))).toBe(true);
+			return {
+				stdout: streamFromString('{"role":"assistant","content":"done"}\n'),
+				stderr: streamFromString(""),
+				exited: Promise.resolve(0),
+				kill() {},
+			};
+		}) as unknown as typeof Bun.spawn;
+
+		try {
+			const provider = createKimiProvider({ model: "kimi-k2.7" });
+			if (!provider.generateWithUsage) {
+				throw new Error("expected generateWithUsage on Kimi provider");
+			}
+
+			await provider.generateWithUsage("test");
+
+			expect(capturedEnv?.HOME).toBeDefined();
+			expect(capturedEnv?.HOME).not.toBe(home);
+			expect(capturedEnv?.KIMI_CODE_HOME).toBe(join(capturedEnv?.HOME ?? "", ".kimi-code"));
+			expect(capturedEnv?.XDG_CONFIG_HOME).toBe(join(capturedEnv?.HOME ?? "", ".config"));
+		} finally {
+			if (prevHome === undefined) {
+				Reflect.deleteProperty(process.env, "HOME");
+			} else {
+				process.env.HOME = prevHome;
+			}
+			if (prevKimiHome === undefined) {
+				Reflect.deleteProperty(process.env, "KIMI_CODE_HOME");
+			} else {
+				process.env.KIMI_CODE_HOME = prevKimiHome;
+			}
+			if (prevKimiRuntimeDir === undefined) {
+				Reflect.deleteProperty(process.env, "SIGNET_KIMI_RUNTIME_DIR");
+			} else {
+				process.env.SIGNET_KIMI_RUNTIME_DIR = prevKimiRuntimeDir;
+			}
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("generate() throws on non-zero exit", async () => {
+		useTempKimiEnv();
+		Bun.spawn = mock((_args: string[]) => ({
+			stdout: streamFromString(""),
+			stderr: streamFromString("boom"),
+			exited: Promise.resolve(1),
+			kill() {},
+		})) as unknown as typeof Bun.spawn;
+
+		const provider = createKimiProvider({ model: "kimi-k2.7" });
+		await expect(provider.generate("test")).rejects.toThrow(/kimi exit 1/);
+	});
+
+	it("generate() throws when stream-json output has no assistant text", async () => {
+		useTempKimiEnv();
+		Bun.spawn = mock((_args: string[]) => ({
+			stdout: streamFromString('{"role":"meta","type":"session.resume_hint","session_id":"abc"}\n'),
+			stderr: streamFromString(""),
+			exited: Promise.resolve(0),
+			kill() {},
+		})) as unknown as typeof Bun.spawn;
+
+		const provider = createKimiProvider({ model: "kimi-k2.7" });
+		await expect(provider.generate("test")).rejects.toThrow(/kimi returned empty output/);
 	});
 });
 

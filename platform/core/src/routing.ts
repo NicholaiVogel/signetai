@@ -1,5 +1,5 @@
-import type { PipelineCommandConfig, PipelineExtractionConfig, PipelineSynthesisConfig } from "./types";
 import { defaultPipelineModel } from "./pipeline-providers";
+import type { PipelineCommandConfig, PipelineExtractionConfig, PipelineSynthesisConfig } from "./types";
 
 export const ROUTING_ACCOUNT_KINDS = ["subscription_session", "api"] as const;
 export const ROUTING_TARGET_KINDS = ["subscription_session", "api", "local", "gateway"] as const;
@@ -7,6 +7,7 @@ export const ROUTING_EXECUTOR_KINDS = [
 	"acpx",
 	"claude-code",
 	"codex",
+	"kimi",
 	"opencode",
 	"anthropic",
 	"openrouter",
@@ -375,7 +376,13 @@ function inferLegacyTargetKind(executor: string, endpoint: string | undefined): 
 
 function inferTargetPrivacy(executor: string): RoutingPrivacyTier {
 	if (executor === "ollama" || executor === "llama-cpp") return "local_only";
-	if (executor === "acpx" || executor === "claude-code" || executor === "codex" || executor === "opencode")
+	if (
+		executor === "acpx" ||
+		executor === "claude-code" ||
+		executor === "codex" ||
+		executor === "kimi" ||
+		executor === "opencode"
+	)
 		return "restricted_remote";
 	return "remote_ok";
 }
