@@ -1868,7 +1868,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	// blocking on LLM inference. The worker produces both a dated
 	// markdown summary and atomic fact rows.
 	const noiseSession = isNoiseSession({
-		project: req.cwd ?? null,
+		project: req.cwd ?? undefined,
 		sessionKey: sessionKey ?? null,
 		sessionId,
 		harness: req.harness,
@@ -1899,7 +1899,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 				transcript: retainedTranscript,
 				sessionKey,
 				sessionId,
-				project: req.cwd ?? null,
+				project: req.cwd ?? undefined,
 				agentId,
 				trigger: "session_end",
 				boundaryReason: "session_closed",

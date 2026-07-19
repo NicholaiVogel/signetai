@@ -955,7 +955,7 @@ function registerCompactionComplete(app: Hono): void {
 			resetSessionStartDedupe({
 				harness: body.harness,
 				agentId,
-				project,
+				project: project ?? undefined,
 				sessionKey: body.sessionKey,
 			});
 

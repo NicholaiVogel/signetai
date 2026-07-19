@@ -813,7 +813,7 @@ export async function aggregateRecall(
 
 	const planned = await timings.timeAsync("aggregate_planning", () =>
 		planQueries({
-			router: deps.router,
+			router: deps.router as unknown as AggregateInferenceRouter,
 			params,
 			budget,
 			maxQueries,
@@ -854,7 +854,7 @@ export async function aggregateRecall(
 	}
 
 	const synthesized = await timings.timeAsync("aggregate_synthesis", () =>
-		synthesize({ router: deps.router, params, evidence }),
+		synthesize({ router: deps.router as unknown as AggregateInferenceRouter, params, evidence }),
 	);
 	if (synthesized.usage) usageStages.push(synthesized.usage);
 	const answer = synthesized.answer;

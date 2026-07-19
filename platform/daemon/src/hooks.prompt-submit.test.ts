@@ -288,7 +288,7 @@ describe("handleUserPromptSubmit entity context", () => {
 
 	it("uses entity match only as the semantic scope for attribute relevance", async () => {
 		seedEntityContext();
-		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0]);
+		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0] as unknown as null);
 
 		const result = await handleUserPromptSubmit(
 			{ harness: "codex", userMessage: "Signet likes taking notes", sessionKey: "session-attribute-semantic" },
@@ -368,7 +368,7 @@ describe("handleUserPromptSubmit entity context", () => {
 				  'runtime', 'duplicate_guard', 0.9, 0.9, 'active', ?, ?)`,
 			).run(now, now);
 		});
-		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0]);
+		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0] as unknown as null);
 
 		const result = await handleUserPromptSubmit(
 			{
@@ -388,7 +388,7 @@ describe("handleUserPromptSubmit entity context", () => {
 
 	it("matches missing-apostrophe possessive entity mentions", async () => {
 		seedEntityContext();
-		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0]);
+		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0] as unknown as null);
 
 		const result = await handleUserPromptSubmit(
 			{
@@ -552,7 +552,7 @@ describe("handleUserPromptSubmit entity context", () => {
 				  'general', 'uncategorized', 0.99, 1, 'active', ?, ?)`,
 			).run(now, now);
 		});
-		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0]);
+		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0] as unknown as null);
 
 		const result = await handleUserPromptSubmit(
 			{
@@ -594,7 +594,7 @@ describe("handleUserPromptSubmit entity context", () => {
 				  'working_style', 'style_summary', 0.9, 0.9, 'active', ?, ?)`,
 			).run(now, now);
 		});
-		fetchEmbeddingMock.mockImplementation(async () => [0, 0]);
+		fetchEmbeddingMock.mockImplementation(async () => [0, 0] as unknown as null);
 
 		await handleUserPromptSubmit(
 			{
@@ -640,7 +640,7 @@ describe("handleUserPromptSubmit entity context", () => {
 				  'mem-nicholai-compass', 'Compass is an active client project management tool.', ?, 'default')`,
 			).run(vectorToBlob([1, 0]), now);
 		});
-		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0]);
+		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0] as unknown as null);
 
 		const result = await handleUserPromptSubmit(
 			{
@@ -679,7 +679,7 @@ describe("handleUserPromptSubmit entity context", () => {
 				  'runtime', 'generic_collision', 0.9, 0.9, 'active', ?, ?)`,
 			).run(now, now);
 		});
-		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0]);
+		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0] as unknown as null);
 
 		const result = await handleUserPromptSubmit(
 			{
@@ -758,7 +758,7 @@ describe("handleUserPromptSubmit entity context", () => {
 				"other-agent",
 			);
 		});
-		fetchEmbeddingMock.mockImplementationOnce(async () => [0, 1]);
+		fetchEmbeddingMock.mockImplementationOnce(async () => [0, 1] as unknown as null);
 
 		const result = await handleUserPromptSubmit(
 			{ harness: "codex", userMessage: "Signet likes taking notes", sessionKey: "session-agent-scoped-embedding" },
@@ -787,7 +787,7 @@ describe("handleUserPromptSubmit entity context", () => {
 				"2026-05-27T00:00:00.000Z",
 			);
 		});
-		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0]);
+		fetchEmbeddingMock.mockImplementationOnce(async () => [1, 0] as unknown as null);
 
 		const result = await handleUserPromptSubmit(
 			{ harness: "codex", userMessage: "Signet likes taking notes", sessionKey: "session-dimension-mismatch" },
