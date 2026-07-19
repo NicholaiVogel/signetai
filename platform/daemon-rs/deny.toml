@@ -1,0 +1,39 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Workspace members are unpublished and carry no license field.
+private = "ignore"
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  # Present in the dependency tree (verified against `cargo metadata`):
+  "0BSD",         # 0BSD OR MIT OR Apache-2.0
+  "BSD-2-Clause", # BSD-2-Clause / BSD-2-Clause OR Apache-2.0 OR MIT
+  "BSD-3-Clause", # BSD-3-Clause, (MIT OR Apache-2.0) AND BSD-3-Clause
+  "BSL-1.0",      # Apache-2.0 OR BSL-1.0 (Boost license)
+  "CC0-1.0",      # CC0-1.0 / CC0-1.0 OR MIT-0 OR Apache-2.0
+  "ISC",          # ISC, Apache-2.0 AND ISC, Apache-2.0 OR ISC OR MIT
+  "MIT-0",        # CC0-1.0 OR MIT-0 OR Apache-2.0
+  "Zlib",         # Zlib, MIT OR Zlib OR Apache-2.0
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
