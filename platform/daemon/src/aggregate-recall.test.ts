@@ -149,7 +149,7 @@ class SynthesisFailingRouter extends StaticRouter {
 			this.calls.push(request);
 			this.prompts.push(prompt);
 			this.opts.push(opts ?? {});
-			return { ok: false, error: new Error("synthesis unavailable") };
+			return { ok: false, error: new Error("synthesis unavailable") as unknown as RouterError };
 		}
 		return super.execute(request, prompt, opts);
 	}

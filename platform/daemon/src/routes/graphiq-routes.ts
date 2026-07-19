@@ -64,7 +64,9 @@ export function registerGraphiqRoutes(app: Hono): void {
 		}
 
 		const agentsDir = getAgentsDir();
-		enableGraphiqState(agentsDir, { installSource: result.source });
+		enableGraphiqState(agentsDir, {
+			installSource: result.source as "source" | "homebrew" | "script" | "existing" | undefined,
+		});
 		getDefaultPluginHost().setEnabled(SIGNET_GRAPHIQ_PLUGIN_ID, true);
 		return c.json({ success: true, message: `GraphIQ installed via ${result.source}`, source: result.source });
 	});
@@ -115,7 +117,9 @@ export function registerGraphiqRoutes(app: Hono): void {
 			if (!installResult.success) {
 				return c.json({ success: false, error: `GraphIQ not installed: ${installResult.error}` }, 500);
 			}
-			enableGraphiqState(getAgentsDir(), { installSource: installResult.source });
+			enableGraphiqState(getAgentsDir(), {
+				installSource: installResult.source as "source" | "homebrew" | "script" | "existing" | undefined,
+			});
 			getDefaultPluginHost().setEnabled(SIGNET_GRAPHIQ_PLUGIN_ID, true);
 		}
 

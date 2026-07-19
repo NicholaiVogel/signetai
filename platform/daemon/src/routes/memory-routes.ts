@@ -3018,7 +3018,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				recallMode: "direct",
 				...(scopeProject ? { project: scopeProject } : {}),
 			};
-			const result = await hybridRecall(params, cfg, fetchEmbedding);
+			const result = await hybridRecall(params as unknown as RecallParams, cfg, fetchEmbedding);
 			recordRecallQaTelemetry({
 				route: "GET /api/memory/search",
 				agentId,

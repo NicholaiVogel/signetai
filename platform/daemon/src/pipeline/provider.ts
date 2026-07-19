@@ -295,6 +295,7 @@ const _exhaustiveCheck: Record<RemoteProvider, true> = {
 	openrouter: true,
 	codex: true,
 	opencode: true,
+	"openai-compatible": true,
 };
 void _exhaustiveCheck;
 

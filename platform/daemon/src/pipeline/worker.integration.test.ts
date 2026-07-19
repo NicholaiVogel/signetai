@@ -170,7 +170,15 @@ function testPipelineCfg(): PipelineV2Config {
 				level2MaxEntities: 5,
 			},
 		},
-		worker: { pollMs: 10, maxRetries: 3, leaseTimeoutMs: 300000, maxLoadPerCpu: 2, overloadBackoffMs: 5000 },
+		worker: {
+			pollMs: 10,
+			maxRetries: 3,
+			leaseTimeoutMs: 300000,
+			maxLoadPerCpu: 2,
+			overloadBackoffMs: 5000,
+			maxLlmConcurrency: 1,
+			threadedExtraction: false,
+		} as unknown as PipelineWorkerConfig,
 		graph: { enabled: true, extractionWritesEnabled: true, boostWeight: 0.15, boostTimeoutMs: 500 },
 		traversal: {
 			enabled: false,

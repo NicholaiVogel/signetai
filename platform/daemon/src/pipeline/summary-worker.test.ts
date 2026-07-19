@@ -584,6 +584,8 @@ describe("summary job helpers", () => {
 		controller.abort();
 		let observedSignal: AbortSignal | undefined;
 		const provider: LlmProvider = {
+			name: "test",
+			available: true,
 			async generate(_prompt, opts) {
 				observedSignal = opts?.signal;
 				throw new Error("aborted");
