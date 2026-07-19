@@ -146,7 +146,7 @@ function getMemoryDbPath(): string {
 	return join(getAgentsDir(), "memory", "memories.db");
 }
 
-const deferredSessionEndWork = new Set<Promise<void>>();
+const deferredSessionEndWork = new Set<Promise<unknown>>();
 
 function summaryJobsHasColumn(column: string): boolean {
 	try {
@@ -1948,7 +1948,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	}
 
 	setImmediate(() => {
-		let work: Promise<void>;
+		let work: Promise<unknown>;
 		try {
 			work = runTranscriptCaptureOnce(getDbAccessor(), getAgentsDir()).catch((error) => {
 				logger.warn("hooks", "Deferred transcript capture job failed", {

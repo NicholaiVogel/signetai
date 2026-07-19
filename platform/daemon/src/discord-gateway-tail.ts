@@ -39,10 +39,11 @@ interface DiscordGatewaySocket {
 
 type DiscordGatewaySocketFactory = (url: string) => DiscordGatewaySocket;
 
-let discordGatewaySocketFactory: DiscordGatewaySocketFactory = (url) => new WebSocket(url);
+let discordGatewaySocketFactory: DiscordGatewaySocketFactory = (url) =>
+	new WebSocket(url) as unknown as DiscordGatewaySocket;
 
 export function setDiscordGatewaySocketFactoryForTest(factory: DiscordGatewaySocketFactory | null): void {
-	discordGatewaySocketFactory = factory ?? ((url) => new WebSocket(url));
+	discordGatewaySocketFactory = factory ?? ((url) => new WebSocket(url) as unknown as DiscordGatewaySocket);
 }
 
 export interface DiscordGatewayTailHandlers {

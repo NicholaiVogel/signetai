@@ -57,7 +57,7 @@ describe("searchSessionTranscripts", () => {
 		);
 
 		const rows = searchSessionTranscripts({
-			db: conn,
+			db: conn as unknown as ReadDb,
 			agentId: "default",
 			query: "delegated continuity",
 			project: "/repo",
