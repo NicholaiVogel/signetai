@@ -385,7 +385,7 @@ function getScopedIdempotencyMemoryId(
 }
 
 function getScopedIdempotencyDedupeRow(
-	db: WriteDb,
+	db: ReadDb | WriteDb,
 	key: string | undefined,
 	input: RememberDedupeScope,
 ): RememberDedupeRow | undefined {
@@ -440,7 +440,7 @@ function isMemoryContentHashUniqueError(err: unknown): boolean {
 }
 
 function getScopedContentHashDedupeRow(
-	db: WriteDb,
+	db: ReadDb | WriteDb,
 	contentHash: string,
 	input: RememberDedupeScope,
 ): RememberDedupeRow | undefined {
