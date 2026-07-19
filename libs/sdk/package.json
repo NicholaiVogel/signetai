@@ -30,7 +30,8 @@
 	"scripts": {
 		"build": "bun build ./src/index.ts ./src/react.tsx ./src/ai-sdk.ts ./src/openai.ts --outdir ./dist --target node --external react --external zod",
 		"dev": "bun --watch src/index.ts",
-		"test": "bun test"
+		"test": "bun test",
+		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
 		"@types/react": "^19.0.0",

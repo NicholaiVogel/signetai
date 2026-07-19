@@ -23,7 +23,8 @@
 		"copy:skills": "rm -rf skills && cp -r ../../skills skills",
 		"prebuild": "bun run build:workspace-deps && bun run copy:skills",
 		"prepublishOnly": "bun run build",
-		"test": "bun test"
+		"test": "bun test",
+		"typecheck": "tsc --noEmit"
 	},
 	"keywords": [
 		"signet",

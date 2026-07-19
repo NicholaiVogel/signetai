@@ -45,6 +45,7 @@
 		"format": "biome format --write .",
 		"typecheck": "bun run --filter '*' typecheck",
 		"version:sync": "bun scripts/version-sync.ts",
+		"prepare": "husky",
 		"dev:web": "cd web/marketing && bun run dev",
 		"deploy:web": "cd web/marketing && bun run deploy",
 		"changelog": "bun scripts/changelog.ts",
@@ -62,6 +63,8 @@
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.4",
 		"@signet/sdk": "workspace:*",
+		"husky": "^9.1.7",
+		"lint-staged": "^17.1.0",
 		"@types/node": "^24.5.2",
 		"bun-types": "^1.3.9",
 		"esbuild": "^0.25.0",
