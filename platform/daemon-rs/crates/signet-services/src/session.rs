@@ -52,6 +52,21 @@ impl RuntimePath {
 // Session claim
 // ---------------------------------------------------------------------------
 
+/// Info handed to the expiration handler before a stale claim is evicted
+/// (issue #902). Mirrors TS `SessionExpiredInfo`.
+#[derive(Debug, Clone)]
+pub struct SessionExpiredInfo {
+    pub key: String,
+    pub agent_id: String,
+    pub runtime_path: RuntimePath,
+    /// ISO-8601 timestamp recorded when the claim was first created.
+    pub claimed_at: String,
+}
+
+/// Handler invoked before a stale claim is evicted. Must not panic — the
+/// tracker relies on it being infallible so eviction is never blocked.
+type ExpirationHandler = std::sync::Arc<dyn Fn(SessionExpiredInfo) + Send + Sync>;
+
 struct SessionClaim {
     path: RuntimePath,
     expires: Instant,
@@ -101,6 +116,10 @@ pub struct SessionTracker {
     /// Session keys embed the agent ID (`agent:<id>:<uuid>`), making
     /// cross-agent key sharing structurally impossible in practice.
     bypassed_keys: Mutex<std::collections::HashSet<String>>,
+    /// Registered by the daemon at startup (issue #902). Invoked before any
+    /// stale claim is evicted so TTL expiry is a formal, auditable lifecycle
+    /// transition (checkpoint + summary enqueue + audit row).
+    expiration_handler: Mutex<Option<ExpirationHandler>>,
 }
 
 #[derive(Debug)]
@@ -118,7 +137,35 @@ impl SessionTracker {
         Self {
             claims: Mutex::new(HashMap::new()),
             bypassed_keys: Mutex::new(std::collections::HashSet::new()),
+            expiration_handler: Mutex::new(None),
         }
+    }
+
+    /// Register the TTL-expiration handler (issue #902). Mirrors TS
+    /// `setSessionExpirationHandler`; the latest registration wins.
+    pub fn set_expiration_handler(
+        &self,
+        handler: impl Fn(SessionExpiredInfo) + Send + Sync + 'static,
+    ) {
+        *self.expiration_handler.lock().unwrap() = Some(std::sync::Arc::new(handler));
+    }
+
+    /// Evict a stale claim, invoking the expiration handler BEFORE removal so
+    /// finalization always sees the transition (mirrors TS `evictClaim`).
+    /// The caller must hold the claims lock.
+    fn evict_claim(&self, claims: &mut HashMap<String, SessionClaim>, key: &str) {
+        let Some(claim) = claims.get(key) else {
+            return;
+        };
+        if let Some(handler) = self.expiration_handler.lock().unwrap().as_ref() {
+            handler(SessionExpiredInfo {
+                key: key.to_string(),
+                agent_id: claim.agent_id.clone(),
+                runtime_path: claim.path,
+                claimed_at: claim.claimed_at.clone(),
+            });
+        }
+        claims.remove(key);
     }
 
     /// Claim a session for a runtime path. Returns Ok if claimed successfully
@@ -133,8 +180,8 @@ impl SessionTracker {
                 return ClaimResult::Ok;
             }
             if claim.is_stale() {
-                // Evict stale claim
-                claims.remove(key);
+                // Evict stale claim (finalizes via expiration handler first)
+                self.evict_claim(&mut claims, key);
             } else {
                 return ClaimResult::Conflict {
                     claimed_by: claim.path,
@@ -172,7 +219,7 @@ impl SessionTracker {
         let mut claims = self.claims.lock().unwrap();
         if let Some(claim) = claims.get(key) {
             if claim.is_stale() {
-                claims.remove(key);
+                self.evict_claim(&mut claims, key);
                 return None;
             }
             Some(claim.path)
@@ -203,7 +250,7 @@ impl SessionTracker {
         let mut claims = self.claims.lock().unwrap();
         if let Some(claim) = claims.get_mut(key) {
             if claim.is_stale() {
-                claims.remove(key);
+                self.evict_claim(&mut claims, key);
                 return false;
             }
             claim.refresh();
@@ -240,9 +287,18 @@ impl SessionTracker {
         self.bypassed_keys.lock().unwrap().contains(key)
     }
 
-    /// List active sessions.
+    /// List active sessions. Stale claims are evicted first (mirrors TS
+    /// `getActiveSessions`, which routes stale claims through eviction).
     pub fn list_sessions(&self, agent_id: Option<&str>) -> Vec<SessionInfo> {
-        let claims = self.claims.lock().unwrap();
+        let mut claims = self.claims.lock().unwrap();
+        let stale: Vec<String> = claims
+            .iter()
+            .filter(|(_, c)| c.is_stale())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in stale {
+            self.evict_claim(&mut claims, &key);
+        }
         claims
             .iter()
             .filter(|(_, c)| !c.is_stale())
@@ -265,7 +321,14 @@ impl SessionTracker {
     pub fn cleanup(&self) -> usize {
         let mut claims = self.claims.lock().unwrap();
         let before = claims.len();
-        claims.retain(|_, c| !c.is_stale());
+        let stale: Vec<String> = claims
+            .iter()
+            .filter(|(_, c)| c.is_stale())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in stale {
+            self.evict_claim(&mut claims, &key);
+        }
         before - claims.len()
     }
 }
@@ -910,5 +973,124 @@ mod tests {
             continuity.record_prompt("s1", "test", "test");
         }
         assert!(continuity.should_checkpoint("s1", 5, 300));
+    }
+
+    // -----------------------------------------------------------------------
+    // TTL expiration handler (issue #902)
+    // -----------------------------------------------------------------------
+
+    /// Force a claim stale by backdating its expiry (test-only shortcut; the
+    /// 4h TTL makes waiting impractical).
+    fn force_stale(tracker: &SessionTracker, key: &str) {
+        let mut claims = tracker.claims.lock().unwrap();
+        let claim = claims.get_mut(key).unwrap();
+        claim.expires = Instant::now() - Duration::from_secs(1);
+    }
+
+    #[test]
+    fn cleanup_invokes_expiration_handler_before_removal() {
+        let tracker = SessionTracker::new();
+        let events = std::sync::Arc::new(Mutex::new(Vec::<SessionExpiredInfo>::new()));
+        let lock_held_during_callback = std::sync::Arc::new(Mutex::new(Vec::<bool>::new()));
+        {
+            let events = events.clone();
+            let held = lock_held_during_callback.clone();
+            let tracker_addr = &tracker as *const SessionTracker as usize;
+            tracker.set_expiration_handler(move |info| {
+                // The handler runs synchronously inside the eviction path,
+                // before the claim is removed: the claims lock is still held
+                // by the cleanup in progress (a post-removal callback would
+                // observe the tracker unlocked and the claim already gone).
+                // try_lock is used because the lock is not reentrant.
+                let in_eviction =
+                    unsafe { &*(tracker_addr as *const SessionTracker) }
+                        .claims
+                        .try_lock()
+                        .is_err();
+                held.lock().unwrap().push(in_eviction);
+                events.lock().unwrap().push(info);
+            });
+        }
+
+        tracker.claim("stale-1", RuntimePath::Plugin, "agent-a");
+        tracker.claim("live-1", RuntimePath::Legacy, "agent-a");
+        force_stale(&tracker, "stale-1");
+
+        let evicted = tracker.cleanup();
+        assert_eq!(evicted, 1);
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key, "stale-1");
+        assert_eq!(events[0].agent_id, "agent-a");
+        assert_eq!(events[0].runtime_path, RuntimePath::Plugin);
+        assert!(!events[0].claimed_at.is_empty());
+        assert_eq!(lock_held_during_callback.lock().unwrap().as_slice(), [true]);
+
+        // Claim is gone after cleanup; live claim untouched.
+        assert!(tracker.claims.lock().unwrap().get("stale-1").is_none());
+        assert!(tracker.claims.lock().unwrap().get("live-1").is_some());
+    }
+
+    #[test]
+    fn cleanup_leaves_live_sessions_untouched() {
+        let tracker = SessionTracker::new();
+        let calls = std::sync::Arc::new(Mutex::new(0usize));
+        {
+            let calls = calls.clone();
+            tracker.set_expiration_handler(move |_| {
+                *calls.lock().unwrap() += 1;
+            });
+        }
+
+        tracker.claim("live-1", RuntimePath::Plugin, "default");
+        tracker.claim("live-2", RuntimePath::Legacy, "default");
+
+        assert_eq!(tracker.cleanup(), 0);
+        assert_eq!(*calls.lock().unwrap(), 0);
+        assert_eq!(tracker.list_sessions(None).len(), 2);
+    }
+
+    #[test]
+    fn stale_eviction_is_idempotent_across_repeat_sweeps() {
+        let tracker = SessionTracker::new();
+        let calls = std::sync::Arc::new(Mutex::new(0usize));
+        {
+            let calls = calls.clone();
+            tracker.set_expiration_handler(move |_| {
+                *calls.lock().unwrap() += 1;
+            });
+        }
+
+        tracker.claim("stale-1", RuntimePath::Plugin, "default");
+        force_stale(&tracker, "stale-1");
+
+        assert_eq!(tracker.cleanup(), 1);
+        // A second sweep must not re-fire the handler for the same claim.
+        assert_eq!(tracker.cleanup(), 0);
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn stale_claim_eviction_routes_through_handler() {
+        let tracker = SessionTracker::new();
+        let events = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let events = events.clone();
+            tracker.set_expiration_handler(move |info| {
+                events.lock().unwrap().push(info.key);
+            });
+        }
+
+        tracker.claim("k", RuntimePath::Plugin, "default");
+        force_stale(&tracker, "k");
+
+        // Stale-on-claim eviction (different runtime path) fires the handler
+        // and allows the new claim.
+        assert!(matches!(
+            tracker.claim("k", RuntimePath::Legacy, "default"),
+            ClaimResult::Ok
+        ));
+        assert_eq!(events.lock().unwrap().as_slice(), ["k"]);
     }
 }

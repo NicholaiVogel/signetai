@@ -52,9 +52,11 @@ pub async fn dashboard_unavailable() -> Html<&'static str> {
 
 /// GET /api/diagnostics — composite health report
 pub async fn report(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Session lifecycle counts (issue #902). Additive; not scored.
+    let active_sessions = state.sessions.list_sessions(None).len() as i64;
     let result = state
         .pool
-        .read(|conn| {
+        .read(move |conn| {
             let memories: i64 = conn
                 .query_row("SELECT COUNT(*) FROM memories WHERE is_deleted = 0", [], |r| {
                     r.get(0)
@@ -85,6 +87,29 @@ pub async fn report(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                     |r| r.get(0),
                 )
                 .unwrap_or(0);
+
+            // TTL-expired session outcomes (issue #902). Zero-fills on
+            // databases that predate the session_outcomes migration.
+            let sessions_table: bool = conn
+                .query_row(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_outcomes'",
+                    [],
+                    |_| Ok(()),
+                )
+                .is_ok();
+            let (expired_sessions, unfinalized_sessions): (i64, i64) = if sessions_table {
+                conn.query_row(
+                    "SELECT COUNT(*),
+                            COALESCE(SUM(CASE WHEN outcome = 'skipped' THEN 1 ELSE 0 END), 0)
+                     FROM session_outcomes
+                     WHERE reason = 'ttl_expired'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or((0, 0))
+            } else {
+                (0, 0)
+            };
 
             let total = memories + tombstones;
             let tombstone_ratio = if total > 0 {
@@ -131,6 +156,11 @@ pub async fn report(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                     "queue": {
                         "pending": pending_jobs,
                         "dead": dead_jobs,
+                    },
+                    "sessions": {
+                        "active": active_sessions,
+                        "expired": expired_sessions,
+                        "unfinalized": unfinalized_sessions,
                     },
                 }
             }))

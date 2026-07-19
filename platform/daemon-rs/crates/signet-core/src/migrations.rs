@@ -121,6 +121,10 @@ const TS_MEMORY_LIFECYCLE_REPAIR_VERSION: u32 = 83;
 const TS_MEMORY_LIFECYCLE_REPAIR_NAME: &str = "memory-lifecycle-repair";
 const TS_LEGACY_MARKDOWN_IMPORT_STATE_VERSION: u32 = 84;
 const TS_LEGACY_MARKDOWN_IMPORT_STATE_NAME: &str = "legacy-markdown-import-state";
+const TS_SUMMARY_JOBS_BOUNDARY_REASON_VERSION: u32 = 87;
+const TS_SUMMARY_JOBS_BOUNDARY_REASON_NAME: &str = "summary-jobs-boundary-reason";
+const TS_SESSION_OUTCOMES_VERSION: u32 = 88;
+const TS_SESSION_OUTCOMES_NAME: &str = "session-outcomes";
 
 /// Simple checksum matching the TS implementation (hash of "version:name").
 fn checksum(version: u32, name: &str) -> String {
@@ -1572,6 +1576,26 @@ fn ensure_cross_daemon_parity_columns(conn: &Connection) -> Result<(), CoreError
             ON memory_artifacts(agent_id, source_id, source_external_id);
          CREATE INDEX IF NOT EXISTS idx_memory_artifacts_agent_source_root
             ON memory_artifacts(agent_id, source_id, source_root);",
+    )?;
+
+    // TS 087: summary_jobs.boundary_reason (durable-boundary classification).
+    add_column_if_missing(conn, "summary_jobs", "boundary_reason", "TEXT")?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_summary_jobs_boundary_reason
+            ON summary_jobs(agent_id, session_key, boundary_reason);",
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_SUMMARY_JOBS_BOUNDARY_REASON_VERSION,
+        TS_SUMMARY_JOBS_BOUNDARY_REASON_NAME,
+    )?;
+
+    // TS 088 (issue #902): session lifecycle outcome audit table.
+    conn.execute_batch(include_str!("sql/088-session-outcomes.sql"))?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_SESSION_OUTCOMES_VERSION,
+        TS_SESSION_OUTCOMES_NAME,
     )?;
 
     Ok(())

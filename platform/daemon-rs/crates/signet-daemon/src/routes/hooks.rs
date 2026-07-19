@@ -886,7 +886,7 @@ fn require_session_scope_for_write(
     Ok(())
 }
 
-fn pipeline_enabled(state: &AppState) -> bool {
+pub(crate) fn pipeline_enabled(state: &AppState) -> bool {
     // Runtime pause takes priority — workers refuse to run when this is set,
     // so we must not enqueue new work either.
     if state.pipeline_paused() {
@@ -1349,7 +1349,7 @@ fn delete_session_transcript(
     Ok(())
 }
 
-fn enqueue_summary_job(
+pub(crate) fn enqueue_summary_job(
     conn: &rusqlite::Connection,
     harness: &str,
     transcript: &str,
@@ -1417,7 +1417,7 @@ fn enqueue_summary_job(
     Ok(id)
 }
 
-fn derive_reset_recovery_session_id(session_key: &str, transcript: &str) -> String {
+pub(crate) fn derive_reset_recovery_session_id(session_key: &str, transcript: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(transcript.trim().as_bytes());
     let digest = hasher.finalize();
@@ -4605,6 +4605,163 @@ mod tests {
         test_state_with_manifest(name, |manifest| {
             manifest.hooks = Some(HooksConfig::default());
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Session TTL finalization (issue #902)
+    // -----------------------------------------------------------------------
+
+    fn ttl_expired_info(session_key: &str, agent_id: &str) -> signet_services::session::SessionExpiredInfo {
+        signet_services::session::SessionExpiredInfo {
+            key: session_key.to_string(),
+            agent_id: agent_id.to_string(),
+            runtime_path: RuntimePath::Plugin,
+            claimed_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ttl_finalization_writes_outcome_checkpoint_and_summary_job() {
+        let (state, _writer, _tmp) = test_state("ttl-finalize");
+        let session_key = "agent:default:ttl-session-1";
+        let agent_id = "default";
+        let transcript = "x".repeat(CHECKPOINT_MIN_DELTA + 100);
+
+        state
+            .pool
+            .write(Priority::High, move |conn| {
+                conn.execute(
+                    "INSERT INTO session_transcripts (session_key, content, harness, project, agent_id, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        session_key,
+                        transcript,
+                        "pi",
+                        "/Users/test/project",
+                        agent_id,
+                        "2026-01-01T00:00:00Z"
+                    ],
+                )?;
+                Ok(serde_json::Value::Null)
+            })
+            .await
+            .unwrap();
+
+        let record =
+            crate::session_ttl::finalize_expired_session(&state, ttl_expired_info(session_key, agent_id)).await;
+        assert_eq!(record.outcome, "finalized");
+        assert!(record.checkpoint_id.is_some());
+        assert!(record.summary_job_id.is_some());
+
+        state
+            .pool
+            .read(move |conn| {
+                let (outcome, reason, actor): (String, String, String) = conn.query_row(
+                    "SELECT outcome, reason, actor FROM session_outcomes WHERE session_key = ?1",
+                    [session_key],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?;
+                assert_eq!(outcome, "finalized");
+                assert_eq!(reason, "ttl_expired");
+                assert_eq!(actor, "daemon");
+
+                let checkpoints: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM session_checkpoints WHERE session_key = ?1 AND trigger = 'ttl_expired'",
+                    [session_key],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(checkpoints, 1);
+
+                let (job_trigger, job_status): (String, String) = conn.query_row(
+                    "SELECT trigger, status FROM summary_jobs WHERE session_key = ?1",
+                    [session_key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                assert_eq!(job_trigger, "ttl_expired");
+                assert_eq!(job_status, "pending");
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // Re-finalization for the same session key is a no-op: the audit row
+        // is the idempotency guard.
+        let again =
+            crate::session_ttl::finalize_expired_session(&state, ttl_expired_info(session_key, agent_id)).await;
+        assert_eq!(again.outcome, "already-recorded");
+
+        let outcome_rows: i64 = state
+            .pool
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM session_outcomes WHERE session_key = ?1",
+                    [session_key],
+                    |r| r.get(0),
+                )
+                .map_err(signet_core::error::CoreError::from)
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn ttl_finalization_skips_when_no_stored_transcript() {
+        let (state, _writer, _tmp) = test_state("ttl-no-transcript");
+        let session_key = "agent:default:ttl-session-missing";
+
+        let record =
+            crate::session_ttl::finalize_expired_session(&state, ttl_expired_info(session_key, "default")).await;
+        assert_eq!(record.outcome, "skipped");
+        assert_eq!(record.skip_reason.as_deref(), Some("no-transcript"));
+
+        state
+            .pool
+            .read(move |conn| {
+                let (outcome, skip_reason): (String, String) = conn.query_row(
+                    "SELECT outcome, skip_reason FROM session_outcomes WHERE session_key = ?1",
+                    [session_key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                assert_eq!(outcome, "skipped");
+                assert_eq!(skip_reason, "no-transcript");
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ttl_finalization_skips_short_transcript_but_keeps_checkpoint() {
+        let (state, _writer, _tmp) = test_state("ttl-short-transcript");
+        let session_key = "agent:default:ttl-session-short";
+
+        state
+            .pool
+            .write(Priority::High, move |conn| {
+                conn.execute(
+                    "INSERT INTO session_transcripts (session_key, content, harness, project, agent_id, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        session_key,
+                        "too short",
+                        "pi",
+                        "/Users/test/project",
+                        "default",
+                        "2026-01-01T00:00:00Z"
+                    ],
+                )?;
+                Ok(serde_json::Value::Null)
+            })
+            .await
+            .unwrap();
+
+        let record =
+            crate::session_ttl::finalize_expired_session(&state, ttl_expired_info(session_key, "default")).await;
+        assert_eq!(record.outcome, "skipped");
+        assert_eq!(record.skip_reason.as_deref(), Some("transcript-too-short"));
+        assert!(record.checkpoint_id.is_some());
+        assert!(record.summary_job_id.is_none());
     }
 
     #[test]

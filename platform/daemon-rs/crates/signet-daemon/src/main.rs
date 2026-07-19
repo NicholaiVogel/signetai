@@ -22,6 +22,7 @@ mod mcp;
 mod reranker;
 mod routes;
 mod service;
+mod session_ttl;
 mod state;
 mod watcher;
 mod workspace_paths;
@@ -223,6 +224,13 @@ async fn main() -> anyhow::Result<()> {
     let file_watcher =
         watcher::start_file_watcher(state.clone()).context("failed to start file watcher")?;
     info!("file watcher started");
+
+    // Issue #902: TTL expiry is a formal lifecycle transition. Register the
+    // finalization handler (checkpoint + summary enqueue + audit row) and
+    // start the periodic stale-claim sweep (15 min, mirroring TS
+    // startSessionCleanup).
+    session_ttl::register_session_ttl_finalization(&state);
+    tokio::spawn(session_ttl::run_session_cleanup_loop(state.clone()));
 
     // Build router
     let app = Router::new()
