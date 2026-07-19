@@ -316,6 +316,24 @@ bun run --filter '@signet/daemon' build
 bun run --filter '@signet/cli' test
 ```
 
+Quality gates (enforced as required checks on every PR; see
+`.github/workflows/ci.yml`):
+
+```bash
+bunx biome ci .                        # lint + format, error level
+bun run build && bun run typecheck     # tsc --noEmit per workspace
+bun run test                           # full suite
+cd platform/daemon-rs
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo check --workspace --all-features
+cargo test --workspace --all-features
+cargo deny check advisories bans licenses sources
+```
+
+A change is not landable while any of these fail. PR-body checkboxes
+are human-review items only, not a substitute for green checks.
+
 ## Proof
 
 - Typecheck, build, lint, and tests are not substitutes for runtime
@@ -353,7 +371,9 @@ bun run --filter '@signet/cli' test
 
 ## Code
 
-- TS strict. Avoid `any`; prefer real types, `unknown`, narrow adapters.
+- TS strict (`strict` + `noUncheckedIndexedAccess` in the shared
+  tsconfig, enforced by CI typecheck). No `any` — Biome errors on it;
+  prefer real types, `unknown`, narrow adapters.
 - No `@ts-nocheck`. Lint suppressions only intentional + explained.
 - External boundaries: prefer `zod` or existing schema helpers.
 - Runtime branching: discriminated unions/closed codes over freeform

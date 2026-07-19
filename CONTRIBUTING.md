@@ -146,14 +146,44 @@ with `SIGNET_PORT`, `SIGNET_HOST`, and `SIGNET_PATH` environment variables.
 Conventions
 ---
 
+Required checks
+---
+
+Every PR and every push to `main` runs `.github/workflows/ci.yml`.
+All of the following must be green to merge:
+
+| Gate | Local equivalent |
+| --- | --- |
+| Biome lint/format | `bunx biome ci .` |
+| TypeScript typecheck | `bun run build && bun run typecheck` |
+| Full test suite | `bun run test` |
+| Rust fmt | `cd platform/daemon-rs && cargo fmt --all -- --check` |
+| Rust clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
+| Rust check/test | `cargo check --workspace --all-features && cargo test --workspace --all-features` |
+| Rust supply chain | `cargo deny check advisories bans licenses sources` |
+| Publish correctness | `bun scripts/check-publish-correctness.ts all` |
+| Dead code | `bunx knip --config knip.json` |
+| Meta-lint | actionlint / shellcheck / hadolint (CI `meta-lint` job) |
+
+TS and Rust suites run on both Ubuntu and macOS. There is no
+label-based bypass: green checks are the gate.
+
 **Package manager:** Bun everywhere. Do not use npm or pnpm.
 
-**Linting and formatting:** Biome. Run `bun run lint` and
-`bun run format` before committing. CI will enforce this.
+**Linting and formatting:** Biome, enforced at error level in CI
+(`biome ci .` in the `typescript` job of `.github/workflows/ci.yml` —
+a PR with any lint error cannot merge). Run `bun run lint` before
+committing; the pre-commit hook (husky + lint-staged) auto-fixes
+staged files.
 
-**TypeScript:** Strict mode is enforced by convention. Specifically:
-no `any` (use `unknown` with narrowing), no `as` casts (fix the types),
-no non-null assertions (`!`), explicit return types on all exported
+**TypeScript:** Strict mode is enforced by the compiler, not by
+convention: the shared `tsconfig.json` enables `strict` plus
+`noUncheckedIndexedAccess`, and CI runs `bun run typecheck`
+(`tsc --noEmit`) for every workspace package. Biome additionally
+gates at error level: no `any` (`noExplicitAny` — use `unknown`
+with narrowing), no non-null assertions (`noNonNullAssertion`),
+no `forEach` (`noForEach` — use `for...of`), no banned types
+(`noBannedTypes`). Explicit return types on all exported
 functions, `readonly` where mutation is not intended, `as const` unions
 over `enum`.
 
