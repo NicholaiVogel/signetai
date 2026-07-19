@@ -336,10 +336,10 @@ memory:
 					)
 					.all() as Array<{ agentId: string; subjectId: string }>,
 		) as Array<{ agentId: string; subjectId: string }>;
-		expect(rows).toEqual([
+		expect(rows as Array<{ agentId: string; subjectId: string }>).toEqual([
 			{ agentId: "agent-a", subjectId: otherAgentJson.id },
 			{ agentId: "default", subjectId: firstJson.id },
-		]);
+		] as Array<{ agentId: string; subjectId: string }>);
 	});
 
 	it("POST /api/memory/remember matches normalized idempotency-key index scope", async () => {

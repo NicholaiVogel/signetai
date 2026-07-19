@@ -73,11 +73,11 @@ describe("github-source-fetch", () => {
 			if (delay === 30_000) {
 				const handle = { id: `request-${requestTimeouts.length + 1}` };
 				requestTimeouts.push(handle);
-				return handle as unknown as turnType<typeof setTimeout>;
+				return handle as unknown as ReturnType<typeof setTimeout>;
 			}
 			return originalSetTimeout(callback, 0, ...args);
 		}) as typeof setTimeout;
-		globalThis.clearTimeout = ((handle?: ReturnType<typeof setTimeout>) => {
+		globalThis.clearTimeout = ((handle?: ReReturnType<typeof setTimeout>) => {
 			if (requestTimeouts.includes(handle)) {
 				clearedTimeouts.push(handle);
 				return;
