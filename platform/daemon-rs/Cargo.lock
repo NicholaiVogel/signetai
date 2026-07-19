@@ -1759,6 +1759,7 @@ dependencies = [
  "chrono",
  "r2d2",
  "r2d2_sqlite",
+ "regex-lite",
  "rusqlite",
  "serde",
  "serde_json",
