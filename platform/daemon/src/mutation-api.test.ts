@@ -335,7 +335,7 @@ memory:
 						 ORDER BY agent_id`,
 					)
 					.all() as Array<{ agentId: string; subjectId: string }>,
-		);
+		) as Array<{ agentId: string; subjectId: string }>;
 		expect(rows).toEqual([
 			{ agentId: "agent-a", subjectId: otherAgentJson.id },
 			{ agentId: "default", subjectId: firstJson.id },

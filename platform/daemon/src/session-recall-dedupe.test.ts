@@ -185,7 +185,10 @@ describe("session recall dedupe", () => {
 			markRepeated: (item) => ({ ...item, already_recalled: true }),
 		});
 
-		expect(result.items).toEqual([
+		expect(
+			(result as unknown as { items: Array<{ id: string; score: number; source: string; already_recalled?: boolean }> })
+				.items,
+		).toEqual([
 			{ id: "mem-1", score: 0.9, source: "hybrid", already_recalled: true },
 			{ id: "mem-2", score: 0.8, source: "hybrid" },
 		]);
@@ -254,7 +257,10 @@ describe("session recall dedupe", () => {
 			claim: false,
 			items: [{ id: "mem-1", score: 0.9, source: "hybrid" }],
 		});
-		expect(result.items).toHaveLength(1);
+		expect(
+			(result as unknown as { items: Array<{ id: string; score: number; source: string; already_recalled?: boolean }> })
+				.items,
+		).toHaveLength(1);
 		expect(events.size).toBe(0);
 	});
 });

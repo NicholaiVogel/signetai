@@ -1853,7 +1853,7 @@ describe("hybridRecall", () => {
 
 		const hit = result.results.find((row) => row.id === "mem-spotify-structured");
 		expect(hit).toBeDefined();
-		expect(["structured", "sec"]).toContain(hit?.source);
+		expect(["structured", "sec"]).toContain(hit?.source as string);
 		expect(hit?.score).toBeGreaterThan(0.75);
 	});
 
@@ -1937,7 +1937,7 @@ describe("hybridRecall", () => {
 
 		const hit = result.results.find((row) => row.id === "mem-shampoo-structured");
 		expect(hit).toBeDefined();
-		expect(["structured", "sec"]).toContain(hit?.source);
+		expect(["structured", "sec"]).toContain(hit?.source as string);
 	});
 
 	it("expands baking advice queries to bridge ingredient preference memories", async () => {

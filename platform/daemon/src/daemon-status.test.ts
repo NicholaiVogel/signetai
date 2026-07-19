@@ -181,7 +181,7 @@ describe("daemon status contract", () => {
 				};
 			};
 			expect(body.providerResolution?.extraction?.effective).toBe("llama-cpp");
-			expect(["active", "degraded"]).toContain(body.providerResolution?.extraction?.status);
+			expect(["active", "degraded"]).toContain(body.providerResolution?.extraction?.status as string);
 		} finally {
 			globalThis.fetch = originalFetch;
 			if (originalOpenAiKey === undefined) {

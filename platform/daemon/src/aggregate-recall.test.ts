@@ -7,6 +7,7 @@ import type { RouteRequest } from "@signet/core";
 import { type AggregateInferenceRouter, aggregateRecall, InvalidAggregateRecallBudgetError } from "./aggregate-recall";
 import { normalizeAndHashContent } from "./content-normalization";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
+import type { RouterError } from "./inference-router";
 import { getOrCreateInferenceRouter, resetInferenceRouterForTests } from "./inference-router";
 import { loadMemoryConfig } from "./memory-config";
 import type { RecallParams, RecallResponse, RecallResult } from "./memory-search";

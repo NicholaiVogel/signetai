@@ -78,7 +78,7 @@ describe("boundary-reason", () => {
 		});
 
 		test("DEFAULT_DURABLE_BOUNDARIES matches DURABLE_BOUNDARY_REASONS", () => {
-			expect(new Set(DEFAULT_DURABLE_BOUNDARIES)).toEqual(DURABLE_BOUNDARY_REASONS);
+			expect(new Set<string>([...DEFAULT_DURABLE_BOUNDARIES])).toEqual(new Set<string>(DURABLE_BOUNDARY_REASONS));
 		});
 	});
 });

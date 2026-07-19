@@ -224,12 +224,16 @@ describe("memory curator routes", () => {
 		};
 
 		expect(body.agentId).toBe("curator");
-		expect(body.injectedNeverUsed).toEqual([
-			{ id: "mem-stale", content: "injected repeatedly but never used", sessions: 2 },
-		]);
-		expect(body.contradicted).toEqual([
-			{ id: "mem-contradicted", content: "contradicted memory", contradicted_count: 1 },
-		]);
-		expect(body.highUsed).toEqual([{ id: "mem-used", content: "useful memory", used_count: 1 }]);
+		expect(
+			(body as unknown as { injectedNeverUsed: Array<{ id: string; content: string; sessions: number }> })
+				.injectedNeverUsed,
+		).toEqual([{ id: "mem-stale", content: "injected repeatedly but never used", sessions: 2 }]);
+		expect(
+			(body as unknown as { contradicted: Array<{ id: string; content: string; contradicted_count: number }> })
+				.contradicted,
+		).toEqual([{ id: "mem-contradicted", content: "contradicted memory", contradicted_count: 1 }]);
+		expect(
+			(body as unknown as { highUsed: Array<{ id: string; content: string; used_count: number }> }).highUsed,
+		).toEqual([{ id: "mem-used", content: "useful memory", used_count: 1 }]);
 	});
 });
