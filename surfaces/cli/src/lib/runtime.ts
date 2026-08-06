@@ -7,6 +7,7 @@ import {
 	mkdirSync,
 	openSync,
 	readFileSync,
+	readdirSync,
 	realpathSync,
 	rmSync,
 	writeFileSync,
@@ -112,6 +113,7 @@ interface DaemonProbeDeps {
 	readonly daemonPaths?: readonly string[];
 	readonly isAlive?: (pid: number) => boolean;
 	readonly readCmd?: (pid: number) => string | null;
+	readonly readEnv?: (pid: number) => string | null;
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -308,7 +310,7 @@ function readPidArtifact(agentsDir: string): { pid: number | null; stale: boolea
 async function buildUnreachableDaemonProbe(agentsDir: string): Promise<DaemonHealthProbe> {
 	const artifact = readPidArtifact(agentsDir);
 	const managedPid = readManagedDaemonPid(agentsDir);
-	const processPid = managedPid ?? findDaemonProcessPids()[0] ?? null;
+	const processPid = managedPid ?? findMarkedDaemonProcessPids()[0] ?? null;
 	const listenerPresent = await canConnect("127.0.0.1", DEFAULT_PORT);
 	const url = `http://127.0.0.1:${DEFAULT_PORT}`;
 
@@ -536,6 +538,10 @@ function normalizeCmd(value: string): string {
 	return normalize(value).replaceAll("\\", "/").toLowerCase();
 }
 
+export function isDaemonEntrypointEnvironment(value: string): boolean {
+	return value.split("\u0000").some((entry) => entry === "SIGNET_DAEMON_ENTRYPOINT=1");
+}
+
 function executablePathVariants(executablePath: string): readonly string[] {
 	const variants = [executablePath];
 	try {
@@ -627,27 +633,37 @@ function readCmd(pid: number): string | null {
 	}
 }
 
-function findDaemonProcessPids(paths: readonly string[] = daemonPaths()): number[] {
+function readDaemonEntrypoint(pid: number): boolean | null {
+	if (process.platform !== "linux") return null;
 	try {
-		const proc = spawnSync("ps", ["-axo", "pid=,command="], {
-			encoding: "utf-8",
-			windowsHide: true,
-		});
-		if (proc.status !== 0) return [];
-		return proc.stdout
-			.split("\n")
-			.flatMap((line) => {
-				const match = line.trimStart().match(/^(\d+)\s+(.+)$/);
-				if (!match) return [];
-				const pid = Number.parseInt(match[1] ?? "", 10);
-				const cmd = match[2] ?? "";
+		return isDaemonEntrypointEnvironment(readFileSync(`/proc/${pid}/environ`, "utf-8"));
+	} catch {
+		return false;
+	}
+}
+
+function findMarkedDaemonProcessPids(): number[] {
+	if (process.platform !== "linux") return [];
+	try {
+		return readdirSync("/proc", { withFileTypes: true })
+			.flatMap((entry) => {
+				if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) return [];
+				const pid = Number.parseInt(entry.name, 10);
 				if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return [];
-				return matchesDaemon(cmd, paths) ? [pid] : [];
+				return readDaemonEntrypoint(pid) === true ? [pid] : [];
 			})
 			.filter((pid, index, items) => items.indexOf(pid) === index);
 	} catch {
 		return [];
 	}
+}
+
+function readManagedDaemonProcess(pid: number): boolean {
+	if (!Number.isInteger(pid) || pid <= 1 || !isAlive(pid)) return false;
+	const marker = readDaemonEntrypoint(pid);
+	if (marker !== null) return marker;
+	const cmd = readCmd(pid);
+	return cmd !== null && matchesDaemon(cmd, daemonPaths());
 }
 
 export function readManagedDaemonPid(agentsDir: string = AGENTS_DIR, deps: DaemonProbeDeps = {}): number | null {
@@ -668,12 +684,14 @@ export function readManagedDaemonPid(agentsDir: string = AGENTS_DIR, deps: Daemo
 			return null;
 		}
 
-		// Only reclaim live PIDs that still look like a Signet daemon process.
-		const cmd = (deps.readCmd ?? readCmd)(pid);
-		if (!cmd) {
-			return null;
-		}
+		const marker = deps.readEnv ? isDaemonEntrypointEnvironment(deps.readEnv(pid) ?? "") : readDaemonEntrypoint(pid);
+		if (marker === true) return pid;
+		if (marker === false) return null;
 
+		// On platforms without a readable process environment, only reclaim a
+		// live PID whose command line still identifies a Signet daemon.
+		const cmd = (deps.readCmd ?? readCmd)(pid);
+		if (!cmd) return null;
 		const paths = deps.daemonPaths ?? daemonPaths();
 		return matchesDaemon(cmd, paths) ? pid : null;
 	} catch {
@@ -682,7 +700,7 @@ export function readManagedDaemonPid(agentsDir: string = AGENTS_DIR, deps: Daemo
 }
 
 export async function hasDaemonProcess(agentsDir: string = AGENTS_DIR): Promise<boolean> {
-	return readManagedDaemonPid(agentsDir) !== null;
+	return readManagedDaemonPid(agentsDir) !== null || findMarkedDaemonProcessPids().length > 0;
 }
 
 export async function getDaemonStatus(): Promise<{
@@ -704,7 +722,7 @@ export async function getDaemonStatus(): Promise<{
 	const instances = await getDaemonInstances();
 	if (instances.length > 0) {
 		const preferred = instances.find((instance) => typeof instance.uptime === "number") ?? instances[0];
-		const fallbackPid = typeof preferred.pid === "number" ? null : (findDaemonProcessPids()[0] ?? null);
+		const fallbackPid = typeof preferred.pid === "number" ? null : (findMarkedDaemonProcessPids()[0] ?? null);
 		return {
 			running: true,
 			pid: preferred.pid ?? fallbackPid,
@@ -1065,32 +1083,12 @@ export function didSystemdDaemonStart(result: Pick<SpawnSyncReturns<Buffer>, "st
 export const didLaunchdDaemonStart = didSystemdDaemonStart;
 
 export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemonPath?: string): Promise<boolean> {
+	if ((await isDaemonRunning()) || (await hasDaemonProcess(agentsDir))) return true;
+
 	const daemonPath = preferredDaemonPath ?? resolveDaemonPath();
 	if (!daemonPath) {
 		console.error(chalk.red("Daemon not found. Try reinstalling signet."));
 		return false;
-	}
-
-	const rebindResult = await rebindDaemonIfNeeded(daemonPath, {
-		getDaemonStatus,
-		readCommand: (pid) => readCmd(pid),
-		stopDaemon: (pid) => stopDaemon(agentsDir, pid),
-	});
-	if (rebindResult === "already-current" || rebindResult === "unknown") {
-		return true;
-	}
-	if (rebindResult === "failed") {
-		return false;
-	}
-	if (rebindResult === "restarted") {
-		console.error(chalk.dim("  Existing daemon uses another Signet installation; switching to the current one."));
-	}
-
-	if (await hasDaemonProcess(agentsDir)) {
-		const stopped = await stopDaemon(agentsDir);
-		if (!stopped) {
-			return false;
-		}
 	}
 
 	const net = resolveDaemonNetwork(agentsDir, process.env);
@@ -1304,18 +1302,21 @@ export async function stopDaemon(agentsDir: string = AGENTS_DIR, preferredPid?: 
 		});
 	}
 
-	const pids = new Set<number>(preferredPid === undefined ? [] : [preferredPid]);
+	const pids = new Set<number>();
+	if (preferredPid !== undefined && readManagedDaemonProcess(preferredPid)) {
+		pids.add(preferredPid);
+	}
 	const managed = readManagedDaemonPid(agentsDir);
 	if (managed !== null) {
 		pids.add(managed);
 	}
 
 	for (const instance of await getDaemonInstances()) {
-		if (typeof instance.pid === "number" && instance.pid > 0) {
+		if (typeof instance.pid === "number" && readManagedDaemonProcess(instance.pid)) {
 			pids.add(instance.pid);
 		}
 	}
-	for (const pid of findDaemonProcessPids()) {
+	for (const pid of findMarkedDaemonProcessPids()) {
 		pids.add(pid);
 	}
 

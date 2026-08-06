@@ -10,6 +10,7 @@ import {
 	didLaunchdDaemonStart,
 	didSystemdDaemonStart,
 	getDaemonStatus,
+	isDaemonEntrypointEnvironment,
 	isLaunchdDaemonLoaded,
 	launchdDaemonPlistPath,
 	macOSLaunchAgentAttributionNotice,
@@ -32,6 +33,13 @@ describe("resolveDaemonPaths", () => {
 	it("keeps the JavaScript daemon bundle as the default when SIGNET_DIR is set", () => {
 		const paths = resolveDaemonPaths({ SIGNET_DIR: "/opt/signet" });
 		expect(paths[0]).toBe("/opt/signet/runtime/daemon-js/daemon.js");
+	});
+});
+
+describe("daemon entrypoint ownership", () => {
+	it("accepts the explicit daemon marker and rejects an unmarked CLI environment", () => {
+		expect(isDaemonEntrypointEnvironment("PATH=/usr/bin\u0000SIGNET_DAEMON_ENTRYPOINT=1\u0000")).toBe(true);
+		expect(isDaemonEntrypointEnvironment("PATH=/usr/bin\u0000")).toBe(false);
 	});
 });
 
@@ -312,9 +320,28 @@ describe("readManagedDaemonPid", () => {
 			daemonPaths: ["/opt/signet/dist/daemon.js"],
 			isAlive: () => true,
 			readCmd: () => "bun /opt/signet/dist/daemon.js",
+			readEnv: () => "SIGNET_DAEMON_ENTRYPOINT=1\u0000",
 		});
 
 		expect(pid).toBe(4242);
+
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("rejects a daemon-path CLI process without the daemon entrypoint marker", () => {
+		const root = mkdtempSync(join(tmpdir(), "signet-runtime-test-"));
+		const dir = join(root, ".daemon");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "pid"), "6262\n");
+
+		const pid = readManagedDaemonPid(root, {
+			daemonPaths: ["/opt/signet/dist/daemon.js"],
+			isAlive: () => true,
+			readCmd: () => "bun /opt/signet/dist/daemon.js daemon start",
+			readEnv: () => "PATH=/usr/bin\u0000",
+		});
+
+		expect(pid).toBeNull();
 
 		rmSync(root, { recursive: true, force: true });
 	});
@@ -329,6 +356,7 @@ describe("readManagedDaemonPid", () => {
 			daemonPaths: ["/home/nicholai/.bun/install/global/node_modules/signetai/dist/daemon.js"],
 			isAlive: () => true,
 			readCmd: () => "bun /home/nicholai/.bun/install/cache/signetai@0.77.0/node_modules/signetai/dist/daemon.js",
+			readEnv: () => "SIGNET_DAEMON_ENTRYPOINT=1\u0000",
 		});
 
 		expect(pid).toBe(5252);
@@ -347,6 +375,7 @@ describe("readManagedDaemonPid", () => {
 			daemonPaths: ["/opt/signet/dist/daemon.js"],
 			isAlive: () => true,
 			readCmd: () => "/usr/bin/python3 /tmp/something-else.py",
+			readEnv: () => "PATH=/usr/bin\u0000",
 		});
 
 		expect(pid).toBeNull();
