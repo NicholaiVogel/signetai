@@ -8,7 +8,6 @@ import {
 	openSync,
 	readFileSync,
 	readdirSync,
-	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -542,32 +541,6 @@ export function isDaemonEntrypointEnvironment(value: string): boolean {
 	return value.split("\u0000").some((entry) => entry === "SIGNET_DAEMON_ENTRYPOINT=1");
 }
 
-function executablePathVariants(executablePath: string): readonly string[] {
-	const variants = [executablePath];
-	try {
-		variants.push(realpathSync(executablePath));
-	} catch {
-		// The executable may have been replaced during an update. The command
-		// line still gives us the best available ownership signal in that case.
-	}
-	return [...new Set(variants.map(normalizeCmd))];
-}
-
-/** Return whether a daemon command line contains the requested executable. */
-export function daemonCommandUsesExecutable(command: string, executablePath: string): boolean {
-	const normalizedCommand = normalizeCmd(command);
-	return executablePathVariants(executablePath).some((candidate) => normalizedCommand.includes(candidate));
-}
-
-/**
- * A running daemon may outlive the CLI installation that started it. Rebind
- * only when its command line is known and points at a different executable;
- * an unreadable command line is left alone for safety.
- */
-export function shouldRebindDaemon(currentCommand: string | null, desiredExecutablePath: string): boolean {
-	return currentCommand !== null && !daemonCommandUsesExecutable(currentCommand, desiredExecutablePath);
-}
-
 function matchesDaemon(cmd: string, paths: readonly string[]): boolean {
 	const normalizedCmd = normalizeCmd(cmd);
 	return daemonMarks(paths).some((path) => normalizedCmd.includes(normalizeCmd(path)));
@@ -761,35 +734,6 @@ export async function getDaemonStatus(): Promise<{
 		probe,
 		openclaw: null,
 	};
-}
-
-interface DaemonOwnershipStatus {
-	readonly running: boolean;
-	readonly pid: number | null;
-}
-
-export type DaemonRebindResult = "not-running" | "already-current" | "unknown" | "restarted" | "failed";
-
-/**
- * Switch a healthy daemon to the executable selected by the current CLI when
- * an older daemon was started from another Signet installation.
- */
-export async function rebindDaemonIfNeeded(
-	desiredExecutablePath: string,
-	deps: {
-		readonly getDaemonStatus: () => Promise<DaemonOwnershipStatus>;
-		readonly readCommand: (pid: number) => string | null;
-		readonly stopDaemon: (pid: number) => Promise<boolean>;
-	},
-): Promise<DaemonRebindResult> {
-	const status = await deps.getDaemonStatus();
-	if (!status.running) return "not-running";
-	if (status.pid === null) return "unknown";
-
-	const currentCommand = deps.readCommand(status.pid);
-	if (!shouldRebindDaemon(currentCommand, desiredExecutablePath)) return currentCommand ? "already-current" : "unknown";
-
-	return (await deps.stopDaemon(status.pid)) ? "restarted" : "failed";
 }
 
 export interface DaemonStartArgsInput {

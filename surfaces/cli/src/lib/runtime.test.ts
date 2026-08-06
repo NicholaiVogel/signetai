@@ -16,11 +16,9 @@ import {
 	macOSLaunchAgentAttributionNotice,
 	readDaemonStartFailureDiagnostics,
 	readManagedDaemonPid,
-	rebindDaemonIfNeeded,
 	resolveDaemonLaunchCommand,
 	resolveDaemonPaths,
 	resolveDaemonRuntimeCommand,
-	shouldRebindDaemon,
 } from "./runtime.js";
 
 const originalFetch = globalThis.fetch;
@@ -40,46 +38,6 @@ describe("daemon entrypoint ownership", () => {
 	it("accepts the explicit daemon marker and rejects an unmarked CLI environment", () => {
 		expect(isDaemonEntrypointEnvironment("PATH=/usr/bin\u0000SIGNET_DAEMON_ENTRYPOINT=1\u0000")).toBe(true);
 		expect(isDaemonEntrypointEnvironment("PATH=/usr/bin\u0000")).toBe(false);
-	});
-});
-
-describe("daemon installation ownership", () => {
-	it("rebinds an npm-launched daemon when the native CLI is now active", () => {
-		const nativeExecutable = "/Users/test/.local/bin/signet";
-		const npmExecutable = "/opt/homebrew/lib/node_modules/signetai/native/signet";
-
-		expect(shouldRebindDaemon(`${npmExecutable} daemon`, nativeExecutable)).toBe(true);
-		expect(shouldRebindDaemon(`${nativeExecutable} daemon`, nativeExecutable)).toBe(false);
-	});
-
-	it("restarts a mismatched healthy daemon instead of leaving the old install in charge", async () => {
-		const calls: string[] = [];
-		const result = await rebindDaemonIfNeeded("/Users/test/.local/bin/signet", {
-			getDaemonStatus: async () => ({ running: true, pid: 42 }),
-			readCommand: () => "/opt/homebrew/lib/node_modules/signetai/native/signet daemon",
-			stopDaemon: async (pid) => {
-				calls.push(`stop:${pid}`);
-				return true;
-			},
-		});
-
-		expect(result).toBe("restarted");
-		expect(calls).toEqual(["stop:42"]);
-	});
-
-	it("does not restart a daemon already using the current executable", async () => {
-		let stopped = false;
-		const result = await rebindDaemonIfNeeded("/Users/test/.local/bin/signet", {
-			getDaemonStatus: async () => ({ running: true, pid: 42 }),
-			readCommand: () => "/Users/test/.local/bin/signet daemon",
-			stopDaemon: async () => {
-				stopped = true;
-				return true;
-			},
-		});
-
-		expect(result).toBe("already-current");
-		expect(stopped).toBe(false);
 	});
 });
 
