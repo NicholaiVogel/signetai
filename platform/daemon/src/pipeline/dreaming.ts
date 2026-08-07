@@ -30,6 +30,7 @@ import {
 import { type GraphHygieneCaps, getDreamingHygieneCandidatesInDb } from "../knowledge-graph-hygiene";
 import { logger } from "../logger";
 import type { GraphWriteCaps } from "../ontology-proposals";
+import { getActiveTelemetry } from "../telemetry";
 import { createDreamingAgentTools } from "./dreaming-agent-tools";
 import {
 	type DreamingAttention,
@@ -912,6 +913,31 @@ export function selectDreamingPassMode(
  * Bounded tool-loop Dreaming pass. The daemon owns evidence selection,
  * exclusion/cursor bookkeeping, tool construction, and audited writes.
  */
+
+/**
+ * Anonymous telemetry for a completed agentic dreaming pass: provider-reported
+ * token usage and cost so dreaming economics show up in PostHog alongside
+ * llm.generate and pipeline.embedding. Best-effort — never throws into the pass.
+ */
+export function recordDreamingPassTelemetry(input: {
+	readonly mode: string;
+	readonly usage: {
+		readonly inputTokens: number | null;
+		readonly outputTokens: number | null;
+		readonly cacheReadTokens: number | null;
+		readonly cacheCreationTokens: number | null;
+		readonly totalCost: number | null;
+	} | null;
+}): void {
+	getActiveTelemetry()?.record("dreaming.pass", {
+		mode: input.mode,
+		tokensInput: input.usage?.inputTokens ?? null,
+		tokensOutput: input.usage?.outputTokens ?? null,
+		tokensCacheRead: input.usage?.cacheReadTokens ?? null,
+		tokensCacheWrite: input.usage?.cacheCreationTokens ?? null,
+		cost: input.usage?.totalCost ?? null,
+	});
+}
 export async function runDreamingAgentPass(
 	accessor: DbAccessor,
 	executor: DreamingAgentExecutor,
@@ -1080,6 +1106,11 @@ export async function runDreamingAgentPass(
 				}
 			}
 		});
+		recordDreamingPassTelemetry({
+			mode,
+			usage,
+		});
+
 		return { passId, applied, skipped: 0, failed, summary };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);

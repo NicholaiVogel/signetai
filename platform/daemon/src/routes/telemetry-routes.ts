@@ -205,6 +205,12 @@ export function registerTelemetryRoutes(app: Hono): void {
 		let embeddingCalls = 0;
 		let embeddingTokens = 0;
 		const embeddingBySource = new Map<string, number>();
+		let dreamingCalls = 0;
+		let dreamingInput = 0;
+		let dreamingOutput = 0;
+		let dreamingCacheRead = 0;
+		let dreamingCacheWrite = 0;
+		let dreamingCost = 0;
 		const latencies: number[] = [];
 
 		for (const e of events) {
@@ -226,6 +232,14 @@ export function registerTelemetryRoutes(app: Hono): void {
 						(typeof e.properties.tokens === "number" ? e.properties.tokens : 0),
 				);
 			}
+			if (e.event === "dreaming.pass") {
+				dreamingCalls++;
+				if (typeof e.properties.tokensInput === "number") dreamingInput += e.properties.tokensInput;
+				if (typeof e.properties.tokensOutput === "number") dreamingOutput += e.properties.tokensOutput;
+				if (typeof e.properties.tokensCacheRead === "number") dreamingCacheRead += e.properties.tokensCacheRead;
+				if (typeof e.properties.tokensCacheWrite === "number") dreamingCacheWrite += e.properties.tokensCacheWrite;
+				if (typeof e.properties.cost === "number") dreamingCost += e.properties.cost;
+			}
 			if (e.event === "pipeline.error") pipelineErrors++;
 		}
 
@@ -243,6 +257,14 @@ export function registerTelemetryRoutes(app: Hono): void {
 				bySource: [...embeddingBySource.entries()]
 					.map(([source, tokens]) => ({ source, tokens }))
 					.sort((a, b) => b.tokens - a.tokens),
+			},
+			dreaming: {
+				calls: dreamingCalls,
+				tokensInput: dreamingInput,
+				tokensOutput: dreamingOutput,
+				tokensCacheRead: dreamingCacheRead,
+				tokensCacheWrite: dreamingCacheWrite,
+				cost: dreamingCost,
 			},
 			pipelineErrors,
 		});

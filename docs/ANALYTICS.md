@@ -233,10 +233,11 @@ prompt text), `session.start` / `session.end` (harness and prompt count),
 the lifecycle events `daemon.started`, `command.invoked`,
 `error.occurred`, and `version.upgraded`, `install.activated` (first
 daemon run of a new install — covers bun/desktop installs the npm
-postinstall ping never sees), and `pipeline.embedding` (tokens,
-provider, sourceKind — memory capture / artifact index / recall /
-dreaming). The remaining `pipeline.*` event types are declared for
-future use but not yet emitted.
+postinstall ping never sees), `pipeline.embedding` (tokens, provider,
+sourceKind — memory capture / artifact index / recall / dreaming), and
+`dreaming.pass` (provider-reported input/output/cache tokens and cost
+per agentic pass). The remaining `pipeline.*` event types are declared
+for future use but not yet emitted.
 
 Release Download Stats
 ---

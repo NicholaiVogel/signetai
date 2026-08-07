@@ -56,6 +56,7 @@ export const TELEMETRY_EVENTS = [
 	// into anonymous telemetry. No PII, no code, no memory content.
 	"daemon.started",
 	"install.activated",
+	"dreaming.pass",
 	"command.invoked",
 	"error.occurred",
 	"version.upgraded",
