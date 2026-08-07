@@ -106,7 +106,7 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
 		label: "Knowledge engine",
 		items: [
 			{ view: "graph", label: "Graph", icon: GraphIcon, badge: "2.4k" },
-			{ view: "dreaming", label: "Dreams", icon: DreamsIcon, badge: "14", disabled: true },
+			{ view: "dreaming", label: "Dreams", icon: DreamsIcon },
 		],
 	},
 ];
@@ -116,6 +116,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 	const graphStats = useAsync(() => api.getKnowledgeStats(), { intervalMs: 30_000 }).data;
 	const secretsList = useAsync(() => api.getSecrets(), { intervalMs: 30_000 }).data;
 	const status = useAsync(() => api.getStatus(), { intervalMs: 30_000 }).data;
+	const dreaming = useAsync(() => api.getDreamStatus(), { intervalMs: 30_000 }).data;
 	const agentCount = status?.agentId ? 1 : 0;
 	const groups = GROUPS.map((group) => ({
 		...group,
@@ -125,6 +126,10 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 			}
 			if (item.view === "graph") {
 				return { ...item, badge: graphStats ? compactCount(graphStats.entityCount) : undefined };
+			}
+			if (item.view === "dreaming") {
+				const pending = dreaming?.attention.length;
+				return { ...item, badge: pending ? String(pending) : undefined };
 			}
 			return item;
 		}),

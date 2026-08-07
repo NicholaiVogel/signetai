@@ -27,14 +27,6 @@ export function SkillsView() {
 	);
 }
 
-export function DreamsView() {
-	return (
-		<div className="flex flex-1 min-h-0 items-center justify-center">
-			<Placeholder title="Dreams" description="The dreaming / cortex buffer view renders here." />
-		</div>
-	);
-}
-
 export function AgentsView() {
 	return (
 		<div className="flex flex-1 min-h-0 items-center justify-center">

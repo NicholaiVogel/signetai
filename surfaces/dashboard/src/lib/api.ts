@@ -361,6 +361,87 @@ export interface HomeGreeting {
 	cachedAt: string;
 }
 
+export interface DreamPass {
+	id: string;
+	mode: string;
+	status: "running" | "completed" | "failed";
+	startedAt: string | null;
+	completedAt: string | null;
+	tokensConsumed: number | null;
+	tokensInput: number | null;
+	tokensOutput: number | null;
+	tokensCacheRead: number | null;
+	tokensCacheWrite: number | null;
+	tokensCost: number | null;
+	mutationsApplied: number | null;
+	mutationsSkipped: number | null;
+	mutationsFailed: number | null;
+	summary: string | null;
+	error: string | null;
+}
+
+export interface DreamAttention {
+	id: string;
+	kind: string;
+	subjectRef: string | null;
+	priority: number | null;
+	createdAt: string | null;
+	details: Record<string, unknown> | null;
+}
+
+export interface DreamToolCall {
+	id: string;
+	passId: string;
+	sequence: number;
+	toolCallId: string | null;
+	toolName: string;
+	input: Record<string, unknown> | null;
+	output: Record<string, unknown> | null;
+	success: number;
+	latencyMs: number;
+	createdAt: string | null;
+}
+
+export interface DreamQuality {
+	agentId: string;
+	citationCoverage: {
+		totalClaimValues: number;
+		valuesWithResolvedEpisodicQuote: number;
+		unaddressableClaimValues: number;
+		unresolvedClaimPaths: number;
+		rate: number;
+	};
+	graphGarbageRate: {
+		totalEntities: number;
+		garbageEntities: number;
+		rate: number;
+		examples: ReadonlyArray<{ id: string; name: string; reason: string }>;
+	};
+}
+
+export interface DreamStatus {
+	worker: { running: boolean; active: boolean; activeAgentId: string | null };
+	state: {
+		consecutiveFailures: number;
+		lastFailureAt: string | null;
+		lastPassAt: string | null;
+		evidenceCursor: string | null;
+		lastPassId: string | null;
+		lastPassMode: string | null;
+	};
+	episodicTokensPending: number;
+	config: {
+		tokenThreshold: number;
+		backfillOnFirstRun: boolean;
+		maxInputTokens: number;
+		maxOutputTokens: number;
+		timeout: number;
+	};
+	passes: DreamPass[];
+	attention: DreamAttention[];
+	exclusions: ReadonlyArray<{ sourceKind: string; sourceId: string; reason: string }>;
+}
+
 // ── Client ──────────────────────────────────────────────────────────────────
 
 export const api = {
@@ -370,6 +451,38 @@ export const api = {
 			return (await fetch(`${API_BASE}/health`)).ok;
 		} catch {
 			return false;
+		}
+	},
+
+	// Dreaming
+	getDreamStatus: () => getJSON<DreamStatus>("/api/dream/status"),
+	getDreamPassTools: (passId: string) =>
+		getJSON<{ agentId: string; passId: string; items: DreamToolCall[] }>(
+			`/api/dream/passes/${encodeURIComponent(passId)}/tools`,
+		),
+	getDreamQuality: () => getJSON<DreamQuality>("/api/dream/quality"),
+	/** POST /api/dream/trigger — starts a pass asynchronously. 409 while a pass
+	 *  is already running; 503 when the dreaming worker is not up. */
+	triggerDream: async (mode: "incremental" | "compact" = "incremental") => {
+		try {
+			const res = await fetch(`${API_BASE}/api/dream/trigger`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", ...authHeaders() },
+				body: JSON.stringify({ mode }),
+			});
+			const data = (await res.json().catch(() => null)) as {
+				accepted?: boolean;
+				passId?: string;
+				error?: string;
+			} | null;
+			return {
+				ok: res.ok,
+				status: res.status,
+				passId: data?.passId ?? null,
+				error: data?.error ?? (res.ok ? null : `HTTP ${res.status}`),
+			};
+		} catch {
+			return { ok: false, status: 0, passId: null, error: "daemon unreachable" };
 		}
 	},
 
