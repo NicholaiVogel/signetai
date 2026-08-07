@@ -215,6 +215,79 @@ describe("dreaming operations", () => {
 		).not.toBeNull();
 	});
 
+
+	it("rejects a merge_aspects whose details aspectId contradicts the flagged subjectRef", () => {
+		insertEntity("e-merge3", "MergeThree", "mergethree");
+		insertAspect("a-t3", "e-merge3", "target");
+		insertAspect("a-s3", "e-merge3", "source");
+		const result = applyDreamingOperations({
+			accessor: getDbAccessor(),
+			agentId: "agent-a",
+			actor: "dreaming",
+			operations: [
+				// The details aspectId names a different aspect than the subjectRef pin.
+				flag({ subjectRef: "aspect:a-s3", details: { aspectId: "a-other", reason: "aspect_over_cap" } }),
+				{
+					operation: "merge_aspects",
+					payload: { entityId: "e-merge3", target: "a-t3", sources: ["a-other"] },
+					provenance: "attention:$0",
+				},
+			],
+		});
+		expect(result.ok).toBe(false);
+		expect(result.error).toContain("Hygiene archives require attention provenance");
+	});
+
+	it("rejects a duplicate merge flagged with an empty canonical name", () => {
+		insertEntity("e-1", "One", "");
+		insertEntity("e-2", "Two", "");
+		const result = applyDreamingOperations({
+			accessor: getDbAccessor(),
+			agentId: "agent-a",
+			actor: "dreaming",
+			operations: [
+				flag({ subjectRef: "duplicate:", details: { reason: "duplicate_canonical_name" } }),
+				{
+					operation: "merge_entities",
+					payload: { targets: ["e-1", "e-2"], survivor: "e-1" },
+					provenance: "attention:$0",
+				},
+			],
+		});
+		expect(result.ok).toBe(false);
+		expect(result.error).toContain("Hygiene archives require attention provenance");
+	});
+
+	it("consumes a flag after the first hygiene op citing it", () => {
+		insertEntity("e-a", "A", "acme");
+		insertEntity("e-b", "B", "acme");
+		insertEntity("e-c", "C", "acme");
+		insertEntity("e-d", "D", "acme");
+		const result = applyDreamingOperations({
+			accessor: getDbAccessor(),
+			agentId: "agent-a",
+			actor: "dreaming",
+			passId: "pass-4",
+			operations: [
+				flag({ subjectRef: "duplicate:acme", details: { canonicalName: "acme", reason: "duplicate_canonical_name" } }),
+				{
+					operation: "merge_entities",
+					payload: { targets: ["e-a", "e-b"], survivor: "e-a" },
+					provenance: "attention:$0",
+				},
+				{
+					operation: "merge_entities",
+					payload: { targets: ["e-c", "e-d"], survivor: "e-c" },
+					provenance: "attention:$0",
+				},
+			],
+		});
+		expect(result.ok).toBe(true);
+		expect(result.items[1]!.ok).toBe(true);
+		expect(result.items[2]!.ok).toBe(false);
+		expect(result.items[2]!.error).toContain("already consumed");
+	});
+
 	it("rejects a same-batch archive whose target is not the flagged entity", () => {
 		insertEntity("e-flagged", "Flagged", "flagged");
 		insertEntity("e-other", "Other", "other");

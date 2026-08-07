@@ -215,6 +215,7 @@ function attentionProvenance(
 			attention.details.canonicalName ?? pinnedBySubjectRef(attention.subjectRef, "duplicate:") ?? "";
 		const groupIds = semanticDuplicateIds(accessor, agentId, canonicalName);
 		expectedTarget =
+			canonicalName.length > 0 &&
 			attention.subjectRef === `duplicate:${canonicalName}` &&
 			groupIds.size > 1 &&
 			groupIds.has(survivor) &&
@@ -223,16 +224,23 @@ function attentionProvenance(
 			targets.includes(survivor) &&
 			targets.some((id) => id !== survivor);
 	} else if (operation.operation === "merge_aspects") {
-		// The flag names the over-cap aspect; the merge must fold it into a target.
+		// The flag names the over-cap aspect; the merge must fold it into a
+		// target. The subjectRef is the pin; details.aspectId is an optional
+		// cross-check — a contradictory details id must reject, not redirect
+		// the merge to a different aspect (#1168).
 		const sources = Array.isArray(payload.sources)
 			? payload.sources.filter((value): value is string => typeof value === "string")
 			: [];
-		const flaggedAspect = attention.details.aspectId ?? pinnedBySubjectRef(attention.subjectRef, "aspect:") ?? "";
+		const pinnedAspect = pinnedBySubjectRef(attention.subjectRef, "aspect:");
+		const detailAgrees =
+			pinnedAspect !== null &&
+			(attention.details.aspectId === undefined || attention.details.aspectId === pinnedAspect);
 		expectedTarget =
-			attention.subjectRef.startsWith("aspect:") &&
+			detailAgrees &&
 			typeof payload.target === "string" &&
 			sources.length >= 1 &&
-			sources.includes(flaggedAspect);
+			pinnedAspect !== null &&
+			sources.includes(pinnedAspect);
 	}
 	if (!expectedTarget) return null;
 
@@ -621,6 +629,26 @@ export function applyDreamingOperations(params: {
 				// flag op: nothing to apply; surface the minted attention id
 				items.push({ index, ok: true, result: { attentionId: entry.attentionId } });
 				continue;
+			}
+			if (entry.attentionId !== null) {
+				// A flag is one-use: an earlier op in this batch may have
+				// already consumed it, so a second op citing the same
+				// attention must not apply. Resolved flags (from a prior
+				// batch) were already rejected by the provenance pin.
+				const pending = db
+					.prepare(
+						`SELECT 1 FROM dreaming_attention
+						 WHERE id = ? AND agent_id = ? AND resolved_at IS NULL`,
+					)
+					.get(entry.attentionId, params.agentId);
+				if (pending == null) {
+					items.push({
+						index,
+						ok: false,
+						error: "Attention already consumed by an earlier operation in this batch",
+					});
+					continue;
+				}
 			}
 			const savepoint = `signet_dream_op_${index}`;
 			db.exec(`SAVEPOINT ${savepoint}`);
