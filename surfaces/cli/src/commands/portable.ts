@@ -10,17 +10,24 @@ import {
 	serializeExportData,
 } from "@signet/core";
 import chalk from "chalk";
-import type { Command } from "commander";
+import { Command } from "commander";
 import ora from "ora";
 import Database from "../sqlite.js";
+import { registerExportTranscriptsCommand } from "./export-transcripts.js";
 
 interface PortableDeps {
 	readonly AGENTS_DIR: string;
 }
 
 export function registerPortableCommands(program: Command, deps: PortableDeps): void {
-	program
-		.command("export")
+	const exportCmd = program.command("export").description("Export agent data (portable bundle or session transcripts)");
+
+	// The portable bundle is the default subcommand so `signet export` keeps
+	// its historical behavior. Keeping options off the parent command matters:
+	// commander parses subcommand arguments at the parent level first, so any
+	// option the parent defines would swallow the same-named option on a
+	// sibling subcommand (e.g. `signet export transcripts --output`).
+	const bundleCmd = new Command("bundle")
 		.description("Export agent identity, memories, and skills to a portable bundle")
 		.option("-o, --output <path>", "Output file path")
 		.option("--include-embeddings", "Include embedding vectors (can be regenerated)")
@@ -37,7 +44,7 @@ export function registerPortableCommands(program: Command, deps: PortableDeps): 
 			const spinner = ora("Collecting export data...").start();
 			let db: ReturnType<typeof Database> | null = null;
 			try {
-				db = new Database(dbPath, { readonly: true });
+				db = Database(dbPath, { readonly: true });
 				try {
 					loadSqliteVec(db);
 				} catch {
@@ -79,6 +86,9 @@ export function registerPortableCommands(program: Command, deps: PortableDeps): 
 				}
 			}
 		});
+	exportCmd.addCommand(bundleCmd, { isDefault: true });
+
+	registerExportTranscriptsCommand(exportCmd, deps);
 
 	program
 		.command("import <path>")
@@ -119,7 +129,7 @@ export function registerPortableCommands(program: Command, deps: PortableDeps): 
 			let entityCount = 0;
 			let relationCount = 0;
 			try {
-				db = new Database(dbPath);
+				db = Database(dbPath);
 				try {
 					loadSqliteVec(db);
 				} catch {

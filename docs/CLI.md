@@ -65,7 +65,8 @@ Commands Overview
 | `signet remember` | Save a memory |
 | `signet recall` | Search memories |
 | `signet index` | Index a project with GraphIQ and make it active code context |
-| `signet export` | Export a portable bundle |
+| `signet export` | Export a portable bundle (identity, memories, skills) |
+| `signet export transcripts` | Export session transcripts as JSONL for training/fine-tuning |
 | `signet import` | Import a portable bundle |
 | `signet migrate-schema` | Migrate database to unified schema |
 | `signet migrate-vectors` | Migrate BLOB vectors to sqlite-vec format |
@@ -679,11 +680,13 @@ state from the CLI.
 ```bash
 signet export
 signet export --json
+signet export bundle
 signet import ./signet-export-2026-03-22
 signet import ./signet-export-2026-03-22.json --json --conflict merge
 ```
 
-`signet export` writes a portable bundle containing:
+`signet export` (equivalent to `signet export bundle`) writes a portable
+bundle containing:
 
 - identity files
 - `agent.yaml`
@@ -698,6 +701,84 @@ handling for memories is controlled with `--conflict`:
 - `skip` — keep existing memories and skip duplicates
 - `overwrite` — replace matching memories
 - `merge` — merge compatible records when supported
+
+---
+
+`signet export transcripts`
+---
+
+Export stored session transcripts as JSONL (one conversation per line) for
+training and fine-tuning pipelines. Output is written to stdout by default so
+it can be piped, or to a file with `--output`.
+
+```bash
+# Export all transcripts as JSONL to stdout
+signet export transcripts
+
+# Write to a file
+signet export transcripts --output ./training-data/conversations.jsonl
+
+# Filter by harness and agent
+signet export transcripts --harness hermes-agent --harness codex --agent ant
+
+# Filter by creation date range
+signet export transcripts --since 2026-06-01 --until 2026-07-01
+
+# Resumable export
+signet export transcripts --limit 5000 --offset 5000 --output ./part-2.jsonl
+
+# Skip system and tool messages
+signet export transcripts --messages-only
+
+# Pretty-printed JSON array instead of JSONL
+signet export transcripts --json
+```
+
+Each line has the shape:
+
+```json
+{
+  "id": "signet-db-<session-key>",
+  "source": "signet",
+  "harness": "hermes-agent",
+  "agent_id": "ant",
+  "session_key": "<session-key>",
+  "project": "/path/to/project",
+  "timestamp": "2026-07-01T12:00:00.000Z",
+  "message_count": 12,
+  "messages": [
+    { "role": "user", "content": "..." },
+    { "role": "assistant", "content": "..." }
+  ]
+}
+```
+
+The `id` is derived from the session key, so re-exporting the same data
+produces identical ids and downstream dedup by id stays stable. Transcript
+content is parsed as JSONL first (one `{role, content}` object per line);
+content without JSONL structure is parsed as role-prefixed text
+(`User:`/`Assistant:`/`System:`/`tool_result:` lines, with continuation lines
+accumulated into the previous message). Carriage returns split lines exactly
+like the training-data aggregator's parser, so export output is a drop-in
+replacement for its SQLite reader.
+
+Date boundaries: `--since 2026-07-01` includes the whole of July 1;
+`--until 2026-07-31` is treated as the end of July 31 (a date-only until
+compared raw would exclude the entire until day).
+
+Options:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `-o, --output <path>` | stdout | Write to a file instead of stdout |
+| `--harness <name>` | all | Filter by harness (repeatable) |
+| `--agent <name>` | all | Filter by agent ID (repeatable) |
+| `--since <iso>` | earliest | Only transcripts created at or after this ISO timestamp |
+| `--until <iso>` | now | Only transcripts created at or before this ISO timestamp |
+| `--limit <n>` | unlimited | Max conversations to export |
+| `--offset <n>` | 0 | Skip N conversations (for resumable export) |
+| `--messages-only` | false | Drop system and tool messages |
+| `--json` | false | Output a JSON array instead of JSONL |
 
 ---
 
