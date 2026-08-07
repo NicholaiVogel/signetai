@@ -33,6 +33,33 @@ signet status          # Check status
 Top-level aliases `signet start`, `signet stop`, and `signet restart`
 still exist, but `signet daemon ...` is the preferred command surface.
 
+### Death evidence and the lifecycle record
+
+The daemon writes its state to `<workspace>/.daemon/lifecycle.json`: `starting`
+at boot, `running` once the HTTP server is ready, and a terminal `clean` or
+`error` record (with exit path, exit code, and timestamp) on every catchable
+exit — SIGTERM/SIGINT shutdowns and fatal errors. The record is written
+synchronously and atomically, and the daemon flushes its log buffer before
+exiting so the final log lines are never lost.
+
+A process that is killed with SIGKILL, OOM-killed, or hard-crashed cannot write
+a terminal record, so the file stays at `starting`/`running` — that stuck state
+is the signal. `signet status` and `signet doctor` read the record whenever the
+daemon is down and surface the distinction:
+
+- `Last daemon exit was clean` (info) — the daemon shut down normally.
+- `Daemon exited after an internal error` (error) — a fatal error with the
+  message, worth reporting upstream.
+- `Previous daemon exit was not recorded as clean` (warn) — killed or crashed.
+  The finding points at the daemon log tail and, on Linux systemd launches, the
+  transient unit's journald exit status (`journalctl --user -u
+  signet-daemon-<pid>`), which distinguishes signals, core dumps, and OOM.
+
+A concurrency load test for the bot-startup traffic profile (session-start
+hooks, secrets, recall, status, optional writes) ships at
+`scripts/load-test-daemon.ts`; run it against a live or scratch daemon with
+`bun scripts/load-test-daemon.ts --port <port> [--writes]`.
+
 ### Via System Service
 
 The daemon can be installed as a system service for auto-start on boot.

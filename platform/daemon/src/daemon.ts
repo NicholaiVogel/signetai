@@ -54,6 +54,7 @@ import { writeFileIfChangedAsync } from "./file-sync";
 import { createSignetHttpServer } from "./http-server";
 import { syncAgentWorkspaces } from "./identity-sync";
 import { type InferenceStatusSummary, getOrCreateInferenceRouter } from "./inference-router.js";
+import { type DaemonLifecycle, writeDaemonLifecycle } from "./lifecycle";
 import { closeInferenceProviderResolver, initInferenceProviderResolver } from "./llm";
 import { logger } from "./logger";
 import { type ResolvedMemoryConfig, graphWriteCaps, loadMemoryConfig } from "./memory-config";
@@ -1628,19 +1629,65 @@ async function cleanup() {
 	}
 }
 
+let lifecycleStartedAt = "";
+
+function buildLifecycleRecord(state: DaemonLifecycle["state"], extra: Partial<DaemonLifecycle> = {}): DaemonLifecycle {
+	return {
+		state,
+		pid: process.pid,
+		version: CURRENT_VERSION,
+		startedAt: lifecycleStartedAt,
+		systemdUnit: process.env.SIGNET_DAEMON_UNIT || undefined,
+		...extra,
+	};
+}
+
+/**
+ * Single exit path for every catchable termination (signals and fatal
+ * errors). Logs the exit path, records it in the lifecycle file, flushes the
+ * logger buffer synchronously so the final lines actually land, then exits.
+ * SIGKILL cannot be caught — a kill leaves the lifecycle record stuck at
+ * "starting"/"running", which `signet status`/`doctor` report as an
+ * unrecorded death instead of silence (issue #1148).
+ */
+function requestShutdown(reason: string, exitCode: number, error?: unknown): void {
+	if (shuttingDown) {
+		// A second signal while draining must not wedge the process; exit
+		// immediately so the operator is never stuck with a zombie.
+		process.exit(exitCode);
+	}
+	setShuttingDown(true);
+	logger.info("daemon", `Received ${reason}; shutting down`, { exitCode });
+	writeDaemonLifecycle(
+		AGENTS_DIR,
+		buildLifecycleRecord(error === undefined ? "clean" : "error", {
+			exitedAt: new Date().toISOString(),
+			exitCode,
+			reason,
+			...(error !== undefined ? { error: error instanceof Error ? error.message : String(error) } : {}),
+		}),
+	);
+	cleanup()
+		.catch(() => {})
+		.finally(() => {
+			// The logger buffers file writes and flushes on a 1s timer; without
+			// an explicit flush the final log lines can be lost on exit.
+			logger.shutdown();
+			process.exit(exitCode);
+		});
+}
+
 process.on("SIGINT", () => {
-	cleanup().finally(() => process.exit(0));
+	requestShutdown("signal:SIGINT", 0);
 });
 
 process.on("SIGTERM", () => {
-	cleanup().finally(() => process.exit(0));
+	requestShutdown("signal:SIGTERM", 0);
 });
 
 process.on("uncaughtException", (err) => {
 	logger.error("daemon", "Uncaught exception", err);
-	if (shuttingDown) return;
-	setShuttingDown(true);
-	cleanup().finally(() => process.exit(1));
+	requestShutdown("error:uncaughtException", 1, err);
 });
 
 process.on("unhandledRejection", (reason) => {
@@ -1650,9 +1697,7 @@ process.on("unhandledRejection", (reason) => {
 		reason instanceof Error ? reason : undefined,
 		reason instanceof Error ? undefined : { reason: String(reason) },
 	);
-	if (shuttingDown) return;
-	setShuttingDown(true);
-	cleanup().finally(() => process.exit(1));
+	requestShutdown("error:unhandledRejection", 1, reason);
 });
 
 // ============================================================================
@@ -1683,6 +1728,9 @@ async function main() {
 			closeSync(lockFd);
 		} catch {}
 	});
+
+	lifecycleStartedAt = new Date().toISOString();
+	writeDaemonLifecycle(AGENTS_DIR, buildLifecycleRecord("starting"));
 
 	// Config migrations must precede every initialization path that resolves
 	// memory config, including DB setup below.
@@ -1968,6 +2016,7 @@ async function main() {
 		});
 		logger.info("daemon", "Daemon ready");
 		logFdSnapshot("server-ready");
+		writeDaemonLifecycle(AGENTS_DIR, buildLifecycleRecord("running"));
 
 		const healthStampPath = join(DAEMON_DIR, "last-healthy-start");
 		try {

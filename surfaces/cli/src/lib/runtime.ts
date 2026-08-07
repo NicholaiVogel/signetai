@@ -32,6 +32,37 @@ export interface DaemonHealthProbe {
 	readonly stalePid: number | null;
 	/** Present only when /health/ready reported not_ready; absent when readiness is unknown (older daemon). */
 	readonly readinessReasons?: readonly string[];
+	/**
+	 * The daemon's own last-exit record (`.daemon/lifecycle.json`), when one
+	 * exists. A record stuck at "starting"/"running" while no daemon process
+	 * is alive means the death was not recorded — an external kill or hard
+	 * crash (issue #1148).
+	 */
+	readonly lastExit?: DaemonLastExit | null;
+}
+
+export interface DaemonLastExit {
+	readonly state: "starting" | "running" | "clean" | "error";
+	readonly pid: number;
+	readonly version: string;
+	readonly startedAt: string;
+	readonly systemdUnit?: string;
+	readonly exitedAt?: string;
+	readonly exitCode?: number;
+	readonly reason?: string;
+	readonly error?: string;
+}
+
+/** Tolerant read of the daemon lifecycle record; null when absent or corrupt. */
+export function readDaemonLifecycleRecord(agentsDir: string): DaemonLastExit | null {
+	try {
+		const raw = readFileSync(join(agentsDir, ".daemon", "lifecycle.json"), "utf-8");
+		const parsed = JSON.parse(raw) as Partial<DaemonLastExit>;
+		if (typeof parsed.state !== "string" || typeof parsed.pid !== "number") return null;
+		return parsed as DaemonLastExit;
+	} catch {
+		return null;
+	}
 }
 
 export interface DaemonOpenClawHealthSummary {
@@ -312,6 +343,7 @@ async function buildUnreachableDaemonProbe(agentsDir: string): Promise<DaemonHea
 	const processPid = managedPid ?? findMarkedDaemonProcessPids()[0] ?? null;
 	const listenerPresent = await canConnect("127.0.0.1", DEFAULT_PORT);
 	const url = `http://127.0.0.1:${DEFAULT_PORT}`;
+	const lastExit = readDaemonLifecycleRecord(agentsDir);
 
 	if (listenerPresent) {
 		return {
@@ -321,6 +353,7 @@ async function buildUnreachableDaemonProbe(agentsDir: string): Promise<DaemonHea
 			listenerPresent,
 			processPid,
 			stalePid: artifact.stale ? artifact.pid : null,
+			lastExit,
 		};
 	}
 
@@ -332,6 +365,7 @@ async function buildUnreachableDaemonProbe(agentsDir: string): Promise<DaemonHea
 			listenerPresent,
 			processPid,
 			stalePid: artifact.stale ? artifact.pid : null,
+			lastExit,
 		};
 	}
 
@@ -343,6 +377,7 @@ async function buildUnreachableDaemonProbe(agentsDir: string): Promise<DaemonHea
 			listenerPresent,
 			processPid: null,
 			stalePid: artifact.pid,
+			lastExit,
 		};
 	}
 
@@ -353,6 +388,7 @@ async function buildUnreachableDaemonProbe(agentsDir: string): Promise<DaemonHea
 		listenerPresent,
 		processPid: null,
 		stalePid: null,
+		lastExit,
 	};
 }
 
@@ -766,6 +802,7 @@ export function buildSystemdDaemonStartArgs(input: SystemdDaemonStartArgsInput):
 		`--setenv=SIGNET_BIND=${input.bind}`,
 		`--setenv=SIGNET_PATH=${input.agentsDir}`,
 		"--setenv=SIGNET_DAEMON_ENTRYPOINT=1",
+		...(input.unitName ? [`--setenv=SIGNET_DAEMON_UNIT=${input.unitName}`] : []),
 		...resolveDaemonLaunchCommand(input.daemonPath),
 	];
 }
@@ -1048,6 +1085,10 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemo
 	}
 
 	const startupLogPath = join(logDir, "startup.log");
+	// Transient unit name is derived from the starting CLI's pid; it is passed
+	// to the daemon via SIGNET_DAEMON_UNIT so the lifecycle record can point
+	// post-mortems at the unit's journald exit status (issue #1148).
+	const systemdUnitName = `signet-daemon-${process.pid}`;
 	let stderrFd: number | null = null;
 	let stderrTarget: "ignore" | number = "ignore";
 	try {
@@ -1064,6 +1105,7 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemo
 		SIGNET_BIND: net.bind,
 		SIGNET_PATH: agentsDir,
 		SIGNET_DAEMON_ENTRYPOINT: "1",
+		SIGNET_DAEMON_UNIT: systemdUnitName,
 	};
 
 	// `detached: true` only creates a new process group; it does not escape the
@@ -1074,7 +1116,6 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemo
 	// platforms or environments where that is unavailable.
 	let procExited = false;
 	let startedByServiceManager = false;
-	const systemdUnitName = `signet-daemon-${process.pid}`;
 	if (process.platform === "linux") {
 		const systemdArgs = buildSystemdDaemonStartArgs({
 			daemonPath,

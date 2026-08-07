@@ -153,7 +153,7 @@ export function resolveLoggerConfig(env: NodeJS.ProcessEnv = process.env, homeDi
 	};
 }
 
-class Logger extends EventEmitter {
+export class Logger extends EventEmitter {
 	private config: LoggerConfig;
 	private currentLogFile: string;
 	private buffer: LogEntry[] = [];

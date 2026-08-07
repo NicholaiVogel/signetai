@@ -1093,6 +1093,105 @@ async function captureDoctorJson(
 	};
 }
 
+describe("daemon lifecycle exit findings (#1148)", () => {
+	function lifecycleDeps(root: string, lastExit: unknown) {
+		return {
+			...depsFor(root),
+			getDaemonStatus: async () => ({
+				running: false,
+				pid: null,
+				uptime: null,
+				version: null,
+				host: null,
+				bindHost: null,
+				networkMode: null,
+				probe: {
+					status: "absent",
+					detail: "No Signet daemon process or healthy listener was found",
+					url: "http://127.0.0.1:3850",
+					listenerPresent: false,
+					processPid: null,
+					stalePid: null,
+					lastExit,
+				},
+			}),
+		};
+	}
+
+	it("doctor flags an unrecorded daemon death (SIGKILL/crash) with a pointer to the evidence", async () => {
+		const root = mkdtempSync(join(tmpdir(), "doctor-lifecycle-"));
+		try {
+			const jsonOut = await captureDoctorJson(
+				lifecycleDeps(root, {
+					state: "running",
+					pid: 4242,
+					version: "0.165.0",
+					startedAt: "2026-08-07T00:00:00.000Z",
+					systemdUnit: "signet-daemon-1234",
+				}).getDaemonStatus,
+			);
+			const finding = jsonOut.findings.find((f) => f.code === "daemon_exit_unrecorded");
+			expect(finding).toBeDefined();
+			expect(finding?.level).toBe("warn");
+			expect(finding?.message).toContain("killed or crashed");
+			expect(finding?.message).toContain("pid 4242");
+			expect(finding?.message).toContain("No shutdown marker was written");
+			expect(finding?.fix).toContain("journalctl --user -u signet-daemon-1234");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("doctor reports a clean last exit as info, not an error", async () => {
+		const root = mkdtempSync(join(tmpdir(), "doctor-lifecycle-"));
+		try {
+			const jsonOut = await captureDoctorJson(
+				lifecycleDeps(root, {
+					state: "clean",
+					pid: 7,
+					version: "0.165.0",
+					startedAt: "2026-08-07T00:00:00.000Z",
+					reason: "signal:SIGTERM",
+					exitCode: 0,
+					exitedAt: "2026-08-07T01:00:00.000Z",
+				}).getDaemonStatus,
+			);
+			const finding = jsonOut.findings.find((f) => f.code === "daemon_exit_clean");
+			expect(finding).toBeDefined();
+			expect(finding?.level).toBe("info");
+			expect(finding?.message).toContain("signal:SIGTERM");
+			expect(finding?.message).toContain("exit code 0");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("doctor reports an internal-error exit with the error message and fails", async () => {
+		const root = mkdtempSync(join(tmpdir(), "doctor-lifecycle-"));
+		try {
+			const jsonOut = await captureDoctorJson(
+				lifecycleDeps(root, {
+					state: "error",
+					pid: 8,
+					version: "0.165.0",
+					startedAt: "2026-08-07T00:00:00.000Z",
+					reason: "error:uncaughtException",
+					exitCode: 1,
+					exitedAt: "2026-08-07T00:00:30.000Z",
+					error: "boom",
+				}).getDaemonStatus,
+			);
+			expect(jsonOut.ok).toBe(false);
+			const finding = jsonOut.findings.find((f) => f.code === "daemon_exit_error");
+			expect(finding).toBeDefined();
+			expect(finding?.level).toBe("error");
+			expect(finding?.message).toContain("boom");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("doctor unknown target", () => {
 	it("sets a non-zero exit code for an unsupported doctor target", async () => {
 		const lines: string[] = [];

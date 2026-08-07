@@ -12,7 +12,7 @@ import {
 } from "@signet/core";
 import chalk from "chalk";
 import { daemonAccessLines } from "../lib/network.js";
-import type { DaemonResourceUsage } from "../lib/runtime.js";
+import type { DaemonLastExit, DaemonResourceUsage } from "../lib/runtime.js";
 import { getGitRemoteState, getSnapshotProtection, hasOpenClawWorkspaceLink } from "../lib/workspace-protection.js";
 import Database from "../sqlite.js";
 import { getDaemonBaseUrl } from "./repair-queue.js";
@@ -89,6 +89,7 @@ interface DaemonStatus {
 		readonly processPid: number | null;
 		readonly stalePid: number | null;
 		readonly readinessReasons?: readonly string[];
+		readonly lastExit?: DaemonLastExit | null;
 	};
 	readonly openclaw?: {
 		readonly status: "connected" | "stale" | "never-seen";
@@ -641,6 +642,48 @@ function addDaemonProbeFindings(report: StatusReport, findings: DoctorFinding[])
 			fix: "Run `signet daemon start`; stale pid files are ignored by current status probes.",
 		});
 	}
+
+	addDaemonLifecycleExitFindings(probe, findings);
+}
+
+/**
+ * Surface the daemon's own last-exit record when it is down. A record stuck at
+ * "starting"/"running" means the process died without writing a shutdown
+ * marker — SIGKILL, OOM, or a hard crash — which is exactly the silent-death
+ * class of issue #1148. The fix pointer routes the operator to the evidence:
+ * the daemon log tail and the systemd transient unit's journald exit status.
+ */
+function addDaemonLifecycleExitFindings(probe: NonNullable<DaemonStatus["probe"]>, findings: DoctorFinding[]): void {
+	const lastExit = probe.lastExit;
+	if (!lastExit) return;
+
+	if (lastExit.state === "clean") {
+		findings.push({
+			level: "info",
+			code: "daemon_exit_clean",
+			message: `Last daemon exit was clean (${lastExit.reason ?? "shutdown"}, exit code ${lastExit.exitCode ?? 0}) at ${lastExit.exitedAt ?? "unknown"}.`,
+		});
+		return;
+	}
+
+	if (lastExit.state === "error") {
+		findings.push({
+			level: "error",
+			code: "daemon_exit_error",
+			message: `Daemon exited after an internal error: ${lastExit.error ?? lastExit.reason ?? "unknown"}.`,
+			fix: "Inspect the daemon log tail for the fatal error, then run `signet daemon start`.",
+		});
+		return;
+	}
+
+	findings.push({
+		level: "warn",
+		code: "daemon_exit_unrecorded",
+		message: `Previous daemon exit was not recorded as clean: the process was killed or crashed (pid ${lastExit.pid}, last marked ${lastExit.state} at ${lastExit.startedAt}). No shutdown marker was written.`,
+		fix: lastExit.systemdUnit
+			? `Check the daemon log tail (~/.agents/.daemon/logs/signet-<date>.log) and the unit exit status: journalctl --user -u ${lastExit.systemdUnit}`
+			: "Check the daemon log tail (~/.agents/.daemon/logs/signet-<date>.log) for where it stopped, and dmesg/journalctl for OOM kills or signals.",
+	});
 }
 
 function addOpenClawRuntimeFindings(report: StatusReport, findings: DoctorFinding[]): void {
