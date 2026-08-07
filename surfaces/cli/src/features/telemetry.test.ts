@@ -10,7 +10,7 @@ function writeAgentYaml(telemetryEnabled?: boolean): void {
 	const telemetryLine = telemetryEnabled === undefined ? "" : `telemetryEnabled: ${telemetryEnabled}`;
 	writeFileSync(
 		join(dir, "agent.yaml"),
-		`version: 1\nschema: signet/v1\npipelineV2:\n  ${telemetryLine || "# no telemetry"}\n`,
+		`version: 1\nschema: signet/v1\nmemory:\n  pipelineV2:\n    ${telemetryLine || "# no telemetry"}\n`,
 		"utf-8",
 	);
 }

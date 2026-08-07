@@ -427,7 +427,11 @@ describe("setupWizard non-interactive harness hooks", () => {
 
 		const agentYaml = readFileSync(join(basePath, "agent.yaml"), "utf-8");
 		// Telemetry is on by default; non-interactive setups keep the default.
-		expect(agentYaml).toContain("telemetryEnabled: true");
+		// The flag must land under memory.pipelineV2 — the path the daemon
+		// reads — or the opt-out would be silently ignored (regression:
+		// setup wrote top-level pipelineV2, which the daemon never sees).
+		expect(agentYaml.indexOf("memory:")).toBeGreaterThanOrEqual(0);
+		expect(agentYaml.indexOf("telemetryEnabled: true")).toBeGreaterThan(agentYaml.indexOf("memory:"));
 	});
 
 	it("writes custom identity preset with concrete files for every referenced path", async () => {

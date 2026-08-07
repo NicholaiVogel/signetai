@@ -35,7 +35,8 @@ export function cliTelemetryEnabled(agentsDir: string): boolean {
 		const yamlPath = join(agentsDir, "agent.yaml");
 		if (!existsSync(yamlPath)) return false;
 		const config = parseSimpleYaml(readFileSync(yamlPath, "utf-8"));
-		const pipeline = config?.pipelineV2 as Record<string, unknown> | undefined;
+		const memory = config?.memory as Record<string, unknown> | undefined;
+		const pipeline = memory?.pipelineV2 as Record<string, unknown> | undefined;
 		return pipeline?.telemetryEnabled !== false;
 	} catch {
 		return false;

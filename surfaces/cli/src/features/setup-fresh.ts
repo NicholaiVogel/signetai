@@ -234,10 +234,12 @@ export async function runFreshSetup(plan: SetupPlan, context: SetupApplyContext,
 				}),
 			);
 		}
-		config.pipelineV2 = {
-			...(config.pipelineV2 as Record<string, unknown> | undefined),
-			telemetryEnabled,
-		};
+		// The daemon reads telemetryEnabled from memory.pipelineV2 — writing it
+		// at the top level would be silently ignored and the opt-out would not
+		// reach the daemon.
+		const memoryCfg = (config.memory as Record<string, unknown> | undefined) ?? {};
+		const pipelineCfg = (memoryCfg.pipelineV2 as Record<string, unknown> | undefined) ?? {};
+		config.memory = { ...memoryCfg, pipelineV2: { ...pipelineCfg, telemetryEnabled } };
 
 		writeFileSync(join(context.basePath, "agent.yaml"), formatYaml(config));
 
