@@ -1,18 +1,4 @@
 ---
-const slides = [
-	{
-		hash: "home",
-		label: "Agent Overview",
-		fallback: "/dashboard-home-16x9.png",
-		fallbackAlt: "Signet dashboard home — memory health, activity, daily brief, and review suggestions in dark mode",
-	},
-	{
-		hash: "graph",
-		label: "Knowledge Graph",
-		fallback: "/dashboard-graph-16x9.png",
-		fallbackAlt: "Signet knowledge graph — entity clusters, edges, and recall controls in dark mode",
-	},
-];
 ---
 
 <section class="showcase">
@@ -28,32 +14,18 @@ const slides = [
       Every memory, source, and claim is inspectable in the dashboard — graph traversal, recall, and repair without a black box.
     </p>
 
-    <div class="showcase-switcher reveal" id="showcase-switcher" role="tablist" aria-label="Dashboard views">
-      {slides.map((slide, i) => (
-        <button
-          type="button"
-          class:list={["showcase-switch", { active: i === 0 }]}
-          role="tab"
-          aria-selected={i === 0 ? "true" : "false"}
-          data-index={i}
-        >
-          {slide.label}
-        </button>
-      ))}
-    </div>
-
     <div class="showcase-stage reveal">
       <div class="showcase-glow" aria-hidden="true"></div>
 
       <div class="showcase-frame" id="showcase-frame">
         <!-- Embedded build of the real dashboard (fixture data, no daemon):
              regenerated automatically by scripts/build-dashboard-demo.ts
-             before every astro build. The tabs drive it via its hash route. -->
+             before every astro build. -->
         <iframe
           class="showcase-embed"
           id="showcase-embed"
           src="/dashboard/#home"
-          title="Signet dashboard demo — Agent Overview"
+          title="Signet dashboard demo"
           loading="lazy"
           aria-label="Interactive Signet dashboard demo"
         ></iframe>
@@ -65,7 +37,6 @@ const slides = [
             draggable="false"
           />
         </noscript>
-
       </div>
     </div>
   </div>
@@ -105,46 +76,6 @@ const slides = [
     margin: 0 auto var(--space-lg);
   }
 
-  /* Segmented view switcher, anchored above the window */
-  .showcase-switcher {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    margin: 0 auto 24px;
-    padding: 4px;
-    border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(255, 255, 255, 0.05);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    width: fit-content;
-  }
-
-  .showcase-switch {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 8px 20px;
-    border-radius: 999px;
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--color-text-muted);
-    transition: all 0.25s var(--ease);
-    white-space: nowrap;
-  }
-
-  .showcase-switch:hover {
-    color: var(--color-text-bright);
-  }
-
-  .showcase-switch.active {
-    color: #ffffff;
-    background: rgba(255, 255, 255, 0.1);
-    box-shadow: 0 0 0 1px rgba(77, 124, 254, 0.35), 0 2px 8px rgba(0, 0, 0, 0.3);
-  }
-
   .showcase-stage {
     position: relative;
   }
@@ -176,9 +107,9 @@ const slides = [
   }
 
   /* The embedded dashboard renders at its designed 1920x1080 and is scaled
-     down to the frame width (the script sets the transform), so the UI fits
-     the 16:9 frame exactly - like a screenshot, but live. Below 700px the
-     frame gets taller and the SPA reflows naturally instead. */
+     up ~25% past the frame width (the script sets the transform), so the UI
+     reads larger than a letterboxed screenshot while the frame itself stays
+     16:9. Below 700px the frame gets taller and the SPA reflows naturally. */
   .showcase-embed {
     position: absolute;
     top: 0;
@@ -211,53 +142,19 @@ const slides = [
 
 <script>
   const frame = document.getElementById("showcase-frame");
-  const switcher = document.getElementById("showcase-switcher");
-  if (frame && switcher) {
+  if (frame) {
     const embed = document.getElementById("showcase-embed") as HTMLIFrameElement | null;
-    const tabs = switcher.querySelectorAll<HTMLButtonElement>(".showcase-switch");
-    const views = ["home", "graph"];
-    let current = 0;
-    let timer: ReturnType<typeof setInterval>;
 
-    function goTo(idx: number) {
-      current = idx;
-      tabs.forEach((tab, i) => {
-        tab.classList.toggle("active", i === idx);
-        tab.setAttribute("aria-selected", i === idx ? "true" : "false");
-      });
-      // Drive the embedded dashboard to the matching view via its hash route —
-      // same-origin, so the SPA stays loaded and just switches views.
-      if (embed?.contentWindow) {
-        embed.contentWindow.location.hash = `#${views[idx]}`;
-      }
-    }
-
-    function advance() {
-      goTo((current + 1) % views.length);
-    }
-
-    function resetTimer() {
-      clearInterval(timer);
-      timer = setInterval(advance, 6000);
-    }
-
-    tabs.forEach((tab) => {
-      tab.addEventListener("click", () => {
-        goTo(Number(tab.dataset.index));
-        resetTimer();
-      });
-    });
-
-    // Scale the embedded dashboard (rendered at 1920x1080) to the frame width
-    // so it fits the 16:9 frame without an internal scrollbar. Below 700px,
-    // let the SPA reflow at natural size inside the taller mobile frame.
+    // Scale the embedded dashboard (rendered at 1920x1080) up ~25% past the
+    // frame width so it reads bigger inside the 16:9 frame. Below 700px, let
+    // the SPA reflow at natural size inside the taller mobile frame.
     function fitEmbed() {
       if (!embed) return;
       const frameW = frame.clientWidth;
       if (frameW >= 700) {
         embed.style.width = "1920px";
         embed.style.height = "1080px";
-        embed.style.transform = `scale(${frameW / 1920})`;
+        embed.style.transform = `scale(${(frameW / 1920) * 1.25})`;
       } else {
         embed.style.width = "100%";
         embed.style.height = "100%";
@@ -266,7 +163,5 @@ const slides = [
     }
     window.addEventListener("resize", fitEmbed);
     fitEmbed();
-
-    resetTimer();
   }
 </script>
