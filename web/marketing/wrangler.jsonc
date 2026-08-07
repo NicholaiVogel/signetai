@@ -3,8 +3,12 @@
 	"name": "signetweb",
 	"account_id": "a19f770b9be1b20e78b8d25bdcfd3bbd",
 	"compatibility_date": "2026-02-19",
-	"assets": { "directory": "./dist" },
-	"observability": { "enabled": true },
+	"assets": {
+		"directory": "./dist"
+	},
+	"observability": {
+		"enabled": true
+	},
 	"rate_limiting": [
 		{
 			"name": "RATE_LIMITER",
@@ -12,5 +16,6 @@
 			"period": 60,
 			"action": "block"
 		}
-	]
+	],
+	"main": "./worker.ts"
 }
