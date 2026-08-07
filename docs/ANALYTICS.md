@@ -230,9 +230,11 @@ Events recorded: `daemon.heartbeat` (every 5 minutes), the `inference.*`
 lifecycle (`route`, `execute`, `stream`, `fallback`), `llm.generate`
 (provider, latency, token and cost counts when reported, success — never
 prompt text), `session.start` / `session.end` (harness and prompt count),
-and the lifecycle events `daemon.started`, `command.invoked`,
-`error.occurred`, and `version.upgraded`. The `pipeline.*` event types
-are declared for future use but not yet emitted.
+the lifecycle events `daemon.started`, `command.invoked`,
+`error.occurred`, and `version.upgraded`, and `pipeline.embedding`
+(tokens, provider, sourceKind — memory capture / artifact index /
+recall / dreaming). The remaining `pipeline.*` event types are declared
+for future use but not yet emitted.
 
 Release Download Stats
 ---

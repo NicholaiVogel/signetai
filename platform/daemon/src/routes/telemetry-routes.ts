@@ -202,6 +202,9 @@ export function registerTelemetryRoutes(app: Hono): void {
 		let llmCalls = 0;
 		let llmErrors = 0;
 		let pipelineErrors = 0;
+		let embeddingCalls = 0;
+		let embeddingTokens = 0;
+		const embeddingBySource = new Map<string, number>();
 		const latencies: number[] = [];
 
 		for (const e of events) {
@@ -211,7 +214,17 @@ export function registerTelemetryRoutes(app: Hono): void {
 				if (typeof e.properties.outputTokens === "number") totalOutputTokens += e.properties.outputTokens;
 				if (typeof e.properties.totalCost === "number") totalCost += e.properties.totalCost;
 				if (e.properties.success === false) llmErrors++;
-				if (typeof e.properties.durationMs === "number") latencies.push(e.properties.durationMs);
+				if (typeof e.properties.latencyMs === "number") latencies.push(e.properties.latencyMs);
+			}
+			if (e.event === "pipeline.embedding") {
+				embeddingCalls++;
+				if (typeof e.properties.tokens === "number") embeddingTokens += e.properties.tokens;
+				const sourceKind = typeof e.properties.sourceKind === "string" ? e.properties.sourceKind : "other";
+				embeddingBySource.set(
+					sourceKind,
+					(embeddingBySource.get(sourceKind) ?? 0) +
+						(typeof e.properties.tokens === "number" ? e.properties.tokens : 0),
+				);
 			}
 			if (e.event === "pipeline.error") pipelineErrors++;
 		}
@@ -224,6 +237,13 @@ export function registerTelemetryRoutes(app: Hono): void {
 			enabled: true,
 			totalEvents: events.length,
 			llm: { calls: llmCalls, errors: llmErrors, totalInputTokens, totalOutputTokens, totalCost, p50, p95 },
+			embedding: {
+				calls: embeddingCalls,
+				totalTokens: embeddingTokens,
+				bySource: [...embeddingBySource.entries()]
+					.map(([source, tokens]) => ({ source, tokens }))
+					.sort((a, b) => b.tokens - a.tokens),
+			},
 			pipelineErrors,
 		});
 	});

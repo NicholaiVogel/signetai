@@ -20,6 +20,7 @@
 import type { DbAccessor } from "./db-accessor";
 import { getDbAccessor, hasDbAccessor } from "./db-accessor";
 import { logger } from "./logger";
+import { getActiveTelemetry } from "./telemetry";
 
 /** What produced the embedding. Used for per-source cost attribution. */
 export type EmbeddingUsageSource = "memory-capture" | "artifact-index" | "recall" | "dreaming" | "other";
@@ -63,6 +64,14 @@ export function recordEmbeddingUsage(input: {
 	readonly agentId?: string;
 	readonly now?: Date;
 }): void {
+	// Anonymous telemetry: emit the pipeline.embedding event at the same fetch
+	// boundary so embedding token spend shows up in PostHog alongside
+	// llm.generate (issue #1181). Best-effort, like the DB accounting below.
+	getActiveTelemetry()?.record("pipeline.embedding", {
+		tokens: input.tokens,
+		provider: input.provider,
+		sourceKind: input.source,
+	});
 	if (!hasDbAccessor()) return;
 	try {
 		getDbAccessor().withWriteTx((db) => {
