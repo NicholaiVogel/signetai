@@ -7,7 +7,8 @@
 		"build": "astro build",
 		"preview": "astro preview",
 		"deploy": "wrangler deploy",
-		"dev:full": "astro build && wrangler pages dev ./dist --ip 0.0.0.0"
+		"dev:full": "astro build && wrangler pages dev ./dist --ip 0.0.0.0",
+		"prebuild": "bun scripts/build-dashboard-demo.ts"
 	},
 	"dependencies": {
 		"@astrojs/mdx": "^7.0.5",

@@ -1,14 +1,16 @@
 ---
 const slides = [
 	{
-		src: "/dashboard-home-16x9.png",
-		alt: "Signet dashboard home — memory health, activity, daily brief, and review suggestions in dark mode",
+		hash: "home",
 		label: "Agent Overview",
+		fallback: "/dashboard-home-16x9.png",
+		fallbackAlt: "Signet dashboard home — memory health, activity, daily brief, and review suggestions in dark mode",
 	},
 	{
-		src: "/dashboard-graph-16x9.png",
-		alt: "Signet knowledge graph — entity clusters, edges, and recall controls in dark mode",
+		hash: "graph",
 		label: "Knowledge Graph",
+		fallback: "/dashboard-graph-16x9.png",
+		fallbackAlt: "Signet knowledge graph — entity clusters, edges, and recall controls in dark mode",
 	},
 ];
 ---
@@ -44,16 +46,25 @@ const slides = [
       <div class="showcase-glow" aria-hidden="true"></div>
 
       <div class="showcase-frame" id="showcase-frame">
-        {slides.map((slide, i) => (
+        <!-- Embedded build of the real dashboard (fixture data, no daemon):
+             regenerated automatically by scripts/build-dashboard-demo.ts
+             before every astro build. The tabs drive it via its hash route. -->
+        <iframe
+          class="showcase-embed"
+          id="showcase-embed"
+          src="/dashboard/#home"
+          title="Signet dashboard demo — Agent Overview"
+          loading="lazy"
+          aria-label="Interactive Signet dashboard demo"
+        ></iframe>
+        <noscript>
           <img
-            class:list={["showcase-img", { active: i === 0 }]}
-            src={slide.src}
-            alt={slide.alt}
-            loading="eager"
+            class="showcase-embed-fallback"
+            src="/dashboard-home-16x9.png"
+            alt="Signet dashboard home view"
             draggable="false"
-            data-index={i}
           />
-        ))}
+        </noscript>
 
         <span class="showcase-hotspot showcase-hotspot--1" aria-hidden="true">
           <span class="showcase-hotspot-dot"></span>
@@ -173,35 +184,24 @@ const slides = [
     box-shadow:
       0 25px 50px -12px rgba(0, 0, 0, 0.7),
       inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    aspect-ratio: 16 / 9;
   }
 
-  .showcase-img {
+  /* The embedded dashboard fills the frame; the SPA scales to the viewport. */
+  .showcase-embed {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+    background: #0b0b0f;
+  }
+
+  .showcase-embed-fallback {
     display: block;
     width: 100%;
     height: auto;
-    opacity: 0;
-    position: absolute;
-    top: 0;
-    left: 0;
-    transition:
-      opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1),
-      transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
-    transform: scale(1.02) translateY(10px);
-    pointer-events: none;
-    z-index: 0;
-    filter: brightness(1.07) contrast(1.06);
-  }
-
-  /* First image is in flow to set container height */
-  .showcase-img:first-child {
-    position: relative;
-  }
-
-  .showcase-img.active {
-    opacity: 1;
-    transform: scale(1) translateY(0);
-    pointer-events: auto;
-    z-index: 1;
   }
 
   /* Hotspot annotations: pulse dot + anchored chip, inside the frame */
@@ -275,6 +275,8 @@ const slides = [
     }
     .showcase-frame {
       border-radius: 10px;
+      /* Taller viewport so the embedded SPA stays readable on small screens */
+      aspect-ratio: 3 / 4;
     }
     .showcase-hotspot-chip {
       display: none;
@@ -289,22 +291,27 @@ const slides = [
   const frame = document.getElementById("showcase-frame");
   const switcher = document.getElementById("showcase-switcher");
   if (frame && switcher) {
-    const imgs = frame.querySelectorAll<HTMLImageElement>(".showcase-img");
+    const embed = document.getElementById("showcase-embed") as HTMLIFrameElement | null;
     const tabs = switcher.querySelectorAll<HTMLButtonElement>(".showcase-switch");
+    const views = ["home", "graph"];
     let current = 0;
     let timer: ReturnType<typeof setInterval>;
 
     function goTo(idx: number) {
       current = idx;
-      imgs.forEach((img, i) => img.classList.toggle("active", i === idx));
       tabs.forEach((tab, i) => {
         tab.classList.toggle("active", i === idx);
         tab.setAttribute("aria-selected", i === idx ? "true" : "false");
       });
+      // Drive the embedded dashboard to the matching view via its hash route —
+      // same-origin, so the SPA stays loaded and just switches views.
+      if (embed?.contentWindow) {
+        embed.contentWindow.location.hash = `#${views[idx]}`;
+      }
     }
 
     function advance() {
-      goTo((current + 1) % imgs.length);
+      goTo((current + 1) % views.length);
     }
 
     function resetTimer() {

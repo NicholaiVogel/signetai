@@ -5,3 +5,4 @@
 dist/
 dogfood-output/
 worker-configuration.d.ts
+public/dashboard/

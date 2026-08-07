@@ -11,6 +11,8 @@
  * to the daemon in Electron).
  */
 
+import { installDemoApi } from "./demo";
+
 const API_BASE = "";
 
 /** Appends an optional API key/auth header if one is stored (dashboard auth). */
@@ -881,4 +883,12 @@ export async function disconnectOAuthProvider(providerId: string): Promise<boole
 		headers: authHeaders(),
 	});
 	return res.ok;
+}
+
+// Demo build (VITE_DEMO=1): the marketing site embeds the real dashboard
+// with fixture data instead of screenshots. Vite replaces the flag with a
+// literal at build time, so this call is dead code — and the demo module is
+// tree-shaken — from every non-demo build (daemon + Electron).
+if (import.meta.env.VITE_DEMO === "1") {
+	installDemoApi(api);
 }
