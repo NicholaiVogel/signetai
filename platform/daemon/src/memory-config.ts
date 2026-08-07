@@ -196,10 +196,14 @@ export const DEFAULT_PIPELINE_V2: ResolvedPipelineV2Config = {
 		inheritContext: true,
 		tailChars: 3000,
 	},
-	telemetryEnabled: false,
+	telemetryEnabled: true,
 	telemetry: {
-		posthogHost: "",
-		posthogApiKey: "",
+		// PostHog cloud (US). On by default so Signet can understand how it
+		// runs in the wild; set telemetryEnabled: false to opt out. Sends
+		// only when both host and api key are configured. The project API
+		// key is a public ingest key (PostHog design); it is not a secret.
+		posthogHost: "https://us.i.posthog.com",
+		posthogApiKey: "phc_mLsvJmbmp6e9UarrX9Cq5QtTjVNiiphM9mvi5Xnddd8Q",
 		flushIntervalMs: 60000,
 		flushBatchSize: 50,
 		retentionDays: 90,

@@ -1055,7 +1055,7 @@ shadowMode                      false
 mutationsFrozen                 false
 semanticContradictionEnabled        true
 semanticContradictionTimeoutMs      120000  # ms, range 5000-300000
-telemetryEnabled                    false
+telemetryEnabled                    true    # set false to opt out
 ```
 
 ### Nested sub-objects and defaults
@@ -1146,8 +1146,9 @@ continuity:
   recoveryBudgetChars: 2000      # range 200–10000
 
 telemetry:
-  posthogHost: ""
-  posthogApiKey: ""
+  telemetryEnabled: true        # set false to opt out
+  posthogHost: "https://us.i.posthog.com"
+  posthogApiKey: "phc_mLsvJmbmp6e9UarrX9Cq5QtTjVNiiphM9mvi5Xnddd8Q"  # public ingest key
   flushIntervalMs: 60000         # ms, range 5s–10min
   flushBatchSize: 50             # range 1–500
   retentionDays: 90              # range 1–365

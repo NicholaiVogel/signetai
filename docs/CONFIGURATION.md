@@ -690,7 +690,7 @@ These top-level boolean fields gate major pipeline behaviors.
 | `shadowMode` | `false` | Extract facts but skip writes. Useful for evaluation. |
 | `mutationsFrozen` | `false` | Allow reads; block all writes. Overrides `shadowMode`. |
 | `semanticContradictionEnabled` | `true` | Enable LLM-based semantic contradiction detection for UPDATE/DELETE proposals. |
-| `telemetryEnabled` | `false` | Enable anonymous telemetry reporting. |
+| `telemetryEnabled` | `true` | Enable anonymous telemetry reporting (set `false` to opt out). |
 
 The relationship between `shadowMode` and `mutationsFrozen` matters:
 `shadowMode` suppresses writes from the normal extraction path only;
@@ -1116,13 +1116,17 @@ leaving the explicit `session_search` MCP/API surface available.
 
 ### Telemetry (`telemetry`)
 
-Anonymous usage telemetry. Only active when `telemetryEnabled: true`.
-Events are batched and flushed periodically.
+Anonymous usage telemetry. On by default; set `telemetryEnabled: false`
+to opt out. Events are batched and flushed periodically. Sending requires
+both `posthogHost` and `posthogApiKey`; telemetry never includes memory
+content, user identity, or file paths. Each install gets a random
+anonymous id (persisted in the workspace database) used as the PostHog
+`distinct_id`, so installs stay countable without being identifiable.
 
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
-| `posthogHost` | `""` | — | PostHog instance URL (empty disables) |
-| `posthogApiKey` | `""` | — | PostHog project API key |
+| `posthogHost` | `https://us.i.posthog.com` | — | PostHog instance URL (empty disables) |
+| `posthogApiKey` | `phc_mLsvJmbmp6e9UarrX9Cq5QtTjVNiiphM9mvi5Xnddd8Q` | — | PostHog project API key. Public ingest key by design; overrides the `POSTHOG_API_KEY` secret when set |
 | `flushIntervalMs` | `60000` | 5s-10min | Time between event flushes |
 | `flushBatchSize` | `50` | 1-500 | Max events per flush batch |
 | `retentionDays` | `90` | 1-365 | Days before local telemetry data is purged |

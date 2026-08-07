@@ -131,6 +131,7 @@ import {
 } from "./session-transcripts";
 import { type StructuralCandidateSource, type StructuralFeatures, getStructuralFeatures } from "./structural-features";
 import { assembleInheritedContextBlock, resolveParentSession } from "./subagent-context";
+import { getActiveTelemetry } from "./telemetry";
 import { searchTemporalFallback } from "./temporal-fallback";
 import { writeTranscriptAudit } from "./transcript-audit";
 import * as transcriptCapture from "./transcript-capture";
@@ -650,6 +651,12 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			warnings: warnings?.length ? warnings : undefined,
 		};
 	}
+
+	// Anonymous usage telemetry: a real session start (dedup stubs and
+	// clear/reset paths above don't count as new sessions).
+	getActiveTelemetry()?.record("session.start", {
+		harness: req.harness,
+	});
 
 	// Initialize continuity state for checkpoint accumulation (first call only)
 	if (req.sessionKey) {
@@ -1747,6 +1754,13 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	// Uses totalPromptCount so this reflects the full session, not just
 	// the interval since the last periodic/pre-compaction consume.
 	const snap = consumeState(sessionKey);
+
+	// Anonymous usage telemetry for real session ends (the clear path above
+	// returns early and doesn't count as a session).
+	getActiveTelemetry()?.record("session.end", {
+		harness: req.harness,
+		promptCount: snap?.totalPromptCount ?? null,
+	});
 	if (snap && snap.totalPromptCount > 0) {
 		try {
 			const cfg = loadMemoryConfig(getAgentsDir()).pipelineV2.continuity;

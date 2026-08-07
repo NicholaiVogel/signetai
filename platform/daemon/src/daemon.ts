@@ -136,7 +136,7 @@ import {
 } from "./source-index-progress";
 import { runStartupRecovery } from "./startup-recovery";
 import { reportStartupGrace } from "./system-pressure";
-import { type TelemetryCollector, createTelemetryCollector } from "./telemetry";
+import { type TelemetryCollector, createTelemetryCollector, setActiveTelemetry } from "./telemetry";
 import { type TranscriptCaptureWorkerHandle, startTranscriptCaptureWorker } from "./transcript-capture-worker";
 
 import {
@@ -1580,6 +1580,7 @@ async function cleanup() {
 		} catch {}
 		telemetryRef = undefined;
 		setTelemetryRef(undefined);
+		setActiveTelemetry(undefined);
 	}
 
 	try {
@@ -1917,6 +1918,7 @@ async function main() {
 		telemetryCollector.start();
 		telemetryRef = telemetryCollector;
 		setTelemetryRef(telemetryCollector);
+		setActiveTelemetry(telemetryCollector);
 
 		const daemonStartTime = Date.now();
 		heartbeatTimer = setInterval(

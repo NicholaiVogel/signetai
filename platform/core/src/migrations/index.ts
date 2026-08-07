@@ -114,6 +114,7 @@ import { up as agentScopedEntityName } from "./105-agent-scoped-entity-name";
 import { up as memoryReviewAfter } from "./106-memory-review-after";
 import { up as dreamingPassUsage } from "./107-dreaming-pass-usage";
 import { up as embeddingUsage } from "./108-embedding-usage";
+import { up as telemetryInstall } from "./109-telemetry-install";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1008,6 +1009,14 @@ export const MIGRATIONS: readonly Migration[] = [
 		up: embeddingUsage,
 		artifacts: {
 			tables: ["embedding_usage"],
+		},
+	},
+	{
+		version: 109,
+		name: "telemetry-install",
+		up: telemetryInstall,
+		artifacts: {
+			tables: ["telemetry_install"],
 		},
 	},
 ];

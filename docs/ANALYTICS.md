@@ -202,3 +202,30 @@ names: `queue`, `storage`, `index`, `provider`, `mutation`, `connector`.
 into the mutation domain for memory integrity monitoring).
 
 `GET /api/analytics/logs` — alias for structured log access.
+
+
+PostHog Telemetry
+---
+
+Separate from the in-memory analytics above, the daemon ships an
+anonymous telemetry collector for understanding install and usage
+patterns (see [[configuration]]). It buffers events to SQLite and
+flushes them in batches to a PostHog instance when both `posthogHost`
+and `posthogApiKey` are configured (`telemetryEnabled` defaults to
+true; set it to `false` to opt out).
+
+Privacy contract:
+
+- Events carry no memory content, user identity, agent ids, or file paths.
+- Each install gets a random anonymous id (persisted in the workspace
+  database) used as the PostHog `distinct_id`, so installs are countable
+  but not identifiable.
+- Telemetry is on by default and can be disabled with
+  `telemetryEnabled: false`.
+
+Events recorded today: `daemon.heartbeat` (every 5 minutes), the
+`inference.*` lifecycle (`route`, `execute`, `stream`, `fallback`),
+`llm.generate` (provider, latency, token and cost counts when reported,
+success — never prompt text), and `session.start` / `session.end`
+(harness and prompt count). The `pipeline.*` event types are declared
+for future use but not yet emitted.

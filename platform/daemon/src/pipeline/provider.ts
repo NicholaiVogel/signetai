@@ -33,6 +33,7 @@ import {
 	resolveDefaultBasePath,
 } from "@signet/core";
 import { logger } from "../logger";
+import { getActiveTelemetry } from "../telemetry";
 import { which } from "../which";
 
 // ---------------------------------------------------------------------------
@@ -470,17 +471,40 @@ export interface StreamCapableLlmProvider extends LlmProvider {
 
 /**
  * Run a provider call, returning usage when the provider reports it.
+ * Records an anonymous `llm.generate` telemetry event (usage counts and
+ * latency only — never prompt content) when a collector is active.
  */
 export async function generateWithTracking(
 	provider: LlmProvider,
 	prompt: string,
 	opts?: LlmProviderCallOptions,
 ): Promise<LlmGenerateResult> {
-	if (provider.generateWithUsage) {
-		return provider.generateWithUsage(prompt, opts);
+	const startedAt = performance.now();
+	try {
+		const result = provider.generateWithUsage
+			? await provider.generateWithUsage(prompt, opts)
+			: { text: await provider.generate(prompt, opts), usage: null };
+		recordLlmGenerate(provider, result.usage, performance.now() - startedAt, true);
+		return result;
+	} catch (error) {
+		recordLlmGenerate(provider, null, performance.now() - startedAt, false);
+		throw error;
 	}
-	const text = await provider.generate(prompt, opts);
-	return { text, usage: null };
+}
+
+function recordLlmGenerate(provider: LlmProvider, usage: LlmUsage | null, latencyMs: number, success: boolean): void {
+	const telemetry = getActiveTelemetry();
+	if (!telemetry) return;
+	telemetry.record("llm.generate", {
+		provider: provider.name,
+		latencyMs: Math.round(latencyMs),
+		success,
+		inputTokens: usage?.inputTokens ?? null,
+		outputTokens: usage?.outputTokens ?? null,
+		cacheReadTokens: usage?.cacheReadTokens ?? null,
+		cacheCreationTokens: usage?.cacheCreationTokens ?? null,
+		totalCost: usage?.totalCost ?? null,
+	});
 }
 
 // ---------------------------------------------------------------------------

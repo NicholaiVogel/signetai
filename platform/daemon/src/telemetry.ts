@@ -62,6 +62,52 @@ export interface TelemetryCollector {
 }
 
 // ---------------------------------------------------------------------------
+// Active collector reference
+// ---------------------------------------------------------------------------
+// Mirrored here by the daemon for pipeline and hooks layers, which are not
+// route modules and therefore don't read the route-layer ref in routes/state.
+
+let activeCollector: TelemetryCollector | undefined;
+
+export function setActiveTelemetry(collector: TelemetryCollector | undefined): void {
+	activeCollector = collector;
+}
+
+export function getActiveTelemetry(): TelemetryCollector | undefined {
+	return activeCollector;
+}
+
+/**
+ * Resolve the anonymous per-install identifier, creating and persisting it on
+ * first use. Falls back to an in-memory id if the database is unusable.
+ * A truthy guard is required here: bun:sqlite returns null for a missing row
+ * while better-sqlite3 returns undefined (dual-DB daemon).
+ */
+function getOrCreateInstallId(db: DbAccessor): string {
+	try {
+		const existing = db.withReadDb((r) => {
+			const row = r.prepare("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1").get() as
+				| { readonly id: string }
+				| null
+				| undefined;
+			return row?.id ?? null;
+		});
+		if (existing != null) return existing;
+
+		const id = crypto.randomUUID();
+		db.withWriteTx((w) => {
+			w.prepare("INSERT OR IGNORE INTO telemetry_install (id, created_at) VALUES (?, ?)").run(
+				id,
+				new Date().toISOString(),
+			);
+		});
+		return id;
+	} catch {
+		return crypto.randomUUID();
+	}
+}
+
+// ---------------------------------------------------------------------------
 // PostHog batch sender
 // ---------------------------------------------------------------------------
 
@@ -76,16 +122,26 @@ const MAX_BUFFER_SIZE = 200;
 const MAX_BUFFER_EVENTS = 5000;
 const MAX_CONSECUTIVE_FAILURES = 3;
 const BACKOFF_MULTIPLIER = 5;
+const PRUNE_EVERY_N_FLUSHES = 10;
+
+/**
+ * Interval used after `failures` consecutive PostHog failures. Pure so the
+ * backoff behavior is testable without driving timers.
+ */
+export function nextFlushIntervalMs(baseIntervalMs: number, consecutiveFailures: number): number {
+	return consecutiveFailures >= MAX_CONSECUTIVE_FAILURES ? baseIntervalMs * BACKOFF_MULTIPLIER : baseIntervalMs;
+}
 
 async function sendToPostHog(
 	host: string,
 	apiKey: string,
+	distinctId: string,
 	events: readonly TelemetryEvent[],
 	daemonVersion: string,
 ): Promise<boolean> {
 	const batch: readonly PostHogBatchEvent[] = events.map((e) => ({
 		event: e.event,
-		distinct_id: "signet-anonymous",
+		distinct_id: distinctId,
 		timestamp: e.timestamp,
 		properties: {
 			...e.properties,
@@ -120,7 +176,9 @@ export function createTelemetryCollector(
 	let flushTimer: ReturnType<typeof setTimeout> | null = null;
 	let running = false;
 	let consecutiveFailures = 0;
+	let flushCount = 0;
 	let effectiveIntervalMs = config.flushIntervalMs;
+	const installId = getOrCreateInstallId(db);
 
 	const posthogConfigured = config.posthogHost.length > 0 && config.posthogApiKey.length > 0;
 
@@ -202,6 +260,7 @@ export function createTelemetryCollector(
 	}
 
 	async function doFlush(): Promise<void> {
+		flushCount++;
 		// Drain buffer to SQLite
 		const pending = buffer.splice(0, buffer.length);
 		writeToDb(pending);
@@ -210,15 +269,15 @@ export function createTelemetryCollector(
 		if (posthogConfigured) {
 			const unsent = loadUnsent(config.flushBatchSize);
 			if (unsent.length > 0) {
-				const ok = await sendToPostHog(config.posthogHost, config.posthogApiKey, unsent, daemonVersion);
+				const ok = await sendToPostHog(config.posthogHost, config.posthogApiKey, installId, unsent, daemonVersion);
 				if (ok) {
 					markSent(unsent.map((e) => e.id));
 					consecutiveFailures = 0;
 					effectiveIntervalMs = config.flushIntervalMs;
 				} else {
 					consecutiveFailures++;
+					effectiveIntervalMs = nextFlushIntervalMs(config.flushIntervalMs, consecutiveFailures);
 					if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-						effectiveIntervalMs = config.flushIntervalMs * BACKOFF_MULTIPLIER;
 						logger.warn("telemetry", "PostHog unreachable, backing off", {
 							intervalMs: effectiveIntervalMs,
 						});
@@ -227,8 +286,8 @@ export function createTelemetryCollector(
 			}
 		}
 
-		// Occasional pruning (roughly every 10th flush)
-		if (Math.random() < 0.1) {
+		// Occasional pruning (every 10th flush, deterministic for tests)
+		if (flushCount % PRUNE_EVERY_N_FLUSHES === 0) {
 			pruneOldEvents();
 		}
 	}
