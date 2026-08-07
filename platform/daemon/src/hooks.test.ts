@@ -3589,8 +3589,16 @@ describe("handleCheckpointExtract", () => {
 
 describe("summary worker tick gate", () => {
 	test.serial(
-		"processes enqueued job when pipelineV2 is enabled",
+		"does not burn attempts when the synthesis resolver is uninitialised despite the router gate passing",
 		async () => {
+			// Regression (#1155): the router's session_synthesis gate can pass
+			// while the module-level inference resolver is not wired up yet
+			// (init-order window during cold boot or pipeline restart). The
+			// worker previously called getInferenceProvider() unguarded,
+			// hard-failed the job, recorded the error, and burned an attempt
+			// on a transient condition — repeatedly failing every queued
+			// transcript. It must instead treat the missing resolver as
+			// workload-unavailable: restore the lease and retry later.
 			writeAgentYaml(`memory:
   pipelineV2:
     enabled: true
@@ -3608,6 +3616,8 @@ describe("summary worker tick gate", () => {
 			const jobId = enq.jobId;
 
 			const { startSummaryWorker } = await import("./pipeline/summary-worker");
+			// Router gate passes (synthesis "available") but no
+			// initInferenceProviderResolver() call — the #1155 window.
 			const handle = startSummaryWorker(getDbAccessor(), { isSynthesisAvailable: async () => true });
 
 			// First tick fires after POLL_INTERVAL_MS (5s)
@@ -3621,9 +3631,11 @@ describe("summary worker tick gate", () => {
 			db.close();
 
 			expect(job).toBeDefined();
-			// Gate allowed tick through → job was leased → attempts incremented.
-			// Without LLM the processing will fail, but that doesn't matter.
-			expect(job?.attempts).toBeGreaterThan(0);
+			// Tick ran and recognized the uninitialised resolver: the lease
+			// was restored, so no attempt was consumed and no failure was
+			// recorded against the job.
+			expect(job?.status).toBe("pending");
+			expect(job?.attempts).toBe(0);
 		},
 		15_000,
 	);

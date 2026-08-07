@@ -15,7 +15,7 @@ import type { LlmProvider } from "@signet/core";
 import { resolveDefaultBasePath } from "@signet/core";
 import type { DbAccessor, WriteDb } from "../db-accessor";
 import { countChanges } from "../db-helpers";
-import { getInferenceProvider } from "../llm";
+import { getInferenceProviderOrNull } from "../llm";
 import { logger } from "../logger";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
 import {
@@ -1257,7 +1257,18 @@ export function startSummaryWorker(accessor: DbAccessor, options: SummaryWorkerO
 			});
 
 			if (synthesisAvailable && !cachedProvider) {
-				cachedProvider = getInferenceProvider("sessionSynthesis");
+				cachedProvider = getInferenceProviderOrNull("sessionSynthesis");
+			}
+			if (synthesisAvailable && !cachedProvider) {
+				// The router says session_synthesis is configured, but the
+				// module-level resolver is not wired up yet (init-order window
+				// during cold boot or pipeline restart). This is a transient
+				// workload-unavailable condition, not a job failure — restore
+				// the lease and retry on the next tick instead of burning an
+				// attempt (#1155, same init-order class as #1143).
+				restoreUnprocessedSummaryLease(accessor, job);
+				scheduleTick(POLL_INTERVAL_MS);
+				return;
 			}
 			await processJob(accessor, synthesisAvailable ? cachedProvider : null, job, memoryCfg, activeAbort.signal);
 
