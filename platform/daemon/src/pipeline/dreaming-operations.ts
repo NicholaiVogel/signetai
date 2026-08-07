@@ -196,33 +196,26 @@ function attentionProvenance(
 
 	let expectedTarget = false;
 	if (operation.operation === "archive_entity") {
-		expectedTarget =
-			typeof payload.target === "string" &&
-			payload.target === attention.details.entityId &&
-			attention.subjectRef === `entity:${payload.target}`;
+		expectedTarget = pinnedTarget(payload, attention, "entity:", "entityId");
 	} else if (operation.operation === "archive_aspect") {
-		expectedTarget =
-			typeof payload.target === "string" &&
-			payload.target === attention.details.aspectId &&
-			attention.subjectRef === `aspect:${payload.target}`;
+		expectedTarget = pinnedTarget(payload, attention, "aspect:", "aspectId");
 	} else if (operation.operation === "archive_claim_value") {
-		expectedTarget =
-			typeof payload.target === "string" &&
-			payload.target === attention.details.attributeId &&
-			attention.subjectRef === `attribute:${payload.target}`;
+		expectedTarget = pinnedTarget(payload, attention, "attribute:", "attributeId");
 	} else if (operation.operation === "archive_link") {
-		expectedTarget =
-			typeof payload.target === "string" &&
-			payload.target === attention.details.linkId &&
-			attention.subjectRef === `link:${payload.target}`;
+		expectedTarget = pinnedTarget(payload, attention, "link:", "linkId");
 	} else if (operation.operation === "merge_entities") {
 		const targets = Array.isArray(payload.targets)
 			? payload.targets.filter((value): value is string => typeof value === "string")
 			: [];
 		const survivor = typeof payload.survivor === "string" ? payload.survivor : "";
-		const groupIds = semanticDuplicateIds(accessor, agentId, attention.details.canonicalName ?? "");
+		// The subjectRef is the canonical pin: agent-minted flags carry the
+		// canonical name in `duplicate:<name>` and may omit details, while
+		// daemon-enqueued flags repeat it in details.canonicalName (#1168).
+		const canonicalName =
+			attention.details.canonicalName ?? pinnedBySubjectRef(attention.subjectRef, "duplicate:") ?? "";
+		const groupIds = semanticDuplicateIds(accessor, agentId, canonicalName);
 		expectedTarget =
-			attention.subjectRef === `duplicate:${attention.details.canonicalName}` &&
+			attention.subjectRef === `duplicate:${canonicalName}` &&
 			groupIds.size > 1 &&
 			groupIds.has(survivor) &&
 			targets.length >= 2 &&
@@ -234,7 +227,7 @@ function attentionProvenance(
 		const sources = Array.isArray(payload.sources)
 			? payload.sources.filter((value): value is string => typeof value === "string")
 			: [];
-		const flaggedAspect = attention.details.aspectId ?? attention.subjectRef.replace(/^aspect:/, "");
+		const flaggedAspect = attention.details.aspectId ?? pinnedBySubjectRef(attention.subjectRef, "aspect:") ?? "";
 		expectedTarget =
 			attention.subjectRef.startsWith("aspect:") &&
 			typeof payload.target === "string" &&
@@ -261,6 +254,34 @@ function attentionProvenance(
 		},
 		attentionId: attention.id,
 	};
+}
+
+/** The row id a hygiene subjectRef pins: the kind prefix plus the id. */
+function pinnedBySubjectRef(subjectRef: string, prefix: string): string | null {
+	if (!subjectRef.startsWith(prefix)) return null;
+	const id = subjectRef.slice(prefix.length);
+	return id.length > 0 ? id : null;
+}
+
+/**
+ * An archive op targets exactly the flagged row when the subjectRef pins the
+ * same id. The details id fields are an optional cross-check: daemon-enqueued
+ * attention repeats the id there, but agent-minted flags may omit it entirely
+ * (#1168) — the subjectRef is mandatory and already pins the target, so a
+ * missing details id must not reject the archive, while a contradictory one
+ * (a redirect) must.
+ */
+function pinnedTarget(
+	payload: Readonly<Record<string, unknown>>,
+	attention: DreamingAttention,
+	prefix: string,
+	detailKey: keyof DreamingAttention["details"],
+): boolean {
+	const target = typeof payload.target === "string" ? payload.target : null;
+	const pinned = target !== null ? pinnedBySubjectRef(attention.subjectRef, prefix) : null;
+	if (pinned === null || target !== pinned) return false;
+	const detail = attention.details[detailKey];
+	return detail === undefined || detail === target;
 }
 
 function provenanceForEvidence(
