@@ -4,10 +4,9 @@
  * Static assets are served through the ASSETS binding; the only custom
  * behavior is the embedded dashboard demo at /dashboard/*, which needs
  * framing permissions (X-Frame-Options: SAMEORIGIN, CSP frame-ancestors
- * 'self') so Showcase.astro can iframe it. Workers static assets `_headers`
- * does not reliably apply per-path overrides (the site-wide DENY rule wins),
- * so the policy is enforced here instead — deterministically, and verified
- * with `wrangler dev`.
+ * 'self') so Showcase.astro can iframe it. The binding must be declared
+ * explicitly in wrangler.jsonc (assets.binding) — wrangler does not
+ * auto-wire it, and without it ASSETS is undefined.
  */
 export default {
 	async fetch(request: Request, env: { ASSETS: { fetch: (r: Request) => Promise<Response> } }): Promise<Response> {
@@ -15,8 +14,6 @@ export default {
 		const res = await env.ASSETS.fetch(request);
 		if (!url.pathname.startsWith("/dashboard/")) return res;
 
-		// Same policy the demo was verified against locally; replaces the
-		// site-wide CSP's frame-ancestors 'none' for the embed only.
 		const headers = new Headers(res.headers);
 		headers.set("X-Frame-Options", "SAMEORIGIN");
 		headers.set(
