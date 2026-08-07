@@ -172,7 +172,10 @@ describe("telemetry collector", () => {
 		expect(captured).toHaveLength(1);
 		const body = captured[0]?.body;
 		expect(body?.api_key).toBe("phc_test_key");
-		expect(body?.batch).toHaveLength(2);
+		// install.activated fires first on a fresh install, then the two
+		// recorded events.
+		expect(body?.batch).toHaveLength(3);
+		expect(body?.batch[0]?.event).toBe("install.activated");
 		expect(body?.batch[0]?.distinct_id).toBe(lastBatchDistinctId());
 		expect(body?.batch[1]?.properties.$lib).toBe("signet-daemon");
 		expect(unsentCount()).toBe(0);
@@ -184,6 +187,24 @@ describe("telemetry collector", () => {
 		await collector.flush();
 		await collector.flush();
 		expect(captured).toHaveLength(1);
+	});
+
+	it("emits install.activated exactly once per install", async () => {
+		// Regression: the npm postinstall ping never fires for bun global or
+		// desktop installs, so the install counter missed them. The daemon
+		// emits install.activated on first run (new persisted install id).
+		const first = makeCollector();
+		first.record("daemon.heartbeat", { uptimeMs: 1 });
+		await first.flush();
+		expect(captured[0]?.body.batch[0]?.event).toBe("install.activated");
+		expect(captured[0]?.body.batch[0]?.properties.version).toBe("0.0.0-test");
+
+		// Restart over the same database: no second activation.
+		const second = makeCollector();
+		second.record("daemon.heartbeat", { uptimeMs: 2 });
+		await second.flush();
+		const lastBatch = captured.at(-1)?.body.batch ?? [];
+		expect(lastBatch.map((e) => e.event)).not.toContain("install.activated");
 	});
 
 	it("honors SIGNET_TELEMETRY_OPTOUT as a runtime opt-out", () => {
@@ -221,7 +242,8 @@ describe("telemetry collector", () => {
 			(db) => db.prepare("SELECT id FROM telemetry_events").all() as Array<{ readonly id: string }>,
 		);
 		expect(rows.map((r) => r.id)).not.toContain("old-1");
-		expect(rows.length).toBe(1);
+		// install.activated (first run) + the freshly recorded heartbeat.
+		expect(rows.length).toBe(2);
 	});
 });
 
@@ -252,13 +274,16 @@ describe("telemetry lifecycle events (issue #1026 Phase 2)", () => {
 
 		expect(existsSync(logPath)).toBe(true);
 		const lines = readFileSync(logPath, "utf-8").trim().split("\n");
-		expect(lines).toHaveLength(2);
+		expect(lines).toHaveLength(3);
 		const first = JSON.parse(lines[0]) as { event: string; properties: { version: string } };
-		expect(first.event).toBe("daemon.started");
+		expect(first.event).toBe("install.activated");
 		expect(first.properties.version).toBe("0.163.15");
-		const second = JSON.parse(lines[1]) as { event: string; properties: { command: string } };
-		expect(second.event).toBe("command.invoked");
-		expect(second.properties.command).toBe("status");
+		const second = JSON.parse(lines[1]) as { event: string; properties: { version: string } };
+		expect(second.event).toBe("daemon.started");
+		expect(second.properties.version).toBe("0.163.15");
+		const third = JSON.parse(lines[2]) as { event: string; properties: { command: string } };
+		expect(third.event).toBe("command.invoked");
+		expect(third.properties.command).toBe("status");
 	});
 
 	it("does not write a log when telemetryLogPath is omitted", () => {

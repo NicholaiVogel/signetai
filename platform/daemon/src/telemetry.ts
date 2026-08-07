@@ -55,6 +55,7 @@ export const TELEMETRY_EVENTS = [
 	// Lifecycle events (issue #1026 Phase 2): fired when the user has opted
 	// into anonymous telemetry. No PII, no code, no memory content.
 	"daemon.started",
+	"install.activated",
 	"command.invoked",
 	"error.occurred",
 	"version.upgraded",
@@ -122,8 +123,13 @@ export function telemetryDisabledByEnv(env: NodeJS.ProcessEnv = process.env): bo
  * first use. Falls back to an in-memory id if the database is unusable.
  * A truthy guard is required here: bun:sqlite returns null for a missing row
  * while better-sqlite3 returns undefined (dual-DB daemon).
+ *
+ * `created` is true only when the id was actually inserted — the daemon uses
+ * it to emit install.activated (the true first-run signal that covers bun,
+ * desktop, and npm installs alike; the wrapper postinstall ping misses bun
+ * and desktop entirely).
  */
-function getOrCreateInstallId(db: DbAccessor): string {
+function getOrCreateInstallId(db: DbAccessor): { readonly id: string; readonly created: boolean } {
 	try {
 		const existing = db.withReadDb((r) => {
 			const row = r.prepare("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1").get() as
@@ -132,7 +138,7 @@ function getOrCreateInstallId(db: DbAccessor): string {
 				| undefined;
 			return row?.id ?? null;
 		});
-		if (existing != null) return existing;
+		if (existing != null) return { id: existing, created: false };
 
 		const id = crypto.randomUUID();
 		db.withWriteTx((w) => {
@@ -141,9 +147,9 @@ function getOrCreateInstallId(db: DbAccessor): string {
 				new Date().toISOString(),
 			);
 		});
-		return id;
+		return { id, created: true };
 	} catch {
-		return crypto.randomUUID();
+		return { id: crypto.randomUUID(), created: false };
 	}
 }
 
@@ -220,7 +226,7 @@ export function createTelemetryCollector(
 	let consecutiveFailures = 0;
 	let flushCount = 0;
 	let effectiveIntervalMs = config.flushIntervalMs;
-	const installId = getOrCreateInstallId(db);
+	const { id: installId, created: installActivated } = getOrCreateInstallId(db);
 
 	const posthogConfigured = config.posthogHost.length > 0 && config.posthogApiKey.length > 0;
 
@@ -334,7 +340,7 @@ export function createTelemetryCollector(
 		}
 	}
 
-	return {
+	const collector: TelemetryCollector = {
 		enabled: true,
 
 		record(event, properties): void {
@@ -454,4 +460,16 @@ export function createTelemetryCollector(
 			}
 		},
 	};
+
+	// First run of a new install: emit install.activated so daemon-running
+	// installs are countable regardless of how they were installed (the npm
+	// postinstall ping never fires for bun global or desktop installs).
+	if (installActivated) {
+		collector.record("install.activated", {
+			version: daemonVersion,
+			platform: process.platform,
+		});
+	}
+
+	return collector;
 }
