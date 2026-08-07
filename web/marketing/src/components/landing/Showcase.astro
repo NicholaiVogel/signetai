@@ -106,10 +106,10 @@
     aspect-ratio: 16 / 9;
   }
 
-  /* The embedded dashboard renders at its designed 1920x1080 and is scaled
-     up ~25% past the frame width (the script sets the transform), so the UI
-     reads larger than a letterboxed screenshot while the frame itself stays
-     16:9. Below 700px the frame gets taller and the SPA reflows naturally. */
+  /* The embedded dashboard renders at 1536x864 (a ~1.25x browser zoom of the
+     designed 1920x1080) and is scaled to the frame width, so the UI reads
+     larger while the whole view stays visible - nothing cropped, no internal
+     scroll. Below 700px the frame gets taller and the SPA reflows naturally. */
   .showcase-embed {
     position: absolute;
     top: 0;
@@ -145,16 +145,18 @@
   if (frame) {
     const embed = document.getElementById("showcase-embed") as HTMLIFrameElement | null;
 
-    // Scale the embedded dashboard (rendered at 1920x1080) up ~25% past the
-    // frame width so it reads bigger inside the 16:9 frame. Below 700px, let
+    // Render the embedded dashboard at 1536x864 (1.25x browser zoom of the
+    // designed 1920x1080) and scale it to the frame width: content reads
+    // ~25% larger, the layout reflows so nothing is cropped, and the 16:9
+    // frame is filled exactly with no internal scrollbar. Below 700px, let
     // the SPA reflow at natural size inside the taller mobile frame.
     function fitEmbed() {
       if (!embed) return;
       const frameW = frame.clientWidth;
       if (frameW >= 700) {
-        embed.style.width = "1920px";
-        embed.style.height = "1080px";
-        embed.style.transform = `scale(${(frameW / 1920) * 1.25})`;
+        embed.style.width = "1536px";
+        embed.style.height = "864px";
+        embed.style.transform = `scale(${frameW / 1536})`;
       } else {
         embed.style.width = "100%";
         embed.style.height = "100%";
