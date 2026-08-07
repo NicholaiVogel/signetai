@@ -1642,6 +1642,25 @@ function buildLifecycleRecord(state: DaemonLifecycle["state"], extra: Partial<Da
 	};
 }
 
+function flushAndExit(exitCode: number): void {
+	// The logger buffers file writes and flushes on a 1s timer; without an
+	// explicit flush the final log lines can be lost on exit.
+	logger.shutdown();
+	process.exit(exitCode);
+}
+
+function buildTerminalLifecycleRecord(reason: string, exitCode: number, error?: unknown): DaemonLifecycle {
+	return buildLifecycleRecord(error === undefined ? "clean" : "error", {
+		exitedAt: new Date().toISOString(),
+		exitCode,
+		reason,
+		...(error !== undefined ? { error: error instanceof Error ? error.message : String(error) } : {}),
+	});
+}
+
+/** Bounds the draining cleanup so a wedged shutdown can never zombie the daemon. */
+const SHUTDOWN_CLEANUP_DEADLINE_MS = 20_000;
+
 /**
  * Single exit path for every catchable termination (signals and fatal
  * errors). Logs the exit path, records it in the lifecycle file, flushes the
@@ -1649,31 +1668,44 @@ function buildLifecycleRecord(state: DaemonLifecycle["state"], extra: Partial<Da
  * SIGKILL cannot be caught — a kill leaves the lifecycle record stuck at
  * "starting"/"running", which `signet status`/`doctor` report as an
  * unrecorded death instead of silence (issue #1148).
+ *
+ * The terminal lifecycle record is written only after cleanup completes (or
+ * the hard deadline forces the exit): writing it earlier would leave a
+ * "clean" record on a process still alive while cleanup hangs.
+ *
+ * `runCleanup` is disabled only for the update handoff: the replacement
+ * daemon is already spawned and needs the port immediately, so the exit is
+ * recorded and flushed but skips the draining cleanup.
  */
-function requestShutdown(reason: string, exitCode: number, error?: unknown): void {
+function requestShutdown(reason: string, exitCode: number, error?: unknown, runCleanup = true): void {
 	if (shuttingDown) {
-		// A second signal while draining must not wedge the process; exit
-		// immediately so the operator is never stuck with a zombie.
-		process.exit(exitCode);
+		// A second signal while draining must not wedge the process; flush and
+		// exit immediately so the operator is never stuck with a zombie — and
+		// the final log lines still land.
+		flushAndExit(exitCode);
 	}
 	setShuttingDown(true);
 	logger.info("daemon", `Received ${reason}; shutting down`, { exitCode });
-	writeDaemonLifecycle(
-		AGENTS_DIR,
-		buildLifecycleRecord(error === undefined ? "clean" : "error", {
-			exitedAt: new Date().toISOString(),
-			exitCode,
+	if (!runCleanup) {
+		writeDaemonLifecycle(AGENTS_DIR, buildTerminalLifecycleRecord(reason, exitCode, error));
+		flushAndExit(exitCode);
+		return;
+	}
+	const cleanupDeadline = setTimeout(() => {
+		logger.warn("daemon", "Shutdown cleanup timed out; forcing exit", {
 			reason,
-			...(error !== undefined ? { error: error instanceof Error ? error.message : String(error) } : {}),
-		}),
-	);
+			exitCode,
+			deadlineMs: SHUTDOWN_CLEANUP_DEADLINE_MS,
+		});
+		writeDaemonLifecycle(AGENTS_DIR, buildTerminalLifecycleRecord(reason, exitCode, error));
+		flushAndExit(exitCode);
+	}, SHUTDOWN_CLEANUP_DEADLINE_MS);
 	cleanup()
 		.catch(() => {})
 		.finally(() => {
-			// The logger buffers file writes and flushes on a 1s timer; without
-			// an explicit flush the final log lines can be lost on exit.
-			logger.shutdown();
-			process.exit(exitCode);
+			clearTimeout(cleanupDeadline);
+			writeDaemonLifecycle(AGENTS_DIR, buildTerminalLifecycleRecord(reason, exitCode, error));
+			flushAndExit(exitCode);
 		});
 }
 
@@ -1948,7 +1980,7 @@ async function main() {
 		if (!daemonScript) {
 			logger.warn("daemon", "Cannot self-restart: process.argv[1] is empty, falling back to clean exit");
 			setTimeout(() => {
-				process.exit(0);
+				requestShutdown("update:no-self-restart", 0, undefined, false);
 			}, 500);
 			return;
 		}
@@ -1975,7 +2007,7 @@ async function main() {
 
 		logger.info("daemon", "Replacement daemon spawned, exiting current process");
 		setTimeout(() => {
-			process.exit(0);
+			requestShutdown("update:replacement-spawned", 0, undefined, false);
 		}, 500);
 	});
 	initFeatureFlags(AGENTS_DIR);
@@ -2177,6 +2209,6 @@ function isMainEntrypoint(): boolean {
 if (isMainEntrypoint()) {
 	main().catch((err) => {
 		logger.error("daemon", "Fatal error", err);
-		process.exit(1);
+		requestShutdown("error:startup", 1, err);
 	});
 }

@@ -676,6 +676,12 @@ function addDaemonLifecycleExitFindings(probe: NonNullable<DaemonStatus["probe"]
 		return;
 	}
 
+	// The record says the daemon was starting/running but never wrote a
+	// terminal state. That only means death if the recorded process is
+	// actually gone: a daemon on a custom port or still binding at boot would
+	// otherwise be misreported as "killed or crashed" against a live process.
+	if (isProcessAlive(lastExit.pid)) return;
+
 	findings.push({
 		level: "warn",
 		code: "daemon_exit_unrecorded",
@@ -684,6 +690,15 @@ function addDaemonLifecycleExitFindings(probe: NonNullable<DaemonStatus["probe"]
 			? `Check the daemon log tail (~/.agents/.daemon/logs/signet-<date>.log) and the unit exit status: journalctl --user -u ${lastExit.systemdUnit}`
 			: "Check the daemon log tail (~/.agents/.daemon/logs/signet-<date>.log) for where it stopped, and dmesg/journalctl for OOM kills or signals.",
 	});
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 function addOpenClawRuntimeFindings(report: StatusReport, findings: DoctorFinding[]): void {

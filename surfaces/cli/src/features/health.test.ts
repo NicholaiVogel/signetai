@@ -1142,6 +1142,27 @@ describe("daemon lifecycle exit findings (#1148)", () => {
 		}
 	});
 
+	it("does not report an unrecorded death while the recorded pid is alive (custom port / still booting)", async () => {
+		const root = mkdtempSync(join(tmpdir(), "doctor-lifecycle-"));
+		try {
+			// The daemon on a custom SIGNET_PORT is invisible to the fixed-port
+			// probe, but the lifecycle record's pid is live — the finding must
+			// not claim "killed or crashed" against a running process.
+			const jsonOut = await captureDoctorJson(
+				lifecycleDeps(root, {
+					state: "running",
+					pid: process.pid,
+					version: "0.165.0",
+					startedAt: "2026-08-07T00:00:00.000Z",
+				}).getDaemonStatus,
+			);
+			const finding = jsonOut.findings.find((f) => f.code === "daemon_exit_unrecorded");
+			expect(finding).toBeUndefined();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("doctor reports a clean last exit as info, not an error", async () => {
 		const root = mkdtempSync(join(tmpdir(), "doctor-lifecycle-"));
 		try {

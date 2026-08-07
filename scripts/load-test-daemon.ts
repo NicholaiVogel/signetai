@@ -34,6 +34,9 @@ interface Route {
 
 const SESSION_KEY_PREFIX = `loadtest-${process.pid}-`;
 let sessionCounter = 0;
+// session-end must reference a session that session-start actually created,
+// otherwise every end is a 400 and the real path never runs.
+const startedSessionKeys: string[] = [];
 
 function nextSessionKey(): string {
 	sessionCounter += 1;
@@ -48,18 +51,21 @@ const READ_ROUTES: readonly Route[] = [
 		method: "POST",
 		path: "/api/hooks/session-start",
 		weight: 3,
-		body: () => ({
-			harness: "loadtest",
-			sessionKey: nextSessionKey(),
-			agentId: "default",
-			project: "/tmp/signet-loadtest",
-		}),
+		body: () => {
+			const sessionKey = nextSessionKey();
+			startedSessionKeys.push(sessionKey);
+			return { harness: "loadtest", sessionKey, agentId: "default", project: "/tmp/signet-loadtest" };
+		},
 	},
 	{
 		method: "POST",
 		path: "/api/hooks/session-end",
 		weight: 1,
-		body: () => ({ harness: "loadtest", sessionKey: nextSessionKey(), agentId: "default" }),
+		body: () => ({
+			harness: "loadtest",
+			sessionKey: startedSessionKeys.shift() ?? nextSessionKey(),
+			agentId: "default",
+		}),
 	},
 	{
 		method: "POST",

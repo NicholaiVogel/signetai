@@ -1085,9 +1085,10 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemo
 	}
 
 	const startupLogPath = join(logDir, "startup.log");
-	// Transient unit name is derived from the starting CLI's pid; it is passed
-	// to the daemon via SIGNET_DAEMON_UNIT so the lifecycle record can point
-	// post-mortems at the unit's journald exit status (issue #1148).
+	// Transient unit name derived from the starting CLI's pid; used for the
+	// systemd-run unit and, via --setenv SIGNET_DAEMON_UNIT, recorded in the
+	// daemon lifecycle record so post-mortems can query the unit's journald
+	// exit status (issue #1148).
 	const systemdUnitName = `signet-daemon-${process.pid}`;
 	let stderrFd: number | null = null;
 	let stderrTarget: "ignore" | number = "ignore";
@@ -1105,7 +1106,11 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemo
 		SIGNET_BIND: net.bind,
 		SIGNET_PATH: agentsDir,
 		SIGNET_DAEMON_ENTRYPOINT: "1",
-		SIGNET_DAEMON_UNIT: systemdUnitName,
+		// SIGNET_DAEMON_UNIT is deliberately NOT set here: it is only meaningful
+		// when systemd-run actually creates the transient unit (the --setenv in
+		// buildSystemdDaemonStartArgs). On the launchd/detached-spawn fallback
+		// paths the daemon must not record a unit name that does not exist, or
+		// the doctor journalctl pointer would be fabricated.
 	};
 
 	// `detached: true` only creates a new process group; it does not escape the
