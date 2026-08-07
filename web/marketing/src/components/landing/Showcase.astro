@@ -66,18 +66,6 @@ const slides = [
           />
         </noscript>
 
-        <span class="showcase-hotspot showcase-hotspot--1" aria-hidden="true">
-          <span class="showcase-hotspot-dot"></span>
-          <span class="showcase-hotspot-chip">Live Node Inspector</span>
-        </span>
-        <span class="showcase-hotspot showcase-hotspot--2" aria-hidden="true">
-          <span class="showcase-hotspot-dot"></span>
-          <span class="showcase-hotspot-chip">Real-time Graph Traversal</span>
-        </span>
-        <span class="showcase-hotspot showcase-hotspot--3" aria-hidden="true">
-          <span class="showcase-hotspot-dot"></span>
-          <span class="showcase-hotspot-chip">Memory Stream</span>
-        </span>
       </div>
     </div>
   </div>
@@ -187,86 +175,26 @@ const slides = [
     aspect-ratio: 16 / 9;
   }
 
-  /* The embedded dashboard fills the frame; the SPA scales to the viewport. */
+  /* The embedded dashboard renders at its designed 1920x1080 and is scaled
+     down to the frame width (the script sets the transform), so the UI fits
+     the 16:9 frame exactly - like a screenshot, but live. Below 700px the
+     frame gets taller and the SPA reflows naturally instead. */
   .showcase-embed {
     position: absolute;
-    inset: 0;
+    top: 0;
+    left: 0;
     width: 100%;
     height: 100%;
     border: 0;
     display: block;
     background: #0b0b0f;
+    transform-origin: top left;
   }
 
   .showcase-embed-fallback {
     display: block;
     width: 100%;
     height: auto;
-  }
-
-  /* Hotspot annotations: pulse dot + anchored chip, inside the frame */
-  .showcase-hotspot {
-    position: absolute;
-    z-index: 3;
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    pointer-events: none;
-  }
-
-  .showcase-hotspot-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: #4ade80;
-    box-shadow: 0 0 10px rgba(74, 222, 128, 0.9);
-    animation: hotspot-ping 2.4s ease-out infinite;
-    flex-shrink: 0;
-  }
-
-  @keyframes hotspot-ping {
-    0% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.5); }
-    70% { box-shadow: 0 0 0 10px rgba(74, 222, 128, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0); }
-  }
-
-  .showcase-hotspot-chip {
-    font-family: var(--font-mono);
-    font-size: 0.6875rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #f1f5f9;
-    background: rgba(10, 10, 14, 0.85);
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 8px;
-    padding: 6px 10px;
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    white-space: nowrap;
-  }
-
-  /* Positions keep clear of the window chrome and frame edges */
-  .showcase-hotspot--1 {
-    left: 14%;
-    top: 62%;
-  }
-
-  .showcase-hotspot--2 {
-    right: 14%;
-    top: 30%;
-    flex-direction: row-reverse;
-  }
-
-  .showcase-hotspot--3 {
-    left: 50%;
-    bottom: 18px;
-    transform: translateX(-50%);
-    flex-direction: column-reverse;
-    gap: 6px;
-  }
-
-  .showcase-hotspot--3 .showcase-hotspot-dot {
-    animation-delay: 0.8s;
   }
 
   @media (max-width: 700px) {
@@ -277,12 +205,6 @@ const slides = [
       border-radius: 10px;
       /* Taller viewport so the embedded SPA stays readable on small screens */
       aspect-ratio: 3 / 4;
-    }
-    .showcase-hotspot-chip {
-      display: none;
-    }
-    .showcase-hotspot--3 {
-      bottom: 10px;
     }
   }
 </style>
@@ -325,6 +247,25 @@ const slides = [
         resetTimer();
       });
     });
+
+    // Scale the embedded dashboard (rendered at 1920x1080) to the frame width
+    // so it fits the 16:9 frame without an internal scrollbar. Below 700px,
+    // let the SPA reflow at natural size inside the taller mobile frame.
+    function fitEmbed() {
+      if (!embed) return;
+      const frameW = frame.clientWidth;
+      if (frameW >= 700) {
+        embed.style.width = "1920px";
+        embed.style.height = "1080px";
+        embed.style.transform = `scale(${frameW / 1920})`;
+      } else {
+        embed.style.width = "100%";
+        embed.style.height = "100%";
+        embed.style.transform = "none";
+      }
+    }
+    window.addEventListener("resize", fitEmbed);
+    fitEmbed();
 
     resetTimer();
   }

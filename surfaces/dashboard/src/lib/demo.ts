@@ -35,6 +35,23 @@ import type {
 	TodayReflectionResponse,
 } from "./api";
 
+// Demo builds render inside the dark-only marketing site. The dashboard's
+// ThemeProvider defaults to `system`, which would flip the embedded demo to
+// light on light-preference visitors; pin dark before React mounts
+// (next-themes reads localStorage.theme at init). Runs at module-eval time,
+// before createRoot().render(), and only in VITE_DEMO=1 builds — this module
+// is tree-shaken from every non-demo build.
+if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
+	localStorage.setItem("theme", "dark");
+	document.documentElement.classList.add("dark");
+	// The embed is a fixed 1920x1080 stage scaled to the marketing frame; the
+	// app is designed to fit 1080p, but hide any residual document scrollbar
+	// so the frame never shows one. Internal view scroll areas are unaffected.
+	const demoStyle = document.createElement("style");
+	demoStyle.textContent = "html, body { scrollbar-width: none; } html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }";
+	document.head.appendChild(demoStyle);
+}
+
 // ── Seeded RNG (deterministic builds; mulberry32) ──────────────────────────
 
 function mulberry32(seed: number): () => number {
