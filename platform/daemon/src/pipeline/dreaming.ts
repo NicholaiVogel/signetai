@@ -697,7 +697,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
    - The evidence source and the graph target must use the same agent scope: search evidence with the agentId of the entity you will update, then pass that same agentId to apply_ontology_ops. A source found in another scope cannot support a write here.
    - create_entity only for durable subjects clearly established by the source.
    - Validate before writing (validate_proposal).
-5. Write the pass log (runbook_write): what changed, which sources were viewed, anything deferred with exact names.
+5. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write natural-language prose — what was examined (attention state, sources), what changed (mutations by type and count, entities touched), why (the dominant reason driving the work), and what was deferred or left flagged and why. No bullet lists, no tool names; a few clear sentences. Put deferred items and open questions in the runbook's deferred and openQuestions fields, not only in the summary.
 
 ### Safe
 
@@ -754,7 +754,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
    - Inspect the flagged target (get_entity — check aspects, claims, pinned).
    - Archive or merge it, citing its attention id (provenance: "attention:<uuid>", or attention:$<index> for a flag you minted in the same batch).
    - If you discover junk the queue did not flag, mint a flag op and archive in the same batch.
-3. Write the pass log (runbook_write): what changed, any flags left for a later pass, anything deferred with exact names.
+3. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write natural-language prose — what was examined, what changed (mutations by type and count, entities touched), why (the dominant reason driving the work), and what was deferred or left flagged and why. No bullet lists, no tool names; a few clear sentences. Put deferred items and open questions in the runbook's deferred and openQuestions fields, not only in the summary.
 
 ### Safe
 
@@ -809,7 +809,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
    - The evidence source and the graph target must use the same agent scope: search evidence with the agentId of the entity you will update, then pass that same agentId to apply_ontology_ops. A source found in another scope cannot support a write here.
    - create_entity only for durable subjects clearly established by the source.
    - Validate before writing (validate_proposal).
-4. Write the pass log (runbook_write): what changed, which sources were viewed, anything deferred with exact names.
+4. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write natural-language prose — what was examined (sources viewed), what changed (claims filed or superseded, entities touched), why (what the evidence established), and what was deferred and why. No bullet lists, no tool names; a few clear sentences. Put deferred items and open questions in the runbook's deferred and openQuestions fields, not only in the summary.
 
 ### Safe
 
