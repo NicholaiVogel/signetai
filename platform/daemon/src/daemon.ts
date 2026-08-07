@@ -136,7 +136,12 @@ import {
 } from "./source-index-progress";
 import { runStartupRecovery } from "./startup-recovery";
 import { reportStartupGrace } from "./system-pressure";
-import { type TelemetryCollector, createTelemetryCollector, defaultTelemetryLogPath, setActiveTelemetry } from "./telemetry";
+import {
+	type TelemetryCollector,
+	createTelemetryCollector,
+	defaultTelemetryLogPath,
+	setActiveTelemetry,
+} from "./telemetry";
 import { type TranscriptCaptureWorkerHandle, startTranscriptCaptureWorker } from "./transcript-capture-worker";
 
 import {

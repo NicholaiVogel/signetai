@@ -24,9 +24,9 @@ afterEach(() => {
 });
 
 describe("cli telemetry (issue #1026 Phase 2)", () => {
-	it("is disabled when agent.yaml has no telemetryEnabled", () => {
+	it("is enabled by default when agent.yaml has no telemetryEnabled", () => {
 		writeAgentYaml();
-		expect(cliTelemetryEnabled(dir)).toBe(false);
+		expect(cliTelemetryEnabled(dir)).toBe(true);
 	});
 
 	it("is disabled when telemetryEnabled is false", () => {

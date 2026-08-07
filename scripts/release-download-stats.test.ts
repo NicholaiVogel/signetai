@@ -22,7 +22,7 @@ describe("release-download-stats (issue #1026 Phase 3)", () => {
 		const calls: string[] = [];
 		const fakeFetch = async (url: string, init?: { headers?: Record<string, string> }): Promise<Response> => {
 			calls.push(url);
-			expect(init?.headers?.["Accept"]).toBe("application/vnd.github+json");
+			expect(init?.headers?.Accept).toBe("application/vnd.github+json");
 			return new Response(JSON.stringify(SAMPLE_RELEASES), { status: 200 });
 		};
 

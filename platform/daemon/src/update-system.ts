@@ -21,6 +21,7 @@ import {
 	syncWorkspaceSourceRepoAsync,
 } from "@signet/core";
 import { logger } from "./logger";
+import { getActiveTelemetry } from "./telemetry";
 import {
 	UPDATE_INSTALL_TIMEOUT_MS,
 	type UpdateInstallDeps,
@@ -1011,7 +1012,9 @@ async function runAutoUpdateCycle(): Promise<void> {
 		}
 
 		logger.info("update", `Auto-installing update v${checkResult.latestVersion}`);
-		const installResult = await runUpdate(checkResult.latestVersion);
+		const installResult = await runUpdate(checkResult.latestVersion, {
+			onUpgraded: (from, to) => getActiveTelemetry()?.record("version.upgraded", { from, to }),
+		});
 
 		if (installResult.success) {
 			lastAutoUpdateAt = new Date();

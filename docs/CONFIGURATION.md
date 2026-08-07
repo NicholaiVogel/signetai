@@ -1123,10 +1123,10 @@ content, user identity, or file paths. Each install gets a random
 anonymous id (persisted in the workspace database) used as the PostHog
 `distinct_id`, so installs stay countable without being identifiable.
 
-**Opt-in (issue #1026):** `signet setup` asks whether to share anonymous
-usage statistics (version, platform, command names) and writes
-`telemetryEnabled: true` when accepted. Non-interactive/CI setups stay
-opted-out. Telemetry is never enabled implicitly.
+**Disclosure (issue #1026):** `signet setup` tells users telemetry is on
+by default and asks whether to disable it. Declining writes
+`telemetryEnabled: false`; non-interactive/CI setups keep the default
+(enabled).
 
 **Open telemetry log:** every recorded event is appended as one JSON line
 to `<agentsDir>/.daemon/telemetry/events.jsonl` — the single inspectable
@@ -1134,7 +1134,7 @@ audit surface for exactly what was sent (daemon events and CLI
 `command.invoked` lines). No memory content, code, file paths, or personal
 data are ever included.
 
-Lifecycle events fired when opted in: `daemon.started` (version, platform,
+Lifecycle events: `daemon.started` (version, platform,
 uptime), `command.invoked` (command name only, never arguments),
 `error.occurred` (error type only, never stack/message), `version.upgraded`
 (from, to).

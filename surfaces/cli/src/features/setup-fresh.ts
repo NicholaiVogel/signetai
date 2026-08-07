@@ -219,25 +219,25 @@ export async function runFreshSetup(plan: SetupPlan, context: SetupApplyContext,
 			config.daemon = { url: plan.daemonUrl };
 		}
 
-		// Anonymous telemetry opt-in (issue #1026 Phase 2). Interactive setups
-		// get a clear yes/no; non-interactive (CI/scripted) setups stay
-		// opted-out by default. Telemetry is off unless explicitly enabled.
-		let telemetryOptIn = false;
+		// Anonymous telemetry disclosure (issue #1026 Phase 2). Telemetry is ON
+		// by default; interactive setups get a chance to disable it, and
+		// non-interactive (CI/scripted) setups keep the default. Every recorded
+		// event is mirrored to ~/.agents/.daemon/telemetry/events.jsonl so
+		// users can audit exactly what is sent.
+		let telemetryEnabled = true;
 		if (!context.nonInteractive) {
-			telemetryOptIn = await import("@inquirer/prompts").then(({ confirm }) =>
+			telemetryEnabled = await import("@inquirer/prompts").then(({ confirm }) =>
 				confirm({
 					message:
-						"Share anonymous usage statistics (version, platform, command names) to help improve Signet? No memory content, code, or personal data. See ~/.agents/.daemon/telemetry/events.jsonl for exactly what is sent.",
-					default: false,
+						"Help improve Signet by sharing anonymous usage statistics (version, platform, command names)? No memory content, code, or personal data. Every event is logged to ~/.agents/.daemon/telemetry/events.jsonl; disable anytime with telemetryEnabled: false.",
+					default: true,
 				}),
 			);
 		}
-		if (telemetryOptIn) {
-			config.pipelineV2 = {
-				...(config.pipelineV2 as Record<string, unknown> | undefined),
-				telemetryEnabled: true,
-			};
-		}
+		config.pipelineV2 = {
+			...(config.pipelineV2 as Record<string, unknown> | undefined),
+			telemetryEnabled,
+		};
 
 		writeFileSync(join(context.basePath, "agent.yaml"), formatYaml(config));
 

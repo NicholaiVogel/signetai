@@ -104,12 +104,15 @@ describe("install copy", () => {
 	test("keeps the postinstall telemetry ping anonymous and opt-out", () => {
 		const installer = read("dist/signetai/scripts/install-native.js");
 
-		// Phase-1 install counter (issue #1026): a single anonymous ping with
-		// version+platform only. No identifier, no payload beyond the query
-		// params, and never a hard failure path.
-		expect(installer).toContain("telemetry.signetai.sh/ping");
-		expect(installer).toContain('searchParams.set("v", nativePackageVersion())');
-		expect(installer).toContain('searchParams.set("p", platform)');
+		// Phase-1 install counter (issue #1026): a single anonymous PostHog
+		// event with version+platform only. No identifier, no payload beyond
+		// the event properties, and never a hard failure path. The project
+		// API key is a public ingest key by PostHog design.
+		expect(installer).toContain("us.i.posthog.com");
+		expect(installer).toContain("/batch/");
+		expect(installer).toContain('event: "install.ping"');
+		expect(installer).toContain("randomUUID");
+		expect(installer).toContain("phc_");
 
 		// Homebrew-style opt-out: one env var disables the ping entirely.
 		expect(installer).toContain("SIGNET_TELEMETRY_OPTOUT");

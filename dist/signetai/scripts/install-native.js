@@ -24,12 +24,15 @@ const require = createRequire(import.meta.url);
 
 const CONNECTOR_COMPONENT = "connectors";
 
-// Phase-1 telemetry (issue #1026): a single anonymous counter ping per real
-// install. No identifier, no IP logging, no payload beyond version+platform.
+// Phase-1 telemetry (issue #1026): a single anonymous install counter sent to
+// the Signet PostHog project. Payload is version+platform only — no
+// identifier, no IP logging. Each install generates a fresh anonymous id, so
+// every ping counts as one distinct install without persisting anything.
 // Opt-out via SIGNET_TELEMETRY_OPTOUT=1 (Homebrew-style). Never blocks the
 // install and never fails it: the request is time-bounded and errors are
 // swallowed, so a telemetry outage cannot break postinstall.
-const TELEMETRY_ENDPOINT = "https://telemetry.signetai.sh/ping";
+const TELEMETRY_HOST = "https://us.i.posthog.com";
+const TELEMETRY_API_KEY = "phc_mLsvJmbmp6e9UarrX9Cq5QtTjVNiiphM9mvi5Xnddd8Q"; // public ingest key
 const TELEMETRY_TIMEOUT_MS = 2000;
 const pendingPings = [];
 
@@ -45,10 +48,27 @@ function telemetryEnabled() {
 
 function fireInstallPing(platform) {
 	if (!telemetryEnabled()) return;
-	const url = new URL(TELEMETRY_ENDPOINT);
-	url.searchParams.set("v", nativePackageVersion());
-	url.searchParams.set("p", platform);
-	const promise = fetch(url, { signal: AbortSignal.timeout(TELEMETRY_TIMEOUT_MS) }).catch(() => {});
+	const body = JSON.stringify({
+		api_key: TELEMETRY_API_KEY,
+		batch: [
+			{
+				event: "install.ping",
+				distinct_id: require("node:crypto").randomUUID(),
+				timestamp: new Date().toISOString(),
+				properties: {
+					version: nativePackageVersion(),
+					platform,
+					$lib: "signet-install",
+				},
+			},
+		],
+	});
+	const promise = fetch(`${TELEMETRY_HOST}/batch/`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body,
+		signal: AbortSignal.timeout(TELEMETRY_TIMEOUT_MS),
+	}).catch(() => {});
 	pendingPings.push(promise);
 }
 

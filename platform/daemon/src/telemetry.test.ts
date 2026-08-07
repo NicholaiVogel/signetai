@@ -13,7 +13,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { closeDbAccessor, getDbAccessor, initDbAccessor, type DbAccessor } from "./db-accessor";
+import { type DbAccessor, closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import {
 	TELEMETRY_EVENTS,
 	type TelemetryCollector,
@@ -60,6 +60,7 @@ function installFetchMock(): void {
 function resetWorkspace(): void {
 	closeDbAccessor();
 	rmSync(join(dir, "memory"), { recursive: true, force: true });
+	rmSync(join(dir, ".daemon"), { recursive: true, force: true });
 	mkdirSync(join(dir, "memory"), { recursive: true });
 	initDbAccessor(join(dir, "memory", "memories.db"));
 }
@@ -90,9 +91,9 @@ function lastBatchDistinctId(): string {
 
 function unsentCount(): number {
 	return getDbAccessor().withReadDb((db) => {
-		const row = db
-			.prepare("SELECT COUNT(*) AS count FROM telemetry_events WHERE sent_to_posthog = 0")
-			.get() as { readonly count: number };
+		const row = db.prepare("SELECT COUNT(*) AS count FROM telemetry_events WHERE sent_to_posthog = 0").get() as {
+			readonly count: number;
+		};
 		return row.count;
 	});
 }
@@ -104,25 +105,27 @@ function installRowCount(): number {
 	});
 }
 
+// Shared harness for both suites below: fresh workspace per test, including
+// a clean .daemon dir so the JSONL log cannot leak between tests.
+beforeAll(() => {
+	dir = createTestTempDir("signet-telemetry-");
+	installFetchMock();
+	resetWorkspace();
+});
+
+beforeEach(() => {
+	captured = [];
+	logPath = defaultTelemetryLogPath(dir);
+	resetWorkspace();
+});
+
+afterAll(() => {
+	globalThis.fetch = originalFetch;
+	closeDbAccessor();
+	cleanupTestTempDir(dir);
+});
+
 describe("telemetry collector", () => {
-	beforeAll(() => {
-		dir = createTestTempDir("signet-telemetry-");
-		installFetchMock();
-		resetWorkspace();
-	});
-
-	beforeEach(() => {
-		captured = [];
-		logPath = defaultTelemetryLogPath(dir);
-		resetWorkspace();
-	});
-
-	afterAll(() => {
-		globalThis.fetch = originalFetch;
-		closeDbAccessor();
-		cleanupTestTempDir(dir);
-	});
-
 	it("uses a different anonymous id for different workspaces", async () => {
 		const collectorA = makeCollector();
 		collectorA.record("daemon.heartbeat", { uptimeMs: 1 });
@@ -204,8 +207,8 @@ describe("telemetry collector", () => {
 			await collector.flush();
 		}
 
-		const rows = getDbAccessor().withReadDb((db) =>
-			db.prepare("SELECT id FROM telemetry_events").all() as Array<{ readonly id: string }>,
+		const rows = getDbAccessor().withReadDb(
+			(db) => db.prepare("SELECT id FROM telemetry_events").all() as Array<{ readonly id: string }>,
 		);
 		expect(rows.map((r) => r.id)).not.toContain("old-1");
 		expect(rows.length).toBe(1);

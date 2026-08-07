@@ -25,14 +25,18 @@ export function cliTelemetryLogPath(agentsDir: string): string {
 	return join(agentsDir, ".daemon", "telemetry", "events.jsonl");
 }
 
-/** True when the user has opted into anonymous telemetry in agent.yaml. */
+/**
+ * True when anonymous telemetry is active for this workspace. Telemetry is on
+ * by default, so the flag is only false when agent.yaml explicitly sets
+ * `telemetryEnabled: false`.
+ */
 export function cliTelemetryEnabled(agentsDir: string): boolean {
 	try {
 		const yamlPath = join(agentsDir, "agent.yaml");
 		if (!existsSync(yamlPath)) return false;
 		const config = parseSimpleYaml(readFileSync(yamlPath, "utf-8"));
 		const pipeline = config?.pipelineV2 as Record<string, unknown> | undefined;
-		return pipeline?.telemetryEnabled === true;
+		return pipeline?.telemetryEnabled !== false;
 	} catch {
 		return false;
 	}

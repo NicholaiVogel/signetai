@@ -405,7 +405,7 @@ describe("setupWizard non-interactive harness hooks", () => {
 		expect(existsSync(join(basePath, "SOUL.md"))).toBe(false);
 	});
 
-	it("keeps telemetry opted out in non-interactive setup (issue #1026 Phase 2)", async () => {
+	it("keeps telemetry enabled in non-interactive setup (issue #1026 Phase 2)", async () => {
 		root = mkdtempSync(join(tmpdir(), "setup-ni-telemetry-"));
 		const basePath = join(root, "agents");
 		const templatesPath = join(root, "templates");
@@ -426,7 +426,8 @@ describe("setupWizard non-interactive harness hooks", () => {
 		await setupWizard({ nonInteractive: true, skipGit: true }, deps);
 
 		const agentYaml = readFileSync(join(basePath, "agent.yaml"), "utf-8");
-		expect(agentYaml).not.toContain("telemetryEnabled: true");
+		// Telemetry is on by default; non-interactive setups keep the default.
+		expect(agentYaml).toContain("telemetryEnabled: true");
 	});
 
 	it("writes custom identity preset with concrete files for every referenced path", async () => {
