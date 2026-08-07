@@ -20,6 +20,7 @@ import {
 	createTelemetryCollector,
 	defaultTelemetryLogPath,
 	nextFlushIntervalMs,
+	telemetryDisabledByEnv,
 } from "./telemetry";
 import { cleanupTestTempDir, createTestTempDir } from "./test-temp-dir";
 
@@ -183,6 +184,15 @@ describe("telemetry collector", () => {
 		await collector.flush();
 		await collector.flush();
 		expect(captured).toHaveLength(1);
+	});
+
+	it("honors SIGNET_TELEMETRY_OPTOUT as a runtime opt-out", () => {
+		// Regression: CI and test daemons boot with default config and the
+		// shipped key, so every smoke run became a fake PostHog install.
+		expect(telemetryDisabledByEnv({})).toBe(false);
+		expect(telemetryDisabledByEnv({ SIGNET_TELEMETRY_OPTOUT: "1" })).toBe(true);
+		expect(telemetryDisabledByEnv({ SIGNET_TELEMETRY_OPTOUT: "true" })).toBe(true);
+		expect(telemetryDisabledByEnv({ SIGNET_TELEMETRY_OPTOUT: "0" })).toBe(false);
 	});
 
 	it("backs off after three consecutive PostHog failures", () => {

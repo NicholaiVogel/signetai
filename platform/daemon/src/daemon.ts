@@ -141,6 +141,7 @@ import {
 	createTelemetryCollector,
 	defaultTelemetryLogPath,
 	setActiveTelemetry,
+	telemetryDisabledByEnv,
 } from "./telemetry";
 import { type TranscriptCaptureWorkerHandle, startTranscriptCaptureWorker } from "./transcript-capture-worker";
 
@@ -1914,7 +1915,7 @@ async function main() {
 
 	const memoryCfg = loadMemoryConfig(AGENTS_DIR);
 	let telemetryCollector: TelemetryCollector | undefined;
-	if (memoryCfg.pipelineV2.telemetryEnabled) {
+	if (memoryCfg.pipelineV2.telemetryEnabled && !telemetryDisabledByEnv()) {
 		let posthogApiKey = memoryCfg.pipelineV2.telemetry.posthogApiKey;
 		if (!posthogApiKey) {
 			try {

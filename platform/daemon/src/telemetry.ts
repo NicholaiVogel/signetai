@@ -109,6 +109,15 @@ export function getActiveTelemetry(): TelemetryCollector | undefined {
 }
 
 /**
+ * True when the process environment disables telemetry. The same
+ * SIGNET_TELEMETRY_OPTOUT knob the install ping honors (issue #1026) so one
+ * switch opts a whole machine or CI runner out — without touching config.
+ */
+export function telemetryDisabledByEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+	return env.SIGNET_TELEMETRY_OPTOUT === "1" || env.SIGNET_TELEMETRY_OPTOUT === "true";
+}
+
+/**
  * Resolve the anonymous per-install identifier, creating and persisting it on
  * first use. Falls back to an in-memory id if the database is unusable.
  * A truthy guard is required here: bun:sqlite returns null for a missing row
