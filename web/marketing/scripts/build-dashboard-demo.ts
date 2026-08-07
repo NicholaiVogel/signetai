@@ -25,14 +25,11 @@ if (process.env.SKIP_DASHBOARD_DEMO === "1") {
 }
 
 console.log("[demo] building dashboard (VITE_DEMO=1, base=/dashboard/) …");
-const build = Bun.spawnSync(
-	["bun", "run", "build", "--", "--base=/dashboard/", `--outDir=${demoOut}`],
-	{
-		cwd: dashboardDir,
-		env: { ...process.env, VITE_DEMO: "1" },
-		stdio: ["ignore", "inherit", "inherit"],
-	},
-);
+const build = Bun.spawnSync(["bun", "run", "build", "--", "--base=/dashboard/", `--outDir=${demoOut}`], {
+	cwd: dashboardDir,
+	env: { ...process.env, VITE_DEMO: "1" },
+	stdio: ["ignore", "inherit", "inherit"],
+});
 if (!build.success) {
 	console.error("[demo] dashboard demo build failed");
 	process.exit(build.exitCode ?? 1);

@@ -20,8 +20,8 @@
  */
 
 import type {
-	DailyReflection,
 	DaemonStatus,
+	DailyReflection,
 	DreamStatus,
 	EmbeddingHealthReport,
 	KnowledgeConstellation,
@@ -48,7 +48,8 @@ if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
 	// app is designed to fit 1080p, but hide any residual document scrollbar
 	// so the frame never shows one. Internal view scroll areas are unaffected.
 	const demoStyle = document.createElement("style");
-	demoStyle.textContent = "html, body { scrollbar-width: none; } html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }";
+	demoStyle.textContent =
+		"html, body { scrollbar-width: none; } html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }";
 	document.head.appendChild(demoStyle);
 }
 
@@ -199,14 +200,46 @@ const demoSources: SourcesResponse = {
 // ── Knowledge constellation (graph view) ───────────────────────────────────
 
 const ENTITY_NAMES = [
-	"Signet", "Local-first", "Provenance", "Agent Sessions", "Knowledge Graph",
-	"Memory Stream", "Source Artifacts", "Embedding Index", "Ontology", "Claim Values",
-	"Evidence Trail", "Recall", "Fusion Search", "Daily Brief", "Dreaming",
-	"Hygiene", "Content Passes", "Watermark", "Lineage", "Transcripts",
-	"Session Manifest", "Skill Library", "Connectors", "Harness Hooks", "Obsidian",
-	"GitHub", "Discord", "CLI", "HTTP API", "MCP",
-	"Vector Store", "SQLite", "Secrets Vault", "Config Files", "Agent Identity",
-	"Reflections", "Attention", "Entity Clusters", "Dependencies", "Semantic Index",
+	"Signet",
+	"Local-first",
+	"Provenance",
+	"Agent Sessions",
+	"Knowledge Graph",
+	"Memory Stream",
+	"Source Artifacts",
+	"Embedding Index",
+	"Ontology",
+	"Claim Values",
+	"Evidence Trail",
+	"Recall",
+	"Fusion Search",
+	"Daily Brief",
+	"Dreaming",
+	"Hygiene",
+	"Content Passes",
+	"Watermark",
+	"Lineage",
+	"Transcripts",
+	"Session Manifest",
+	"Skill Library",
+	"Connectors",
+	"Harness Hooks",
+	"Obsidian",
+	"GitHub",
+	"Discord",
+	"CLI",
+	"HTTP API",
+	"MCP",
+	"Vector Store",
+	"SQLite",
+	"Secrets Vault",
+	"Config Files",
+	"Agent Identity",
+	"Reflections",
+	"Attention",
+	"Entity Clusters",
+	"Dependencies",
+	"Semantic Index",
 ] as const;
 
 const ASPECT_NAMES = ["facts", "preferences", "workflow", "constraints", "rules", "learnings"] as const;
@@ -297,7 +330,8 @@ const demoReflectionsResponse: TodayReflectionResponse = {
 const demoMemories: Memory[] = [
 	{
 		id: "demo-memory-1",
-		content: "Source-backed claims keep provenance chains intact: derived memories may change, but their source evidence is never rewritten.",
+		content:
+			"Source-backed claims keep provenance chains intact: derived memories may change, but their source evidence is never rewritten.",
 		created_at: new Date(Date.now() - 3_600_000).toISOString(),
 		who: "hermes-agent",
 		importance: 0.85,
@@ -308,7 +342,8 @@ const demoMemories: Memory[] = [
 	},
 	{
 		id: "demo-memory-2",
-		content: "Recall fuses FTS, vector, and graph traversal, then dampens results by source freshness before returning.",
+		content:
+			"Recall fuses FTS, vector, and graph traversal, then dampens results by source freshness before returning.",
 		created_at: new Date(Date.now() - 7_200_000).toISOString(),
 		who: "hermes-agent",
 		importance: 0.7,
@@ -330,7 +365,8 @@ const demoMemories: Memory[] = [
 	},
 	{
 		id: "demo-memory-4",
-		content: "The dashboard scopes every query to the active agent id; cross-agent reads are rejected at the API layer.",
+		content:
+			"The dashboard scopes every query to the active agent id; cross-agent reads are rejected at the API layer.",
 		created_at: new Date(Date.now() - 2 * 86_400_000).toISOString(),
 		who: "hermes-agent",
 		importance: 0.9,
@@ -352,7 +388,8 @@ const demoMemories: Memory[] = [
 	},
 	{
 		id: "demo-memory-6",
-		content: "Embedding index health degrades when the staging drain falls behind; watch the queue depth before triggering a pass.",
+		content:
+			"Embedding index health degrades when the staging drain falls behind; watch the queue depth before triggering a pass.",
 		created_at: new Date(Date.now() - 4 * 86_400_000).toISOString(),
 		who: "dreaming",
 		importance: 0.8,
@@ -477,9 +514,30 @@ const demoDreamStatus: DreamStatus = {
 		},
 	],
 	attention: [
-		{ id: "demo-attn-1", kind: "stale_entity", subjectRef: "demo-entity-12", priority: 0.8, createdAt: new Date().toISOString(), details: null },
-		{ id: "demo-attn-2", kind: "orphan_claim", subjectRef: "demo-entity-27", priority: 0.6, createdAt: new Date().toISOString(), details: null },
-		{ id: "demo-attn-3", kind: "unresolved_evidence", subjectRef: "demo-entity-4", priority: 0.4, createdAt: new Date().toISOString(), details: null },
+		{
+			id: "demo-attn-1",
+			kind: "stale_entity",
+			subjectRef: "demo-entity-12",
+			priority: 0.8,
+			createdAt: new Date().toISOString(),
+			details: null,
+		},
+		{
+			id: "demo-attn-2",
+			kind: "orphan_claim",
+			subjectRef: "demo-entity-27",
+			priority: 0.6,
+			createdAt: new Date().toISOString(),
+			details: null,
+		},
+		{
+			id: "demo-attn-3",
+			kind: "unresolved_evidence",
+			subjectRef: "demo-entity-4",
+			priority: 0.4,
+			createdAt: new Date().toISOString(),
+			details: null,
+		},
 	],
 	exclusions: [],
 };
@@ -487,9 +545,24 @@ const demoDreamStatus: DreamStatus = {
 const demoLogs: { logs: LogEntry[]; count: number } = {
 	count: 3,
 	logs: [
-		{ timestamp: new Date(Date.now() - 60_000).toISOString(), level: "info", category: "daemon", message: "health check ok — 3 sources indexed, embeddings healthy" },
-		{ timestamp: new Date(Date.now() - 3_600_000).toISOString(), level: "info", category: "dreaming", message: "pass demo-pass-2 completed (37 mutations applied)" },
-		{ timestamp: new Date(Date.now() - 86_400_000).toISOString(), level: "info", category: "sources", message: "obsidian index refreshed — 12,980 chunks up to date" },
+		{
+			timestamp: new Date(Date.now() - 60_000).toISOString(),
+			level: "info",
+			category: "daemon",
+			message: "health check ok — 3 sources indexed, embeddings healthy",
+		},
+		{
+			timestamp: new Date(Date.now() - 3_600_000).toISOString(),
+			level: "info",
+			category: "dreaming",
+			message: "pass demo-pass-2 completed (37 mutations applied)",
+		},
+		{
+			timestamp: new Date(Date.now() - 86_400_000).toISOString(),
+			level: "info",
+			category: "sources",
+			message: "obsidian index refreshed — 12,980 chunks up to date",
+		},
 	],
 };
 
@@ -525,7 +598,9 @@ export function installDemoApi(target: ApiClient): void {
 				needle.length === 0 ||
 				m.content.toLowerCase().includes(needle) ||
 				m.type.toLowerCase().includes(needle) ||
-				String(m.tags ?? "").toLowerCase().includes(needle),
+				String(m.tags ?? "")
+					.toLowerCase()
+					.includes(needle),
 		);
 		return { memories: hits.slice(0, limit) };
 	};

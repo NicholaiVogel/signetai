@@ -1,14 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { type ReactNode, createContext, useCallback, useContext, useEffect, useState } from "react";
 
-export type ViewId =
-	| "home"
-	| "agents"
-	| "memory"
-	| "sources"
-	| "graph"
-	| "dreaming"
-	| "skills"
-	| "secrets";
+export type ViewId = "home" | "agents" | "memory" | "sources" | "graph" | "dreaming" | "skills" | "secrets";
 
 const VIEW_LABELS: Record<ViewId, string> = {
 	home: "Home",
