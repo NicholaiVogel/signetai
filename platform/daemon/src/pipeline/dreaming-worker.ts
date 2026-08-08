@@ -61,6 +61,8 @@ export interface DreamingWorkerHandle {
 export interface DreamingWorkerOptions {
 	/** Test seam; production always uses the configured inference router. */
 	readonly executorFactory?: (agentId: string) => DreamingAgentExecutor;
+	/** Test seam; production always uses the 5-minute check interval. */
+	readonly checkIntervalMs?: number;
 	/** Scoped connection details for ACPX's temporary MCP server. */
 	readonly acpxMcp?: {
 		readonly daemonUrl: string;
@@ -332,15 +334,45 @@ export function startDreamingWorker(
 		// directly otherwise.
 		const mode = selectDreamingCheckMode(accessor, scopes, nextScheduledFocus);
 		nextScheduledFocus = dreamingFocusOfMode(mode) ?? nextScheduledFocus;
-		await runPass(defaultAgentId, mode, undefined, scopes);
+		try {
+			await runPass(defaultAgentId, mode, undefined, scopes);
+		} catch (e) {
+			// runPass already recorded the failure (recordDreamingFailure)
+			// and failDreamingPass marked the pass row failed. A pass error
+			// (provider 429, timeout, any executor rejection) must never
+			// escape the check loop: as an unhandled rejection it hits the
+			// daemon's unhandledRejection exit path and kills the whole
+			// process (#1198). Log and keep the loop running; the per-scope
+			// failure backoff (keyed on the run agent's state) paces the
+			// retries.
+			logger.error(
+				"dreaming-worker",
+				"Scheduled dreaming pass failed; check loop continues",
+				e instanceof Error ? e : undefined,
+				{ mode, error: e instanceof Error ? e.message : String(e) },
+			);
+		}
 	}
 
 	function schedule(): void {
 		if (stopped) return;
 		timer = setTimeout(async () => {
-			await check();
+			// check() handles pass failures internally; this catch is the
+			// last line of defense so no check error (from any future
+			// path) becomes an unhandled rejection, and the sweep always
+			// re-arms instead of silently dying (#1198).
+			try {
+				await check();
+			} catch (e) {
+				logger.error(
+					"dreaming-worker",
+					"Dreaming check failed; scheduling next check",
+					e instanceof Error ? e : undefined,
+					{ error: e instanceof Error ? e.message : String(e) },
+				);
+			}
 			schedule();
-		}, CHECK_INTERVAL_MS);
+		}, options.checkIntervalMs ?? CHECK_INTERVAL_MS);
 	}
 
 	// Start the periodic check. Hygiene attention is enqueued during regular
