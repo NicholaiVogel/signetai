@@ -972,6 +972,82 @@ for vector in contract["vectors"]:
 		expect(generationIncrement).toBeLessThan(queuePrefetchFn.indexOf("def _run"));
 	});
 
+	it("serializes claim-only session recovery for the daemon (#1243)", () => {
+		const clientPath = join(import.meta.dir, "hermes-plugin", "client.py");
+		const script = String.raw`
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("signet_client", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+client = module.SignetClient(agent_id="agent-a", harness="hermes-agent")
+calls = []
+def post(path, body, **kwargs):
+    calls.append({"path": path, "body": body, "kwargs": kwargs})
+    return {"sessionKnown": True}
+client._post = post
+result = client.session_start("active-session", project="/tmp/project", claim_only=True)
+assert result == {"sessionKnown": True}
+assert calls == [{
+    "path": "/api/hooks/session-start",
+    "body": {
+        "harness": "hermes-agent",
+        "sessionKey": "active-session",
+        "project": "/tmp/project",
+        "agentId": "agent-a",
+        "claimOnly": True,
+    },
+    "kwargs": {"timeout": 15},
+}]
+`;
+
+		const result = spawnSync(process.env.PYTHON?.trim() || "python3", ["-c", script, clientPath], {
+			encoding: "utf-8",
+		});
+
+		expect(result.status, result.stderr || result.stdout).toBe(0);
+	});
+
+	it("sends claim-only session-start recovery without injecting it into an active Hermes session (#1243)", () => {
+		const fixture = join(tmpRoot, "python-claim-only-recovery-fixture");
+		cpSync(join(import.meta.dir, "hermes-plugin"), join(fixture, "plugins", "memory", "signet"), { recursive: true });
+		mkdirSync(join(fixture, "agent"), { recursive: true });
+		writeFileSync(join(fixture, "agent", "__init__.py"), "");
+		writeFileSync(join(fixture, "plugins", "__init__.py"), "");
+		writeFileSync(join(fixture, "plugins", "memory", "__init__.py"), "");
+		writeFileSync(join(fixture, "agent", "memory_provider.py"), "class MemoryProvider:\n    pass\n");
+
+		const result = spawnSync(
+			"python",
+			[
+				"-c",
+				[
+					"import json",
+					"from plugins.memory.signet import SignetMemoryProvider",
+					"class FakeClient:",
+					"    def __init__(self): self.calls = []",
+					"    def user_prompt_submit(self, *args, **kwargs): return {'sessionKnown': False}",
+					"    def session_start(self, *args, **kwargs):",
+					"        self.calls.append({'args': args, 'kwargs': kwargs})",
+					"        return {'sessionKnown': True, 'inject': 'must not be injected'}",
+					"provider = SignetMemoryProvider()",
+					"provider._client = FakeClient()",
+					"provider._session_initialized = True",
+					"provider._session_key = 'active-session'",
+					"provider._project = '/tmp/project'",
+					"provider.queue_prefetch('restart recovery')",
+					"provider._prefetch_thread.join(1)",
+					"assert provider._client.calls == [{'args': ('active-session',), 'kwargs': {'project': '/tmp/project', 'claim_only': True}}]",
+					"assert provider.prefetch('restart recovery') == ''",
+				].join("\n"),
+			],
+			{ env: { ...process.env, PYTHONPATH: fixture }, encoding: "utf-8" },
+		);
+
+		expect(result.status, result.stderr || result.stdout).toBe(0);
+	});
+
 	it("accepts latest Hermes lifecycle calls with the daemon offline", () => {
 		const fixture = join(tmpRoot, "python-lifecycle-fixture");
 		cpSync(join(import.meta.dir, "hermes-plugin"), join(fixture, "plugins", "memory", "signet"), { recursive: true });

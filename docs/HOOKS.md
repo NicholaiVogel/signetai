@@ -122,6 +122,15 @@ Called when a new agent session begins. Returns memories and context formatted f
 persistence scope. Harness-native sub-agent identifiers should be sent as
 `harnessAgentId`; they are used only for parent-session inference.
 
+When a daemon restart is detected during an already-running session, a harness
+may send `claimOnly: true` with the same `sessionKey` and a `plugin` or `legacy`
+runtime path in `x-signet-runtime-path` or `runtimePath`. Signet renews the
+runtime claim and returns `{ "sessionKnown": true }` without generating
+memories, identity, or an `inject` block. This mode rejects requests without a
+runtime path. Do not use it for a new session: it deliberately preserves the
+existing conversation's stable system prompt rather than constructing startup
+context.
+
 ### Response
 
 ```json

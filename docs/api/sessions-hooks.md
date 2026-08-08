@@ -37,7 +37,8 @@ for injection into the harness system prompt. Requires `remember` permission
   "harnessAgentId": "optional-harness-subagent-id",
   "parentSessionKey": "optional-parent-session-key",
   "sessionKey": "session-uuid",
-  "runtimePath": "plugin"
+  "runtimePath": "plugin",
+  "claimOnly": false
 }
 ```
 
@@ -51,8 +52,18 @@ lineage. If it is absent, Signet infers parent context where possible from
 harness-native signals such as OpenClaw lineage session keys or recent Claude
 Code parent activity in the same project.
 
-**Response** — implementation-defined context object returned by
-`handleSessionStart`.
+Set `claimOnly: true` only when recovering an already-running harness session
+after a daemon restart. It requires a `plugin` or `legacy` runtime path in
+`x-signet-runtime-path` or `runtimePath`; requests without one return `400`.
+The daemon renews the runtime-path claim and returns `{ "sessionKnown": true }`
+without rebuilding or returning startup context. The caller must not inject
+startup memory or identity into an existing conversation: its original
+session-start context is already in the system prompt, and changing it
+mid-conversation invalidates prompt caching.
+
+**Response** — ordinary starts return the implementation-defined context object
+from `handleSessionStart`; claim-only recovery returns only
+`{ "sessionKnown": true }`.
 
 ### POST /api/hooks/user-prompt-submit
 

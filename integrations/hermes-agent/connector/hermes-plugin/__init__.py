@@ -526,24 +526,19 @@ class SignetMemoryProvider(MemoryProvider):
                     project=project,
                 )
                 if result:
-                    # Handle daemon restart detection: re-initialize and refresh context.
-                    # Always return after this branch — result came from a session the
-                    # daemon no longer recognizes, so its inject would be stale/wrong.
+                    # Handle daemon restart detection by restoring only the runtime
+                    # claim. The initial system prompt is already part of this
+                    # conversation; injecting session-start context again would mutate
+                    # the cached prefix mid-conversation.
                     if not result.get("sessionKnown", True) and self._session_initialized:
-                        logger.debug("Signet daemon restarted mid-session, re-initializing")
+                        logger.debug("Signet daemon restarted mid-session, restoring session claim")
                         reinit = client.session_start(
-                            session_key, project=project,
+                            session_key, project=project, claim_only=True,
                         )
-                        if reinit:
-                            inject_from_reinit = reinit.get("inject", "")
-                            if inject_from_reinit and inject_from_reinit.strip():
-                                with self._prefetch_lock:
-                                    if prefetch_generation == self._prefetch_generation and session_key == self._session_key:
-                                        self._prefetch_result = inject_from_reinit
-                        else:
+                        if not reinit:
                             logger.warning(
-                                "Signet re-initialization after daemon restart returned no data; "
-                                "session context will be missing until next turn"
+                                "Signet session-claim recovery after daemon restart returned no data; "
+                                "the next prompt may be treated as a new session"
                             )
                         return
                     inject = result.get("inject", "")

@@ -280,16 +280,20 @@ class SignetClient:
         session_key: str,
         *,
         project: str = "",
+        claim_only: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        """Call session-start hook. Returns identity + memories + inject text."""
+        """Call session-start hook, optionally recovering only the session claim."""
+        body: Dict[str, Any] = {
+            "harness": self._harness,
+            "sessionKey": session_key,
+            "project": project,
+            "agentId": self._agent_id,
+        }
+        if claim_only:
+            body["claimOnly"] = True
         return self._post(
             "/api/hooks/session-start",
-            {
-                "harness": self._harness,
-                "sessionKey": session_key,
-                "project": project,
-                "agentId": self._agent_id,
-            },
+            body,
             timeout=_LONG_TIMEOUT_SECS,
         )
 

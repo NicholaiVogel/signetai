@@ -279,6 +279,39 @@ memory:
 		});
 	});
 
+	it("reclaims a restarted session without rebuilding startup context (#1243)", async () => {
+		const sessionKey = "claim-only-recovery";
+		try {
+			const resp = await app.request("/api/hooks/session-start", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"x-signet-runtime-path": "plugin",
+				},
+				body: JSON.stringify({ harness: "hermes-agent", sessionKey, claimOnly: true }),
+			});
+
+			expect(resp.status).toBe(200);
+			expect(await resp.json()).toEqual({ sessionKnown: true });
+			expect(getSessionPath?.(sessionKey)).toBe("plugin");
+		} finally {
+			releaseSession?.(sessionKey);
+		}
+	});
+
+	it("rejects claim-only recovery without a runtime path (#1243)", async () => {
+		const sessionKey = "claim-only-missing-runtime-path";
+		const resp = await app.request("/api/hooks/session-start", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ harness: "hermes-agent", sessionKey, claimOnly: true }),
+		});
+
+		expect(resp.status).toBe(400);
+		expect(await resp.json()).toEqual({ error: "claimOnly requires a runtime path" });
+		expect(getSessionPath?.(sessionKey)).toBeUndefined();
+	});
+
 	it("skips duplicate user-prompt-submit calls from a conflicting runtime path", async () => {
 		const sessionKey = "duplicate-runtime-session";
 		try {

@@ -269,6 +269,9 @@ function registerSessionStart(app: Hono): void {
 			}
 
 			const runtimePath = resolveRuntimePath(c, body);
+			if (body.claimOnly === true && !runtimePath) {
+				return c.json({ error: "claimOnly requires a runtime path" }, 400);
+			}
 			if (runtimePath) body.runtimePath = runtimePath;
 
 			if (body.sessionKey && runtimePath) {
@@ -303,6 +306,10 @@ function registerSessionStart(app: Hono): void {
 
 			if (checkBypass(body)) {
 				return c.json({ inject: "", memories: [], bypassed: true });
+			}
+
+			if (body.claimOnly === true) {
+				return c.json({ sessionKnown: true });
 			}
 
 			const result = await handleSessionStart(body);

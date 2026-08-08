@@ -247,6 +247,8 @@ export interface SessionStartRequest {
 	harness: string;
 	project?: string;
 	agentId?: string;
+	/** Re-establish the runtime claim without rebuilding startup context. */
+	claimOnly?: boolean;
 	source?: string;
 	/** Harness-native agent/sub-agent identifier. Not used for Signet data scoping. */
 	harnessAgentId?: string;
