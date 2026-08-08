@@ -863,13 +863,13 @@ describe("Dreaming", () => {
 
 	it("requires bounded Markdown runbook summaries in every pass mode (#1226)", () => {
 		for (const prompt of [DREAMING_AGENT_PROMPT, DREAMING_HYGIENE_AGENT_PROMPT, DREAMING_CONTENT_AGENT_PROMPT]) {
-			expect(prompt).toContain("write Markdown");
+			expect(prompt).toContain("specific entity-named change manifest");
+			expect(prompt).toContain("## Updated, ## Created, ## Deferred, ## No-op");
+			expect(prompt).toContain("exact change");
+			expect(prompt).toContain("source or provenance reference");
+			expect(prompt).toContain("specific blocker or reason");
+			expect(prompt).toContain("never use generic categories");
 			expect(prompt).toContain("max 2000 chars");
-			expect(prompt).toContain("## sections");
-			expect(prompt).toContain("bullet lists");
-			expect(prompt).toContain("deferred and openQuestions fields");
-			expect(prompt).not.toContain("No bullet lists");
-			expect(prompt).not.toContain("natural-language prose");
 		}
 	});
 
