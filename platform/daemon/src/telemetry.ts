@@ -598,8 +598,10 @@ export function createTelemetryCollector(
 
 	function reopenSession(sessionHash: string): void {
 		if (!sessionHash) return;
-		activeSessionKeys.add(sessionHash);
-		sessionCosts.set(sessionHash, emptySessionCost());
+		if (!activeSessionKeys.has(sessionHash)) {
+			activeSessionKeys.add(sessionHash);
+			sessionCosts.set(sessionHash, emptySessionCost());
+		}
 		pruneSessionState();
 	}
 
@@ -630,7 +632,7 @@ export function createTelemetryCollector(
 		if (event !== "session.end") return properties;
 		let closingKey = key;
 		let cost = key ? sessionCosts.get(key) : undefined;
-		if (!cost && activeSessionKeys.size === 1) {
+		if (!key && activeSessionKeys.size === 1) {
 			const onlyActiveKey = activeSessionKeys.values().next().value;
 			if (typeof onlyActiveKey === "string") {
 				closingKey = onlyActiveKey;

@@ -532,11 +532,11 @@ describe("session economics (issue #1201)", () => {
 		expect(end?.properties.cost).toBe(0.54);
 	});
 
-	it("recovers from a mismatched session-end key without poisoning later sessions", async () => {
+	it("recovers from a missing session-end key without poisoning later sessions", async () => {
 		const collector = makeCollector();
 		collector.record("session.start", { sessionHash: "session-a" });
 		collector.record("llm.generate", { inputTokens: 100, totalCost: 0.5 });
-		collector.record("session.end", { sessionHash: "session-b" });
+		collector.record("session.end", {});
 		collector.record("session.start", { sessionHash: "session-c" });
 		collector.record("llm.generate", { inputTokens: 200, totalCost: 1 });
 		collector.record("session.end", { sessionHash: "session-c" });
