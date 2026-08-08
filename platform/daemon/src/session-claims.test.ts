@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { createSessionClaimStore } from "./session-claims";
 import {
+	_expireSessionForTest,
 	claimSession,
 	getActiveSessions,
 	getEndedSession,
@@ -12,11 +13,22 @@ import {
 	markSessionEnded,
 	resetSessions,
 	restorePersistedSessions,
+	runStaleCleanup,
 	setSessionClaimStore,
 	setSessionEvictionHandler,
 } from "./session-tracker";
+import { createTelemetryCollector, setActiveTelemetry } from "./telemetry";
 
 let agentsDir = "";
+
+const TEST_TELEMETRY_CONFIG = {
+	posthogHost: "",
+	posthogApiKey: "",
+	flushIntervalMs: 60000,
+	flushBatchSize: 50,
+	retentionDays: 90,
+	memorySearchQaEnabled: false,
+} as const;
 
 function sessionClaimRow(sessionKey: string, agentId: string): Record<string, unknown> | null {
 	return getDbAccessor().withReadDb(
@@ -127,5 +139,24 @@ describe("durable session lifecycle claims (#1228)", () => {
 		expect(restored).toMatchObject({ active: 0, expired: 1, ended: 0 });
 		expect(evicted).toEqual(["restart-expired"]);
 		expect(sessionClaimRow("restart-expired", "agent-d")).toBeNull();
+	});
+
+	it("does not re-emit expiry telemetry for an already-expired durable row", async () => {
+		const collector = createTelemetryCollector(getDbAccessor(), TEST_TELEMETRY_CONFIG, "0.0.0-test");
+		setActiveTelemetry(collector);
+		try {
+			claimSession("restart-telemetry", "plugin", "agent-e", "hermes");
+			_expireSessionForTest("restart-telemetry", "agent-e");
+			runStaleCleanup();
+			await collector.flush();
+
+			resetSessions();
+			expect(restorePersistedSessions()).toMatchObject({ active: 0, expired: 1, ended: 0 });
+			await collector.flush();
+
+			expect(collector.query().filter((event) => event.event === "session.end")).toHaveLength(1);
+		} finally {
+			setActiveTelemetry(undefined);
+		}
 	});
 });

@@ -212,6 +212,18 @@ describe("ended session tombstones", () => {
 
 		expect(getEndedSession("reused-sess")).toBeUndefined();
 	});
+
+	it("removes expired ended markers from the agent-scoped map", () => {
+		markSessionEnded("expired-scoped", "plugin", "agent-scoped");
+		const realNow = Date.now;
+		Date.now = () => realNow() + 31 * 60 * 1000;
+		try {
+			expect(getEndedSession("expired-scoped", "agent-scoped")).toBeUndefined();
+			expect(getSessionTrackerStats().ended).toBe(0);
+		} finally {
+			Date.now = realNow;
+		}
+	});
 });
 
 describe("TTL eviction lifecycle handler (#902)", () => {

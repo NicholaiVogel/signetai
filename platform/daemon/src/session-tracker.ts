@@ -126,7 +126,7 @@ function persistedClaim(
 // normalizeSessionKey is defined in session-end-state.ts (single source of
 // truth for session-key identity) and re-exported here for the routes.
 
-function evictExpiredSession(mapKey: string, claim: SessionClaim): void {
+function evictExpiredSession(mapKey: string, claim: SessionClaim, emitEndTelemetry = true): void {
 	if (!sessions.delete(mapKey)) return;
 	const key = claim.sessionKey;
 	const scopedKey = scopedSessionKey(key, claim.agentId);
@@ -143,7 +143,10 @@ function evictExpiredSession(mapKey: string, claim: SessionClaim): void {
 	// (no hooks for STALE_SESSION_MS). Emit session.end once per session
 	// lifetime (#1212) — dedup'd so a session already counted via explicit
 	// clear is not double-counted here.
-	if (!hasSessionEndTelemetry({ agentId: claim.agentId, harness: claim.harness, sessionKey: key })) {
+	if (
+		emitEndTelemetry &&
+		!hasSessionEndTelemetry({ agentId: claim.agentId, harness: claim.harness, sessionKey: key })
+	) {
 		getActiveTelemetry()?.record("session.end", {
 			harness: claim.harness ?? null,
 			reason: "expired",
@@ -326,7 +329,7 @@ export function getEndedSession(sessionKey: string, agentId = "default"): EndedS
 	if (!ended) return undefined;
 
 	if (Date.now() > ended.expiresAt) {
-		endedSessions.delete(key);
+		endedSessions.delete(scopedSessionKey(key, agentId));
 		return undefined;
 	}
 
@@ -566,7 +569,7 @@ export function restorePersistedSessions(): {
 		};
 		sessions.set(mapKey, claim);
 		if (expiresAt <= now || row.state === "expired") {
-			evictExpiredSession(mapKey, claim);
+			evictExpiredSession(mapKey, claim, row.state !== "expired");
 			expired++;
 		} else {
 			active++;
