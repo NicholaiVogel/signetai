@@ -50,6 +50,7 @@ PostHog failures, and never throws into the daemon.
 |---|---|---|
 | `install.ping` | npm wrapper postinstall (native binary install) | `version`, `platform` |
 | `install.activated` | first daemon run of a new install (persisted install id first created) | `version`, `platform` |
+| `first.remember` / `first.recall` | first successful remember / recall per install, exactly once | `version`, `platform` |
 | `daemon.started` | daemon boot | `version`, `platform`, `uptimeMs` |
 | `daemon.heartbeat` | every 5 minutes | `uptimeMs`, `memoryCount`, `connectorsActive`, `pipelineMode`, `extractionProvider`, `embeddingProvider` |
 | `session.start` | real session start (deduped; stubs and clear/reset paths don't count) | `harness`, `sessionHash` |
@@ -93,6 +94,14 @@ Notes on individual events:
   normalized session key, so distinct sessions and concurrency are countable
   without leaking raw keys. Cleanly-finished sessions that never send
   `clear` are not counted as ended — only provable terminations are.
+- **`first.remember` / `first.recall`** — the activation funnel. Emitted
+  exactly once per install, when the first successful remember / recall
+  completes (guarded by an atomic claim on the persisted install id, so
+  concurrent or repeated calls can't double-fire). Events carry only
+  `version` and `platform` — no content, no query text, no agent ids. The
+  funnel query is activated vs activated+first.remember vs +first.recall
+  (below). A deduped remember counts; the automatic recall injected into
+  prompt-submit context does not — only the explicit recall route fires it.
 - **`dreaming.pass`** — dreaming is the largest token consumer (millions of
   input tokens per heavy install), so always include it in token/cost
   aggregates.
@@ -205,6 +214,12 @@ HogQL examples that work:
 select event, count() as n from events group by event order by n desc
 -- active installs (distinct ids that ever activated)
 select distinct_id, count() as n from events where event = 'install.activated' group by distinct_id
+-- activation funnel: activated vs used (first remember) vs recalled
+select
+  count(distinct distinct_id) as activated,
+  count(distinct if(event = 'first.remember', distinct_id, null)) as first_remember,
+  count(distinct if(event = 'first.recall', distinct_id, null)) as first_recall
+from events where event in ('install.activated', 'first.remember', 'first.recall')
 -- llm cost by provider
 select properties.provider as provider, count() as calls, sum(properties.totalCost) as cost
   from events where event = 'llm.generate' group by provider
@@ -228,6 +243,7 @@ vault mirrors the key PostHog aggregates for daily review via
 | 0.176.0 | Sanitized crash reports: full `error.occurred` payload (truncated, home-stripped message + top-8 stack frames) and rate-limited `EventLoopLag` wedge reports |
 | next | `session.turn` + real `session.end` split (#1212): the per-turn event renamed from the old `session.end`; `session.end` now fires only at real terminations, deduped per lifetime; `sessionHash` added to all three session events |
 | Unreleased | `recall.performed` with anonymous recall type, result count, latency, and truncation metrics (#1203) |
+| Unreleased | First-run activation funnel: `first.remember` / `first.recall`, exactly once per install (#1202) |
 
 Related: #1026 (original rollout), #1200 (IP capture, dev tagging),
 #1201-#1207 (event-scoped follow-ups), #1212 (session.end rename — resolved).

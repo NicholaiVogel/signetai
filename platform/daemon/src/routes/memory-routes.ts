@@ -36,6 +36,7 @@ import { recordPathFeedback } from "../path-feedback";
 import { enqueueDocumentIngestJob } from "../pipeline";
 import { parseFeedback, recordAgentFeedback } from "../session-memories";
 import { upsertSessionTranscript } from "../session-transcripts";
+import { getActiveTelemetry } from "../telemetry";
 import { createTemporalEdgeId, normalizeTemporalTimestamp, validateTemporalTimeOptions } from "../temporal-recall";
 import {
 	type SupersedeMemoryTxStatus,
@@ -622,6 +623,15 @@ function documentScopeOwnedBy(
 
 function documentMetadataJson(metadata: unknown): string | null {
 	return metadata === undefined ? null : JSON.stringify(metadata);
+}
+
+/**
+ * Claim the install's one-shot first-use milestone after a successful
+ * remember / recall. The collector fires first.remember / first.recall
+ * only when this call wins the persisted claim (issue #1202).
+ */
+function recordFirstUseTelemetry(kind: "remember" | "recall"): void {
+	getActiveTelemetry()?.recordFirstUse(kind);
 }
 
 export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): void {
@@ -1341,6 +1351,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					return c.json({ error: "idempotencyKey already used for different chunked content" }, 409);
 				}
 
+				recordFirstUseTelemetry("remember");
 				return c.json({
 					chunked: true,
 					chunk_count: existingChunks.length,
@@ -1449,6 +1460,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					return c.json({ error: "chunk content already exists for this agent and scope" }, 409);
 				}
 				if (result.status === "deduped") {
+					recordFirstUseTelemetry("remember");
 					return c.json({
 						chunked: true,
 						chunk_count: result.ids.length,
@@ -1509,6 +1521,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					chunkCount: savedChunkIds.length,
 				});
 
+				recordFirstUseTelemetry("remember");
 				return c.json({
 					chunked: true,
 					chunk_count: savedChunkIds.length,
@@ -1660,6 +1673,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 						now,
 					}),
 				);
+				recordFirstUseTelemetry("remember");
 				return c.json({
 					id: result.row.id,
 					type: result.row.type,
@@ -1689,6 +1703,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 							now,
 						}),
 					);
+					recordFirstUseTelemetry("remember");
 					return c.json({
 						id: existing.id,
 						type: existing.type,
@@ -1811,6 +1826,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			structured: structuredRetained,
 		});
 
+		recordFirstUseTelemetry("remember");
 		return c.json({
 			id,
 			type: memType,
@@ -3074,6 +3090,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				result,
 				cfg,
 			});
+			recordFirstUseTelemetry("recall");
 			return c.json(result);
 		} catch (e) {
 			logger.error("memory", "Recall failed", e as Error);

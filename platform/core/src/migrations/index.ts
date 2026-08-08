@@ -116,6 +116,7 @@ import { up as dreamingPassUsage } from "./107-dreaming-pass-usage";
 import { up as embeddingUsage } from "./108-embedding-usage";
 import { up as telemetryInstall } from "./109-telemetry-install";
 import { up as memoryMentionJoinIndex } from "./110-memory-mention-join-index";
+import { up as telemetryFirstUse } from "./111-telemetry-first-use";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1024,6 +1025,17 @@ export const MIGRATIONS: readonly Migration[] = [
 		version: 110,
 		name: "memory-mention-join-index",
 		up: memoryMentionJoinIndex,
+	},
+	{
+		version: 111,
+		name: "telemetry-first-use",
+		up: telemetryFirstUse,
+		artifacts: {
+			columns: [
+				{ table: "telemetry_install", column: "first_remember_at" },
+				{ table: "telemetry_install", column: "first_recall_at" },
+			],
+		},
 	},
 ];
 

@@ -281,6 +281,39 @@ describe("telemetry collector", () => {
 		}
 	});
 
+	it("emits first.remember and first.recall exactly once per install", async () => {
+		// Regression (issue #1202): the activation funnel needs one-shot
+		// first-use milestones guarded by the persisted install id, or
+		// repeated remembers/recalls inflate the funnel and daemon restarts
+		// double-count an install that already used the product.
+		const first = makeCollector();
+		first.recordFirstUse("remember");
+		first.recordFirstUse("remember");
+		first.recordFirstUse("recall");
+		await first.flush();
+
+		const rememberEvent = captured.flatMap((c) => c.body.batch).find((e) => e.event === "first.remember");
+		const recallEvent = captured.flatMap((c) => c.body.batch).find((e) => e.event === "first.recall");
+		expect(rememberEvent).toBeDefined();
+		expect(recallEvent).toBeDefined();
+		// No content: the event carries only the fact of first use.
+		expect(rememberEvent?.properties).toMatchObject({ version: "0.0.0-test", platform: process.platform });
+		expect(Object.keys(rememberEvent?.properties ?? {})).toEqual(["version", "platform", "$lib", "$lib_version"]);
+		const firstBatch = captured.flatMap((c) => c.body.batch.map((e) => e.event));
+		expect(firstBatch.filter((e) => e === "first.remember")).toHaveLength(1);
+		expect(firstBatch.filter((e) => e === "first.recall")).toHaveLength(1);
+
+		// Restart over the same database: no second first-use, even though
+		// the new collector claims again.
+		const second = makeCollector();
+		second.recordFirstUse("remember");
+		second.recordFirstUse("recall");
+		second.record("daemon.heartbeat", { uptimeMs: 2 });
+		await second.flush();
+		const lastBatch = captured.at(-1)?.body.batch ?? [];
+		expect(lastBatch.map((e) => e.event)).toEqual(["daemon.heartbeat"]);
+	});
+
 	it("sanitizes crash reports: truncation, home-path stripping, frame cap", () => {
 		const longMessage =
 			'SQLiteError: database is locked near "a very long embedded fragment that goes on and on" at /home/alice/.agents/memory/memories.db'.repeat(

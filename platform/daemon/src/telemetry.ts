@@ -62,6 +62,12 @@ export const TELEMETRY_EVENTS = [
 	// into anonymous telemetry. No PII, no code, no memory content.
 	"daemon.started",
 	"install.activated",
+	// First-use milestones (issue #1202): fired exactly once per install,
+	// at the first successful remember / recall. Guards the activation
+	// funnel (install.activated -> first.remember/recall) so "activated"
+	// stops including installs that never did anything.
+	"first.remember",
+	"first.recall",
 	"dreaming.pass",
 	"command.invoked",
 	"error.occurred",
@@ -78,6 +84,12 @@ export const TELEMETRY_EVENTS = [
 
 export type TelemetryEventType = (typeof TELEMETRY_EVENTS)[number];
 
+/**
+ * Which first-use milestone to claim. Each fires at most once per
+ * install, persisted on the telemetry_install row (migration 111).
+ */
+export type FirstUseKind = "remember" | "recall";
+
 export type TelemetryProperties = Readonly<Record<string, string | number | boolean | null>>;
 
 export interface TelemetryEvent {
@@ -93,6 +105,13 @@ export interface TelemetryEvent {
 
 export interface TelemetryCollector {
 	record(event: TelemetryEventType, properties: TelemetryProperties): void;
+
+	/**
+	 * Claim a one-shot first-use milestone (issue #1202). Emits
+	 * first.remember / first.recall only when this call wins the claim
+	 * for this install — later calls are silent no-ops.
+	 */
+	recordFirstUse(kind: FirstUseKind): void;
 
 	flush(): Promise<void>;
 	start(): void;
@@ -290,6 +309,25 @@ async function sendToPostHog(
 }
 
 // ---------------------------------------------------------------------------
+// First-use milestones (issue #1202)
+// ---------------------------------------------------------------------------
+
+/**
+ * telemetry_install column that records the first-use timestamp for each
+ * kind. Fixed internal map — the column name is interpolated into SQL,
+ * so it must never accept caller input.
+ */
+const FIRST_USE_COLUMNS: Readonly<Record<FirstUseKind, string>> = {
+	remember: "first_remember_at",
+	recall: "first_recall_at",
+};
+
+const FIRST_USE_EVENTS: Readonly<Record<FirstUseKind, TelemetryEventType>> = {
+	remember: "first.remember",
+	recall: "first.recall",
+};
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -309,6 +347,33 @@ export function createTelemetryCollector(
 	const { id: installId, created: installActivated } = getOrCreateInstallId(db);
 
 	const posthogConfigured = config.posthogHost.length > 0 && config.posthogApiKey.length > 0;
+
+	/**
+	 * Atomically claim a first-use milestone for this install. Only the
+	 * first caller wins (changes === 1); every later call is a no-op, so
+	 * concurrent remembers can't double-fire. When the install id fell
+	 * back to an in-memory value (broken DB) the UPDATE matches no row
+	 * and the milestone never fires — acceptable, telemetry is degraded
+	 * anyway.
+	 */
+	function claimFirstUse(kind: FirstUseKind): boolean {
+		try {
+			const column = FIRST_USE_COLUMNS[kind];
+			let claimed = false;
+			db.withWriteTx((w) => {
+				const result = w
+					.prepare(
+						`UPDATE telemetry_install SET ${column} = ?
+						 WHERE id = ? AND ${column} IS NULL`,
+					)
+					.run(new Date().toISOString(), installId);
+				claimed = result.changes > 0;
+			});
+			return claimed;
+		} catch {
+			return false;
+		}
+	}
 
 	function writeToDb(events: readonly TelemetryEvent[]): void {
 		if (events.length === 0) return;
@@ -457,6 +522,17 @@ export function createTelemetryCollector(
 			if (buffer.length >= MAX_BUFFER_SIZE) {
 				doFlush().catch(() => {});
 			}
+		},
+
+		recordFirstUse(kind): void {
+			// Best-effort: a failed claim (no row, broken DB) means the
+			// milestone stays unclaimed and may fire on a later run —
+			// still exactly once overall.
+			if (!claimFirstUse(kind)) return;
+			collector.record(FIRST_USE_EVENTS[kind], {
+				version: daemonVersion,
+				platform: process.platform,
+			});
 		},
 
 		async flush(): Promise<void> {
