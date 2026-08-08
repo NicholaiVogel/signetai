@@ -116,6 +116,8 @@ describe("install copy", () => {
 
 		// Homebrew-style opt-out: one env var disables the ping entirely.
 		expect(installer).toContain("SIGNET_TELEMETRY_OPTOUT");
+		expect(installer).toContain("SIGNET_TELEMETRY_ENV");
+		expect(installer).toContain("telemetryReportedVersion(nativePackageVersion())");
 
 		// The ping must never block or fail the install: it is fire-and-forget
 		// with a bounded timeout, and errors are swallowed.

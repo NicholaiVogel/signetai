@@ -22,7 +22,9 @@ import {
 	defaultTelemetryLogPath,
 	nextFlushIntervalMs,
 	sanitizeCrashError,
+	telemetryDeployment,
 	telemetryDisabledByEnv,
+	telemetryReportedVersion,
 } from "./telemetry";
 import { cleanupTestTempDir, createTestTempDir } from "./test-temp-dir";
 
@@ -427,6 +429,46 @@ describe("telemetry collector", () => {
 		expect(telemetryDisabledByEnv({ SIGNET_TELEMETRY_OPTOUT: "1" })).toBe(true);
 		expect(telemetryDisabledByEnv({ SIGNET_TELEMETRY_OPTOUT: "true" })).toBe(true);
 		expect(telemetryDisabledByEnv({ SIGNET_TELEMETRY_OPTOUT: "0" })).toBe(false);
+	});
+
+	it("tags development telemetry and marks its reported version", async () => {
+		expect(telemetryDeployment({})).toBeUndefined();
+		expect(telemetryDeployment({ SIGNET_TELEMETRY_ENV: "DEV" })).toBe("dev");
+		expect(telemetryDeployment({ SIGNET_TELEMETRY_ENV: "production" })).toBeUndefined();
+		expect(telemetryReportedVersion("0.176.8", "dev")).toBe("0.176.8-dev");
+		expect(telemetryReportedVersion("0.176.8-dev", "dev")).toBe("0.176.8-dev");
+
+		const collector = createTelemetryCollector(getDbAccessor(), TELEMETRY_CONFIG, "0.176.8", {
+			env: { SIGNET_TELEMETRY_ENV: "dev" },
+			telemetryLogPath: logPath,
+		});
+		collector.record("daemon.started", { version: "0.176.8", platform: process.platform });
+		await collector.flush();
+
+		const batch = captured[0]?.body.batch ?? [];
+		expect(batch).toHaveLength(2);
+		for (const event of batch) {
+			expect(event.properties.deployment).toBe("dev");
+			expect(event.properties.$lib_version).toBe("0.176.8-dev");
+		}
+		expect(batch[0]?.properties.version).toBe("0.176.8-dev");
+		expect(batch[1]?.properties.version).toBe("0.176.8-dev");
+
+		const lines = readFileSync(logPath, "utf-8").trim().split("\n");
+		for (const line of lines) {
+			expect((JSON.parse(line) as { properties: { deployment: string } }).properties.deployment).toBe("dev");
+		}
+	});
+
+	it("marks both sides of development upgrade events", async () => {
+		const collector = createTelemetryCollector(getDbAccessor(), TELEMETRY_CONFIG, "0.176.8", {
+			env: { SIGNET_TELEMETRY_ENV: "dev" },
+		});
+		collector.record("version.upgraded", { from: "0.176.6", to: "0.176.8" });
+		await collector.flush();
+		const [event] = collector.query({ event: "version.upgraded" });
+		expect(event?.properties.from).toBe("0.176.6-dev");
+		expect(event?.properties.to).toBe("0.176.8-dev");
 	});
 
 	it("backs off after three consecutive PostHog failures", () => {

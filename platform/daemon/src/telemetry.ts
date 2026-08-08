@@ -233,6 +233,25 @@ export function telemetryDisabledByEnv(env: NodeJS.ProcessEnv = process.env): bo
 	return env.SIGNET_TELEMETRY_OPTOUT === "1" || env.SIGNET_TELEMETRY_OPTOUT === "true";
 }
 
+export type TelemetryDeployment = "dev";
+
+/**
+ * Resolve the optional deployment marker used to separate operator-owned
+ * development checkouts from production installs in PostHog.
+ */
+export function telemetryDeployment(env: NodeJS.ProcessEnv = process.env): TelemetryDeployment | undefined {
+	return env.SIGNET_TELEMETRY_ENV?.trim().toLowerCase() === "dev" ? "dev" : undefined;
+}
+
+/**
+ * Keep development builds visible in version breakdowns without changing the
+ * daemon's operational version or update behavior.
+ */
+export function telemetryReportedVersion(version: string, deployment: TelemetryDeployment | undefined): string {
+	if (deployment !== "dev" || version.endsWith("-dev")) return version;
+	return `${version}-dev`;
+}
+
 /**
  * Resolve the anonymous per-install identifier, creating and persisting it on
  * first use. Falls back to an in-memory id if the database is unusable.
@@ -424,10 +443,13 @@ export function createTelemetryCollector(
 	opts: {
 		readonly telemetryLogPath?: string | null;
 		readonly configSnapshot?: TelemetryConfigSnapshot;
+		readonly env?: NodeJS.ProcessEnv;
 	} = {},
 ): TelemetryCollector {
 	const buffer: TelemetryEvent[] = [];
 	const logPath = opts.telemetryLogPath ?? null;
+	const deployment = telemetryDeployment(opts.env);
+	const reportedVersion = telemetryReportedVersion(daemonVersion, deployment);
 	let flushTimer: ReturnType<typeof setTimeout> | null = null;
 	let running = false;
 	let consecutiveFailures = 0;
@@ -462,6 +484,18 @@ export function createTelemetryCollector(
 		} catch {
 			return false;
 		}
+	}
+
+	function addContext(properties: TelemetryProperties): TelemetryProperties {
+		return {
+			...properties,
+			...(deployment ? { deployment } : {}),
+			...(typeof properties.version === "string"
+				? { version: telemetryReportedVersion(properties.version, deployment) }
+				: {}),
+			...(typeof properties.from === "string" ? { from: telemetryReportedVersion(properties.from, deployment) } : {}),
+			...(typeof properties.to === "string" ? { to: telemetryReportedVersion(properties.to, deployment) } : {}),
+		};
 	}
 
 	function writeToDb(events: readonly TelemetryEvent[]): void {
@@ -581,7 +615,7 @@ export function createTelemetryCollector(
 					config.posthogApiKey,
 					installId,
 					claimed.events,
-					daemonVersion,
+					reportedVersion,
 				);
 				if (ok) {
 					markSent(claimed.token);
@@ -700,7 +734,7 @@ export function createTelemetryCollector(
 				id: crypto.randomUUID(),
 				event,
 				timestamp: new Date().toISOString(),
-				properties: enrichSessionEvent(event, properties),
+				properties: addContext(enrichSessionEvent(event, properties)),
 			});
 
 			// Open telemetry log (issue #1026 Phase 2): mirror every event to
@@ -820,7 +854,7 @@ export function createTelemetryCollector(
 	// postinstall ping never fires for bun global or desktop installs).
 	if (installActivated) {
 		collector.record("install.activated", {
-			version: daemonVersion,
+			version: reportedVersion,
 			platform: process.platform,
 		});
 		if (opts.configSnapshot) {

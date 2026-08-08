@@ -187,6 +187,15 @@ knob for the whole product. CI runners, containers, and scripted
 environments should set it so automated daemon boots don't count as
 installs.
 
+**Development fleet marker:** `SIGNET_TELEMETRY_ENV=dev` adds
+`deployment: dev` to daemon events sent to PostHog and the local audit log,
+to CLI `command.invoked` events in that same log, and to native install pings
+when the environment is present. Daemon and install-ping version fields report
+the library version with a `-dev` suffix. The daemon and CLI `bun run dev`
+scripts set this marker automatically; direct source launches can set it
+explicitly. The marker is not an opt-out. `SIGNET_TELEMETRY_OPTOUT=1` or
+`true` silences daemon, CLI, and install-ping telemetry.
+
 **Disclosure:** `signet setup` tells users telemetry is on by default and
 asks whether to disable it. Declining writes `telemetryEnabled: false`;
 non-interactive/CI setups keep the default (enabled).
@@ -211,11 +220,11 @@ it is never flushed to PostHog.
   default and remote rates come from `embedding.costRates` (#1201).
 - `install.ping` and `install.activated` measure different populations —
   report them as complementary, never summed.
-- CI and dev fleets inflate "user" counts: every automated daemon boot with
-  default config is a phantom install. Identify them as `daemon.started`
-  without a matching `install.ping`, and set `SIGNET_TELEMETRY_OPTOUT=1` in
-  workflows. Dev-install tagging (`SIGNET_TELEMETRY_ENV=dev`) is under
-  discussion (#1200).
+- CI and dev fleets can inflate "user" counts: every automated daemon boot
+  with default config is a phantom install. Identify CI as
+  `daemon.started` without a matching `install.ping`, set
+  `SIGNET_TELEMETRY_OPTOUT=1` in workflows, and set
+  `SIGNET_TELEMETRY_ENV=dev` for operator-owned development checkouts.
 - Flush cadence is the configured interval (default 60s); a freshly started
   daemon takes up to a minute to appear in PostHog.
 

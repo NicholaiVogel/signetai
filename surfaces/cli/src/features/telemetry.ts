@@ -54,6 +54,16 @@ function createTelemetryDatabase(dbPath: string): ReturnType<typeof createDataba
 	return db;
 }
 
+export type CliTelemetryDeployment = "dev";
+
+export function cliTelemetryDeployment(env: NodeJS.ProcessEnv = process.env): CliTelemetryDeployment | undefined {
+	return env.SIGNET_TELEMETRY_ENV?.trim().toLowerCase() === "dev" ? "dev" : undefined;
+}
+
+function cliTelemetryDisabledByEnv(env: NodeJS.ProcessEnv): boolean {
+	return env.SIGNET_TELEMETRY_OPTOUT === "1" || env.SIGNET_TELEMETRY_OPTOUT === "true";
+}
+
 /**
  * Resolve the shared open-telemetry log path, mirroring the daemon's
  * `defaultTelemetryLogPath` (issue #1026).
@@ -62,11 +72,11 @@ export function cliTelemetryLogPath(agentsDir: string): string {
 	return join(agentsDir, ".daemon", "telemetry", "events.jsonl");
 }
 
-function readTelemetrySettings(agentsDir: string): CliTelemetrySettings | null {
+function readTelemetrySettings(agentsDir: string, env: NodeJS.ProcessEnv = process.env): CliTelemetrySettings | null {
 	try {
 		const yamlPath = join(agentsDir, "agent.yaml");
 		if (!existsSync(yamlPath)) return null;
-		if (process.env.SIGNET_TELEMETRY_OPTOUT === "1" || process.env.SIGNET_TELEMETRY_OPTOUT === "true") {
+		if (cliTelemetryDisabledByEnv(env)) {
 			return null;
 		}
 
@@ -97,8 +107,8 @@ function readTelemetrySettings(agentsDir: string): CliTelemetrySettings | null {
  * by default, so the flag is only false when agent.yaml is unavailable,
  * telemetry is explicitly disabled, or the runtime opt-out is set.
  */
-export function cliTelemetryEnabled(agentsDir: string): boolean {
-	return readTelemetrySettings(agentsDir)?.enabled === true;
+export function cliTelemetryEnabled(agentsDir: string, env: NodeJS.ProcessEnv = process.env): boolean {
+	return readTelemetrySettings(agentsDir, env)?.enabled === true;
 }
 
 function getOrCreateInstallId(db: ReturnType<typeof createDatabase>): string | null {
@@ -198,16 +208,21 @@ function markClaimedSent(db: ReturnType<typeof createDatabase>, token: string): 
  * Payload is the command name only. This function is synchronous for the
  * local write and never performs a network request.
  */
-export function recordCommandInvoked(agentsDir: string, commandName: string): void {
-	const settings = readTelemetrySettings(agentsDir);
+export function recordCommandInvoked(
+	agentsDir: string,
+	commandName: string,
+	env: NodeJS.ProcessEnv = process.env,
+): void {
+	const settings = readTelemetrySettings(agentsDir, env);
 	if (!settings) return;
 
 	try {
+		const deployment = cliTelemetryDeployment(env);
 		const event: QueuedEvent = {
 			id: randomUUID(),
 			event: TELEMETRY_EVENT,
 			timestamp: new Date().toISOString(),
-			properties: { command: commandName },
+			properties: { command: commandName, ...(deployment ? { deployment } : {}) },
 		};
 		const logPath = cliTelemetryLogPath(agentsDir);
 		mkdirSync(dirname(logPath), { recursive: true });

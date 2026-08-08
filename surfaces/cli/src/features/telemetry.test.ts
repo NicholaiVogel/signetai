@@ -3,7 +3,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDatabase } from "../sqlite";
-import { cliTelemetryEnabled, cliTelemetryLogPath, flushCliTelemetry, recordCommandInvoked } from "./telemetry";
+import {
+	cliTelemetryDeployment,
+	cliTelemetryEnabled,
+	cliTelemetryLogPath,
+	flushCliTelemetry,
+	recordCommandInvoked,
+} from "./telemetry";
 
 let dir = "";
 const originalFetch = globalThis.fetch;
@@ -64,6 +70,24 @@ describe("cli telemetry (issue #1206)", () => {
 		};
 		expect(line.event).toBe("command.invoked");
 		expect(line.properties.command).toBe("remember");
+	});
+
+	it("tags development command events", () => {
+		writeAgentYaml(true);
+		expect(cliTelemetryDeployment({})).toBeUndefined();
+		expect(cliTelemetryDeployment({ SIGNET_TELEMETRY_ENV: "DEV" })).toBe("dev");
+		recordCommandInvoked(dir, "remember", { SIGNET_TELEMETRY_ENV: "dev" });
+		const line = JSON.parse(readFileSync(cliTelemetryLogPath(dir), "utf-8").trim()) as {
+			properties: { deployment: string };
+		};
+		expect(line.properties.deployment).toBe("dev");
+	});
+
+	it("honors the runtime telemetry opt-out", () => {
+		writeAgentYaml(true);
+		expect(cliTelemetryEnabled(dir, { SIGNET_TELEMETRY_OPTOUT: "1" })).toBe(false);
+		recordCommandInvoked(dir, "remember", { SIGNET_TELEMETRY_OPTOUT: "true" });
+		expect(existsSync(cliTelemetryLogPath(dir))).toBe(false);
 	});
 
 	it("does not write anything when telemetry is disabled", () => {

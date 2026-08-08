@@ -1156,6 +1156,15 @@ uptime), `command.invoked` (command name only, never arguments),
 stripped, top stack frames with home directories removed, uptime, and
 rate-limited `EventLoopLag` reports with measured lag), `version.upgraded`
 (from, to).
+
+**Development fleet marker:** setting `SIGNET_TELEMETRY_ENV=dev` keeps operator
+development checkouts in the dataset while making them filterable. The daemon
+adds `deployment: dev` to its local and PostHog events, while the CLI adds it
+to its JSONL-only command events. The native install ping applies the marker
+and `-dev` version suffix when the environment is present. The daemon and CLI
+`bun run dev` scripts set this marker automatically. The marker does not
+disable telemetry; use `SIGNET_TELEMETRY_OPTOUT=1` when development or
+automated events should be silenced entirely.
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
 | `posthogHost` | `https://us.i.posthog.com` | — | PostHog instance URL (empty disables) |

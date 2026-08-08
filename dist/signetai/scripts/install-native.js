@@ -36,6 +36,16 @@ const TELEMETRY_API_KEY = "phc_mLsvJmbmp6e9UarrX9Cq5QtTjVNiiphM9mvi5Xnddd8Q"; //
 const TELEMETRY_TIMEOUT_MS = 2000;
 const pendingPings = [];
 
+function telemetryDeployment() {
+	return process.env.SIGNET_TELEMETRY_ENV?.trim().toLowerCase() === "dev" ? "dev" : undefined;
+}
+
+function telemetryReportedVersion(version) {
+	const deployment = telemetryDeployment();
+	if (deployment !== "dev" || version.endsWith("-dev")) return version;
+	return `${version}-dev`;
+}
+
 function telemetryEnabled() {
 	if (process.env.SIGNET_TELEMETRY_OPTOUT === "1" || process.env.SIGNET_TELEMETRY_OPTOUT === "true") {
 		return false;
@@ -56,8 +66,9 @@ function fireInstallPing(platform) {
 				distinct_id: require("node:crypto").randomUUID(),
 				timestamp: new Date().toISOString(),
 				properties: {
-					version: nativePackageVersion(),
+					version: telemetryReportedVersion(nativePackageVersion()),
 					platform,
+					...(telemetryDeployment() ? { deployment: telemetryDeployment() } : {}),
 					$lib: "signet-install",
 				},
 			},
