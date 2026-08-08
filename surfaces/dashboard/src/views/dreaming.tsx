@@ -584,6 +584,20 @@ function splitMarkdownBlocks(text: string): ReadonlyArray<{
 	return blocks;
 }
 
+/** Plain one-line preview for ledger rows and native browser tooltips. */
+function markdownSummaryPreview(text: string): string {
+	const content = splitMarkdownBlocks(text)
+		.map((block) => (block.type === "list" ? (block.items ?? []).map((item) => item.text).join(" · ") : block.text))
+		.join(" ");
+	return content
+		.replace(/\*\*([^*]+)\*\*/g, "$1")
+		.replace(/\*([^*]+)\*/g, "$1")
+		.replace(/`([^`]+)`/g, "$1")
+		.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
 /* ── Live pass + tool trace ──────────────────────────────────────────────── */
 
 function LivePassPanel({
@@ -775,7 +789,7 @@ function PassLedger({ passes, onSelect }: { passes: DreamPass[]; onSelect: (p: D
 									"relative grid w-full cursor-pointer grid-cols-[5rem_4rem_4rem_4.5rem_4rem_5.5rem_minmax(0,1fr)_1rem] items-center gap-2 rounded-[6px] px-2 py-[5px] text-left transition-colors",
 									"hover:bg-white/[0.03]",
 								)}
-								title={p.summary ?? undefined}
+								title={p.summary ? markdownSummaryPreview(p.summary) : undefined}
 							>
 								{/* Latest pass gets a blue accent bar — it's the active reference row. */}
 								{idx === 0 && (
@@ -794,7 +808,7 @@ function PassLedger({ passes, onSelect }: { passes: DreamPass[]; onSelect: (p: D
 									{(p.mutationsApplied ?? 0) > 0 ? `${p.mutationsApplied} applied` : "no mutations"}
 								</span>
 								<span className="min-w-0 truncate text-[11px] text-slate-700 dark:text-slate-300">
-									{p.error ?? p.summary ?? ""}
+									{p.error ?? (p.summary ? markdownSummaryPreview(p.summary) : "")}
 								</span>
 								<ChevronRight className="size-3 shrink-0 text-slate-500 dark:text-slate-500" />
 							</button>
@@ -859,9 +873,7 @@ function PassDetailDialog({ pass, onClose }: { pass: DreamPass; onClose: () => v
 				</DialogHeader>
 
 				<div className="flex max-h-[72vh] flex-col gap-4 overflow-y-auto px-5 py-4">
-					{pass.summary && (
-						<p className="m-0 text-[12px] leading-relaxed text-slate-500 dark:text-slate-400">{pass.summary}</p>
-					)}
+					{pass.summary && <MarkdownSummary text={pass.summary} />}
 					{pass.error && (
 						<p className="m-0 flex items-start gap-1.5 text-[12px] leading-relaxed text-destructive">
 							<AlertCircle className="mt-px size-3.5 shrink-0" />
