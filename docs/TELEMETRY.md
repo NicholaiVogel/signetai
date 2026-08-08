@@ -1,0 +1,217 @@
+# Telemetry
+
+> Single source of truth for Signet's anonymous product telemetry. When
+> adding or changing an event, a config flag, or the privacy contract, update
+> this document — not the telemetry sections of CONFIGURATION.md, ANALYTICS.md,
+> or PIPELINE.md in parallel.
+
+## What telemetry is and why
+
+Signet ships an anonymous, default-on telemetry collector so the project can
+understand how it runs in the wild. It answers three questions:
+
+- **Install and usage analytics** — how many installs, on which platforms and
+  versions, how much the daemon is used.
+- **Crash diagnostics** — sanitized reports of process-level crashes and
+  wedged event loops, enough to reproduce and fix remotely.
+- **Per-install economics** — token and cost counts per provider, so the
+  project can reason about what running Signet actually costs.
+
+Telemetry is opt-out, not opt-in: `telemetryEnabled: false` in config, or
+`SIGNET_TELEMETRY_OPTOUT=1` in the environment. It never carries memory
+content, query text, prompt text, or personal identity (see the
+[privacy contract](#privacy-contract)). Sending is best-effort and can never
+break the daemon.
+
+## Where events go
+
+- **PostHog cloud** — project **547297** (US region), host
+  `https://us.i.posthog.com`, `POST /batch/` endpoint. The project API key is a
+  public ingest key by PostHog design; it is not a secret.
+- **`distinct_id`** — a random per-install anonymous UUID persisted in the
+  `telemetry_install` table (migration 109). One id per daemon-using install,
+  stable across restarts. The daemon attaches `$lib: "signet-daemon"` and
+  `$lib_version` to every batch; the install ping uses
+  `$lib: "signet-install"`.
+- **Local SQLite** — every event is also written to `telemetry_events` (90-day
+  retention, pruned every 10th flush) with a `sent_to_posthog` flag marking
+  successful batch delivery.
+- **Open JSONL log** — every recorded event is mirrored as one JSON line to
+  `<agentsDir>/.daemon/telemetry/events.jsonl`, the inspectable audit surface
+  (see [below](#the-open-audit-log)).
+
+The collector buffers events in memory (auto-flush at 200 events, hard cap
+5000), flushes on the configured interval, backs off 5x after 3 consecutive
+PostHog failures, and never throws into the daemon.
+
+## Event catalog
+
+| Event | When | Key payload fields |
+|---|---|---|
+| `install.ping` | npm wrapper postinstall (native binary install) | `version`, `platform` |
+| `install.activated` | first daemon run of a new install (persisted install id first created) | `version`, `platform` |
+| `daemon.started` | daemon boot | `version`, `platform`, `uptimeMs` |
+| `daemon.heartbeat` | every 5 minutes | `uptimeMs`, `memoryCount`, `connectorsActive`, `pipelineMode`, `extractionProvider`, `embeddingProvider` |
+| `session.start` | real session start (deduped; stubs and clear/reset paths don't count) | `harness` |
+| `session.end` | Stop/session-end hook | `harness`, `promptCount` |
+| `llm.generate` | every LLM call | `provider`, `latencyMs`, `success`, `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreationTokens`, `totalCost` |
+| `pipeline.embedding` | every embedding fetch, at the usage-recording boundary | `tokens`, `provider`, `sourceKind` (`memory-capture` / `artifact-index` / `recall` / `dreaming` / `other`) |
+| `dreaming.pass` | completed agentic dreaming pass (early-exit passes emit nothing) | `mode`, `tokensInput`, `tokensOutput`, `tokensCacheRead`, `tokensCacheWrite`, `cost` |
+| `inference.route` | inference control-plane routing decision | `surface`, `agentId`, `operation`, `taskClass`, `policyId`, `selectedTarget`, `candidateCount`, `blockedCount`, `allowedCount`, `privacy`, `durationMs`, `success`, `errorCode` |
+| `inference.execute` / `inference.stream` | per-execution outcome | `surface`, `agentId`, `operation`, `taskClass`, `policyId`, `selectedTarget`, `finalTarget`, `attemptPath`, `failedTargets`, `attemptCount`, `failedCount`, `fallbackCount`, `privacy`, `durationMs`, `inputTokens`, `outputTokens`, `success`, `cancelled`, `errorCode` |
+| `inference.fallback` | emitted alongside execute/stream when a target failed and routing fell back | same fields as execute/stream |
+| `error.occurred` | process-level crash, unhandled rejection, or event-loop wedge | `type`, `message`, `stack`, `uptimeMs`; `EventLoopLag` reports add `lagMs` |
+| `version.upgraded` | daemon auto-update path only | `from`, `to` |
+| `command.invoked` | CLI command (name only, never arguments) | `command` |
+
+Declared but **not yet emitted**: `pipeline.extraction`, `pipeline.decision`,
+`pipeline.error` (issue #1205 covers firing `pipeline.error`). Docs must not
+claim them.
+
+Notes on individual events:
+
+- **`install.ping`** — the wrapper postinstall counter. Each ping uses a
+  *fresh throwaway UUID*, so it never joins the daemon's persisted id: one
+  physical install is two PostHog users across ping and daemon events. Bun
+  global installs skip the postinstall and desktop installs never run it, so
+  the ping structurally undercounts both populations.
+- **`install.activated`** — emitted exactly once, when the persisted install
+  id is first created. It covers bun, desktop, and npm uniformly and is the
+  **active installs** metric. Count distinct ids with `install.activated`;
+  never sum ping and activated counts.
+- **`session.end`** — known naming quirk: it fires on the `session_end` hook
+  harnesses call per turn to save messages, so it measures *turns persisted*,
+  not session terminations. `session.start` is deduped per real session; the
+  end path is not, so the counters are not comparable (observed ~9:1 in the
+  wild). Rename to `session.turn` / `turn.persisted` plus a real termination
+  event is tracked in issue #1212.
+- **`dreaming.pass`** — dreaming is the largest token consumer (millions of
+  input tokens per heavy install), so always include it in token/cost
+  aggregates.
+
+## Privacy contract
+
+- **Anonymous per-install UUIDs.** The `distinct_id` is a random UUID
+  persisted in the workspace database. No email, name, or account is ever
+  sent; PostHog persons show up as the UUID.
+- **No content.** Events carry no memory content, no recall query text, no
+  prompt text, and no file paths. `llm.generate` records token/cost counts,
+  latency, provider, and success — never the prompt or response.
+- **Sanitized crash reports.** `error.occurred` captures the error type, a
+  message truncated to 400 characters with control characters replaced and
+  `/home/<user>` / `/Users/<user>` paths stripped to `~`, the top 8 stack
+  frames with home directories removed, and uptime in ms. `EventLoopLag`
+  reports (the event-loop-wedge class) are rate-limited to once per 10
+  minutes per process so a stuck loop can't flood the project. No memory
+  content is ever captured anywhere, so errors cannot carry it by design.
+- **Agent ids in `inference.*`.** The inference routing events include
+  `agentId` (the local agent profile id, e.g. `default`) as-is. This is the
+  harness scope, not a person identifier, but it is a per-install variable —
+  documented here so the claim "no agent ids" is never made.
+- **Geo.** PostHog captures `$ip` server-side on every event and derives
+  city/country from it. The wrapper cannot suppress this; it is an open
+  question whether to send `$ip: null` or soften the no-IP claim (issue
+  #1200).
+- **`memorySearchQaEnabled` is separate and local-only.** It writes a recall
+  QA ledger that *intentionally* includes query text and result snapshots. It
+  is exposed only through analytics-gated endpoints and is never sent to
+  PostHog.
+
+## Configuration
+
+All telemetry keys live under `memory.pipelineV2` in `agent.yaml`:
+
+| Key | Default | Range | Description |
+|---|---|---|---|
+| `telemetryEnabled` | `true` | boolean | Master switch; `false` opts out |
+| `telemetry.posthogHost` | `https://us.i.posthog.com` | — | PostHog instance URL; empty disables sending |
+| `telemetry.posthogApiKey` | public ingest key | — | PostHog project API key; when empty, falls back to the `POSTHOG_API_KEY` secret |
+| `telemetry.flushIntervalMs` | `60000` | 5s-10min | Time between event flushes |
+| `telemetry.flushBatchSize` | `50` | 1-500 | Max events per flush batch |
+| `telemetry.retentionDays` | `90` | 1-365 | Days before local telemetry data is purged |
+| `memorySearchQaEnabled` | `false` | boolean | Local-only recall QA ledger (never sent) |
+
+**Nesting pitfall (regression-pinned):** the daemon reads the flag via
+`loadPipelineConfig` from `yaml.memory.pipelineV2`. A *top-level*
+`pipelineV2.telemetryEnabled` key is invisible to the daemon — the original
+setup disclosure wrote top-level and the opt-out silently did nothing until
+fixed (1d014075). Setup/CLI writers must write into `memory.pipelineV2`.
+
+**Runtime opt-out:** `SIGNET_TELEMETRY_OPTOUT=1` (or `true`) in the daemon's
+environment disables both the daemon collector and the install ping — one
+knob for the whole product. CI runners, containers, and scripted
+environments should set it so automated daemon boots don't count as
+installs.
+
+**Disclosure:** `signet setup` tells users telemetry is on by default and
+asks whether to disable it. Declining writes `telemetryEnabled: false`;
+non-interactive/CI setups keep the default (enabled).
+
+## The open audit log
+
+Every recorded event is appended as one JSON line to
+`<agentsDir>/.daemon/telemetry/events.jsonl` — daemon events and CLI
+`command.invoked` lines alike. It is the single inspectable surface for
+exactly what was recorded: users can audit the file without trusting the
+sink. The CLI appends `command.invoked` (command name only) locally,
+best-effort, with no daemon round-trip or auth, gated on the same
+`memory.pipelineV2.telemetryEnabled` flag. `command.invoked` is JSONL-only —
+it is never flushed to PostHog.
+
+## Known semantics quirks
+
+- `session.end` counts turns, not sessions (#1212, rename pending).
+- `pipeline.embedding` is tokens-only; embedding cost accounting is pending
+  (#1201).
+- `install.ping` and `install.activated` measure different populations —
+  report them as complementary, never summed.
+- CI and dev fleets inflate "user" counts: every automated daemon boot with
+  default config is a phantom install. Identify them as `daemon.started`
+  without a matching `install.ping`, and set `SIGNET_TELEMETRY_OPTOUT=1` in
+  workflows. Dev-install tagging (`SIGNET_TELEMETRY_ENV=dev`) is under
+  discussion (#1200).
+- Flush cadence is the configured interval (default 60s); a freshly started
+  daemon takes up to a minute to appear in PostHog.
+
+## How to query
+
+The project is PostHog **547297** (US region). The shipped ingest key is
+ingest-only by PostHog design and **cannot read data** — query with a
+personal API key (`phx_…`) that has `query:read`, e.g. via the PostHog CLI:
+
+```bash
+export POSTHOG_CLI_HOST=https://us.posthog.com POSTHOG_CLI_PROJECT_ID=547297 POSTHOG_CLI_API_KEY=<phx key>
+bunx -y @posthog/cli@latest api call --json execute-sql '{"query": "<hogql>"}'
+```
+
+HogQL examples that work:
+
+```sql
+-- events by type
+select event, count() as n from events group by event order by n desc
+-- active installs (distinct ids that ever activated)
+select distinct_id, count() as n from events where event = 'install.activated' group by distinct_id
+-- llm cost by provider
+select properties.provider as provider, count() as calls, sum(properties.totalCost) as cost
+  from events where event = 'llm.generate' group by provider
+```
+
+The local daemon also exposes `/api/telemetry/stats` (llm + embedding +
+dreaming aggregates from the local `telemetry_events` table) — see
+[docs/api/telemetry-logs.md](./api/telemetry-logs.md). A local analytics
+vault mirrors the key PostHog aggregates for daily review via
+`scripts/sync-analytics.py`.
+
+## Changelog of event additions
+
+| Release | Change |
+|---|---|
+| 0.170.0 | Per-install PostHog analytics: daemon collector, default-on (#1026) |
+| 0.171.0 | Phase 2 (#1026): open JSONL audit log, lifecycle events (`daemon.started`, `daemon.heartbeat`, `session.start`/`session.end`, `error.occurred`, `version.upgraded`, `command.invoked`), wrapper install ping, default-on disclosure in setup; fix setup opt-out to write `memory.pipelineV2` |
+| 0.172.0 | `pipeline.embedding` with stats (#1181) |
+| 0.173.0 | `install.activated` on first daemon run |
+| 0.174.0 | `dreaming.pass` with provider-reported token usage and cost |
+| 0.176.0 | Sanitized crash reports: full `error.occurred` payload (truncated, home-stripped message + top-8 stack frames) and rate-limited `EventLoopLag` wedge reports |
+
+Related: #1026 (original rollout), #1200 (IP capture, dev tagging),
+#1201-#1207 (event-scoped follow-ups), #1212 (session.end rename).

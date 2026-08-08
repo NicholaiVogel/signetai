@@ -324,6 +324,7 @@ surfaces, and ownership boundaries.
 - [Quickstart](./docs/QUICKSTART.md)
 - [CLI Reference](./docs/CLI.md)
 - [Configuration](./docs/CONFIGURATION.md)
+- [Telemetry](./docs/TELEMETRY.md)
 - [Hooks](./docs/HOOKS.md)
 - [Harnesses](./docs/HARNESSES.md)
 - [Secrets](./docs/SECRETS.md)

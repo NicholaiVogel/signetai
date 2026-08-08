@@ -1146,6 +1146,8 @@ continuity:
   recoveryBudgetChars: 2000      # range 200–10000
 
 telemetry:
+  # anonymous usage telemetry; see docs/TELEMETRY.md for the event catalog,
+  # privacy contract, and audit log
   telemetryEnabled: true        # set false to opt out
   posthogHost: "https://us.i.posthog.com"
   posthogApiKey: "phc_mLsvJmbmp6e9UarrX9Cq5QtTjVNiiphM9mvi5Xnddd8Q"  # public ingest key

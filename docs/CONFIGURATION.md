@@ -1118,33 +1118,18 @@ leaving the explicit `session_search` MCP/API surface available.
 
 Anonymous usage telemetry. On by default; set `telemetryEnabled: false`
 to opt out. Events are batched and flushed periodically. Sending requires
-both `posthogHost` and `posthogApiKey`; telemetry never includes memory
-content, user identity, or file paths. Each install gets a random
+both `posthogHost` and `posthogApiKey`. Each install gets a random
 anonymous id (persisted in the workspace database) used as the PostHog
 `distinct_id`, so installs stay countable without being identifiable.
+
+**See [TELEMETRY.md](./TELEMETRY.md)** — the single reference for the
+event catalog, privacy contract, the open JSONL audit log, runtime opt-out
+(`SIGNET_TELEMETRY_OPTOUT=1`), and how to query the data.
 
 **Disclosure (issue #1026):** `signet setup` tells users telemetry is on
 by default and asks whether to disable it. Declining writes
 `telemetryEnabled: false`; non-interactive/CI setups keep the default
 (enabled).
-
-**Runtime opt-out:** setting `SIGNET_TELEMETRY_OPTOUT=1` in the daemon's
-environment disables telemetry without touching config — the same knob the
-install ping honors. CI runners, containers, and scripted environments
-should set it so automated daemon boots don't count as installs.
-
-**Open telemetry log:** every recorded event is appended as one JSON line
-to `<agentsDir>/.daemon/telemetry/events.jsonl` — the single inspectable
-audit surface for exactly what was sent (daemon events and CLI
-`command.invoked` lines). No memory content, code, file paths, or personal
-data are ever included.
-
-Lifecycle events: `daemon.started` (version, platform,
-uptime), `command.invoked` (command name only, never arguments),
-`error.occurred` (sanitized crash report — truncated message with user paths
-stripped, top stack frames with home directories removed, uptime, and
-rate-limited `EventLoopLag` reports with measured lag), `version.upgraded`
-(from, to).
 
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
