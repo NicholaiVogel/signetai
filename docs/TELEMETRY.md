@@ -104,10 +104,12 @@ Notes on individual events:
   reports (the event-loop-wedge class) are rate-limited to once per 10
   minutes per process so a stuck loop can't flood the project. No memory
   content is ever captured anywhere, so errors cannot carry it by design.
-- **Agent ids in `inference.*`.** The inference routing events include
-  `agentId` (the local agent profile id, e.g. `default`) as-is. This is the
-  harness scope, not a person identifier, but it is a per-install variable —
-  documented here so the claim "no agent ids" is never made.
+- **Agent ids in `inference.*` are hashed.** Inference events carry
+  `agentId` as a SHA-256 hash salted with the per-install install id (16 hex
+  chars). Stable within an install (per-agent analysis still works), not
+  joinable across installs, not reversible — the raw agent name is never
+  sent. (Hashed in `telemetry.anonymizeAgentId`; previous versions sent it
+  as-is.)
 - **Geo.** PostHog captures `$ip` server-side on every event and derives
   city/country from it. The wrapper cannot suppress this; it is an open
   question whether to send `$ip: null` or soften the no-IP claim (issue

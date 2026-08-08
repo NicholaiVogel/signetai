@@ -208,6 +208,79 @@ describe("telemetry collector", () => {
 		expect(lastBatch.map((e) => e.event)).not.toContain("install.activated");
 	});
 
+	it("anonymizeAgentId: stable per install, differs across installs, never raw", async () => {
+		const { cleanupTestTempDir, createTestTempDir } = await import("./test-temp-dir");
+		const dir = createTestTempDir("signet-anon-");
+		try {
+			closeDbAccessor();
+			initDbAccessor(join(dir, "memory", "memories.db"));
+			const collector = createTelemetryCollector(
+				getDbAccessor(),
+				{
+					posthogHost: "",
+					posthogApiKey: "",
+					flushIntervalMs: 60000,
+					flushBatchSize: 50,
+					retentionDays: 90,
+					memorySearchQaEnabled: false,
+				},
+				"0.0.0-test",
+			);
+			const a = collector.anonymizeAgentId("hermes-agent");
+			const b = collector.anonymizeAgentId("hermes-agent");
+			expect(a).toBe(b); // stable within an install
+			expect(a).not.toContain("hermes-agent");
+			expect(a).toMatch(/^[0-9a-f]{16}$/);
+			expect(collector.anonymizeAgentId("agent-a")).not.toBe(collector.anonymizeAgentId("agent-b"));
+		} finally {
+			closeDbAccessor();
+			cleanupTestTempDir(dir);
+		}
+	});
+
+	it("anonymizeAgentId differs across installs for the same agent id", async () => {
+		const { cleanupTestTempDir, createTestTempDir } = await import("./test-temp-dir");
+		const dirA = createTestTempDir("signet-anon-a-");
+		const dirB = createTestTempDir("signet-anon-b-");
+		try {
+			closeDbAccessor();
+			initDbAccessor(join(dirA, "memory", "memories.db"));
+			const ca = createTelemetryCollector(
+				getDbAccessor(),
+				{
+					posthogHost: "",
+					posthogApiKey: "",
+					flushIntervalMs: 60000,
+					flushBatchSize: 50,
+					retentionDays: 90,
+					memorySearchQaEnabled: false,
+				},
+				"0.0.0-test",
+			);
+			const ha = ca.anonymizeAgentId("default");
+			closeDbAccessor();
+			initDbAccessor(join(dirB, "memory", "memories.db"));
+			const cb = createTelemetryCollector(
+				getDbAccessor(),
+				{
+					posthogHost: "",
+					posthogApiKey: "",
+					flushIntervalMs: 60000,
+					flushBatchSize: 50,
+					retentionDays: 90,
+					memorySearchQaEnabled: false,
+				},
+				"0.0.0-test",
+			);
+			const hb = cb.anonymizeAgentId("default");
+			expect(ha).not.toBe(hb); // same agent id hashes differently per install
+		} finally {
+			closeDbAccessor();
+			cleanupTestTempDir(dirA);
+			cleanupTestTempDir(dirB);
+		}
+	});
+
 	it("sanitizes crash reports: truncation, home-path stripping, frame cap", () => {
 		const longMessage =
 			'SQLiteError: database is locked near "a very long embedded fragment that goes on and on" at /home/alice/.agents/memory/memories.db'.repeat(

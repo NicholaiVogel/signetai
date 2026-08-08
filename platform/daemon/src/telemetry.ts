@@ -6,6 +6,7 @@
  * No memory content, user identity, or file paths are ever included.
  */
 
+import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { PipelineTelemetryConfig } from "@signet/core";
@@ -99,6 +100,13 @@ export interface TelemetryCollector {
 	}): readonly TelemetryEvent[];
 
 	readonly enabled: boolean;
+
+	/**
+	 * Hash an agent id with the per-install id so inference telemetry never
+	 * carries the raw agent name: stable within an install, not joinable
+	 * across installs, not reversible. Returns "" when no install id exists.
+	 */
+	anonymizeAgentId(agentId: string): string;
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +416,9 @@ export function createTelemetryCollector(
 
 	const collector: TelemetryCollector = {
 		enabled: true,
+		anonymizeAgentId(agentId: string): string {
+			return createHash("sha256").update(`${agentId}:${installId}`).digest("hex").slice(0, 16);
+		},
 
 		record(event, properties): void {
 			if (buffer.length >= MAX_BUFFER_EVENTS) {

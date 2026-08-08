@@ -573,7 +573,7 @@ function recordInferenceRouteTelemetry(
 		).length;
 		telemetry.record("inference.route", {
 			surface,
-			agentId: request.agentId ?? "default",
+			agentId: telemetry.anonymizeAgentId(request.agentId ?? "default"),
 			operation: request.operation,
 			taskClass: result.value.taskClass,
 			policyId: result.value.policyId,
@@ -591,7 +591,7 @@ function recordInferenceRouteTelemetry(
 	const counts = traceCounts(result.error.details);
 	telemetry.record("inference.route", {
 		surface,
-		agentId: request.agentId ?? "default",
+		agentId: telemetry.anonymizeAgentId(request.agentId ?? "default"),
 		operation: request.operation,
 		taskClass: request.taskClass ?? null,
 		policyId: request.explicitPolicy ?? null,
@@ -624,7 +624,7 @@ function recordInferenceExecutionTelemetry(
 	const summary = summarizeAttempts(payload.attempts);
 	telemetry.record(event, {
 		surface,
-		agentId: request.agentId ?? "default",
+		agentId: telemetry.anonymizeAgentId(request.agentId ?? "default"),
 		operation: request.operation,
 		taskClass: payload.decision.taskClass,
 		policyId: payload.decision.policyId,
@@ -646,7 +646,7 @@ function recordInferenceExecutionTelemetry(
 	if (summary.failedCount > 0) {
 		telemetry.record("inference.fallback", {
 			surface,
-			agentId: request.agentId ?? "default",
+			agentId: telemetry.anonymizeAgentId(request.agentId ?? "default"),
 			operation: request.operation,
 			taskClass: payload.decision.taskClass,
 			policyId: payload.decision.policyId,
