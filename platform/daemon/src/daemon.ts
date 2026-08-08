@@ -121,8 +121,11 @@ import {
 import { startSchedulerWorker } from "./scheduler";
 import { getSecret } from "./secrets.js";
 import { flushPendingCheckpoints, initCheckpointFlush, pruneCheckpoints } from "./session-checkpoints";
+import { createSessionClaimStore } from "./session-claims";
 import {
 	releaseAllSessions,
+	restorePersistedSessions,
+	setSessionClaimStore,
 	setSessionEvictionHandler,
 	startSessionCleanup,
 	stopSessionCleanup,
@@ -1888,6 +1891,7 @@ async function main() {
 	}
 
 	await initDbAccessorAsync(MEMORY_DB, { agentsDir: AGENTS_DIR });
+	setSessionClaimStore(createSessionClaimStore(getDbAccessor()));
 	startSessionCleanup();
 	// Formal TTL lifecycle (#902): when stale-session cleanup evicts a claim
 	// whose harness never sent session-end, checkpoint the residual continuity
@@ -1903,6 +1907,10 @@ async function main() {
 			},
 		}),
 	);
+	const restoredSessions = restorePersistedSessions();
+	if (restoredSessions.active > 0 || restoredSessions.expired > 0 || restoredSessions.ended > 0) {
+		logger.info("session-tracker", "Restored durable session lifecycle state", restoredSessions);
+	}
 	logFdSnapshot("post-db-init");
 	startEventLoopMonitor();
 	startFdPollMonitor();

@@ -47,7 +47,7 @@ function listLiveSessions(agentId: string): Array<{
 			runtimePath: presence.runtimePath ?? "unknown",
 			claimedAt: presence.startedAt,
 			expiresAt: null,
-			bypassed: isSessionBypassed(key),
+			bypassed: isSessionBypassed(key, agentId),
 		});
 	}
 	return [...byKey.values()].sort((a, b) => b.claimedAt.localeCompare(a.claimedAt));
@@ -274,12 +274,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRoutesDeps): void 
 		const enabled = body.enabled === true;
 
 		if (enabled) {
-			const ok = bypassSession(key, { allowUnknown: session.expiresAt === null });
+			const ok = bypassSession(key, { allowUnknown: session.expiresAt === null }, scopedAgent.agentId);
 			if (!ok) {
 				return c.json({ error: "Session not found or already released" }, 404);
 			}
 		} else {
-			unbypassSession(key);
+			unbypassSession(key, scopedAgent.agentId);
 		}
 		return c.json({ key, bypassed: enabled });
 	});
@@ -296,7 +296,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRoutesDeps): void 
 			touchAgentPresence(key, scopedAgent.agentId);
 			return c.json({ key, renewed: true });
 		}
-		const expiresAt = renewSession(key);
+		const expiresAt = renewSession(key, scopedAgent.agentId);
 		if (!expiresAt) {
 			return c.json({ error: "Session not found or expired" }, 404);
 		}

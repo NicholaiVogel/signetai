@@ -219,10 +219,11 @@ describe("TTL eviction lifecycle handler (#902)", () => {
 		const seen: Array<{ key: string; agentId: string; runtimePath: string }> = [];
 		const handler: SessionEvictionHandler = (info) => {
 			seen.push({ key: info.sessionKey, agentId: info.agentId, runtimePath: info.runtimePath });
+			return undefined;
 		};
 		setSessionEvictionHandler(handler);
 		claimSession("ttl-sess-1", "plugin", "agent-a");
-		_expireSessionForTest("ttl-sess-1");
+		_expireSessionForTest("ttl-sess-1", "agent-a");
 
 		runStaleCleanup();
 
@@ -234,7 +235,7 @@ describe("TTL eviction lifecycle handler (#902)", () => {
 	it("counts a handler 'skipped' outcome as unfinalized", () => {
 		setSessionEvictionHandler(() => "skipped");
 		claimSession("ttl-sess-2", "legacy", "agent-b");
-		_expireSessionForTest("ttl-sess-2");
+		_expireSessionForTest("ttl-sess-2", "agent-b");
 
 		runStaleCleanup();
 
@@ -245,7 +246,7 @@ describe("TTL eviction lifecycle handler (#902)", () => {
 	it("does not count a 'finalized' outcome as unfinalized", () => {
 		setSessionEvictionHandler(() => "finalized");
 		claimSession("ttl-sess-3", "plugin", "agent-c");
-		_expireSessionForTest("ttl-sess-3");
+		_expireSessionForTest("ttl-sess-3", "agent-c");
 
 		runStaleCleanup();
 

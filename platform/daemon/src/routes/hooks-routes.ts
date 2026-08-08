@@ -110,10 +110,11 @@ function checkSessionClaim(
 	c: Context,
 	sessionKey: string | undefined,
 	runtimePath: RuntimePath | undefined,
+	agentId = "default",
 ): Response | null {
 	if (!sessionKey || !runtimePath) return null;
 
-	const owner = getSessionPath(sessionKey);
+	const owner = getSessionPath(sessionKey, agentId);
 	if (owner && owner !== runtimePath) {
 		return c.json({ error: `session claimed by ${owner} path` }, 409) as unknown as Response;
 	}
@@ -150,9 +151,10 @@ function claimAutomaticSessionOrSkip(
 function skipConflictingSessionEnd(
 	sessionKey: string | undefined,
 	runtimePath: RuntimePath | undefined,
+	agentId = "default",
 ): Record<string, unknown> | null {
 	if (!sessionKey || !runtimePath) return null;
-	const ended = getEndedSession(sessionKey);
+	const ended = getEndedSession(sessionKey, agentId);
 	if (ended && !ended.runtimePath) return null;
 	if (ended) {
 		logger.info("hooks", "Duplicate session-end skipped", {
@@ -167,7 +169,7 @@ function skipConflictingSessionEnd(
 			endedBy: ended.runtimePath ?? "unknown",
 		};
 	}
-	const owner = getSessionPath(sessionKey);
+	const owner = getSessionPath(sessionKey, agentId);
 	if (!owner || owner === runtimePath) return null;
 
 	logger.info("hooks", "Duplicate runtime session-end skipped", {
@@ -211,10 +213,10 @@ function isInternalCall(c: Context): boolean {
 }
 
 // Check whether the session is bypassed (hooks return no-op responses)
-function checkBypass(body?: { sessionKey?: string; sessionId?: string }): boolean {
+function checkBypass(body?: { sessionKey?: string; sessionId?: string; agentId?: string }): boolean {
 	const key = body?.sessionKey ?? body?.sessionId;
 	if (!key) return false;
-	return isSessionBypassed(key);
+	return isSessionBypassed(key, body?.agentId ?? "default");
 }
 
 export function listLiveSessions(agentId: string): Array<{
@@ -243,7 +245,7 @@ export function listLiveSessions(agentId: string): Array<{
 			runtimePath: presence.runtimePath ?? "unknown",
 			claimedAt: presence.startedAt,
 			expiresAt: null,
-			bypassed: isSessionBypassed(key),
+			bypassed: isSessionBypassed(key, agentId),
 		});
 	}
 	return [...byKey.values()].sort((a, b) => b.claimedAt.localeCompare(a.claimedAt));
@@ -372,9 +374,8 @@ function registerUserPromptSubmit(app: Hono): void {
 			if (runtimePath) body.runtimePath = runtimePath;
 
 			const sessionKey = parseOptionalString(body.sessionKey);
-			const known = sessionKey ? hasSession(sessionKey) : false;
-
 			const agentId = parseOptionalString(body.agentId) ?? "default";
+			const known = sessionKey ? hasSession(sessionKey, agentId) : false;
 			const duplicate = claimAutomaticSessionOrSkip(
 				sessionKey,
 				runtimePath,
@@ -462,10 +463,10 @@ function registerSessionEnd(app: Hono): void {
 			stampHarness(body.harness);
 
 			const sessionKey = body.sessionKey || body.sessionId;
-			const conflict = skipConflictingSessionEnd(sessionKey, runtimePath);
+			let agentId = resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey });
+			const conflict = skipConflictingSessionEnd(sessionKey, runtimePath, agentId);
 			if (conflict) return c.json(conflict);
 			const transcriptPath = parseOptionalString(body.transcriptPath);
-			let agentId = resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey });
 			if (transcriptPath) {
 				const denied = await requirePermission("remember", authConfig)(c, () => Promise.resolve());
 				if (denied) return denied;
@@ -484,8 +485,8 @@ function registerSessionEnd(app: Hono): void {
 			});
 			if (duplicate) return c.json(duplicate);
 
-			if (sessionKey && isSessionBypassed(sessionKey)) {
-				markSessionEnded(sessionKey, runtimePath);
+			if (sessionKey && isSessionBypassed(sessionKey, agentId)) {
+				markSessionEnded(sessionKey, runtimePath, agentId);
 				removeAgentPresence(sessionKey);
 				return c.json({ memoriesSaved: 0, bypassed: true });
 			}
@@ -493,7 +494,7 @@ function registerSessionEnd(app: Hono): void {
 			try {
 				const result = await handleSessionEnd(body);
 				if (sessionKey) {
-					markSessionEnded(sessionKey, runtimePath);
+					markSessionEnded(sessionKey, runtimePath, agentId);
 					removeAgentPresence(sessionKey);
 				}
 				if (transcriptPath) {
@@ -511,7 +512,7 @@ function registerSessionEnd(app: Hono): void {
 				return c.json(result);
 			} catch (e) {
 				if (sessionKey) {
-					releaseSession(sessionKey);
+					releaseSession(sessionKey, agentId);
 					removeAgentPresence(sessionKey);
 				}
 				throw e;
@@ -557,7 +558,7 @@ function registerSkillInvocation(app: Hono): void {
 			if (createdAt.error) return c.json({ error: createdAt.error }, 400);
 			const sessionKey = parseOptionalString(body.sessionKey ?? body.sessionId);
 			const runtimePath = resolveRuntimePath(c, { runtimePath: parseOptionalString(body.runtimePath) });
-			const conflict = checkSessionClaim(c, sessionKey, runtimePath);
+			const conflict = checkSessionClaim(c, sessionKey, runtimePath, parseOptionalString(body.agentId) ?? "default");
 			if (conflict) return conflict;
 			const requestedAgentId = resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey });
 			const denied = await requirePermission("remember", authConfig)(c, () => Promise.resolve());
@@ -615,11 +616,12 @@ function registerCheckpointExtract(app: Hono): void {
 
 			const runtimePath = resolveRuntimePath(c, body);
 			if (runtimePath) body.runtimePath = runtimePath;
+			const agentId = parseOptionalString(body.agentId) ?? "default";
 
 			const duplicate = claimAutomaticSessionOrSkip(
 				body.sessionKey,
 				runtimePath,
-				parseOptionalString(body.agentId) ?? "default",
+				agentId,
 				body.harness,
 				"session-checkpoint-extract",
 				{
@@ -630,11 +632,11 @@ function registerCheckpointExtract(app: Hono): void {
 
 			stampHarness(body.harness);
 
-			if (isSessionBypassed(body.sessionKey)) {
+			if (isSessionBypassed(body.sessionKey, agentId)) {
 				return c.json({ skipped: true });
 			}
 
-			renewSession(body.sessionKey);
+			renewSession(body.sessionKey, agentId);
 
 			const result = handleCheckpointExtract(body);
 			return c.json(result);
@@ -661,7 +663,12 @@ function registerRemember(app: Hono): void {
 			const runtimePath = resolveRuntimePath(c, body);
 			if (runtimePath) body.runtimePath = runtimePath;
 
-			const conflict = checkSessionClaim(c, body.sessionKey, runtimePath);
+			const conflict = checkSessionClaim(
+				c,
+				body.sessionKey,
+				runtimePath,
+				parseOptionalString(body.agentId) ?? "default",
+			);
 			if (conflict) return conflict;
 
 			if (checkBypass(body)) {
@@ -708,7 +715,12 @@ function registerRecall(app: Hono): void {
 			const runtimePath = resolveRuntimePath(c, body);
 			if (runtimePath) body.runtimePath = runtimePath;
 
-			const conflict = checkSessionClaim(c, body.sessionKey, runtimePath);
+			const conflict = checkSessionClaim(
+				c,
+				body.sessionKey,
+				runtimePath,
+				parseOptionalString(body.agentId) ?? "default",
+			);
 			if (conflict) return conflict;
 
 			if (checkBypass(body)) {

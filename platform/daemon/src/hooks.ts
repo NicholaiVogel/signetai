@@ -659,7 +659,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			timeStyle: "short",
 		});
 		const warnings = req.sessionKey
-			? [getExpiryWarning(req.sessionKey)].filter((w): w is string => w !== null)
+			? [getExpiryWarning(req.sessionKey, agentId)].filter((w): w is string => w !== null)
 			: undefined;
 		return {
 			identity: { name: "Agent" },
@@ -1246,7 +1246,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 		inject,
 		warnings: (() => {
 			if (!req.sessionKey) return undefined;
-			const w = [getExpiryWarning(req.sessionKey)].filter((v): v is string => v !== null);
+			const w = [getExpiryWarning(req.sessionKey, resolveAgentId(req))].filter((v): v is string => v !== null);
 			return w.length > 0 ? w : undefined;
 		})(),
 	};
@@ -1643,7 +1643,7 @@ export async function handleUserPromptSubmit(
 		timeStyle: "short",
 	});
 	const metadataHeader = `# Current Date & Time\n${now} (${tz})\n`;
-	const expiryWarning = req.sessionKey ? deps.getExpiryWarning(req.sessionKey) : null;
+	const expiryWarning = req.sessionKey ? deps.getExpiryWarning(req.sessionKey, agentId) : null;
 	const warnings = expiryWarning ? [expiryWarning] : undefined;
 
 	if (submitCfg.enabled === false) {

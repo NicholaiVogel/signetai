@@ -118,6 +118,7 @@ import { up as telemetryInstall } from "./109-telemetry-install";
 import { up as memoryMentionJoinIndex } from "./110-memory-mention-join-index";
 import { up as telemetryFirstUse } from "./111-telemetry-first-use";
 import { up as telemetryQueueOwnership } from "./112-telemetry-queue-ownership";
+import { up as sessionClaims } from "./113-session-claims";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1047,6 +1048,20 @@ export const MIGRATIONS: readonly Migration[] = [
 				{ table: "telemetry_events", column: "source" },
 				{ table: "telemetry_events", column: "claim_token" },
 				{ table: "telemetry_events", column: "claimed_at" },
+			],
+		},
+	},
+	{
+		version: 113,
+		name: "session-claims",
+		up: sessionClaims,
+		artifacts: {
+			tables: ["session_claims"],
+			columns: [
+				{ table: "session_claims", column: "agent_id" },
+				{ table: "session_claims", column: "harness" },
+				{ table: "session_claims", column: "expires_at" },
+				{ table: "session_claims", column: "end_marker" },
 			],
 		},
 	},

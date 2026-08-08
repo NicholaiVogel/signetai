@@ -10,9 +10,10 @@
  */
 
 import { logger } from "./logger";
+import type { PersistedSessionClaim, SessionClaimStore } from "./session-claims";
 import {
-	hashSessionKey,
 	hasSessionEndTelemetry,
+	hashSessionKey,
 	markSessionEndTelemetry,
 	normalizeSessionKey,
 	resetSessionEndTelemetry,
@@ -33,6 +34,7 @@ export interface SessionInfo {
 }
 
 interface SessionClaim {
+	readonly sessionKey: string;
 	readonly agentId: string;
 	readonly runtimePath: RuntimePath;
 	/** Harness that claimed the session (for telemetry breakdowns). */
@@ -49,6 +51,7 @@ export interface EndedSessionInfo {
 }
 
 interface EndedSession {
+	readonly agentId: string;
 	readonly runtimePath?: RuntimePath;
 	readonly endedAt: string;
 	expiresAt: number;
@@ -92,16 +95,43 @@ let cleanupTimer: ReturnType<typeof setInterval> | null = null;
 let cleanupStarted = false;
 // TTL-eviction lifecycle hook + counters (#902).
 let evictionHandler: SessionEvictionHandler | null = null;
+let claimStore: SessionClaimStore | null = null;
 let expiredCount = 0;
 let unfinalizedCount = 0;
+
+function scopedSessionKey(sessionKey: string, agentId: string): string {
+	return agentId === "default" ? sessionKey : JSON.stringify([agentId, sessionKey]);
+}
+
+function persistedClaim(
+	key: string,
+	claim: SessionClaim,
+	state: "active" | "expired" | "ended" = "active",
+	endedAt: string | null = null,
+	endMarker: string | null = null,
+): PersistedSessionClaim {
+	return {
+		sessionKey: key,
+		agentId: claim.agentId,
+		runtimePath: claim.runtimePath,
+		harness: claim.harness ?? null,
+		claimedAt: claim.claimedAt,
+		expiresAt: new Date(claim.expiresAt).toISOString(),
+		state,
+		endedAt,
+		endMarker,
+	};
+}
 
 // normalizeSessionKey is defined in session-end-state.ts (single source of
 // truth for session-key identity) and re-exported here for the routes.
 
-function evictExpiredSession(key: string, claim: SessionClaim): void {
-	if (!sessions.delete(key)) return;
-	bypassedSessions.delete(key);
-	warnedSessions.delete(key);
+function evictExpiredSession(mapKey: string, claim: SessionClaim): void {
+	if (!sessions.delete(mapKey)) return;
+	const key = claim.sessionKey;
+	const scopedKey = scopedSessionKey(key, claim.agentId);
+	bypassedSessions.delete(scopedKey);
+	warnedSessions.delete(scopedKey);
 	expiredCount++;
 	logger.warn("session-tracker", "Session evicted (TTL expired)", {
 		sessionKey: key,
@@ -122,12 +152,17 @@ function evictExpiredSession(key: string, claim: SessionClaim): void {
 		markSessionEndTelemetry({ agentId: claim.agentId, harness: claim.harness, sessionKey: key });
 	}
 
-	if (!evictionHandler) return;
+	if (!evictionHandler) {
+		claimStore?.markExpired(key, claim.agentId);
+		return;
+	}
+	let outcome: "finalized" | "skipped" | undefined;
 	try {
-		const outcome = evictionHandler({
+		outcome = evictionHandler({
 			sessionKey: key,
 			agentId: claim.agentId,
 			runtimePath: claim.runtimePath,
+			harness: claim.harness,
 			claimedAt: claim.claimedAt,
 		});
 		if (outcome === "skipped") unfinalizedCount++;
@@ -137,6 +172,11 @@ function evictExpiredSession(key: string, claim: SessionClaim): void {
 			sessionKey: key,
 			error: err instanceof Error ? err.message : String(err),
 		});
+	}
+	if (outcome === "finalized") {
+		claimStore?.remove(key, claim.agentId);
+	} else {
+		claimStore?.markExpired(key, claim.agentId);
 	}
 }
 
@@ -152,13 +192,15 @@ export function claimSession(
 	harness?: string,
 ): ClaimResult {
 	const key = normalizeSessionKey(sessionKey);
-	const existing = sessions.get(key);
-	endedSessions.delete(key);
+	const mapKey = scopedSessionKey(key, agentId);
+	const existing = sessions.get(mapKey);
+	endedSessions.delete(mapKey);
 
 	if (existing) {
 		if (existing.runtimePath === runtimePath) {
 			// Same path reclaiming — refresh expiry
 			existing.expiresAt = Date.now() + STALE_SESSION_MS;
+			claimStore?.upsertActive(persistedClaim(key, existing));
 			return { ok: true };
 		}
 
@@ -169,20 +211,23 @@ export function claimSession(
 				previousPath: existing.runtimePath,
 				newPath: runtimePath,
 			});
-			evictExpiredSession(key, existing);
+			evictExpiredSession(mapKey, existing);
 			// Fall through to create new claim
 		} else {
 			return { ok: false, claimedBy: existing.runtimePath };
 		}
 	}
 
-	sessions.set(key, {
+	const claim: SessionClaim = {
+		sessionKey: key,
 		agentId,
 		runtimePath,
 		harness,
 		claimedAt: new Date().toISOString(),
 		expiresAt: Date.now() + STALE_SESSION_MS,
-	});
+	};
+	sessions.set(mapKey, claim);
+	claimStore?.upsertActive(persistedClaim(key, claim));
 
 	logger.info("session-tracker", "Session claimed", {
 		sessionKey: key,
@@ -196,24 +241,46 @@ export function claimSession(
  * Release a session claim. Called on session-end.
  * Also cleans up bypass state for the session.
  */
-export function releaseSession(sessionKey: string): void {
+export function releaseSession(sessionKey: string, agentId = "default"): void {
 	const key = normalizeSessionKey(sessionKey);
-	const removed = sessions.delete(key);
-	bypassedSessions.delete(key);
-	warnedSessions.delete(key);
+	const mapKey = scopedSessionKey(key, agentId);
+	const existing = sessions.get(mapKey);
+	const removed = sessions.delete(mapKey);
+	bypassedSessions.delete(mapKey);
+	warnedSessions.delete(mapKey);
+	if (existing) claimStore?.remove(key, existing.agentId);
 	if (removed) {
 		logger.info("session-tracker", "Session released", { sessionKey: key });
 	}
 }
 
-export function markSessionEnded(sessionKey: string, runtimePath?: RuntimePath): void {
+export function markSessionEnded(sessionKey: string, runtimePath?: RuntimePath, agentId = "default"): void {
 	const key = normalizeSessionKey(sessionKey);
-	releaseSession(key);
-	endedSessions.set(key, {
-		runtimePath,
-		endedAt: new Date().toISOString(),
-		expiresAt: Date.now() + ENDED_SESSION_TOMBSTONE_MS,
+	const endedAt = new Date().toISOString();
+	const mapKey = scopedSessionKey(key, agentId);
+	const existing = sessions.get(mapKey);
+	releaseSession(key, agentId);
+	const resolvedRuntimePath = runtimePath ?? existing?.runtimePath;
+	const tombstoneExpiresAt = Date.now() + ENDED_SESSION_TOMBSTONE_MS;
+	endedSessions.set(mapKey, {
+		agentId: existing?.agentId ?? agentId,
+		runtimePath: resolvedRuntimePath,
+		endedAt,
+		expiresAt: tombstoneExpiresAt,
 	});
+	if (claimStore) {
+		claimStore.markEnded({
+			sessionKey: key,
+			agentId: existing?.agentId ?? agentId,
+			runtimePath: resolvedRuntimePath ?? null,
+			harness: existing?.harness ?? null,
+			claimedAt: existing?.claimedAt ?? endedAt,
+			expiresAt: new Date(tombstoneExpiresAt).toISOString(),
+			state: "ended",
+			endedAt,
+			endMarker: endedAt,
+		});
+	}
 	logger.info("session-tracker", "Session ended", {
 		sessionKey: key,
 		runtimePath,
@@ -224,12 +291,13 @@ export function markSessionEnded(sessionKey: string, runtimePath?: RuntimePath):
  * Return true if the session is currently claimed and not stale.
  * Used by hooks to detect daemon-restart mid-session.
  */
-export function hasSession(sessionKey: string): boolean {
+export function hasSession(sessionKey: string, agentId = "default"): boolean {
 	const key = normalizeSessionKey(sessionKey);
-	const claim = sessions.get(key);
+	const mapKey = scopedSessionKey(key, agentId);
+	const claim = sessions.get(mapKey);
 	if (!claim) return false;
 	if (Date.now() > claim.expiresAt) {
-		evictExpiredSession(key, claim);
+		evictExpiredSession(mapKey, claim);
 		return false;
 	}
 	return true;
@@ -238,22 +306,23 @@ export function hasSession(sessionKey: string): boolean {
 /**
  * Get the runtime path for a session, if claimed.
  */
-export function getSessionPath(sessionKey: string): RuntimePath | undefined {
+export function getSessionPath(sessionKey: string, agentId = "default"): RuntimePath | undefined {
 	const key = normalizeSessionKey(sessionKey);
-	const claim = sessions.get(key);
+	const mapKey = scopedSessionKey(key, agentId);
+	const claim = sessions.get(mapKey);
 	if (!claim) return undefined;
 
 	if (Date.now() > claim.expiresAt) {
-		evictExpiredSession(key, claim);
+		evictExpiredSession(mapKey, claim);
 		return undefined;
 	}
 
 	return claim.runtimePath;
 }
 
-export function getEndedSession(sessionKey: string): EndedSessionInfo | undefined {
+export function getEndedSession(sessionKey: string, agentId = "default"): EndedSessionInfo | undefined {
 	const key = normalizeSessionKey(sessionKey);
-	const ended = endedSessions.get(key);
+	const ended = endedSessions.get(scopedSessionKey(key, agentId));
 	if (!ended) return undefined;
 
 	if (Date.now() > ended.expiresAt) {
@@ -277,35 +346,38 @@ export function getEndedSession(sessionKey: string): EndedSessionInfo | undefine
 export function bypassSession(
 	sessionKey: string,
 	opts?: { readonly allowUnknown?: boolean; readonly ttlMs?: number },
+	agentId = "default",
 ): boolean {
 	const key = normalizeSessionKey(sessionKey);
-	if (!sessions.has(key) && opts?.allowUnknown !== true) {
+	const mapKey = scopedSessionKey(key, agentId);
+	if (!sessions.has(mapKey) && opts?.allowUnknown !== true) {
 		logger.warn("session-tracker", "Bypass requested for unknown session", { sessionKey: key });
 		return false;
 	}
 	const ttlMs = opts?.ttlMs;
 	const ttl = typeof ttlMs === "number" && Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : STALE_SESSION_MS;
-	bypassedSessions.set(key, Date.now() + ttl);
+	bypassedSessions.set(mapKey, Date.now() + ttl);
 	logger.debug("session-tracker", "Session bypassed", { sessionKey: key });
 	return true;
 }
 
 /** Disable bypass for a session — hooks resume normal behavior. */
-export function unbypassSession(sessionKey: string): void {
+export function unbypassSession(sessionKey: string, agentId = "default"): void {
 	const key = normalizeSessionKey(sessionKey);
-	const removed = bypassedSessions.delete(key);
+	const removed = bypassedSessions.delete(scopedSessionKey(key, agentId));
 	if (removed) {
 		logger.debug("session-tracker", "Session bypass removed", { sessionKey: key });
 	}
 }
 
 /** Check whether a session is currently bypassed. */
-export function isSessionBypassed(sessionKey: string): boolean {
+export function isSessionBypassed(sessionKey: string, agentId = "default"): boolean {
 	const key = normalizeSessionKey(sessionKey);
-	const expiresAt = bypassedSessions.get(key);
+	const mapKey = scopedSessionKey(key, agentId);
+	const expiresAt = bypassedSessions.get(mapKey);
 	if (expiresAt === undefined) return false;
 	if (Date.now() > expiresAt) {
-		bypassedSessions.delete(key);
+		bypassedSessions.delete(mapKey);
 		return false;
 	}
 	return true;
@@ -321,18 +393,18 @@ export function getActiveSessions(): readonly SessionInfo[] {
 	const now = Date.now();
 	const result: SessionInfo[] = [];
 
-	for (const [key, claim] of sessions) {
+	for (const [mapKey, claim] of sessions) {
 		if (now > claim.expiresAt) {
-			evictExpiredSession(key, claim);
+			evictExpiredSession(mapKey, claim);
 			continue;
 		}
 		result.push({
-			key,
+			key: claim.sessionKey,
 			agentId: claim.agentId,
 			runtimePath: claim.runtimePath,
 			claimedAt: claim.claimedAt,
 			expiresAt: new Date(claim.expiresAt).toISOString(),
-			bypassed: isSessionBypassed(key),
+			bypassed: isSessionBypassed(claim.sessionKey, claim.agentId),
 		});
 	}
 
@@ -344,16 +416,17 @@ export function getActiveSessions(): readonly SessionInfo[] {
  * or null if healthy or not found. Throttled — only warns once per session
  * until the session is renewed.
  */
-export function getExpiryWarning(sessionKey: string): string | null {
-	if (isSessionBypassed(sessionKey)) return null;
+export function getExpiryWarning(sessionKey: string, agentId = "default"): string | null {
+	if (isSessionBypassed(sessionKey, agentId)) return null;
 	const key = normalizeSessionKey(sessionKey);
-	const claim = sessions.get(key);
+	const mapKey = scopedSessionKey(key, agentId);
+	const claim = sessions.get(mapKey);
 	if (!claim) return null;
 	const remaining = claim.expiresAt - Date.now();
 	if (remaining <= 0) return "session has expired — reconnect to start a new session";
 	if (remaining > WARN_BEFORE_MS) return null;
-	if (warnedSessions.has(sessionKey)) return null;
-	warnedSessions.add(sessionKey);
+	if (warnedSessions.has(mapKey)) return null;
+	warnedSessions.add(mapKey);
 	const mins = Math.max(1, Math.round(remaining / 60_000));
 	return `session expires in ~${mins} minute${mins === 1 ? "" : "s"} — consider /checkpoint`;
 }
@@ -362,23 +435,25 @@ export function getExpiryWarning(sessionKey: string): string | null {
  * Reset a session's TTL. Returns the new expiresAt ISO string, or null
  * if the session is not found.
  */
-export function renewSession(sessionKey: string): string | null {
+export function renewSession(sessionKey: string, agentId = "default"): string | null {
 	const key = normalizeSessionKey(sessionKey);
-	const claim = sessions.get(key);
+	const mapKey = scopedSessionKey(key, agentId);
+	const claim = sessions.get(mapKey);
 	if (!claim) return null;
 	// Reject renewal of already-expired sessions — caller should re-claim
 	if (claim.expiresAt <= Date.now()) {
-		evictExpiredSession(key, claim);
+		evictExpiredSession(mapKey, claim);
 		return null;
 	}
 	claim.expiresAt = Date.now() + STALE_SESSION_MS;
+	claimStore?.upsertActive(persistedClaim(key, claim));
 	// Keep bypass TTL aligned with the session TTL so bypassed sessions
 	// do not leak after renewal extends the session lifetime.
-	const existing = bypassedSessions.get(key);
+	const existing = bypassedSessions.get(mapKey);
 	if (existing !== undefined) {
-		bypassedSessions.set(key, claim.expiresAt);
+		bypassedSessions.set(mapKey, claim.expiresAt);
 	}
-	warnedSessions.delete(key);
+	warnedSessions.delete(mapKey);
 	logger.info("session-tracker", "Session renewed", { sessionKey: key });
 	return new Date(claim.expiresAt).toISOString();
 }
@@ -431,6 +506,73 @@ export function startSessionCleanup(): void {
 	if (cleanupStarted) return;
 	cleanupStarted = true;
 	cleanupTimer = setInterval(cleanupStaleSessions, CLEANUP_INTERVAL_MS);
+}
+
+/** Register the durable claim store after database migrations complete. */
+export function setSessionClaimStore(store: SessionClaimStore | null): void {
+	claimStore = store;
+}
+
+/**
+ * Rehydrate claims left by a previous daemon process. Expired rows are sent
+ * through the same finalizer as in-process TTL cleanup; ended rows restore the
+ * short duplicate-end tombstone without claiming the session again.
+ */
+export function restorePersistedSessions(): {
+	readonly active: number;
+	readonly expired: number;
+	readonly ended: number;
+} {
+	if (!claimStore) return { active: 0, expired: 0, ended: 0 };
+	const now = Date.now();
+	let active = 0;
+	let expired = 0;
+	let ended = 0;
+	for (const row of claimStore.list()) {
+		const expiresAt = Date.parse(row.expiresAt);
+		if (!Number.isFinite(expiresAt)) {
+			claimStore.markExpired(row.sessionKey, row.agentId);
+			expired++;
+			continue;
+		}
+		const mapKey = scopedSessionKey(row.sessionKey, row.agentId);
+		if (row.state === "ended") {
+			if (expiresAt <= now || !row.endedAt) {
+				claimStore.remove(row.sessionKey, row.agentId);
+				continue;
+			}
+			endedSessions.set(mapKey, {
+				agentId: row.agentId,
+				runtimePath: row.runtimePath ?? undefined,
+				endedAt: row.endedAt,
+				expiresAt,
+			});
+			ended++;
+			continue;
+		}
+		if (row.runtimePath === null) {
+			claimStore.remove(row.sessionKey, row.agentId);
+			expired++;
+			continue;
+		}
+
+		const claim: SessionClaim = {
+			sessionKey: row.sessionKey,
+			agentId: row.agentId,
+			runtimePath: row.runtimePath,
+			harness: row.harness ?? undefined,
+			claimedAt: row.claimedAt,
+			expiresAt,
+		};
+		sessions.set(mapKey, claim);
+		if (expiresAt <= now || row.state === "expired") {
+			evictExpiredSession(mapKey, claim);
+			expired++;
+		} else {
+			active++;
+		}
+	}
+	return { active, expired, ended };
 }
 
 /** Stop periodic cleanup (for graceful shutdown). */
@@ -502,8 +644,8 @@ export function resetSessions(): void {
 }
 
 /** Test-only: force a session claim's expiry so cleanup evicts it. */
-export function _expireSessionForTest(sessionKey: string): void {
+export function _expireSessionForTest(sessionKey: string, agentId = "default"): void {
 	const key = normalizeSessionKey(sessionKey);
-	const claim = sessions.get(key);
+	const claim = sessions.get(scopedSessionKey(key, agentId));
 	if (claim) claim.expiresAt = Date.now() - 1;
 }
