@@ -60,6 +60,13 @@ export const TELEMETRY_EVENTS = [
 	"command.invoked",
 	"error.occurred",
 	"version.upgraded",
+	// Cloud events (issue #1207): declared now so the future cloud-connect
+	// layer inherits the typed contract instead of retrofitting it. Nothing
+	// emits them until the Signet Cloud surface exists. Same anonymous
+	// contract — no credentials, account identifiers, or content.
+	"cloud.connect_attempt",
+	"cloud.sync",
+	"cloud.storage",
 ] as const;
 
 export type TelemetryEventType = (typeof TELEMETRY_EVENTS)[number];
