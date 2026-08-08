@@ -646,6 +646,8 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	// Must fire BEFORE initContinuity to avoid resetting accumulated state.
 	pruneSessionStartDedupe();
 	if (hasSessionStartDedupe(req)) {
+		const sessionHash = hashSessionKey(req.sessionKey);
+		if (sessionHash) getActiveTelemetry()?.reopenSession(sessionHash);
 		logger.info("hooks", "Session start dedup — returning minimal stub", {
 			harness: req.harness,
 			sessionKey: req.sessionKey,

@@ -531,4 +531,37 @@ describe("session economics (issue #1201)", () => {
 		expect(end?.properties.tokensCacheWrite).toBe(5);
 		expect(end?.properties.cost).toBe(0.54);
 	});
+
+	it("recovers from a mismatched session-end key without poisoning later sessions", async () => {
+		const collector = makeCollector();
+		collector.record("session.start", { sessionHash: "session-a" });
+		collector.record("llm.generate", { inputTokens: 100, totalCost: 0.5 });
+		collector.record("session.end", { sessionHash: "session-b" });
+		collector.record("session.start", { sessionHash: "session-c" });
+		collector.record("llm.generate", { inputTokens: 200, totalCost: 1 });
+		collector.record("session.end", { sessionHash: "session-c" });
+		await collector.flush();
+
+		const ends = collector.query({ event: "session.end" });
+		expect(ends[0]?.properties.tokensInput).toBe(100);
+		expect(ends[0]?.properties.cost).toBe(0.5);
+		expect(ends[1]?.properties.tokensInput).toBe(200);
+		expect(ends[1]?.properties.cost).toBe(1);
+	});
+
+	it("reopens the accumulator for a resumed session", async () => {
+		const collector = makeCollector();
+		collector.record("session.start", { sessionHash: "session-1" });
+		collector.record("llm.generate", { inputTokens: 100, totalCost: 0.5 });
+		collector.record("session.end", { sessionHash: "session-1" });
+		collector.reopenSession("session-1");
+		collector.record("llm.generate", { inputTokens: 300, totalCost: 1.5 });
+		collector.record("session.end", { sessionHash: "session-1" });
+		await collector.flush();
+
+		const ends = collector.query({ event: "session.end" });
+		expect(ends[0]?.properties.tokensInput).toBe(100);
+		expect(ends[1]?.properties.tokensInput).toBe(300);
+		expect(ends[1]?.properties.cost).toBe(1.5);
+	});
 });

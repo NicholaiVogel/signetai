@@ -125,6 +125,8 @@ interface SessionCostAccumulator {
 	cost: number;
 }
 
+const MAX_ACTIVE_SESSIONS = 1024;
+
 function emptySessionCost(): SessionCostAccumulator {
 	return {
 		tokensInput: 0,
@@ -182,6 +184,7 @@ function sessionCostProperties(cost: SessionCostAccumulator): TelemetryPropertie
 
 export interface TelemetryCollector {
 	record(event: TelemetryEventType, properties: TelemetryProperties): void;
+	reopenSession(sessionHash: string): void;
 
 	/**
 	 * Claim a one-shot first-use milestone (issue #1202). Emits
@@ -581,17 +584,34 @@ export function createTelemetryCollector(
 	const sessionCosts = new Map<string, SessionCostAccumulator>();
 	const activeSessionKeys = new Set<string>();
 
+	function pruneSessionState(): void {
+		for (const key of sessionCosts.keys()) {
+			if (!activeSessionKeys.has(key)) sessionCosts.delete(key);
+		}
+		while (activeSessionKeys.size > MAX_ACTIVE_SESSIONS) {
+			const oldest = activeSessionKeys.values().next().value;
+			if (typeof oldest !== "string") break;
+			activeSessionKeys.delete(oldest);
+			sessionCosts.delete(oldest);
+		}
+	}
+
+	function reopenSession(sessionHash: string): void {
+		if (!sessionHash) return;
+		activeSessionKeys.add(sessionHash);
+		sessionCosts.set(sessionHash, emptySessionCost());
+		pruneSessionState();
+	}
+
 	function enrichSessionEvent(event: TelemetryEventType, properties: TelemetryProperties): TelemetryProperties {
 		const key = sessionKeyFor(properties);
 		if (event === "session.start") {
-			if (key) {
-				activeSessionKeys.add(key);
-				sessionCosts.set(key, emptySessionCost());
-			}
+			if (key) reopenSession(key);
 			return properties;
 		}
 		if (event === "llm.generate" || event === "dreaming.pass" || event === "pipeline.embedding") {
 			if (key) {
+				if (!activeSessionKeys.has(key)) return properties;
 				const cost = sessionCosts.get(key) ?? emptySessionCost();
 				addEventCost(cost, event, properties);
 				sessionCosts.set(key, cost);
@@ -608,16 +628,26 @@ export function createTelemetryCollector(
 			return properties;
 		}
 		if (event !== "session.end") return properties;
-		const cost = key ? sessionCosts.get(key) : undefined;
-		if (key) {
-			activeSessionKeys.delete(key);
-			sessionCosts.delete(key);
+		let closingKey = key;
+		let cost = key ? sessionCosts.get(key) : undefined;
+		if (!cost && activeSessionKeys.size === 1) {
+			const onlyActiveKey = activeSessionKeys.values().next().value;
+			if (typeof onlyActiveKey === "string") {
+				closingKey = onlyActiveKey;
+				cost = sessionCosts.get(onlyActiveKey);
+			}
 		}
+		if (closingKey) {
+			activeSessionKeys.delete(closingKey);
+			sessionCosts.delete(closingKey);
+		}
+		pruneSessionState();
 		return cost ? { ...properties, ...sessionCostProperties(cost) } : properties;
 	}
 
 	const collector: TelemetryCollector = {
 		enabled: true,
+		reopenSession,
 		anonymizeAgentId(agentId: string): string {
 			return createHash("sha256").update(`${agentId}:${installId}`).digest("hex").slice(0, 16);
 		},
