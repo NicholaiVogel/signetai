@@ -19,6 +19,7 @@ import {
 	type AgentDefinition,
 	type PipelineSynthesisConfig,
 	buildArchitectureDoc,
+	configuredRoutingTargetRefs,
 	identityModeManagesFiles,
 	isLocalInferenceEndpoint,
 	loadConfiguredHarnesses,
@@ -1353,16 +1354,11 @@ function configuredInferenceMode(agentsDir: string, memoryCfg: ResolvedMemoryCon
 		try {
 			const routing = parseRoutingConfig(parseSimpleYaml(readFileSync(path, "utf-8")));
 			if (routing.ok && routing.value.enabled) {
-				const bindings = Object.values(routing.value.workloads ?? {});
-				const refs = bindings.flatMap((binding) => (binding?.target ? [binding.target] : []));
-				const targets =
-					refs.length > 0
-						? refs.flatMap((ref) => {
-								const parsed = parseRoutingTargetRef(ref);
-								const target = parsed.ok ? routing.value.targets[parsed.value.targetId] : undefined;
-								return target ? [target] : [];
-							})
-						: Object.values(routing.value.targets);
+				const targets = configuredRoutingTargetRefs(routing.value).flatMap((ref) => {
+					const [targetId] = ref.split("/", 1);
+					const target = routing.value.targets[targetId];
+					return target ? [target] : [];
+				});
 				return targets.some((target) => targetIsRemote(target)) ? "remote" : "local";
 			}
 		} catch {

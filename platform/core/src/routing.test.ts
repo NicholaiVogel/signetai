@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	configuredRoutingTargetRefs,
 	isLocalInferenceEndpoint,
 	makeRoutingTargetRef,
 	parseRoutingConfig,
@@ -53,6 +54,48 @@ describe("inference config + decision engine", () => {
 		expect(isLocalInferenceEndpoint("http://localhost:1234/v1")).toBe(true);
 		expect(isLocalInferenceEndpoint("http://[::1]:1234/v1")).toBe(true);
 		expect(isLocalInferenceEndpoint("https://gateway.example.test/v1")).toBe(false);
+	});
+
+	it("resolves configured target refs through policies instead of unused target blocks", () => {
+		const localRef = makeRoutingTargetRef("local", "default");
+		const remoteRef = makeRoutingTargetRef("remote", "default");
+		const parsed = parseRoutingConfig({
+			inference: {
+				targets: {
+					local: { executor: "ollama", models: { default: { model: "local-model" } } },
+					remote: { executor: "openai", models: { default: { model: "remote-model" } } },
+				},
+				policies: {
+					localOnly: { mode: "strict", allow: [localRef], defaultTargets: [localRef] },
+					remoteOnly: { mode: "strict", allow: [remoteRef], defaultTargets: [remoteRef] },
+				},
+				workloads: {
+					interactive: { target: localRef },
+					memoryExtraction: { policy: "remoteOnly" },
+				},
+				defaultPolicy: "localOnly",
+			},
+		});
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+
+		const refs = configuredRoutingTargetRefs(parsed.value);
+		expect(refs).toContain(localRef);
+		expect(refs).toContain(remoteRef);
+
+		const localPolicy = parsed.value.policies.localOnly;
+		expect(localPolicy).toBeDefined();
+		if (!localPolicy) return;
+		const localOnly = parseRoutingConfig({
+			inference: {
+				targets: parsed.value.targets,
+				policies: { localOnly: localPolicy },
+				defaultPolicy: "localOnly",
+			},
+		});
+		expect(localOnly.ok).toBe(true);
+		if (!localOnly.ok) return;
+		expect(configuredRoutingTargetRefs(localOnly.value)).toEqual([localRef]);
 	});
 
 	it("allows local openai-compatible targets for restricted_remote task classes", () => {
@@ -952,4 +995,3 @@ describe("routing reference validation (#1005)", () => {
 		expect(explicit.value.targetRef).toBe(aggregationRef);
 	});
 });
-

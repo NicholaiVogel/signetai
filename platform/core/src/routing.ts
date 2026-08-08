@@ -1178,6 +1178,32 @@ export function allTargetRefs(config: RoutingConfig): readonly string[] {
 	return refs;
 }
 
+/**
+ * Return target refs that can be selected by the configured routing graph
+ * without runtime health or account state. This intentionally uses the same
+ * workload, policy, task-class, roster, and fallback resolution as runtime
+ * routing so configuration summaries do not classify unused target blocks.
+ */
+export function configuredRoutingTargetRefs(config: RoutingConfig): readonly string[] {
+	let refs: readonly string[] = [];
+	for (const operation of ROUTING_OPERATION_KINDS) {
+		const request: RouteRequest = { operation };
+		const classification = classifyRouteRequest(config, request);
+		const preference = orderedPreferenceLists(config, request, classification);
+		if ("code" in preference) continue;
+
+		const policy = config.policies[preference.policyId];
+		if (!policy) continue;
+		const workload = workloadBindingForOperation(config, operation);
+		const rosterTargets = workload?.target ? [] : targetRefsForRoster(config, request, classification, policy);
+		refs = mergeUnique(
+			refs,
+			mergeUnique(preference.orderedTargets, mergeUnique(rosterTargets, preference.fallbackTargets)),
+		);
+	}
+	return refs;
+}
+
 function buildCandidateTrace(
 	config: RoutingConfig,
 	request: RouteRequest,

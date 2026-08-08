@@ -459,6 +459,7 @@ export {
 	parseRoutingConfig,
 	validateRoutingReferences,
 	allTargetRefs,
+	configuredRoutingTargetRefs,
 	resolveAcpxModelSelection,
 	resolveRoutingDecision,
 } from "./routing";
