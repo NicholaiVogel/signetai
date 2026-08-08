@@ -111,12 +111,6 @@ export interface TelemetryEvent {
 	readonly properties: TelemetryProperties;
 }
 
-export function hashSessionKey(sessionKey: string | null | undefined): string | null {
-	const normalized = sessionKey?.trim();
-	if (!normalized) return null;
-	return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
-}
-
 interface SessionCostAccumulator {
 	tokensInput: number;
 	tokensOutput: number;
