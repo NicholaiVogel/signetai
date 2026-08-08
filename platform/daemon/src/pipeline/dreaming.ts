@@ -700,7 +700,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
    - The evidence source and the graph target must use the same agent scope: search evidence with the agentId of the entity you will update, then pass that same agentId to apply_ontology_ops. A source found in another scope cannot support a write here.
    - create_entity only for durable subjects clearly established by the source.
    - Validate before writing (validate_proposal).
-5. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write natural-language prose — what was examined (attention state, sources), what changed (mutations by type and count, entities touched), why (the dominant reason driving the work), and what was deferred or left flagged and why. No bullet lists, no tool names; a few clear sentences. Put deferred items and open questions in the runbook's deferred and openQuestions fields, not only in the summary.
+5. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write Markdown, max 2000 chars, with ## sections and bullet lists where useful. Cover what was examined (attention state, sources), what changed (mutations by type and count, entities touched), why (the dominant reason driving the work), and what was deferred or left flagged and why. Put deferred items and open questions in the runbook's deferred and openQuestions fields as well.
 
 ### What counts as durable
 
@@ -758,7 +758,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
    - Archive or merge it, citing its attention id (provenance: "attention:<uuid>", or attention:$<index> for a flag you minted in the same batch).
    - If you discover junk the queue did not flag, mint a flag op and archive in the same batch.
    - If you inspect a flagged target and judge it should stay as it is (a deliberate keep — e.g. a live entity with a non-concrete type, or an over-cap aspect you chose not to consolidate), close the record with decline_attention citing its attention id. Declining is an affirmative judgment: only decline records you actually inspected, and never decline records you could not complete this pass — defer those with a named blocker instead.
-3. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write natural-language prose — what was examined, what changed (mutations by type and count, entities touched), why (the dominant reason driving the work), and what was deferred or left flagged and why. No bullet lists, no tool names; a few clear sentences. Put deferred items and open questions in the runbook's deferred and openQuestions fields, not only in the summary.
+3. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write Markdown, max 2000 chars, with ## sections and bullet lists where useful. Cover what was examined, what changed (mutations by type and count, entities touched), why (the dominant reason driving the work), and what was deferred or left flagged and why. Put deferred items and open questions in the runbook's deferred and openQuestions fields as well.
 
 ### What counts as durable
 
@@ -816,7 +816,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
    - The evidence source and the graph target must use the same agent scope: search evidence with the agentId of the entity you will update, then pass that same agentId to apply_ontology_ops. A source found in another scope cannot support a write here.
    - create_entity only for durable subjects clearly established by the source.
    - Validate before writing (validate_proposal).
-4. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write natural-language prose — what was examined (sources viewed), what changed (claims filed or superseded, entities touched), why (what the evidence established), and what was deferred and why. No bullet lists, no tool names; a few clear sentences. Put deferred items and open questions in the runbook's deferred and openQuestions fields, not only in the summary.
+4. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write Markdown, max 2000 chars, with ## sections and bullet lists where useful. Cover what was examined (sources viewed), what changed (claims filed or superseded, entities touched), why (what the evidence established), and what was deferred and why. Put deferred items and open questions in the runbook's deferred and openQuestions fields as well.
 
 ### What counts as durable
 
