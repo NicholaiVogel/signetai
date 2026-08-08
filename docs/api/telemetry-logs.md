@@ -143,7 +143,7 @@ by most recent.
 
 Telemetry endpoints expose local event data collected by the daemon. The
 standard event stream excludes prompt text, memory content, credentials, and
-session references. Recall QA telemetry is a separate local-only ledger that
+raw session keys. Recall QA telemetry is a separate local-only ledger that
 intentionally stores query text and result snapshots for manual review, so it
 requires `analytics` permission and is never forwarded to external telemetry
 sinks.
@@ -216,6 +216,31 @@ Aggregated telemetry statistics since daemon start or since a given timestamp.
     "p50": 800,
     "p95": 2400
   },
+  "embedding": {
+    "calls": 480,
+    "totalTokens": 1200000,
+    "cost": 0.024,
+    "bySource": [
+      { "source": "recall", "tokens": 900000, "cost": 0.018 },
+      { "source": "memory-capture", "tokens": 300000, "cost": 0.006 }
+    ]
+  },
+  "dreaming": {
+    "calls": 12,
+    "tokensInput": 180000,
+    "tokensOutput": 24000,
+    "tokensCacheRead": 60000,
+    "tokensCacheWrite": 0,
+    "cost": 0.45
+  },
+  "sessions": {
+    "ended": 18,
+    "tokensInput": 240000,
+    "tokensOutput": 36000,
+    "tokensCacheRead": 60000,
+    "tokensCacheWrite": 0,
+    "cost": 0.924
+  },
   "inference": {
     "routes": 40,
     "executes": 18,
@@ -244,6 +269,11 @@ Aggregated telemetry statistics since daemon start or since a given timestamp.
   }
 }
 ```
+
+Embedding `cost` values are USD. The `sessions` block is a derived view over
+matching usage events and should not be added to event-level cost totals. The
+`session.end` event carries the same collector-derived totals, keyed by a
+truncated hash of the session key rather than the raw key.
 
 ### GET /api/telemetry/export
 

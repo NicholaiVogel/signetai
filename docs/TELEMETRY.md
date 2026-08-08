@@ -55,9 +55,9 @@ PostHog failures, and never throws into the daemon.
 | `daemon.heartbeat` | every 5 minutes | `uptimeMs`, `memoryCount`, `connectorsActive`, `pipelineMode`, `extractionProvider`, `embeddingProvider` |
 | `session.start` | real session start (deduped; stubs and clear/reset paths don't count) | `harness`, `sessionHash` |
 | `session.turn` | every `session-end` hook call (per turn, see notes) | `harness`, `promptCount`, `sessionHash` |
-| `session.end` | real session termination: explicit `reason: "clear"`, or a TTL-evicted (abandoned) session claim | `harness`, `reason` (`clear` / `expired`), `sessionHash` |
+| `session.end` | real session termination: explicit `reason: "clear"`, or a TTL-evicted (abandoned) session claim | `harness`, `reason` (`clear` / `expired`), `sessionHash`, `tokensInput`, `tokensOutput`, `tokensCacheRead`, `tokensCacheWrite`, `cost` |
 | `llm.generate` | every LLM call | `provider`, `latencyMs`, `success`, `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreationTokens`, `totalCost` |
-| `pipeline.embedding` | every embedding fetch, at the usage-recording boundary | `tokens`, `provider`, `sourceKind` (`memory-capture` / `artifact-index` / `recall` / `dreaming` / `other`) |
+| `pipeline.embedding` | every embedding fetch, at the usage-recording boundary | `tokens`, `provider`, `sourceKind` (`memory-capture` / `artifact-index` / `recall` / `dreaming` / `other`), `cost` (USD) |
 | `recall.performed` | every completed shared recall search | `type` (`semantic` / `keyword` / `temporal` / `graph`), `results`, `latencyMs`, `truncated` |
 | `pipeline.error` | categorized extraction, decision, or embedding failure | `stage`, `code` only; no message or stack content |
 | `dreaming.pass` | completed agentic dreaming pass (early-exit passes emit nothing) | `mode`, `tokensInput`, `tokensOutput`, `tokensCacheRead`, `tokensCacheWrite`, `cost` |
@@ -102,6 +102,10 @@ Notes on individual events:
   funnel query is activated vs activated+first.remember vs +first.recall
   (below). A deduped remember counts; the automatic recall injected into
   prompt-submit context does not — only the explicit recall route fires it.
+  The `session.end` token and cost fields are collector-derived sums of
+  matching `llm.generate`, `dreaming.pass`, and `pipeline.embedding` events.
+  Unscoped usage is attributed only when exactly one session is active;
+  concurrent sessions are never guessed together.
 - **`dreaming.pass`** — dreaming is the largest token consumer (millions of
   input tokens per heavy install), so always include it in token/cost
   aggregates.
@@ -155,6 +159,22 @@ All telemetry keys live under `memory.pipelineV2` in `agent.yaml`:
 | `telemetry.retentionDays` | `90` | 1-365 | Days before local telemetry data is purged |
 | `memorySearchQaEnabled` | `false` | boolean | Local-only recall QA ledger (never sent) |
 
+Embedding billing rates are configured separately under the canonical
+top-level `embedding` section. Rates are USD per million input tokens and are
+not secrets:
+
+```yaml
+embedding:
+  costRates:
+    openai: 0.02
+    openrouter: 0.004
+```
+
+`native`, `llama-cpp`, and `ollama` default to zero cost. An OpenAI-compatible
+embedding request whose `base_url` contains `openrouter.ai` is billed using
+the OpenRouter rate. Changing rates does not trigger an embedding-index
+migration.
+
 **Nesting pitfall (regression-pinned):** the daemon reads the flag via
 `loadPipelineConfig` from `yaml.memory.pipelineV2`. A *top-level*
 `pipelineV2.telemetryEnabled` key is invisible to the daemon — the original
@@ -184,8 +204,11 @@ it is never flushed to PostHog.
 
 ## Known semantics quirks
 
-- `pipeline.embedding` is tokens-only; embedding cost accounting is pending
-  (#1201).
+- `session.turn` counts turns persisted, while `session.end` is reserved for
+  real session termination (#1212). Its collector-derived token and cost
+  totals cover the matching usage events.
+- `pipeline.embedding` includes a USD `cost`; local providers are free by
+  default and remote rates come from `embedding.costRates` (#1201).
 - `install.ping` and `install.activated` measure different populations —
   report them as complementary, never summed.
 - CI and dev fleets inflate "user" counts: every automated daemon boot with
@@ -225,8 +248,8 @@ select properties.provider as provider, count() as calls, sum(properties.totalCo
   from events where event = 'llm.generate' group by provider
 ```
 
-The local daemon also exposes `/api/telemetry/stats` (llm, embedding, recall,
-and dreaming aggregates from the local `telemetry_events` table) — see
+The local daemon also exposes `/api/telemetry/stats` (LLM, embedding, recall,
+dreaming, and session aggregates from the local `telemetry_events` table) — see
 [docs/api/telemetry-logs.md](./api/telemetry-logs.md). A local analytics
 vault mirrors the key PostHog aggregates for daily review via
 `scripts/sync-analytics.py`.
@@ -244,6 +267,7 @@ vault mirrors the key PostHog aggregates for daily review via
 | next | `session.turn` + real `session.end` split (#1212): the per-turn event renamed from the old `session.end`; `session.end` now fires only at real terminations, deduped per lifetime; `sessionHash` added to all three session events |
 | Unreleased | `recall.performed` with anonymous recall type, result count, latency, and truncation metrics (#1203) |
 | Unreleased | First-run activation funnel: `first.remember` / `first.recall`, exactly once per install (#1202) |
+| Unreleased | `pipeline.embedding` cost rates and collector-derived session token/cost totals (#1201) |
 
 Related: #1026 (original rollout), #1200 (IP capture, dev tagging),
 #1201-#1207 (event-scoped follow-ups), #1212 (session.end rename — resolved).
