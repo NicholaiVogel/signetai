@@ -1029,3 +1029,41 @@ describe("Dreaming", () => {
 		expect(getDreamingState(accessor, AGENT).lastPassAt).toBeNull();
 	});
 });
+
+describe("Dreaming runbook structure (#1211)", () => {
+	// The runbook is served to whatever model the inference route resolves,
+	// from local 26B to large hosted models. #1211 pins the structure that
+	// keeps both ends working: a load-bearing numbered process, completion
+	// criteria that define done, and narrow "You may not" prohibitions
+	// instead of category-level safe/unsafe lists (which small models read
+	// as blanket caution and generalize into inaction — #1208).
+	const runbooks = [
+		["combined", DREAMING_AGENT_PROMPT],
+		["hygiene", DREAMING_HYGIENE_AGENT_PROMPT],
+		["content", DREAMING_CONTENT_AGENT_PROMPT],
+	] as const;
+
+	for (const [name, prompt] of runbooks) {
+		it(`${name} runbook defines completion criteria and narrow must-nots (#1211)`, () => {
+			// Completion criteria: what "done" looks like (flags resolved or
+			// blocker-named, claims complete, pass log written).
+			expect(prompt).toContain("### Done");
+			expect(prompt).toContain("The pass is done when");
+			// Narrow must-nots: every prohibition is finite and specific
+			// ("You may not ..."), never a category-level list.
+			const mustNot = prompt.split("### Must not")[1]?.split("### Done")[0] ?? "";
+			const prohibitions = mustNot.split("\n").filter((line) => line.trim().startsWith("- "));
+			expect(prohibitions.length).toBeGreaterThan(3);
+			for (const prohibition of prohibitions) {
+				expect(prohibition.trim()).toMatch(/^- You may not /);
+			}
+			// No category-level "unsafe" list remains.
+			expect(prompt).not.toContain("### Unsafe");
+			expect(prompt).not.toContain("### Safe");
+			// Deferral is not an escape hatch: it needs a named blocker,
+			// never the same blocker twice in a row.
+			expect(prompt).toContain("named blocker");
+			expect(prompt).toContain("not the same blocker twice in a row");
+		});
+	}
+});

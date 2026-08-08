@@ -690,44 +690,42 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
    - Archive or merge it, citing its attention id (provenance: "attention:<uuid>", or attention:$<index> for a flag you minted in the same batch).
    - \`attribute_over_cap\` / \`aspect_over_cap\` flags: the write gate rejects new claims or aspects past the cap, so consolidate the flagged target — merge_aspects to fold over-cap aspects together, supersede_claim_value to collapse duplicate claim keys, archive_claim_value for stale snapshots. Consolidation (merge_aspects) may exceed the attribute cap; it is the remedy the cap forces.
    - If you discover junk the queue did not flag, mint a flag op and archive in the same batch.
-   - If you inspect a flagged target and judge it should stay as it is (a deliberate keep — e.g. a live entity with a non-concrete type, or an over-cap aspect you chose not to consolidate), close the record with decline_attention citing its attention id. Declining is an affirmative judgment: only decline records you actually inspected, and never decline records you could not complete this pass — defer those in the pass log so they stay pending.
+   - If you inspect a flagged target and judge it should stay as it is (a deliberate keep — e.g. a live entity with a non-concrete type, or an over-cap aspect you chose not to consolidate), close the record with decline_attention citing its attention id. Declining is an affirmative judgment: only decline records you actually inspected, and never decline records you could not complete this pass — defer those with a named blocker instead.
 3. Query attention_list with kind=review_due. For expired records, inspect the cited memory with search_evidence using its subjectRef, then supersede the matching active claim with supersede_claim_value. Use the supplied entityId, aspectId, attributeId, and claimKey when present. The replacement must state that the planned event remains unconfirmed; never rewrite it as if the event happened. Cite an exact quote from the original memory. Do not supersede approaching records. When creating or setting a future temporal claim, set payload.reviewAfter to the referenced ISO timestamp.
 4. Only when the hygiene queue is clear: find new evidence since the cutoff. First LIST unprocessed sources with search_evidence — omit the query and omit since so it lists from the scope's evidence watermark (the frontier the last pass actually surfaced), newest first; only after seeing what is there, narrow with a query if the list is large. Prefer evidence from completed sessions and their summaries; a transcript with completed: false is mid-stream — defer filing from it and note the deferral in the pass log, because its states may be contradicted by the session's end. For each new source:
    - search_entities for subjects it establishes.
    - File claims only for what the source establishes as settled fact: outcomes, decisions, shipped changes, stable behavior. Do not file instructions that were merely suggested, hypotheses or diagnoses, open questions, or intermediate states of an ongoing investigation. When a source shows an attempt and its outcome, file the outcome.
+   - A claim must be a complete statement: it names the subject and the fact about it. A bare label ("SHIP-WITH-FIXES"), a fragment ("Root cause confirmed."), or an implementation detail without its subject is not a claim — do not file it.
    - Before adding a claim, check the target aspect's existing claims; if one covers the same key or is contradicted by the new evidence, supersede it (supersede_claim_value) instead of adding alongside.
    - The evidence source and the graph target must use the same agent scope: search evidence with the agentId of the entity you will update, then pass that same agentId to apply_ontology_ops. A source found in another scope cannot support a write here.
    - create_entity only for durable subjects clearly established by the source.
    - Validate before writing (validate_proposal).
 5. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write natural-language prose — what was examined (attention state, sources), what changed (mutations by type and count, entities touched), why (the dominant reason driving the work), and what was deferred or left flagged and why. No bullet lists, no tool names; a few clear sentences. Put deferred items and open questions in the runbook's deferred and openQuestions fields, not only in the summary.
 
-### Safe
+### What counts as durable
 
-- Archive attention-flagged entities that are non-concrete (zero active aspects/claims, non-concrete type, legacy-only deps).
-- Merge exact-canonical duplicates (same canonical name, same scope).
-- Add/set/supersede claims with exact quotes from an episodic source.
-- Set reviewAfter when adding or setting a future temporal claim; supersede expired claims as unconfirmed rather than asserting that the event occurred.
-- Create entities for durable subjects the source clearly establishes.
-- Rename/update entities only with evidence.
+A write is durable when the source establishes it as settled fact: an outcome, a decision, a shipped change, or a stable behavior, attached to the entity and aspect it belongs to. Trust your judgment beyond that.
 
-### Unsafe
+### Must not
 
-- Archive any entity with active aspects/claims.
-- Merge entities across agent scopes.
-- Any write without provenance: hygiene ops need an attention id; content ops need an exact quote.
-- Claims without exact quotes, or relationships the source does not state.
-- Touch pinned entities, source-root entities, or topology entities.
-- Rewrite existing claims without evidence that supersedes them.
+- You may not archive an entity that has active aspects or claims.
+- You may not merge entities across agent scopes.
+- You may not write without provenance: hygiene ops need an attention id; content ops need an exact quote.
+- You may not file a claim without an exact quote, or a relationship the source does not state.
+- You may not touch pinned entities, source-root entities, or topology entities.
+- You may not rewrite an existing claim without evidence that supersedes it.
+- You may not defer without a named blocker, and not the same blocker twice in a row.
 
-### Verification (before finishing)
+### Done
 
-- Every write in the batch has valid provenance.
-- Hygiene queue is drained, or remaining records are explicitly deferred with reasons in the pass log.
+The pass is done when:
+
+- Every pending hygiene record is resolved: archived, merged, or declined after inspection — or deferred with a named blocker (not the same blocker twice in a row).
+- Every claim filed is a complete statement attached to an entity and aspect — no bare labels or fragments.
 - Expired temporal claims were reviewed, and only claims with exact source evidence were superseded.
-- Pass log written with sources viewed + changes applied (this is the next pass's dedup).
-- No flag left unresolved for a target you archived.
-- Records you judged to keep are closed with decline_attention; records you could not complete this pass stay pending and are deferred in the pass log.
-- No writes attempted against pinned or source-root entities.
+- Every write in the batch has valid provenance.
+- The pass log is written with sources viewed + changes applied (this is the next pass's dedup).
+- No flag is left unresolved for a target you archived; no writes attempted against pinned or source-root entities.
 `;
 
 /**
@@ -757,30 +755,30 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
    - Inspect the flagged target (get_entity — check aspects, claims, pinned).
    - Archive or merge it, citing its attention id (provenance: "attention:<uuid>", or attention:$<index> for a flag you minted in the same batch).
    - If you discover junk the queue did not flag, mint a flag op and archive in the same batch.
-   - If you inspect a flagged target and judge it should stay as it is (a deliberate keep — e.g. a live entity with a non-concrete type, or an over-cap aspect you chose not to consolidate), close the record with decline_attention citing its attention id. Declining is an affirmative judgment: only decline records you actually inspected, and never decline records you could not complete this pass — defer those in the pass log so they stay pending.
+   - If you inspect a flagged target and judge it should stay as it is (a deliberate keep — e.g. a live entity with a non-concrete type, or an over-cap aspect you chose not to consolidate), close the record with decline_attention citing its attention id. Declining is an affirmative judgment: only decline records you actually inspected, and never decline records you could not complete this pass — defer those with a named blocker instead.
 3. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write natural-language prose — what was examined, what changed (mutations by type and count, entities touched), why (the dominant reason driving the work), and what was deferred or left flagged and why. No bullet lists, no tool names; a few clear sentences. Put deferred items and open questions in the runbook's deferred and openQuestions fields, not only in the summary.
 
-### Safe
+### What counts as durable
 
-- Archive attention-flagged entities that are non-concrete (zero active aspects/claims, non-concrete type, legacy-only deps).
-- Merge exact-canonical duplicates (same canonical name, same scope).
+An entity is removable when it is non-concrete (zero active aspects/claims, non-concrete type, legacy-only deps) or an exact-canonical duplicate (same canonical name, same scope). Trust your judgment beyond that.
 
-### Unsafe
+### Must not
 
-- Archive any entity with active aspects/claims.
-- Merge entities across agent scopes.
-- Any write without provenance: hygiene ops need an attention id.
-- Content writes: claims and entities need exact-quote citations from episodic evidence and belong to content passes.
-- Touch pinned entities, source-root entities, or topology entities.
+- You may not archive an entity that has active aspects or claims.
+- You may not merge entities across agent scopes.
+- You may not write without provenance: hygiene ops need an attention id.
+- You may not make content writes: claims and entities need exact-quote citations from episodic evidence and belong to content passes.
+- You may not touch pinned entities, source-root entities, or topology entities.
+- You may not defer without a named blocker, and not the same blocker twice in a row.
 
-### Verification (before finishing)
+### Done
 
+The pass is done when:
+
+- Every pending hygiene record is resolved: archived, merged, or declined after inspection — or deferred with a named blocker (not the same blocker twice in a row).
 - Every write in the batch carries attention provenance.
-- Hygiene queue is drained, or remaining records are explicitly deferred with reasons in the pass log.
-- Pass log written with changes applied (this is the next pass's dedup).
-- No flag left unresolved for a target you archived.
-- Records you judged to keep are closed with decline_attention; records you could not complete this pass stay pending and are deferred in the pass log.
-- No writes attempted against pinned or source-root entities.
+- The pass log is written with changes applied (this is the next pass's dedup).
+- No flag is left unresolved for a target you archived; no writes attempted against pinned or source-root entities.
 `;
 
 /**
@@ -810,33 +808,34 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
 3. Find new evidence since the cutoff. First LIST unprocessed sources with search_evidence — omit the query and omit since so it lists from the scope's evidence watermark (the frontier the last pass actually surfaced), newest first; only after seeing what is there, narrow with a query if the list is large. Prefer evidence from completed sessions and their summaries; a transcript with completed: false is mid-stream — defer filing from it and note the deferral in the pass log, because its states may be contradicted by the session's end. For each new source:
    - search_entities for subjects it establishes.
    - File claims only for what the source establishes as settled fact: outcomes, decisions, shipped changes, stable behavior. Do not file instructions that were merely suggested, hypotheses or diagnoses, open questions, or intermediate states of an ongoing investigation. When a source shows an attempt and its outcome, file the outcome.
+   - A claim must be a complete statement: it names the subject and the fact about it. A bare label ("SHIP-WITH-FIXES"), a fragment ("Root cause confirmed."), or an implementation detail without its subject is not a claim — do not file it.
    - Before adding a claim, check the target aspect's existing claims; if one covers the same key or is contradicted by the new evidence, supersede it (supersede_claim_value) instead of adding alongside.
    - The evidence source and the graph target must use the same agent scope: search evidence with the agentId of the entity you will update, then pass that same agentId to apply_ontology_ops. A source found in another scope cannot support a write here.
    - create_entity only for durable subjects clearly established by the source.
    - Validate before writing (validate_proposal).
 4. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write natural-language prose — what was examined (sources viewed), what changed (claims filed or superseded, entities touched), why (what the evidence established), and what was deferred and why. No bullet lists, no tool names; a few clear sentences. Put deferred items and open questions in the runbook's deferred and openQuestions fields, not only in the summary.
 
-### Safe
+### What counts as durable
 
-- Add/set/supersede claims with exact quotes from an episodic source.
-- Set reviewAfter when adding or setting a future temporal claim; supersede expired claims as unconfirmed rather than asserting that the event occurred.
-- Create entities for durable subjects the source clearly establishes.
-- Rename/update entities only with evidence.
+A write is durable when the source establishes it as settled fact: an outcome, a decision, a shipped change, or a stable behavior, attached to the entity and aspect it belongs to. Trust your judgment beyond that.
 
-### Unsafe
+### Must not
 
-- Any write without provenance: content ops need an exact quote.
-- Claims without exact quotes, or relationships the source does not state.
-- Hygiene archives/merges: they need attention records, which hygiene passes process.
-- Touch pinned entities, source-root entities, or topology entities.
-- Rewrite existing claims without evidence that supersedes them.
+- You may not write without provenance: content ops need an exact quote.
+- You may not file a claim without an exact quote, or a relationship the source does not state.
+- You may not make hygiene writes: archives and merges need attention records, which hygiene passes process.
+- You may not touch pinned entities, source-root entities, or topology entities.
+- You may not rewrite an existing claim without evidence that supersedes it.
+- You may not defer without a named blocker, and not the same blocker twice in a row.
 
-### Verification (before finishing)
+### Done
 
+The pass is done when:
+
+- Every claim filed is a complete statement attached to an entity and aspect — no bare labels or fragments.
 - Every write in the batch cites an exact quote from episodic evidence in the same agent scope as the graph target.
 - Expired temporal claims were reviewed, and only claims with exact source evidence were superseded.
-- Pass log written with sources viewed + changes applied (this is the next pass's dedup).
-- No claims without exact quotes, no relationships the source does not state.
+- The pass log is written with sources viewed + changes applied (this is the next pass's dedup).
 - No writes attempted against pinned or source-root entities.
 `;
 
