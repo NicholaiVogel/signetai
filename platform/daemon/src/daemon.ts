@@ -20,10 +20,12 @@ import {
 	type PipelineSynthesisConfig,
 	buildArchitectureDoc,
 	identityModeManagesFiles,
+	isLocalInferenceEndpoint,
 	loadConfiguredHarnesses,
 	loadIdentityMode,
 	loadSourcesConfig,
 	normalizeAgentRosterEntry,
+	parseRoutingConfig,
 	parseRoutingTargetRef,
 	parseSimpleYaml,
 	resolveDefaultBasePath,
@@ -81,6 +83,7 @@ import { stopModelRegistry } from "./pipeline/model-registry";
 import { configureLlmConcurrency } from "./pipeline/provider";
 import { type ReflectionWorkerHandle, startReflectionWorker } from "./pipeline/reflection-worker";
 import { startReconciler } from "./pipeline/skill-reconciler";
+import { isRemotePipelineProviderForEndpoint } from "./provider-safety";
 import { logFdSnapshot, startEventLoopMonitor, startFdPollMonitor, stopResourceMonitors } from "./resource-monitor";
 import {
 	AGENTS_DIR,
@@ -138,6 +141,7 @@ import { runStartupRecovery } from "./startup-recovery";
 import { reportStartupGrace } from "./system-pressure";
 import {
 	type TelemetryCollector,
+	type TelemetryConfigSnapshot,
 	createTelemetryCollector,
 	defaultTelemetryLogPath,
 	sanitizeCrashError,
@@ -1324,6 +1328,65 @@ function syncAgentRoster(agentsDir: string): void {
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
 
+const LOCAL_INFERENCE_EXECUTORS = new Set(["none", "llama-cpp", "ollama"]);
+const INFERENCE_CONFIG_FILES = ["agent.yaml", "AGENT.yaml"] as const;
+
+function targetIsRemote(target: {
+	readonly executor: string;
+	readonly endpoint?: string;
+	readonly privacy?: string;
+}): boolean {
+	if (target.privacy === "local_only") return false;
+	if (target.executor === "openai-compatible") return !isLocalInferenceEndpoint(target.endpoint);
+	return !LOCAL_INFERENCE_EXECUTORS.has(target.executor);
+}
+
+function configuredInferenceMode(agentsDir: string, memoryCfg: ResolvedMemoryConfig): "local" | "remote" {
+	const legacyRemote = [
+		[memoryCfg.pipelineV2.extraction.provider, memoryCfg.pipelineV2.extraction.endpoint],
+		[memoryCfg.pipelineV2.synthesis.provider, memoryCfg.pipelineV2.synthesis.endpoint],
+	].some(([provider, endpoint]) => isRemotePipelineProviderForEndpoint(provider, endpoint));
+
+	for (const name of INFERENCE_CONFIG_FILES) {
+		const path = join(agentsDir, name);
+		if (!existsSync(path)) continue;
+		try {
+			const routing = parseRoutingConfig(parseSimpleYaml(readFileSync(path, "utf-8")));
+			if (routing.ok && routing.value.enabled) {
+				const bindings = Object.values(routing.value.workloads ?? {});
+				const refs = bindings.flatMap((binding) => (binding?.target ? [binding.target] : []));
+				const targets =
+					refs.length > 0
+						? refs.flatMap((ref) => {
+								const parsed = parseRoutingTargetRef(ref);
+								const target = parsed.ok ? routing.value.targets[parsed.value.targetId] : undefined;
+								return target ? [target] : [];
+							})
+						: Object.values(routing.value.targets);
+				return targets.some((target) => targetIsRemote(target)) ? "remote" : "local";
+			}
+		} catch {
+			// Fall through to the resolved legacy pipeline configuration.
+		}
+		break;
+	}
+
+	return legacyRemote ? "remote" : "local";
+}
+
+function buildTelemetryConfigSnapshot(agentsDir: string, memoryCfg: ResolvedMemoryConfig): TelemetryConfigSnapshot {
+	return {
+		graphEnabled: memoryCfg.pipelineV2.graph.enabled,
+		rerankerEnabled: memoryCfg.pipelineV2.reranker.enabled,
+		autonomousEnabled: memoryCfg.pipelineV2.autonomous.enabled,
+		semanticContradictionEnabled: memoryCfg.pipelineV2.semanticContradictionEnabled,
+		embeddingProvider: memoryCfg.embedding.provider,
+		embeddingModel: memoryCfg.embedding.model,
+		inferenceMode: configuredInferenceMode(agentsDir, memoryCfg),
+		harnesses: [...new Set(loadConfiguredHarnesses(agentsDir))].sort().join(","),
+	};
+}
+
 async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?: TelemetryCollector): Promise<void> {
 	const pipelinePaused = memoryCfg.pipelineV2.paused;
 	logger.info("dreaming", "Dreaming owns all semantic writes; legacy extraction is retired");
@@ -1965,6 +2028,7 @@ async function main() {
 		};
 		telemetryCollector = createTelemetryCollector(getDbAccessor(), resolvedTelemetryCfg, CURRENT_VERSION, {
 			telemetryLogPath: defaultTelemetryLogPath(AGENTS_DIR),
+			configSnapshot: buildTelemetryConfigSnapshot(AGENTS_DIR, memoryCfg),
 		});
 		telemetryCollector.start();
 		telemetryRef = telemetryCollector;

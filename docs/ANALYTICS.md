@@ -245,6 +245,38 @@ capture / artifact index / recall / dreaming), and `dreaming.pass`
 pass). The remaining `pipeline.*` event types are declared
 for future use but not yet emitted.
 
+Privacy contract:
+
+- Events carry no memory content, user identity, agent ids, or file paths.
+- Each install gets a random anonymous id (persisted in the workspace
+  database) used as the PostHog `distinct_id`, so installs are countable
+  but not identifiable.
+- Telemetry is on by default and can be disabled with
+  `telemetryEnabled: false`.
+- Every recorded event is mirrored to an open, inspectable JSONL log at
+  `<agentsDir>/.daemon/telemetry/events.jsonl`, so users can audit
+  exactly what was sent.
+
+Events recorded: `daemon.heartbeat` (every 5 minutes), the `inference.*`
+lifecycle (`route`, `execute`, `stream`, `fallback`), `llm.generate`
+(provider, latency, token and cost counts when reported, success — never
+prompt text), `session.start` / `session.end` (harness and prompt count),
+the lifecycle events `daemon.started`, `command.invoked`,
+`error.occurred` (sanitized crash report — truncated message with user
+paths stripped, top stack frames with home directories removed, uptime;
+plus rate-limited `EventLoopLag` reports with measured lag), and
+`version.upgraded`, `install.activated` (first daemon run of a new
+install — covers bun/desktop installs the npm postinstall ping never
+sees), and `config.snapshot` (first-run feature flags, embedding provider
+and model, local/remote inference mode, and configured harnesses). The
+per-install harness mix is queryable from `session.start.harness` events
+because they share the same anonymous `distinct_id`. `pipeline.embedding`
+(tokens, provider, sourceKind — memory capture / artifact index / recall /
+dreaming), and `dreaming.pass`
+(provider-reported input/output/cache tokens and cost per agentic
+pass). The remaining `pipeline.*` event types are declared
+for future use but not yet emitted.
+
 Release Download Stats
 ---
 

@@ -80,6 +80,7 @@ export const TELEMETRY_EVENTS = [
 	"cloud.sync",
 	"cloud.storage",
 	"recall.performed",
+	"config.snapshot",
 ] as const;
 
 export type TelemetryEventType = (typeof TELEMETRY_EVENTS)[number];
@@ -91,6 +92,17 @@ export type TelemetryEventType = (typeof TELEMETRY_EVENTS)[number];
 export type FirstUseKind = "remember" | "recall";
 
 export type TelemetryProperties = Readonly<Record<string, string | number | boolean | null>>;
+
+export interface TelemetryConfigSnapshot {
+	readonly graphEnabled: boolean;
+	readonly rerankerEnabled: boolean;
+	readonly autonomousEnabled: boolean;
+	readonly semanticContradictionEnabled: boolean;
+	readonly embeddingProvider: string;
+	readonly embeddingModel: string;
+	readonly inferenceMode: "local" | "remote";
+	readonly harnesses: string;
+}
 
 export interface TelemetryEvent {
 	readonly id: string;
@@ -172,23 +184,25 @@ export function telemetryDisabledByEnv(env: NodeJS.ProcessEnv = process.env): bo
  */
 function getOrCreateInstallId(db: DbAccessor): { readonly id: string; readonly created: boolean } {
 	try {
-		const existing = db.withReadDb((r) => {
-			const row = r.prepare("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1").get() as
+		return db.withWriteTx((w) => {
+			const existing = w.prepare("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1").get() as
 				| { readonly id: string }
 				| null
 				| undefined;
-			return row?.id ?? null;
-		});
-		if (existing != null) return { id: existing, created: false };
+			if (existing?.id) return { id: existing.id, created: false };
 
-		const id = crypto.randomUUID();
-		db.withWriteTx((w) => {
-			w.prepare("INSERT OR IGNORE INTO telemetry_install (id, created_at) VALUES (?, ?)").run(
-				id,
-				new Date().toISOString(),
-			);
+			const id = crypto.randomUUID();
+			const result = w
+				.prepare("INSERT OR IGNORE INTO telemetry_install (id, created_at) VALUES (?, ?)")
+				.run(id, new Date().toISOString());
+			if (result.changes > 0) return { id, created: true };
+
+			const inserted = w.prepare("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1").get() as
+				| { readonly id: string }
+				| null
+				| undefined;
+			return inserted?.id ? { id: inserted.id, created: false } : { id, created: false };
 		});
-		return { id, created: true };
 	} catch {
 		return { id: crypto.randomUUID(), created: false };
 	}
@@ -216,7 +230,11 @@ function stripUserPaths(text: string): string {
 }
 
 function sanitizeCrashText(value: string): string {
-	return stripUserPaths(value.replace(/[\x00-\x1f\x7f]/g, " ")).slice(0, MAX_CRASH_MESSAGE_CHARS);
+	const cleaned = Array.from(value, (char) => {
+		const code = char.charCodeAt(0);
+		return code <= 0x1f || code === 0x7f ? " " : char;
+	}).join("");
+	return stripUserPaths(cleaned).slice(0, MAX_CRASH_MESSAGE_CHARS);
 }
 
 function crashStackFrames(stack: string | undefined): string[] | undefined {
@@ -335,7 +353,10 @@ export function createTelemetryCollector(
 	db: DbAccessor,
 	config: PipelineTelemetryConfig,
 	daemonVersion: string,
-	opts: { readonly telemetryLogPath?: string | null } = {},
+	opts: {
+		readonly telemetryLogPath?: string | null;
+		readonly configSnapshot?: TelemetryConfigSnapshot;
+	} = {},
 ): TelemetryCollector {
 	const buffer: TelemetryEvent[] = [];
 	const logPath = opts.telemetryLogPath ?? null;
@@ -628,6 +649,9 @@ export function createTelemetryCollector(
 			version: daemonVersion,
 			platform: process.platform,
 		});
+		if (opts.configSnapshot) {
+			collector.record("config.snapshot", { ...opts.configSnapshot });
+		}
 	}
 
 	return collector;

@@ -17,6 +17,7 @@ import { type DbAccessor, closeDbAccessor, getDbAccessor, initDbAccessor } from 
 import {
 	TELEMETRY_EVENTS,
 	type TelemetryCollector,
+	type TelemetryConfigSnapshot,
 	createTelemetryCollector,
 	defaultTelemetryLogPath,
 	nextFlushIntervalMs,
@@ -67,8 +68,8 @@ function resetWorkspace(): void {
 	initDbAccessor(join(dir, "memory", "memories.db"));
 }
 
-function makeCollector(): TelemetryCollector {
-	return createTelemetryCollector(getDbAccessor(), TELEMETRY_CONFIG, "0.0.0-test");
+function makeCollector(configSnapshot?: TelemetryConfigSnapshot): TelemetryCollector {
+	return createTelemetryCollector(getDbAccessor(), TELEMETRY_CONFIG, "0.0.0-test", { configSnapshot });
 }
 
 /**
@@ -76,7 +77,7 @@ function makeCollector(): TelemetryCollector {
  * withWriteTx/withReadDb there, and posthogHost is "" so nothing sends.
  */
 function fakeDbAccessor(): DbAccessor {
-	const stmt = { run: () => ({}), get: () => undefined, all: () => [] };
+	const stmt = { run: () => ({ changes: 1 }), get: () => undefined, all: () => [] };
 	return {
 		withWriteTx: (fn: (db: { prepare(sql: string): typeof stmt }) => unknown) => fn({ prepare: () => stmt }),
 		withReadDb: (fn: (db: { prepare(sql: string): typeof stmt }) => unknown) => fn({ prepare: () => stmt }),
@@ -314,6 +315,42 @@ describe("telemetry collector", () => {
 		expect(lastBatch.map((e) => e.event)).toEqual(["daemon.heartbeat"]);
 	});
 
+	it("emits one config snapshot alongside install activation", async () => {
+		const snapshot: TelemetryConfigSnapshot = {
+			graphEnabled: true,
+			rerankerEnabled: false,
+			autonomousEnabled: true,
+			semanticContradictionEnabled: true,
+			embeddingProvider: "native",
+			embeddingModel: "nomic-embed-text-v1.5",
+			inferenceMode: "local",
+			harnesses: "codex,hermes-agent",
+		};
+		const first = makeCollector(snapshot);
+		first.record("daemon.heartbeat", { uptimeMs: 1 });
+		await first.flush();
+
+		const firstBatch = captured[0]?.body.batch ?? [];
+		expect(firstBatch.map((event) => event.event)).toEqual([
+			"install.activated",
+			"config.snapshot",
+			"daemon.heartbeat",
+		]);
+		expect(firstBatch[1]?.properties).toMatchObject({
+			graphEnabled: true,
+			rerankerEnabled: false,
+			embeddingProvider: "native",
+			embeddingModel: "nomic-embed-text-v1.5",
+			inferenceMode: "local",
+			harnesses: "codex,hermes-agent",
+		});
+
+		const second = makeCollector(snapshot);
+		second.record("daemon.heartbeat", { uptimeMs: 2 });
+		await second.flush();
+		expect(captured[1]?.body.batch.map((event) => event.event)).toEqual(["daemon.heartbeat"]);
+	});
+
 	it("sanitizes crash reports: truncation, home-path stripping, frame cap", () => {
 		const longMessage =
 			'SQLiteError: database is locked near "a very long embedded fragment that goes on and on" at /home/alice/.agents/memory/memories.db'.repeat(
@@ -347,7 +384,7 @@ describe("telemetry collector", () => {
 	});
 
 	it("degrades non-Error rejections to a truncated string", () => {
-		const props = sanitizeCrashError("oops: " + "x".repeat(500), 42);
+		const props = sanitizeCrashError(`oops: ${"x".repeat(500)}`, 42);
 		expect(props.type).toBe("UnhandledRejection");
 		expect(props.message.length).toBeLessThanOrEqual(400);
 		expect(props.uptimeMs).toBe(42);
