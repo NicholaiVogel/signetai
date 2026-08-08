@@ -57,6 +57,7 @@ PostHog failures, and never throws into the daemon.
 | `session.end` | real session termination: explicit `reason: "clear"`, or a TTL-evicted (abandoned) session claim | `harness`, `reason` (`clear` / `expired`), `sessionHash` |
 | `llm.generate` | every LLM call | `provider`, `latencyMs`, `success`, `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreationTokens`, `totalCost` |
 | `pipeline.embedding` | every embedding fetch, at the usage-recording boundary | `tokens`, `provider`, `sourceKind` (`memory-capture` / `artifact-index` / `recall` / `dreaming` / `other`) |
+| `recall.performed` | every completed shared recall search | `type` (`semantic` / `keyword` / `temporal` / `graph`), `results`, `latencyMs`, `truncated` |
 | `dreaming.pass` | completed agentic dreaming pass (early-exit passes emit nothing) | `mode`, `tokensInput`, `tokensOutput`, `tokensCacheRead`, `tokensCacheWrite`, `cost` |
 | `inference.route` | inference control-plane routing decision | `surface`, `agentId`, `operation`, `taskClass`, `policyId`, `selectedTarget`, `candidateCount`, `blockedCount`, `allowedCount`, `privacy`, `durationMs`, `success`, `errorCode` |
 | `inference.execute` / `inference.stream` | per-execution outcome | `surface`, `agentId`, `operation`, `taskClass`, `policyId`, `selectedTarget`, `finalTarget`, `attemptPath`, `failedTargets`, `attemptCount`, `failedCount`, `fallbackCount`, `privacy`, `durationMs`, `inputTokens`, `outputTokens`, `success`, `cancelled`, `errorCode` |
@@ -95,6 +96,11 @@ Notes on individual events:
 - **`dreaming.pass`** — dreaming is the largest token consumer (millions of
   input tokens per heavy install), so always include it in token/cost
   aggregates.
+- **`recall.performed`** — emitted at the shared `hybridRecall` boundary with
+  counts and timing only. Aggregate recall can emit one event for the main
+  search and additional events for decomposed subqueries. Local stats read the
+  flushed telemetry table, so they can lag the in-memory event buffer by one
+  flush interval.
 
 ## Privacy contract
 
@@ -204,8 +210,8 @@ select properties.provider as provider, count() as calls, sum(properties.totalCo
   from events where event = 'llm.generate' group by provider
 ```
 
-The local daemon also exposes `/api/telemetry/stats` (llm + embedding +
-dreaming aggregates from the local `telemetry_events` table) — see
+The local daemon also exposes `/api/telemetry/stats` (llm, embedding, recall,
+and dreaming aggregates from the local `telemetry_events` table) — see
 [docs/api/telemetry-logs.md](./api/telemetry-logs.md). A local analytics
 vault mirrors the key PostHog aggregates for daily review via
 `scripts/sync-analytics.py`.
@@ -221,6 +227,7 @@ vault mirrors the key PostHog aggregates for daily review via
 | 0.174.0 | `dreaming.pass` with provider-reported token usage and cost |
 | 0.176.0 | Sanitized crash reports: full `error.occurred` payload (truncated, home-stripped message + top-8 stack frames) and rate-limited `EventLoopLag` wedge reports |
 | next | `session.turn` + real `session.end` split (#1212): the per-turn event renamed from the old `session.end`; `session.end` now fires only at real terminations, deduped per lifetime; `sessionHash` added to all three session events |
+| Unreleased | `recall.performed` with anonymous recall type, result count, latency, and truncation metrics (#1203) |
 
 Related: #1026 (original rollout), #1200 (IP capture, dev tagging),
 #1201-#1207 (event-scoped follow-ups), #1212 (session.end rename — resolved).
