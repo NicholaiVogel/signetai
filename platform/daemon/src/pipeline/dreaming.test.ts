@@ -832,6 +832,18 @@ describe("Dreaming", () => {
 		expect(contentPrompt).not.toContain("Process ALL pending hygiene records");
 	});
 
+	it("requires bounded Markdown runbook summaries in every pass mode (#1226)", () => {
+		for (const prompt of [DREAMING_AGENT_PROMPT, DREAMING_HYGIENE_AGENT_PROMPT, DREAMING_CONTENT_AGENT_PROMPT]) {
+			expect(prompt).toContain("write Markdown");
+			expect(prompt).toContain("max 2000 chars");
+			expect(prompt).toContain("## sections");
+			expect(prompt).toContain("bullet lists");
+			expect(prompt).toContain("deferred and openQuestions fields");
+			expect(prompt).not.toContain("No bullet lists");
+			expect(prompt).not.toContain("natural-language prose");
+		}
+	});
+
 	it("does not advance the evidence watermark for hygiene-only work (#1098)", async () => {
 		// Regression for #1098: a pass that only processed hygiene used to
 		// reset the evidence cursor anyway, so the unprocessed episodic
