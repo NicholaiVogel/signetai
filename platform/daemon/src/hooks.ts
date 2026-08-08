@@ -139,7 +139,7 @@ import {
 } from "./session-transcripts";
 import { type StructuralCandidateSource, type StructuralFeatures, getStructuralFeatures } from "./structural-features";
 import { assembleInheritedContextBlock, resolveParentSession } from "./subagent-context";
-import { getActiveTelemetry, hashSessionKey } from "./telemetry";
+import { getActiveTelemetry } from "./telemetry";
 import { searchTemporalFallback } from "./temporal-fallback";
 import { writeTranscriptAudit } from "./transcript-audit";
 import * as transcriptCapture from "./transcript-capture";

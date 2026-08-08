@@ -501,6 +501,15 @@ export interface TelemetryStatsEnabledResponse {
 		readonly tokensCacheWrite: number;
 		readonly cost: number;
 	};
+	readonly recall: {
+		readonly calls: number;
+		readonly p50: number;
+		readonly p95: number;
+		readonly byType: readonly {
+			readonly type: string;
+			readonly calls: number;
+		}[];
+	};
 	readonly sessions: {
 		readonly ended: number;
 		readonly tokensInput: number;
