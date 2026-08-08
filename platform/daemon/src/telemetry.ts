@@ -111,6 +111,71 @@ export interface TelemetryEvent {
 	readonly properties: TelemetryProperties;
 }
 
+export function hashSessionKey(sessionKey: string | null | undefined): string | null {
+	const normalized = sessionKey?.trim();
+	if (!normalized) return null;
+	return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+interface SessionCostAccumulator {
+	tokensInput: number;
+	tokensOutput: number;
+	tokensCacheRead: number;
+	tokensCacheWrite: number;
+	cost: number;
+}
+
+function emptySessionCost(): SessionCostAccumulator {
+	return {
+		tokensInput: 0,
+		tokensOutput: 0,
+		tokensCacheRead: 0,
+		tokensCacheWrite: 0,
+		cost: 0,
+	};
+}
+
+function addNumber(target: number, value: string | number | boolean | null | undefined): number {
+	return typeof value === "number" && Number.isFinite(value) ? target + value : target;
+}
+
+function addEventCost(
+	accumulator: SessionCostAccumulator,
+	event: TelemetryEventType,
+	properties: TelemetryProperties,
+): void {
+	if (event === "llm.generate") {
+		accumulator.tokensInput = addNumber(accumulator.tokensInput, properties.inputTokens);
+		accumulator.tokensOutput = addNumber(accumulator.tokensOutput, properties.outputTokens);
+		accumulator.tokensCacheRead = addNumber(accumulator.tokensCacheRead, properties.cacheReadTokens);
+		accumulator.tokensCacheWrite = addNumber(accumulator.tokensCacheWrite, properties.cacheCreationTokens);
+		accumulator.cost = addNumber(accumulator.cost, properties.totalCost);
+		return;
+	}
+	if (event === "dreaming.pass") {
+		accumulator.tokensInput = addNumber(accumulator.tokensInput, properties.tokensInput);
+		accumulator.tokensOutput = addNumber(accumulator.tokensOutput, properties.tokensOutput);
+		accumulator.tokensCacheRead = addNumber(accumulator.tokensCacheRead, properties.tokensCacheRead);
+		accumulator.tokensCacheWrite = addNumber(accumulator.tokensCacheWrite, properties.tokensCacheWrite);
+		accumulator.cost = addNumber(accumulator.cost, properties.cost);
+		return;
+	}
+	if (event === "pipeline.embedding") {
+		accumulator.tokensInput = addNumber(accumulator.tokensInput, properties.tokens);
+		accumulator.cost = addNumber(accumulator.cost, properties.cost);
+	}
+}
+
+function sessionCostProperties(cost: SessionCostAccumulator): TelemetryProperties {
+	return {
+		tokensInput: cost.tokensInput,
+		tokensOutput: cost.tokensOutput,
+		tokensCacheRead: cost.tokensCacheRead,
+		tokensCacheWrite: cost.tokensCacheWrite,
+		cost: cost.cost,
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Collector interface
 // ---------------------------------------------------------------------------
@@ -506,6 +571,51 @@ export function createTelemetryCollector(
 		}
 	}
 
+	function sessionKeyFor(properties: TelemetryProperties): string | null {
+		const hashed = properties.sessionHash;
+		if (typeof hashed === "string" && hashed.length > 0) return hashed;
+		const harness = properties.harness;
+		return typeof harness === "string" && harness.length > 0 ? `harness:${harness}` : null;
+	}
+
+	const sessionCosts = new Map<string, SessionCostAccumulator>();
+	const activeSessionKeys = new Set<string>();
+
+	function enrichSessionEvent(event: TelemetryEventType, properties: TelemetryProperties): TelemetryProperties {
+		const key = sessionKeyFor(properties);
+		if (event === "session.start") {
+			if (key) {
+				activeSessionKeys.add(key);
+				sessionCosts.set(key, emptySessionCost());
+			}
+			return properties;
+		}
+		if (event === "llm.generate" || event === "dreaming.pass" || event === "pipeline.embedding") {
+			if (key) {
+				const cost = sessionCosts.get(key) ?? emptySessionCost();
+				addEventCost(cost, event, properties);
+				sessionCosts.set(key, cost);
+				return properties;
+			}
+			if (activeSessionKeys.size === 1) {
+				const activeKey = activeSessionKeys.values().next().value;
+				if (typeof activeKey === "string") {
+					const cost = sessionCosts.get(activeKey) ?? emptySessionCost();
+					addEventCost(cost, event, properties);
+					sessionCosts.set(activeKey, cost);
+				}
+			}
+			return properties;
+		}
+		if (event !== "session.end") return properties;
+		const cost = key ? sessionCosts.get(key) : undefined;
+		if (key) {
+			activeSessionKeys.delete(key);
+			sessionCosts.delete(key);
+		}
+		return cost ? { ...properties, ...sessionCostProperties(cost) } : properties;
+	}
+
 	const collector: TelemetryCollector = {
 		enabled: true,
 		anonymizeAgentId(agentId: string): string {
@@ -526,7 +636,7 @@ export function createTelemetryCollector(
 				id: crypto.randomUUID(),
 				event,
 				timestamp: new Date().toISOString(),
-				properties,
+				properties: enrichSessionEvent(event, properties),
 			});
 
 			// Open telemetry log (issue #1026 Phase 2): mirror every event to

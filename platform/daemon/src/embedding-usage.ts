@@ -19,6 +19,7 @@
 
 import type { DbAccessor } from "./db-accessor";
 import { getDbAccessor, hasDbAccessor } from "./db-accessor";
+import { type EmbeddingCostRates, calculateEmbeddingCost } from "./embedding-cost";
 import { logger } from "./logger";
 import { getActiveTelemetry } from "./telemetry";
 
@@ -28,6 +29,7 @@ export type EmbeddingUsageSource = "memory-capture" | "artifact-index" | "recall
 export interface EmbeddingUsageAttribution {
 	readonly source?: EmbeddingUsageSource;
 	readonly agentId?: string;
+	readonly sessionHash?: string;
 }
 
 interface EmbeddingUsageRow {
@@ -62,6 +64,9 @@ export function recordEmbeddingUsage(input: {
 	readonly tokens: number;
 	readonly source: EmbeddingUsageSource;
 	readonly agentId?: string;
+	readonly sessionHash?: string;
+	readonly baseUrl?: string;
+	readonly costRates?: EmbeddingCostRates;
 	readonly now?: Date;
 }): void {
 	// Anonymous telemetry: emit the pipeline.embedding event at the same fetch
@@ -71,6 +76,11 @@ export function recordEmbeddingUsage(input: {
 		tokens: input.tokens,
 		provider: input.provider,
 		sourceKind: input.source,
+		...(input.sessionHash ? { sessionHash: input.sessionHash } : {}),
+		cost: calculateEmbeddingCost(input.provider, input.tokens, {
+			baseUrl: input.baseUrl,
+			rates: input.costRates,
+		}),
 	});
 	if (!hasDbAccessor()) return;
 	try {

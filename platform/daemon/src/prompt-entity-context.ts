@@ -657,6 +657,7 @@ export interface BuildEntityPromptContextOptions {
 	readonly memoryDbPath: string;
 	readonly fetchEmbedding: FetchEmbedding;
 	readonly embedding: EmbeddingConfig;
+	readonly sessionHash?: string;
 }
 
 export async function buildEntityPromptContext({
@@ -667,6 +668,7 @@ export async function buildEntityPromptContext({
 	memoryDbPath,
 	fetchEmbedding,
 	embedding,
+	sessionHash,
 }: BuildEntityPromptContextOptions): Promise<PromptEntityContextResult> {
 	if (isLowSignalPrompt(userMessage)) return { lines: [], memories: [], memoryCount: 0, engine: "low-signal" };
 	if (!existsSync(memoryDbPath)) return { lines: [], memories: [], memoryCount: 0, engine: "no-entity" };
@@ -682,7 +684,11 @@ export async function buildEntityPromptContext({
 	let sharedQueryVector: Float32Array | null = null;
 	try {
 		const vector = await fetchEmbedding(sharedSemanticQuery, embedding, "query", {
-			usage: { source: "recall", agentId },
+			usage: {
+				source: "recall",
+				agentId,
+				...(sessionHash ? { sessionHash } : {}),
+			},
 		});
 		if (vector) sharedQueryVector = new Float32Array(vector);
 	} catch (error) {

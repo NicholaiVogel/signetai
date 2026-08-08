@@ -12,6 +12,7 @@ import {
 	parseSimpleYaml,
 } from "@signet/core";
 import { type AuthConfig, parseAuthConfig } from "./auth";
+import type { EmbeddingCostProvider, EmbeddingCostRates } from "./embedding-cost";
 import { logger } from "./logger";
 import { isRemotePipelineProviderForEndpoint, providerFallbackForLock } from "./provider-safety";
 
@@ -20,6 +21,8 @@ export interface EmbeddingConfig {
 	model: string;
 	dimensions: number;
 	base_url: string;
+	/** USD per million input tokens, keyed by billing provider. */
+	costRates?: EmbeddingCostRates;
 	/** Internal retrieval formatting contract. Omitted means legacy raw text until a generation migration promotes a profile. */
 	profile?: string;
 	/** Internal marker: only the migration worker may bypass active resolution. */
@@ -305,6 +308,25 @@ function clampNonNegative(raw: unknown, max: number, fallback: number): number {
 function parseOptionalPositive(raw: unknown, min: number, max: number): number | undefined {
 	if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
 	return Math.max(min, Math.min(max, raw));
+}
+
+const EMBEDDING_COST_PROVIDERS: readonly EmbeddingCostProvider[] = [
+	"native",
+	"llama-cpp",
+	"ollama",
+	"openai",
+	"openrouter",
+];
+
+function parseEmbeddingCostRates(raw: unknown): EmbeddingCostRates | undefined {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const source = raw as Record<string, unknown>;
+	const rates: Partial<Record<EmbeddingCostProvider, number>> = {};
+	for (const provider of EMBEDDING_COST_PROVIDERS) {
+		const value = source[provider];
+		if (typeof value === "number" && Number.isFinite(value) && value >= 0) rates[provider] = value;
+	}
+	return Object.keys(rates).length > 0 ? rates : undefined;
 }
 
 function clampFraction(raw: unknown, fallback: number): number {
@@ -1048,6 +1070,8 @@ export function loadMemoryConfig(agentsDir: string): ResolvedMemoryConfig {
 				((yaml.memory as Record<string, unknown> | undefined)?.embeddings as Record<string, unknown> | undefined) ??
 				(yaml.embeddings as Record<string, unknown> | undefined) ??
 				{};
+			const configuredCostRates = parseEmbeddingCostRates(emb.costRates ?? emb.cost_rates);
+			if (configuredCostRates) defaults.embedding.costRates = configuredCostRates;
 			const srch = (yaml.search as Record<string, unknown> | undefined) ?? {};
 
 			defaults.embedding.promptSubmitTimeoutMs = clampPositive(

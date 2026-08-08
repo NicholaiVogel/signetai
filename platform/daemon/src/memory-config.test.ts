@@ -75,6 +75,22 @@ describe("loadMemoryConfig", () => {
 		expect(cfg.embedding.dimensions).toBe(384);
 	});
 
+	it("parses configured embedding cost rates for remote providers (#1201)", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(
+			join(agentsDir, "agent.yaml"),
+			`embedding:
+  provider: openai
+  costRates:
+    openai: 0.03
+    openrouter: 0.01
+`,
+		);
+
+		const cfg = loadMemoryConfig(agentsDir);
+		expect(cfg.embedding.costRates).toEqual({ openai: 0.03, openrouter: 0.01 });
+	});
+
 	it("parses embedding.warmNative: false as the native kill-switch (#1073)", () => {
 		const agentsDir = makeTempAgentsDir();
 		writeFileSync(

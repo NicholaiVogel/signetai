@@ -503,3 +503,32 @@ describe("telemetry lifecycle events (issue #1026 Phase 2)", () => {
 		expect(() => collector.record("daemon.started", { version: "0.163.15" })).not.toThrow();
 	});
 });
+
+describe("session economics (issue #1201)", () => {
+	it("aggregates embedding and LLM spend into the matching session end", async () => {
+		const collector = makeCollector();
+		collector.record("session.start", { sessionHash: "session-1" });
+		collector.record("llm.generate", {
+			sessionHash: "session-1",
+			inputTokens: 100,
+			outputTokens: 20,
+			cacheReadTokens: 10,
+			cacheCreationTokens: 5,
+			totalCost: 0.5,
+		});
+		collector.record("pipeline.embedding", {
+			sessionHash: "session-1",
+			tokens: 2_000_000,
+			cost: 0.04,
+		});
+		collector.record("session.end", { sessionHash: "session-1" });
+		await collector.flush();
+
+		const end = collector.query({ event: "session.end" })[0];
+		expect(end?.properties.tokensInput).toBe(2_000_100);
+		expect(end?.properties.tokensOutput).toBe(20);
+		expect(end?.properties.tokensCacheRead).toBe(10);
+		expect(end?.properties.tokensCacheWrite).toBe(5);
+		expect(end?.properties.cost).toBe(0.54);
+	});
+});

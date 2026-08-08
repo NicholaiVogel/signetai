@@ -139,7 +139,7 @@ import {
 } from "./session-transcripts";
 import { type StructuralCandidateSource, type StructuralFeatures, getStructuralFeatures } from "./structural-features";
 import { assembleInheritedContextBlock, resolveParentSession } from "./subagent-context";
-import { getActiveTelemetry } from "./telemetry";
+import { getActiveTelemetry, hashSessionKey } from "./telemetry";
 import { searchTemporalFallback } from "./temporal-fallback";
 import { writeTranscriptAudit } from "./transcript-audit";
 import * as transcriptCapture from "./transcript-capture";
@@ -1670,6 +1670,7 @@ export async function handleUserPromptSubmit(
 			memoryDbPath: getMemoryDbPath(),
 			fetchEmbedding: deps.fetchEmbedding,
 			embedding: cfg.embedding,
+			sessionHash: hashSessionKey(req.sessionKey) ?? undefined,
 		});
 		if (entityContext.lines.length === 0) {
 			recordUserPromptRecallTelemetry({

@@ -95,6 +95,10 @@ embedding:
   promptSubmitTimeoutMs: 1000
   # llama.cpp only: truncate inputs to stay below its physical batch limit
   llamaCppMaxInputTokens: 1400
+  # USD per million input tokens; local providers default to zero
+  costRates:
+    openai: 0.02
+    openrouter: 0.004
 
 search:
   alpha: 0.7
@@ -217,6 +221,7 @@ Vector embedding configuration for semantic memory search.
 | `api_key` | string | — | API key or `$secret:NAME` reference |
 | `promptSubmitTimeoutMs` | number | `1000` | Explicit recall embedding timeout retained for compatibility, range 1000-300000 ms |
 | `warmNative` | boolean | `true` | Kill-switch for the native ONNX embedding path. Set `false` to never warm or route to native — useful on Intel Macs where the native ONNX runtime can wedge (see #1073). Callers fall through to the llama.cpp/ollama fallback chain. Env override: `SIGNET_EMBEDDING_WARM_NATIVE=0`. |
+| `costRates` | object | provider defaults | USD per million input tokens by billing provider; local provider defaults are zero. |
 
 Increase the embedding timeout when local embedding models are slow to
 cold-load. For example, Ollama with `mxbai-embed-large` may need `10000` ms

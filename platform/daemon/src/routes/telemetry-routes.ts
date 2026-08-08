@@ -206,7 +206,8 @@ export function registerTelemetryRoutes(app: Hono): void {
 		const pipelineErrorsByCode = new Map<string, number>();
 		let embeddingCalls = 0;
 		let embeddingTokens = 0;
-		const embeddingBySource = new Map<string, number>();
+		let embeddingCost = 0;
+		const embeddingBySource = new Map<string, { tokens: number; cost: number }>();
 		let dreamingCalls = 0;
 		let dreamingInput = 0;
 		let dreamingOutput = 0;
@@ -216,6 +217,12 @@ export function registerTelemetryRoutes(app: Hono): void {
 		let recallCalls = 0;
 		const recallLatencies: number[] = [];
 		const recallByType = new Map<string, number>();
+		let sessionEnds = 0;
+		let sessionInput = 0;
+		let sessionOutput = 0;
+		let sessionCacheRead = 0;
+		let sessionCacheWrite = 0;
+		let sessionCost = 0;
 		const latencies: number[] = [];
 
 		for (const e of events) {
@@ -229,13 +236,15 @@ export function registerTelemetryRoutes(app: Hono): void {
 			}
 			if (e.event === "pipeline.embedding") {
 				embeddingCalls++;
-				if (typeof e.properties.tokens === "number") embeddingTokens += e.properties.tokens;
+				const tokens = typeof e.properties.tokens === "number" ? e.properties.tokens : 0;
+				const cost = typeof e.properties.cost === "number" ? e.properties.cost : 0;
+				embeddingTokens += tokens;
+				embeddingCost += cost;
 				const sourceKind = typeof e.properties.sourceKind === "string" ? e.properties.sourceKind : "other";
-				embeddingBySource.set(
-					sourceKind,
-					(embeddingBySource.get(sourceKind) ?? 0) +
-						(typeof e.properties.tokens === "number" ? e.properties.tokens : 0),
-				);
+				const source = embeddingBySource.get(sourceKind) ?? { tokens: 0, cost: 0 };
+				source.tokens += tokens;
+				source.cost += cost;
+				embeddingBySource.set(sourceKind, source);
 			}
 			if (e.event === "dreaming.pass") {
 				dreamingCalls++;
@@ -253,6 +262,14 @@ export function registerTelemetryRoutes(app: Hono): void {
 				if (typeof e.properties.code === "string") {
 					pipelineErrorsByCode.set(e.properties.code, (pipelineErrorsByCode.get(e.properties.code) ?? 0) + 1);
 				}
+			}
+			if (e.event === "session.end") {
+				sessionEnds++;
+				if (typeof e.properties.tokensInput === "number") sessionInput += e.properties.tokensInput;
+				if (typeof e.properties.tokensOutput === "number") sessionOutput += e.properties.tokensOutput;
+				if (typeof e.properties.tokensCacheRead === "number") sessionCacheRead += e.properties.tokensCacheRead;
+				if (typeof e.properties.tokensCacheWrite === "number") sessionCacheWrite += e.properties.tokensCacheWrite;
+				if (typeof e.properties.cost === "number") sessionCost += e.properties.cost;
 			}
 			if (e.event === "recall.performed") {
 				recallCalls++;
@@ -277,8 +294,9 @@ export function registerTelemetryRoutes(app: Hono): void {
 			embedding: {
 				calls: embeddingCalls,
 				totalTokens: embeddingTokens,
+				cost: embeddingCost,
 				bySource: [...embeddingBySource.entries()]
-					.map(([source, tokens]) => ({ source, tokens }))
+					.map(([source, totals]) => ({ source, tokens: totals.tokens, cost: totals.cost }))
 					.sort((a, b) => b.tokens - a.tokens),
 			},
 			dreaming: {
@@ -296,6 +314,14 @@ export function registerTelemetryRoutes(app: Hono): void {
 				byType: [...recallByType.entries()]
 					.map(([type, calls]) => ({ type, calls }))
 					.sort((a, b) => a.type.localeCompare(b.type)),
+			},
+			sessions: {
+				ended: sessionEnds,
+				tokensInput: sessionInput,
+				tokensOutput: sessionOutput,
+				tokensCacheRead: sessionCacheRead,
+				tokensCacheWrite: sessionCacheWrite,
+				cost: sessionCost,
 			},
 			pipelineErrors,
 			pipelineErrorsByStage: Object.fromEntries(pipelineErrorsByStage),

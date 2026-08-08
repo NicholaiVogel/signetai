@@ -381,6 +381,9 @@ export async function fetchEmbedding(
 				tokens: serve.tokenCount,
 				source: opts.usage?.source ?? "other",
 				agentId: opts.usage?.agentId,
+				sessionHash: opts.usage?.sessionHash,
+				baseUrl: effectiveCfg.base_url,
+				costRates: effectiveCfg.costRates,
 			});
 		}
 		return serve.embedding;

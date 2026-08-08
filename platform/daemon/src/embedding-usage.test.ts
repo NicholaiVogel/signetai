@@ -57,9 +57,11 @@ describe("embedding telemetry (issue #1181)", () => {
 		expect(embeddings).toHaveLength(2);
 		const first = embeddings.find((e) => e.properties.provider === "native");
 		expect(first?.properties.tokens).toBe(128);
+		expect(first?.properties.cost).toBe(0);
 		expect(first?.properties.sourceKind).toBe("memory-capture");
 		const second = embeddings.find((e) => e.properties.provider === "ollama");
 		expect(second?.properties.tokens).toBe(42);
+		expect(second?.properties.cost).toBe(0);
 		expect(second?.properties.sourceKind).toBe("dreaming");
 
 		// The DB accounting still lands too (shared boundary, #1154).
