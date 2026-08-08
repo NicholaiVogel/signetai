@@ -49,6 +49,7 @@ import {
 } from "./pipeline/structured-path-evidence";
 import { type RecallDedupeMeta, applyRecallDedupe } from "./session-recall-dedupe";
 import { escapeLike } from "./sql-utils";
+import { getActiveTelemetry } from "./telemetry";
 import { type TemporalTimeOptions, hasFreshnessIntent, resolveTemporalRecall } from "./temporal-recall";
 
 // ---------------------------------------------------------------------------
@@ -153,6 +154,21 @@ export interface RecallResponse {
 			attributes: Array<{ content: string; status: string; importance: number }>;
 		}>;
 	}>;
+}
+
+type RecallTelemetryType = "semantic" | "keyword" | "temporal" | "graph";
+
+function classifyRecallTelemetry(
+	response: Pick<RecallResponse, "results" | "method"> & {
+		readonly meta: Pick<RecallResponse["meta"], "temporal">;
+	},
+): RecallTelemetryType | undefined {
+	const sources = new Set(response.results.map((result) => result.source));
+	if (response.meta.temporal || [...sources].some((source) => source.startsWith("temporal"))) return "temporal";
+	if (["traversal", "structured", "sec"].some((source) => sources.has(source))) return "graph";
+	if (response.method === "hybrid") return "semantic";
+	if (response.method === "keyword") return "keyword";
+	return undefined;
 }
 
 export interface AggregateRecallUsage extends LlmUsage {
@@ -1261,6 +1277,13 @@ export async function hybridRecall(
 			logger.warn("memory", "Failed to update access tracking", e as Error);
 		}
 		const recallTimings = timings.finish();
+		const telemetryType = classifyRecallTelemetry(response);
+		getActiveTelemetry()?.record("recall.performed", {
+			...(telemetryType ? { type: telemetryType } : {}),
+			results: response.results.length,
+			latencyMs: recallTimings.totalMs,
+			truncated: response.results.length >= limit,
+		});
 		if (recallTimings.totalMs >= RECALL_TIMING_LOG_THRESHOLD_MS) {
 			logger.warn("memory", "Recall stage timings", {
 				agentId: params.agentId ?? "default",

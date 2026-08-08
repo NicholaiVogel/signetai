@@ -186,6 +186,11 @@ Inference emits additional local-first telemetry events:
 These events intentionally exclude raw prompts, response text, secrets,
 credentials, and session references.
 
+Recall emits `recall.performed` at the shared search boundary. Its properties
+are counts and metadata only: `type` when classification is reliable
+(`semantic`, `keyword`, `temporal`, or `graph`), `results`, `latencyMs`, and
+`truncated`. It never includes query text, memory content, or result snippets.
+
 ### GET /api/telemetry/stats
 
 Aggregated telemetry statistics since daemon start or since a given timestamp.
@@ -220,6 +225,15 @@ Aggregated telemetry statistics since daemon start or since a given timestamp.
     "fallbacks": 5,
     "p50": 120,
     "p95": 900
+  },
+  "recall": {
+    "calls": 80,
+    "p50": 42,
+    "p95": 310,
+    "byType": [
+      { "type": "keyword", "calls": 30 },
+      { "type": "semantic", "calls": 50 }
+    ]
   },
   "pipelineErrors": 3
 }

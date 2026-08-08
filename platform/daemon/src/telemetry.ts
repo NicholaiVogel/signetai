@@ -73,6 +73,7 @@ export const TELEMETRY_EVENTS = [
 	"cloud.connect_attempt",
 	"cloud.sync",
 	"cloud.storage",
+	"recall.performed",
 ] as const;
 
 export type TelemetryEventType = (typeof TELEMETRY_EVENTS)[number];

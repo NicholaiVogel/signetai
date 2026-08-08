@@ -211,6 +211,9 @@ export function registerTelemetryRoutes(app: Hono): void {
 		let dreamingCacheRead = 0;
 		let dreamingCacheWrite = 0;
 		let dreamingCost = 0;
+		let recallCalls = 0;
+		const recallLatencies: number[] = [];
+		const recallByType = new Map<string, number>();
 		const latencies: number[] = [];
 
 		for (const e of events) {
@@ -241,11 +244,21 @@ export function registerTelemetryRoutes(app: Hono): void {
 				if (typeof e.properties.cost === "number") dreamingCost += e.properties.cost;
 			}
 			if (e.event === "pipeline.error") pipelineErrors++;
+			if (e.event === "recall.performed") {
+				recallCalls++;
+				if (typeof e.properties.latencyMs === "number") recallLatencies.push(e.properties.latencyMs);
+				if (typeof e.properties.type === "string") {
+					recallByType.set(e.properties.type, (recallByType.get(e.properties.type) ?? 0) + 1);
+				}
+			}
 		}
 
 		latencies.sort((a, b) => a - b);
 		const p50 = latencies[Math.floor(latencies.length * 0.5)] ?? 0;
 		const p95 = latencies[Math.floor(latencies.length * 0.95)] ?? 0;
+		recallLatencies.sort((a, b) => a - b);
+		const recallP50 = recallLatencies[Math.floor(recallLatencies.length * 0.5)] ?? 0;
+		const recallP95 = recallLatencies[Math.floor(recallLatencies.length * 0.95)] ?? 0;
 
 		return c.json({
 			enabled: true,
@@ -265,6 +278,14 @@ export function registerTelemetryRoutes(app: Hono): void {
 				tokensCacheRead: dreamingCacheRead,
 				tokensCacheWrite: dreamingCacheWrite,
 				cost: dreamingCost,
+			},
+			recall: {
+				calls: recallCalls,
+				p50: recallP50,
+				p95: recallP95,
+				byType: [...recallByType.entries()]
+					.map(([type, calls]) => ({ type, calls }))
+					.sort((a, b) => a.type.localeCompare(b.type)),
 			},
 			pipelineErrors,
 		});
