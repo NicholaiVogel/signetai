@@ -692,7 +692,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
    - If you discover junk the queue did not flag, mint a flag op and archive in the same batch.
    - If you inspect a flagged target and judge it should stay as it is (a deliberate keep — e.g. a live entity with a non-concrete type, or an over-cap aspect you chose not to consolidate), close the record with decline_attention citing its attention id. Declining is an affirmative judgment: only decline records you actually inspected, and never decline records you could not complete this pass — defer those with a named blocker instead.
 3. Query attention_list with kind=review_due. For expired records, inspect the cited memory with search_evidence using its subjectRef, then supersede the matching active claim with supersede_claim_value. Use the supplied entityId, aspectId, attributeId, and claimKey when present. The replacement must state that the planned event remains unconfirmed; never rewrite it as if the event happened. Cite an exact quote from the original memory. Do not supersede approaching records. When creating or setting a future temporal claim, set payload.reviewAfter to the referenced ISO timestamp.
-4. Only when the hygiene queue is clear: find new evidence since the cutoff. First LIST unprocessed sources with search_evidence — omit the query and omit since so it lists from the scope's evidence watermark (the frontier the last pass actually surfaced), newest first; only after seeing what is there, narrow with a query if the list is large. Prefer evidence from completed sessions and their summaries; a transcript with completed: false is mid-stream — defer filing from it and note the deferral in the pass log, because its states may be contradicted by the session's end. For each new source:
+4. Only when the hygiene queue is clear: find new evidence since the cutoff. First LIST unprocessed sources with search_evidence — omit the query and omit since so it lists from the scope's evidence watermark (the frontier the last pass actually surfaced), newest first; only after seeing what is there, narrow with a query if the list is large. Prefer evidence from completed sessions and their summaries; a transcript with completed: false is mid-stream — defer filing from it with the named blocker "transcript still mid-stream" (re-check completed each pass: a session still active when re-checked is a re-verified blocker, not a repeated one), and note the deferral in the pass log, because its states may be contradicted by the session's end. For each new source:
    - search_entities for subjects it establishes.
    - File claims only for what the source establishes as settled fact: outcomes, decisions, shipped changes, stable behavior. Do not file instructions that were merely suggested, hypotheses or diagnoses, open questions, or intermediate states of an ongoing investigation. When a source shows an attempt and its outcome, file the outcome.
    - A claim must be a complete statement: it names the subject and the fact about it. A bare label ("SHIP-WITH-FIXES"), a fragment ("Root cause confirmed."), or an implementation detail without its subject is not a claim — do not file it.
@@ -704,7 +704,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
 
 ### What counts as durable
 
-A write is durable when the source establishes it as settled fact: an outcome, a decision, a shipped change, or a stable behavior, attached to the entity and aspect it belongs to. Trust your judgment beyond that.
+A write is durable when the source establishes it as settled fact: an outcome, a decision, a shipped change, or a stable behavior, attached to the entity and aspect it belongs to. An entity is removable when it is non-concrete (zero active aspects/claims, non-concrete type, legacy-only deps) or an exact-canonical duplicate (same canonical name, same scope). Trust your judgment beyond that.
 
 ### Must not
 
@@ -714,6 +714,7 @@ A write is durable when the source establishes it as settled fact: an outcome, a
 - You may not file a claim without an exact quote, or a relationship the source does not state.
 - You may not touch pinned entities, source-root entities, or topology entities.
 - You may not rewrite an existing claim without evidence that supersedes it.
+- You may not rename an entity or aspect without evidence that establishes the new name.
 - You may not defer without a named blocker, and not the same blocker twice in a row.
 
 ### Done
@@ -721,6 +722,7 @@ A write is durable when the source establishes it as settled fact: an outcome, a
 The pass is done when:
 
 - Every pending hygiene record is resolved: archived, merged, or declined after inspection — or deferred with a named blocker (not the same blocker twice in a row).
+- Deferred records stay pending: deferral is not a close — the record is re-examined next pass.
 - Every claim filed is a complete statement attached to an entity and aspect — no bare labels or fragments.
 - Expired temporal claims were reviewed, and only claims with exact source evidence were superseded.
 - Every write in the batch has valid provenance.
@@ -776,6 +778,7 @@ An entity is removable when it is non-concrete (zero active aspects/claims, non-
 The pass is done when:
 
 - Every pending hygiene record is resolved: archived, merged, or declined after inspection — or deferred with a named blocker (not the same blocker twice in a row).
+- Deferred records stay pending: deferral is not a close — the record is re-examined next pass.
 - Every write in the batch carries attention provenance.
 - The pass log is written with changes applied (this is the next pass's dedup).
 - No flag is left unresolved for a target you archived; no writes attempted against pinned or source-root entities.
@@ -805,7 +808,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
 
 1. Read the pass log (runbook_read). Establish cutoff: sources viewed, changes applied, deferred items.
 2. Query attention_list with kind=review_due. For expired records, inspect the cited memory with search_evidence using its subjectRef, then supersede the matching active claim with supersede_claim_value. Use the supplied entityId, aspectId, attributeId, and claimKey when present. The replacement must state that the planned event remains unconfirmed; never rewrite it as if the event happened. Cite an exact quote from the original memory. Do not supersede approaching records. When creating or setting a future temporal claim, set payload.reviewAfter to the referenced ISO timestamp.
-3. Find new evidence since the cutoff. First LIST unprocessed sources with search_evidence — omit the query and omit since so it lists from the scope's evidence watermark (the frontier the last pass actually surfaced), newest first; only after seeing what is there, narrow with a query if the list is large. Prefer evidence from completed sessions and their summaries; a transcript with completed: false is mid-stream — defer filing from it and note the deferral in the pass log, because its states may be contradicted by the session's end. For each new source:
+3. Find new evidence since the cutoff. First LIST unprocessed sources with search_evidence — omit the query and omit since so it lists from the scope's evidence watermark (the frontier the last pass actually surfaced), newest first; only after seeing what is there, narrow with a query if the list is large. Prefer evidence from completed sessions and their summaries; a transcript with completed: false is mid-stream — defer filing from it with the named blocker "transcript still mid-stream" (re-check completed each pass: a session still active when re-checked is a re-verified blocker, not a repeated one), and note the deferral in the pass log, because its states may be contradicted by the session's end. For each new source:
    - search_entities for subjects it establishes.
    - File claims only for what the source establishes as settled fact: outcomes, decisions, shipped changes, stable behavior. Do not file instructions that were merely suggested, hypotheses or diagnoses, open questions, or intermediate states of an ongoing investigation. When a source shows an attempt and its outcome, file the outcome.
    - A claim must be a complete statement: it names the subject and the fact about it. A bare label ("SHIP-WITH-FIXES"), a fragment ("Root cause confirmed."), or an implementation detail without its subject is not a claim — do not file it.
@@ -826,6 +829,7 @@ A write is durable when the source establishes it as settled fact: an outcome, a
 - You may not make hygiene writes: archives and merges need attention records, which hygiene passes process.
 - You may not touch pinned entities, source-root entities, or topology entities.
 - You may not rewrite an existing claim without evidence that supersedes it.
+- You may not rename an entity or aspect without evidence that establishes the new name.
 - You may not defer without a named blocker, and not the same blocker twice in a row.
 
 ### Done
@@ -833,6 +837,7 @@ A write is durable when the source establishes it as settled fact: an outcome, a
 The pass is done when:
 
 - Every claim filed is a complete statement attached to an entity and aspect — no bare labels or fragments.
+- Deferred records stay pending: deferral is not a close — the source is re-examined next pass.
 - Every write in the batch cites an exact quote from episodic evidence in the same agent scope as the graph target.
 - Expired temporal claims were reviewed, and only claims with exact source evidence were superseded.
 - The pass log is written with sources viewed + changes applied (this is the next pass's dedup).

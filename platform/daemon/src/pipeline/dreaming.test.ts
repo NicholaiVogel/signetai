@@ -1064,6 +1064,37 @@ describe("Dreaming runbook structure (#1211)", () => {
 			// never the same blocker twice in a row.
 			expect(prompt).toContain("named blocker");
 			expect(prompt).toContain("not the same blocker twice in a row");
+			// Deferral is not a close: deferred records stay pending and are
+			// re-examined next pass.
+			expect(prompt).toContain("Deferred records stay pending");
 		});
 	}
+
+	it("rejects fragment claims wherever claims are filed (#1210)", () => {
+		// The content and combined runbooks reach claim filing; both must
+		// carry the complete-statement standard with the concrete
+		// anti-examples the local model filed as durable knowledge.
+		for (const prompt of [DREAMING_AGENT_PROMPT, DREAMING_CONTENT_AGENT_PROMPT]) {
+			expect(prompt).toContain("complete statement");
+			expect(prompt).toContain("SHIP-WITH-FIXES");
+			expect(prompt).toContain("Root cause confirmed.");
+		}
+	});
+
+	it("keeps the focused-mode boundaries and names the mid-stream blocker (#1098, #1140)", () => {
+		// Focused modes own disjoint work: hygiene never ingests evidence,
+		// content never processes the hygiene queue.
+		expect(DREAMING_HYGIENE_AGENT_PROMPT).not.toContain("find new evidence since the cutoff");
+		expect(DREAMING_CONTENT_AGENT_PROMPT).not.toContain("Process ALL pending hygiene records");
+		expect(DREAMING_AGENT_PROMPT).toContain("find new evidence since the cutoff");
+		expect(DREAMING_AGENT_PROMPT).toContain("Process ALL pending hygiene records");
+		// The mid-stream deferral carries a named blocker that survives
+		// re-checking — a still-active session is a re-verified blocker,
+		// not a repeated one, so #1140 does not collide with the
+		// same-blocker-twice rule.
+		for (const prompt of [DREAMING_AGENT_PROMPT, DREAMING_CONTENT_AGENT_PROMPT]) {
+			expect(prompt).toContain("transcript still mid-stream");
+			expect(prompt).toContain("re-verified blocker");
+		}
+	});
 });
