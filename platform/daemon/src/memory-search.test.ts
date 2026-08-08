@@ -6,7 +6,14 @@ import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "./memory-config";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
-import { buildAgentScopeClause, expandRecallKeywordQuery, hybridRecall, transcriptExcerpt } from "./memory-search";
+import {
+	buildAgentScopeClause,
+	classifyRecallTelemetry,
+	expandRecallKeywordQuery,
+	hybridRecall,
+	transcriptExcerpt,
+} from "./memory-search";
+import type { RecallResult } from "./memory-search";
 
 describe("hybridRecall", () => {
 	let dir = "";
@@ -71,6 +78,30 @@ describe("hybridRecall", () => {
 	function unitVector(): number[] {
 		return Array.from({ length: 768 }, (_, index) => (index === 0 ? 1 : 0));
 	}
+
+	function telemetryResponse(source: string): Parameters<typeof classifyRecallTelemetry>[0] {
+		const result: RecallResult = {
+			id: "memory-1",
+			content: "",
+			content_length: 0,
+			truncated: false,
+			score: 0.5,
+			source,
+			type: "fact",
+			tags: null,
+			pinned: false,
+			importance: 0.5,
+			who: "",
+			project: null,
+			created_at: "2026-01-01T00:00:00.000Z",
+		};
+		return { results: [result], method: "hybrid", meta: {} };
+	}
+
+	it("classifies graph result sources as graph telemetry", () => {
+		expect(classifyRecallTelemetry(telemetryResponse("graph"))).toBe("graph");
+		expect(classifyRecallTelemetry(telemetryResponse("ka_traversal"))).toBe("graph");
+	});
 
 	function seedUnbackedOntologyClaim(opts: {
 		readonly id: string;

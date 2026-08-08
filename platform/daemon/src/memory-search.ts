@@ -158,14 +158,14 @@ export interface RecallResponse {
 
 type RecallTelemetryType = "semantic" | "keyword" | "temporal" | "graph";
 
-function classifyRecallTelemetry(
+export function classifyRecallTelemetry(
 	response: Pick<RecallResponse, "results" | "method"> & {
 		readonly meta: Pick<RecallResponse["meta"], "temporal">;
 	},
 ): RecallTelemetryType | undefined {
 	const sources = new Set(response.results.map((result) => result.source));
 	if (response.meta.temporal || [...sources].some((source) => source.startsWith("temporal"))) return "temporal";
-	if (["traversal", "structured", "sec"].some((source) => sources.has(source))) return "graph";
+	if (["traversal", "ka_traversal", "structured", "sec", "graph"].some((source) => sources.has(source))) return "graph";
 	if (response.method === "hybrid") return "semantic";
 	if (response.method === "keyword") return "keyword";
 	return undefined;
