@@ -7,13 +7,13 @@
  * 3. The drain pauses when system pressure is elevated, then resumes.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import type { WriteDb, ReadDb } from "./db-accessor";
-import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
-import { drainWriteBatches } from "./yielding-writes";
-import { reportEventLoopLag, getSystemPressure } from "./system-pressure";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ReadDb, WriteDb } from "./db-accessor";
+import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
+import { getSystemPressure, reportEventLoopLag } from "./system-pressure";
+import { drainWriteBatches } from "./yielding-writes";
 
 const dbFiles = ["memories.db", "memories.db-shm", "memories.db-wal"];
 let agentsDir = "";
@@ -53,7 +53,9 @@ describe("drainWriteBatches", () => {
 		const result = await drainWriteBatches(
 			getDbAccessor(),
 			(db: ReadDb, limit: number) => {
-				return db.prepare("SELECT id, payload FROM work WHERE id NOT IN (SELECT id FROM items) ORDER BY id LIMIT ?").all(limit) as Array<{ id: number; payload: string }>;
+				return db
+					.prepare("SELECT id, payload FROM work WHERE id NOT IN (SELECT id FROM items) ORDER BY id LIMIT ?")
+					.all(limit) as Array<{ id: number; payload: string }>;
 			},
 			(db: WriteDb, batch: readonly { id: number; payload: string }[]) => {
 				const stmt = db.prepare("INSERT INTO items (id) VALUES (?)");
@@ -67,8 +69,9 @@ describe("drainWriteBatches", () => {
 		expect(result.stopped).toBe("exhausted");
 
 		// Verify all items were processed.
-		const remaining = getDbAccessor().withReadDb((db) =>
-			(db.prepare("SELECT COUNT(*) AS n FROM work WHERE id NOT IN (SELECT id FROM items)").get() as { n: number }).n
+		const remaining = getDbAccessor().withReadDb(
+			(db) =>
+				(db.prepare("SELECT COUNT(*) AS n FROM work WHERE id NOT IN (SELECT id FROM items)").get() as { n: number }).n,
 		);
 		expect(remaining).toBe(0);
 	});
@@ -81,12 +84,16 @@ describe("drainWriteBatches", () => {
 
 		// Track whether other macrotasks run during the drain.
 		let otherRan = false;
-		const timer = setInterval(() => { otherRan = true; }, 5);
+		const timer = setInterval(() => {
+			otherRan = true;
+		}, 5);
 
 		await drainWriteBatches(
 			getDbAccessor(),
 			(db: ReadDb, limit: number) =>
-				db.prepare("SELECT id FROM work WHERE id NOT IN (SELECT id FROM items) ORDER BY id LIMIT ?").all(limit) as Array<{ id: number }>,
+				db
+					.prepare("SELECT id FROM work WHERE id NOT IN (SELECT id FROM items) ORDER BY id LIMIT ?")
+					.all(limit) as Array<{ id: number }>,
 			(db: WriteDb, batch: readonly { id: number }[]) => {
 				for (const item of batch) db.prepare("INSERT INTO items (id) VALUES (?)").run(item.id);
 			},
@@ -114,13 +121,20 @@ describe("drainWriteBatches", () => {
 		drainWriteBatches(
 			getDbAccessor(),
 			(db: ReadDb, limit: number) =>
-				db.prepare("SELECT id FROM work WHERE id NOT IN (SELECT id FROM items) ORDER BY id LIMIT ?").all(limit) as Array<{ id: number }>,
+				db
+					.prepare("SELECT id FROM work WHERE id NOT IN (SELECT id FROM items) ORDER BY id LIMIT ?")
+					.all(limit) as Array<{ id: number }>,
 			(db: WriteDb, batch: readonly { id: number }[]) => {
 				for (const item of batch) db.prepare("INSERT INTO items (id) VALUES (?)").run(item.id);
 			},
 			{ label: "test-pressure", maxPerTx: 50 },
-		).then(() => { drainDone = true; })
-			.catch(() => { /* drain aborted by test teardown — expected */ });
+		)
+			.then(() => {
+				drainDone = true;
+			})
+			.catch(() => {
+				/* drain aborted by test teardown — expected */
+			});
 
 		// Give it a moment — it should be paused, not done.
 		await new Promise((resolve) => setTimeout(resolve, 200));
@@ -130,4 +144,56 @@ describe("drainWriteBatches", () => {
 		// pause by showing drainDone is false after 200ms while pressure is
 		// critical. The .catch() on drainPromise handles teardown.
 	}, 1000); // 1s timeout — proves it pauses, doesn't need to finish
+});
+
+describe("event-loop wedge telemetry", () => {
+	it("emits error.occurred EventLoopLag on critical lag, rate-limited per 10 min", async () => {
+		const { closeDbAccessor, getDbAccessor, initDbAccessor } = await import("./db-accessor");
+		const { mkdirSync, rmSync } = await import("node:fs");
+		const { join } = await import("node:path");
+		const { cleanupTestTempDir, createTestTempDir } = await import("./test-temp-dir");
+		const { createTelemetryCollector, setActiveTelemetry } = await import("./telemetry");
+		const dir = createTestTempDir("signet-wedge-");
+		try {
+			closeDbAccessor();
+			rmSync(join(dir, "memory"), { recursive: true, force: true });
+			mkdirSync(join(dir, "memory"), { recursive: true });
+			initDbAccessor(join(dir, "memory", "memories.db"));
+			const collector = createTelemetryCollector(
+				getDbAccessor(),
+				{
+					posthogHost: "",
+					posthogApiKey: "",
+					flushIntervalMs: 60000,
+					flushBatchSize: 50,
+					retentionDays: 90,
+					memorySearchQaEnabled: false,
+				},
+				"0.0.0-test",
+			);
+			setActiveTelemetry(collector);
+
+			// Base the injected clock a day in the future — earlier tests in
+			// this file may already have set the wedge cooldown with real
+			// timestamps, so t0 must clear that window deterministically.
+			const t0 = Date.now() + 24 * 60 * 60 * 1000;
+			reportEventLoopLag(1500, t0);
+			reportEventLoopLag(2000, t0 + 1_000); // within cooldown: suppressed
+			await collector.flush();
+			const events = collector.query().filter((e) => e.event === "error.occurred");
+			expect(events).toHaveLength(1);
+			expect(events[0]?.properties.type).toBe("EventLoopLag");
+			expect(events[0]?.properties.lagMs).toBe(1500);
+
+			// After the cooldown elapses, a new wedge is reported.
+			reportEventLoopLag(999, t0 + 601_000);
+			await collector.flush();
+			const after = collector.query().filter((e) => e.event === "error.occurred");
+			expect(after).toHaveLength(2);
+		} finally {
+			setActiveTelemetry(undefined);
+			closeDbAccessor();
+			cleanupTestTempDir(dir);
+		}
+	});
 });

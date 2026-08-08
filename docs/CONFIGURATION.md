@@ -1141,7 +1141,9 @@ data are ever included.
 
 Lifecycle events: `daemon.started` (version, platform,
 uptime), `command.invoked` (command name only, never arguments),
-`error.occurred` (error type only, never stack/message), `version.upgraded`
+`error.occurred` (sanitized crash report — truncated message with user paths
+stripped, top stack frames with home directories removed, uptime, and
+rate-limited `EventLoopLag` reports with measured lag), `version.upgraded`
 (from, to).
 
 | Field | Default | Range | Description |

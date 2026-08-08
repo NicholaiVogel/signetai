@@ -155,6 +155,64 @@ function getOrCreateInstallId(db: DbAccessor): { readonly id: string; readonly c
 }
 
 // ---------------------------------------------------------------------------
+// Crash diagnostics
+// ---------------------------------------------------------------------------
+// error.occurred reports are sanitized at the boundary: the message is
+// truncated and stripped of user paths, the stack keeps only the top frames
+// with home directories removed, and no memory content is ever captured.
+// Enough to reproduce and fix a crash remotely, nothing to leak.
+
+const MAX_CRASH_MESSAGE_CHARS = 400;
+const MAX_CRASH_STACK_FRAMES = 8;
+
+const HOME_PATH_PATTERNS = [/\/home\/[^\/\s]+/g, /\/Users\/[^\/\s]+/g];
+
+function stripUserPaths(text: string): string {
+	let out = text;
+	for (const pattern of HOME_PATH_PATTERNS) {
+		out = out.replace(pattern, "~");
+	}
+	return out;
+}
+
+function sanitizeCrashText(value: string): string {
+	return stripUserPaths(value.replace(/[\x00-\x1f\x7f]/g, " ")).slice(0, MAX_CRASH_MESSAGE_CHARS);
+}
+
+function crashStackFrames(stack: string | undefined): string[] | undefined {
+	if (!stack) return undefined;
+	return stack
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0)
+		.map((line) => stripUserPaths(line))
+		.slice(0, MAX_CRASH_STACK_FRAMES);
+}
+
+/**
+ * Build the sanitized error.occurred properties for a process-level crash.
+ * Non-Error reasons (unhandledRejection with a primitive) degrade to a
+ * truncated string.
+ */
+export function sanitizeCrashError(error: unknown, uptimeMs: number): TelemetryProperties {
+	const uptime = Math.round(uptimeMs);
+	if (error instanceof Error) {
+		const stack = crashStackFrames(error.stack);
+		return {
+			type: error.name || "Error",
+			message: sanitizeCrashText(error.message || String(error)),
+			...(stack ? { stack: stack.join("\n") } : {}),
+			uptimeMs: uptime,
+		};
+	}
+	return {
+		type: "UnhandledRejection",
+		message: sanitizeCrashText(String(error)),
+		uptimeMs: uptime,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // PostHog batch sender
 // ---------------------------------------------------------------------------
 

@@ -16,6 +16,7 @@
  */
 
 import { logger } from "./logger";
+import { getActiveTelemetry } from "./telemetry";
 
 export type PressureLevel = "normal" | "elevated" | "critical";
 
@@ -38,7 +39,10 @@ let startupGraceUntil = 0;
 export function reportStartupGrace(durationMs = 10_000): void {
 	startupGraceUntil = Date.now() + durationMs;
 	if (currentLevel === "normal") currentLevel = "elevated";
-	logger.info("system-pressure", `Startup grace period active for ${Math.round(durationMs / 1000)}s — background workers deferred`);
+	logger.info(
+		"system-pressure",
+		`Startup grace period active for ${Math.round(durationMs / 1000)}s — background workers deferred`,
+	);
 }
 
 /**
@@ -46,8 +50,28 @@ export function reportStartupGrace(durationMs = 10_000): void {
  * difference between the expected callback interval and the actual interval —
  * i.e. how long the event loop was blocked since the last tick.
  */
-export function reportEventLoopLag(lagMs: number): void {
+const EVENT_LOOP_WEDGE_COOLDOWN_MS = 10 * 60 * 1000;
+let lastWedgeEmitAt = 0;
+
+/**
+ * Sanitized crash signal for a wedged event loop (the #1059/#1094 class):
+ * emitted at most once per 10 minutes so a stuck loop can't flood PostHog.
+ * `now` is injectable for tests.
+ */
+function reportEventLoopWedge(lagMs: number, now: number): void {
+	// lastWedgeEmitAt === 0 means never emitted — always report the first wedge.
+	if (lastWedgeEmitAt !== 0 && now - lastWedgeEmitAt < EVENT_LOOP_WEDGE_COOLDOWN_MS) return;
+	lastWedgeEmitAt = now;
+	getActiveTelemetry()?.record("error.occurred", {
+		type: "EventLoopLag",
+		message: `event loop critically blocked for ${Math.round(lagMs)}ms`,
+		lagMs: Math.round(lagMs),
+	});
+}
+
+export function reportEventLoopLag(lagMs: number, now: number = Date.now()): void {
 	if (lagMs >= CRITICAL_THRESHOLD_MS) {
+		reportEventLoopWedge(lagMs, now);
 		if (currentLevel !== "critical") {
 			logger.warn("system-pressure", `Event loop critically blocked (${lagMs}ms) — background work should pause`);
 		}

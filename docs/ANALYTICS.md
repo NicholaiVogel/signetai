@@ -231,12 +231,15 @@ lifecycle (`route`, `execute`, `stream`, `fallback`), `llm.generate`
 (provider, latency, token and cost counts when reported, success — never
 prompt text), `session.start` / `session.end` (harness and prompt count),
 the lifecycle events `daemon.started`, `command.invoked`,
-`error.occurred`, and `version.upgraded`, `install.activated` (first
-daemon run of a new install — covers bun/desktop installs the npm
-postinstall ping never sees), `pipeline.embedding` (tokens, provider,
-sourceKind — memory capture / artifact index / recall / dreaming), and
-`dreaming.pass` (provider-reported input/output/cache tokens and cost
-per agentic pass). The remaining `pipeline.*` event types are declared
+`error.occurred` (sanitized crash report — truncated message with user
+paths stripped, top stack frames with home directories removed, uptime;
+plus rate-limited `EventLoopLag` reports with measured lag), and
+`version.upgraded`, `install.activated` (first daemon run of a new
+install — covers bun/desktop installs the npm postinstall ping never
+sees), `pipeline.embedding` (tokens, provider, sourceKind — memory
+capture / artifact index / recall / dreaming), and `dreaming.pass`
+(provider-reported input/output/cache tokens and cost per agentic
+pass). The remaining `pipeline.*` event types are declared
 for future use but not yet emitted.
 
 Release Download Stats

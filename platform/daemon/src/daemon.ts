@@ -140,6 +140,7 @@ import {
 	type TelemetryCollector,
 	createTelemetryCollector,
 	defaultTelemetryLogPath,
+	sanitizeCrashError,
 	setActiveTelemetry,
 	telemetryDisabledByEnv,
 } from "./telemetry";
@@ -1726,9 +1727,9 @@ process.on("SIGTERM", () => {
 
 process.on("uncaughtException", (err) => {
 	logger.error("daemon", "Uncaught exception", err);
-	// Lifecycle event (issue #1026 Phase 2): error type only — never the
-	// stack or message content.
-	telemetryRef?.record("error.occurred", { type: err?.name ?? "Error" });
+	// Sanitized crash report: truncated message, home-stripped stack frames,
+	// uptime. No memory content. Joinable to the install's heartbeat context.
+	telemetryRef?.record("error.occurred", sanitizeCrashError(err, process.uptime() * 1000));
 	requestShutdown("error:uncaughtException", 1, err);
 });
 
@@ -1739,11 +1740,9 @@ process.on("unhandledRejection", (reason) => {
 		reason instanceof Error ? reason : undefined,
 		reason instanceof Error ? undefined : { reason: String(reason) },
 	);
-	// Lifecycle event (issue #1026 Phase 2): error type only — never the
-	// stack or message content.
-	telemetryRef?.record("error.occurred", {
-		type: reason instanceof Error ? reason.name : "UnhandledRejection",
-	});
+	// Sanitized crash report for rejections too (primitives degrade to a
+	// truncated string).
+	telemetryRef?.record("error.occurred", sanitizeCrashError(reason, process.uptime() * 1000));
 	requestShutdown("error:unhandledRejection", 1, reason);
 });
 

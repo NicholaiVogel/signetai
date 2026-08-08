@@ -20,6 +20,7 @@ import {
 	createTelemetryCollector,
 	defaultTelemetryLogPath,
 	nextFlushIntervalMs,
+	sanitizeCrashError,
 	telemetryDisabledByEnv,
 } from "./telemetry";
 import { cleanupTestTempDir, createTestTempDir } from "./test-temp-dir";
@@ -205,6 +206,45 @@ describe("telemetry collector", () => {
 		await second.flush();
 		const lastBatch = captured.at(-1)?.body.batch ?? [];
 		expect(lastBatch.map((e) => e.event)).not.toContain("install.activated");
+	});
+
+	it("sanitizes crash reports: truncation, home-path stripping, frame cap", () => {
+		const longMessage =
+			'SQLiteError: database is locked near "a very long embedded fragment that goes on and on" at /home/alice/.agents/memory/memories.db'.repeat(
+				10,
+			);
+		const err = new Error(longMessage);
+		err.stack = [
+			"Error: database is locked",
+			"    at run (/home/alice/.agents/platform/daemon/src/db-accessor.ts:1045:12)",
+			"    at withWriteTx (/home/alice/.agents/platform/daemon/src/db-accessor.ts:1060:14)",
+			"    at main (/home/alice/.agents/platform/daemon/src/daemon.ts:2001:9)",
+			"    at Module._compile (node:internal/modules/cjs/loader:1234:17)",
+			"    at Module._extensions..js (node:internal/modules/cjs/loader:987:10)",
+			"    at Module.load (node:internal/modules/cjs/loader:812:32)",
+			"    at Module._load (node:internal/modules/cjs/loader:685:12)",
+			"    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main_module:99:12)",
+			"    at node:internal/main/run_main_module:18:47",
+		].join("\n");
+
+		const props = sanitizeCrashError(err, 123456);
+		expect(props.type).toBe("Error");
+		expect(props.message.length).toBeLessThanOrEqual(400);
+		expect(props.message).not.toContain("/home/alice");
+		expect(props.message).toContain("~");
+		expect(props.uptimeMs).toBe(123456);
+		const frames = (props.stack as string).split("\n");
+		expect(frames.length).toBeLessThanOrEqual(8);
+		expect(frames[0]).toBe("Error: database is locked");
+		expect(frames[1]).not.toContain("/home/alice");
+		expect(frames[1]).toContain("~");
+	});
+
+	it("degrades non-Error rejections to a truncated string", () => {
+		const props = sanitizeCrashError("oops: " + "x".repeat(500), 42);
+		expect(props.type).toBe("UnhandledRejection");
+		expect(props.message.length).toBeLessThanOrEqual(400);
+		expect(props.uptimeMs).toBe(42);
 	});
 
 	it("honors SIGNET_TELEMETRY_OPTOUT as a runtime opt-out", () => {
