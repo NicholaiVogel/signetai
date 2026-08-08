@@ -52,6 +52,15 @@ function wrapDb(db: Database): DbAccessor {
 	} as unknown as DbAccessor;
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (predicate()) return;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(`Condition not met within ${timeoutMs}ms`);
+}
+
 describe("dreaming worker agent scope", () => {
 	let db: Database;
 	let accessor: DbAccessor;
@@ -160,6 +169,70 @@ describe("dreaming worker agent scope", () => {
 			).toEqual({ count: 0 });
 		} finally {
 			worker.stop();
+		}
+	});
+
+	it("keeps the check loop alive when a scheduled pass fails (#1198)", async () => {
+		// Regression for #1198: the periodic check loop awaited runPass
+		// without catching, so a provider 429 (or any executor rejection)
+		// escaped through the timer callback as an unhandled rejection. The
+		// daemon's unhandledRejection exit path (#1148) then shut down the
+		// whole process, and the sweep never re-armed. The check loop must
+		// record the failure (recordDreamingFailure + failDreamingPass), log
+		// it, and keep scheduling future checks.
+		db.prepare(
+			`INSERT INTO session_summaries
+		 (id, agent_id, content, token_count, depth, kind, source_type, earliest_at, latest_at, created_at)
+		 VALUES ('sweep-failure-evidence', 'alpha', 'Episodic evidence awaiting a doomed pass.', 10, 0, 'session', 'summary',
+		         datetime('now'), datetime('now'), datetime('now'))`,
+		).run();
+
+		const executorFactory = () => ({
+			async run(_input: { prompt: string; tools: ReadonlyArray<{ name: string }> }) {
+				throw new Error("429 rate_limit_error: Token usage limit reached");
+			},
+		});
+
+		// The bug's observable signature is an unhandled rejection escaping
+		// the check loop; capture any that surface during the test window.
+		const unhandled: unknown[] = [];
+		const onUnhandledRejection = (reason: unknown) => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandledRejection);
+
+		const worker = startDreamingWorker(accessor, defaultCfg({ tokenThreshold: 1 }), agentsDir, "default", {
+			executorFactory,
+			checkIntervalMs: 20,
+		});
+		try {
+			// Failures accumulate on the run agent ("default") while the
+			// per-scope backoff reads each scope's own state, so "alpha"'s
+			// fresh backlog re-triggers on the next tick. Two recorded
+			// failures prove the loop survived the first one and kept
+			// checking instead of dying with it.
+			await waitFor(() => {
+				const state = db
+					.prepare("SELECT consecutive_failures AS n FROM dreaming_state WHERE agent_id = 'default'")
+					.get() as { n: number } | null;
+				return state != null && state.n >= 2;
+			}, 2_000);
+			expect(unhandled).toEqual([]);
+
+			const state = db
+				.prepare("SELECT consecutive_failures AS n FROM dreaming_state WHERE agent_id = 'default'")
+				.get() as { n: number };
+			expect(state.n).toBeGreaterThanOrEqual(2);
+
+			const passes = db.prepare("SELECT status, error FROM dreaming_passes ORDER BY created_at").all() as Array<{
+				status: string;
+				error: string | null;
+			}>;
+			expect(passes.length).toBeGreaterThanOrEqual(2);
+			expect(passes.every((pass) => pass.status === "failed" && pass.error?.includes("429"))).toBe(true);
+		} finally {
+			worker.stop();
+			process.off("unhandledRejection", onUnhandledRejection);
 		}
 	});
 
