@@ -483,6 +483,32 @@ export interface TelemetryStatsEnabledResponse {
 		readonly p50: number;
 		readonly p95: number;
 	};
+	readonly embedding: {
+		readonly calls: number;
+		readonly totalTokens: number;
+		readonly cost: number;
+		readonly bySource: readonly {
+			readonly source: string;
+			readonly tokens: number;
+			readonly cost: number;
+		}[];
+	};
+	readonly dreaming: {
+		readonly calls: number;
+		readonly tokensInput: number;
+		readonly tokensOutput: number;
+		readonly tokensCacheRead: number;
+		readonly tokensCacheWrite: number;
+		readonly cost: number;
+	};
+	readonly sessions: {
+		readonly ended: number;
+		readonly tokensInput: number;
+		readonly tokensOutput: number;
+		readonly tokensCacheRead: number;
+		readonly tokensCacheWrite: number;
+		readonly cost: number;
+	};
 	readonly pipelineErrors: number;
 	readonly pipelineErrorsByStage: Readonly<Record<string, number>>;
 	readonly pipelineErrorsByCode: Readonly<Record<string, number>>;
