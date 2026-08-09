@@ -123,6 +123,7 @@ describe("buildSystemdDaemonStartArgs", () => {
 		expect(args).toContain("--setenv=SIGNET_BIND=0.0.0.0");
 		expect(args).toContain("--setenv=SIGNET_PATH=/home/user/.agents");
 		expect(args).toContain("--setenv=SIGNET_DAEMON_ENTRYPOINT=1");
+		expect(args.some((arg) => arg.startsWith("--setenv=BUN_INSPECT="))).toBe(false);
 		expect(args).toContain("--property=StandardError=append:/home/user/.agents/.daemon/logs/startup.log");
 		expect(args.slice(-2)).toEqual([process.execPath, "/opt/signet/dist/daemon.js"]);
 	});
@@ -139,6 +140,23 @@ describe("buildSystemdDaemonStartArgs", () => {
 		});
 
 		expect(args).toContain("--setenv=BUN_INSPECT=127.0.0.1:9230");
+	});
+
+	it("omits empty inspector settings", () => {
+		const input = {
+			daemonPath: "/opt/signet/dist/daemon.js",
+			agentsDir: "/home/user/.agents",
+			port: 3850,
+			host: "127.0.0.1",
+			bind: "0.0.0.0",
+			startupLogPath: "/home/user/.agents/.daemon/logs/startup.log",
+		};
+
+		const args = buildSystemdDaemonStartArgs({ ...input, bunInspect: "" });
+		const plist = buildLaunchdDaemonPlist({ ...input, bunInspect: "" });
+
+		expect(args.some((arg) => arg.startsWith("--setenv=BUN_INSPECT="))).toBe(false);
+		expect(plist).not.toContain("<key>BUN_INSPECT</key>");
 	});
 });
 
@@ -170,6 +188,7 @@ describe("buildLaunchdDaemonPlist", () => {
 		expect(plist).toContain("<key>SIGNET_PATH</key>");
 		expect(plist).toContain("<string>/Users/user/.agents</string>");
 		expect(plist).toContain("<key>SIGNET_DAEMON_ENTRYPOINT</key>");
+		expect(plist).not.toContain("<key>BUN_INSPECT</key>");
 		expect(plist).toContain("<string>1</string>");
 		expect(plist).toContain("<key>HOME</key>");
 		expect(plist).toContain("<key>RunAtLoad</key>");
