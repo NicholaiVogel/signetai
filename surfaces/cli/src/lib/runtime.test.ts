@@ -126,6 +126,20 @@ describe("buildSystemdDaemonStartArgs", () => {
 		expect(args).toContain("--property=StandardError=append:/home/user/.agents/.daemon/logs/startup.log");
 		expect(args.slice(-2)).toEqual([process.execPath, "/opt/signet/dist/daemon.js"]);
 	});
+
+	it("forwards the Bun inspector setting through the transient service boundary", () => {
+		const args = buildSystemdDaemonStartArgs({
+			daemonPath: "/opt/signet/dist/daemon.js",
+			agentsDir: "/home/user/.agents",
+			port: 3850,
+			host: "127.0.0.1",
+			bind: "0.0.0.0",
+			startupLogPath: "/home/user/.agents/.daemon/logs/startup.log",
+			bunInspect: "127.0.0.1:9230",
+		});
+
+		expect(args).toContain("--setenv=BUN_INSPECT=127.0.0.1:9230");
+	});
 });
 
 describe("buildLaunchdDaemonPlist", () => {
@@ -164,6 +178,21 @@ describe("buildLaunchdDaemonPlist", () => {
 		expect(plist).toMatch(/<key>KeepAlive<\/key>\s*<true\/>/);
 		expect(plist).toContain("<key>StandardErrorPath</key>");
 		expect(plist).toContain("<string>/Users/user/.agents/.daemon/logs/startup.log</string>");
+	});
+
+	it("forwards the Bun inspector setting into the persistent launch agent", () => {
+		const plist = buildLaunchdDaemonPlist({
+			daemonPath: "/opt/signet/dist/daemon.js",
+			agentsDir: "/Users/user/.agents",
+			port: 3850,
+			host: "127.0.0.1",
+			bind: "0.0.0.0",
+			startupLogPath: "/Users/user/.agents/.daemon/logs/startup.log",
+			bunInspect: "127.0.0.1:9230",
+		});
+
+		expect(plist).toContain("<key>BUN_INSPECT</key>");
+		expect(plist).toContain("<string>127.0.0.1:9230</string>");
 	});
 
 	it("invokes runtime directly without bash wrapper", () => {

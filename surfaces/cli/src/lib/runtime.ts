@@ -780,6 +780,8 @@ export interface DaemonStartArgsInput {
 	readonly bind: string;
 	readonly startupLogPath: string;
 	readonly unitName?: string;
+	// Service managers do not inherit this debugger setting unless it is explicit.
+	readonly bunInspect?: string;
 }
 
 export type SystemdDaemonStartArgsInput = DaemonStartArgsInput;
@@ -803,6 +805,7 @@ export function buildSystemdDaemonStartArgs(input: SystemdDaemonStartArgsInput):
 		`--setenv=SIGNET_PATH=${input.agentsDir}`,
 		"--setenv=SIGNET_DAEMON_ENTRYPOINT=1",
 		...(input.unitName ? [`--setenv=SIGNET_DAEMON_UNIT=${input.unitName}`] : []),
+		...(input.bunInspect ? [`--setenv=BUN_INSPECT=${input.bunInspect}`] : []),
 		...resolveDaemonLaunchCommand(input.daemonPath),
 	];
 }
@@ -979,6 +982,7 @@ export function buildLaunchdDaemonPlist(input: LaunchdDaemonPlistInput): string 
 		SIGNET_BIND: input.bind,
 		SIGNET_PATH: input.agentsDir,
 		SIGNET_DAEMON_ENTRYPOINT: "1",
+		...(input.bunInspect ? { BUN_INSPECT: input.bunInspect } : {}),
 		...(process.env.SIGNET_DIR ? { SIGNET_DIR: process.env.SIGNET_DIR } : {}),
 		...(process.env.SIGNET_DASHBOARD_DIR ? { SIGNET_DASHBOARD_DIR: process.env.SIGNET_DASHBOARD_DIR } : {}),
 		HOME: process.env.HOME ?? homedir(),
@@ -1130,6 +1134,7 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemo
 			bind: net.bind,
 			startupLogPath,
 			unitName: systemdUnitName,
+			bunInspect: process.env.BUN_INSPECT,
 		});
 		const result = spawnSync("systemd-run", systemdArgs, {
 			stdio: ["ignore", "ignore", stderrTarget],
@@ -1160,6 +1165,7 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemo
 				host: net.host,
 				bind: net.bind,
 				startupLogPath,
+				bunInspect: process.env.BUN_INSPECT,
 			}),
 		);
 		// Boot out any loaded job before (re)bootstrap. When no job is loaded
