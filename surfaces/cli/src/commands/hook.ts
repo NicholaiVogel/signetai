@@ -48,7 +48,7 @@ export function resolvePromptSubmitTimeout(): number {
 	return resolvePromptSubmitTimeoutMs(readTimeoutEnv("SIGNET_PROMPT_SUBMIT_TIMEOUT"));
 }
 
-type CodexHookEventName = "SessionStart" | "UserPromptSubmit";
+type CodexHookEventName = "SessionStart" | "UserPromptSubmit" | "PreToolUse";
 
 export function buildCodexHookOutput(
 	hookEventName: CodexHookEventName,
@@ -240,6 +240,50 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 			}
 			if (options.codexJson) {
 				printCodexHookOutput("UserPromptSubmit", data.inject);
+			} else if (options.json) {
+				console.log(JSON.stringify(data, null, 2));
+			} else if (data.inject) {
+				console.log(data.inject);
+			}
+		});
+
+	hookCmd
+		.command("notifications")
+		.description("Inject pending cross-agent notifications at a compatible harness hook")
+		.requiredOption("-H, --harness <harness>", "Harness name")
+		.requiredOption("--hook <hook>", "Native harness hook name")
+		.option("--project <project>", "Project path")
+		.option("--agent-id <id>", "Agent ID")
+		.option("--json", "Output as JSON")
+		.option("--hook-json", "Output native hook JSON with additionalContext")
+		.option("--codex-json", "Alias for --hook-json")
+		.action(async (options) => {
+			const input = await readJson();
+			const hook = pickString(options.hook);
+			const data = await fetchHookData<{ inject?: string }>(deps, "notifications", "/api/hooks/notifications", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					harness: options.harness,
+					hook,
+					agentId: pickString(options.agentId, input?.signet_agent_id, process.env.SIGNET_AGENT_ID),
+					sessionKey: pickSessionKey(input),
+					project: pickString(options.project, input?.cwd),
+				}),
+				timeout: PROMPT_SUBMIT_TIMEOUT_MS,
+			});
+			if (!data) {
+				if ((options.hookJson || options.codexJson) && hook === "PreToolUse") {
+					printCodexHookOutput("PreToolUse");
+				}
+				process.exit(0);
+			}
+			if (options.hookJson || options.codexJson) {
+				if (hook !== "PreToolUse") {
+					process.stderr.write(`[signet] native hook JSON is not supported for '${hook}'\n`);
+					process.exit(1);
+				}
+				printCodexHookOutput("PreToolUse", data.inject);
 			} else if (options.json) {
 				console.log(JSON.stringify(data, null, 2));
 			} else if (data.inject) {

@@ -526,6 +526,29 @@ export async function onUserPromptSubmit(
 	});
 }
 
+export async function onNotifications(
+	harness: string,
+	hook: string,
+	options: {
+		daemonUrl?: string;
+		agentId?: string;
+		sessionKey?: string;
+		project?: string;
+	},
+): Promise<UserPromptSubmitResult | null> {
+	return daemonFetch(options.daemonUrl || DEFAULT_DAEMON_URL, "/api/hooks/notifications", {
+		method: "POST",
+		body: {
+			harness,
+			hook,
+			agentId: options.agentId,
+			sessionKey: options.sessionKey,
+			project: options.project,
+		},
+		timeout: READ_TIMEOUT,
+	});
+}
+
 export async function onPreCompaction(
 	harness: string,
 	options: {
@@ -1454,6 +1477,8 @@ const signetPlugin = {
 			const hooksRegistered = [
 				"before_prompt_build",
 				"before_agent_start",
+				"message_received",
+				"before_tool_call",
 				"agent_end",
 				"before_compaction",
 				"after_compaction",
@@ -2003,6 +2028,7 @@ const signetPlugin = {
 			// the same event-loop tick don't both pass the guard before either await
 			// completes (injectedTurns is only written after the daemon responds).
 			const inFlightTurns = new Set<string>();
+			const pendingNotifications = new Map<string, { inject: string; at: number }>();
 			const beforeCompactions = new Map<string, number>();
 			const afterCompactions = new Map<string, number>();
 
@@ -2258,6 +2284,9 @@ const signetPlugin = {
 				// ECONNREFUSED hang on every message turn when the daemon is down.
 				if (!daemonReachable) return undefined;
 
+				const scopedKey = buildScopedSessionKey(sessionKey, agentId);
+				const pendingNotification = scopedKey ? pendingNotifications.get(scopedKey)?.inject : undefined;
+
 				// Prefer the clean last user message from the structured messages
 				// array. The prompt field carries platform metadata wrappers
 				// (Discord JSON, untrusted-context blocks) that pollute recall.
@@ -2265,7 +2294,7 @@ const signetPlugin = {
 				const prompt =
 					extractLastUserMessage(event.messages) ?? (rawPrompt ? extractUserMessage(rawPrompt) : undefined);
 				if (!prompt || prompt.length <= 3) {
-					return undefined;
+					return pendingNotification ? { prependContext: pendingNotification } : undefined;
 				}
 
 				// Deduplicate by (sessionKey, messageCount): both before_prompt_build
@@ -2274,7 +2303,6 @@ const signetPlugin = {
 				// reliably correlated and are allowed to fall through rather than
 				// risk cross-suppressing concurrent independent sessions.
 				const count = Array.isArray(event.messages) ? event.messages.length : undefined;
-				const scopedKey = buildScopedSessionKey(sessionKey, agentId);
 				// sig is only defined when we have both a stable scoped session identity
 				// and a message count — the two values that make dedup meaningful.
 				const sig = scopedKey && typeof count === "number" ? `${scopedKey}|${count}` : undefined;
@@ -2284,12 +2312,21 @@ const signetPlugin = {
 					for (const [k, v] of injectedTurns) {
 						if (now - v.at > SESSION_TURN_TTL_MS) injectedTurns.delete(k);
 					}
+					for (const [k, v] of pendingNotifications) {
+						if (now - v.at > SESSION_TURN_TTL_MS) pendingNotifications.delete(k);
+					}
 				}
 				if (
 					sig &&
 					(inFlightTurns.has(sig) || (scopedKey !== undefined && injectedTurns.get(scopedKey)?.count === count))
 				) {
-					return undefined;
+					const notifications = await onNotifications("openclaw", "before_prompt_build", {
+						...opts,
+						agentId,
+						sessionKey,
+					});
+					if (notifications?.inject) return { prependContext: notifications.inject };
+					return pendingNotification ? { prependContext: pendingNotification } : undefined;
 				}
 				// Mark in-flight synchronously before any await so concurrent
 				// invocations in the same event-loop tick see the guard immediately.
@@ -2308,8 +2345,9 @@ const signetPlugin = {
 				if (sig) inFlightTurns.delete(sig);
 				if (!result) {
 					// daemonFetch already logged the specific error (ECONNREFUSED or HTTP status).
-					return undefined;
+					return pendingNotification ? { prependContext: pendingNotification } : undefined;
 				}
+				if (scopedKey) pendingNotifications.delete(scopedKey);
 				// Record the completed turn so the other hook sees it on arrival.
 				if (scopedKey && typeof count === "number") {
 					injectedTurns.set(scopedKey, { count, at: Date.now() });
@@ -2375,6 +2413,35 @@ const signetPlugin = {
 				return result;
 			});
 
+			const cacheNotificationHook = async (
+				event: Record<string, unknown>,
+				ctx: unknown,
+				hook: string,
+			): Promise<void> => {
+				if (!cfg.enabled || !daemonReachable) return;
+				const resolved = resolveCtx(event, ctx);
+				const scopedKey = buildScopedSessionKey(resolved.sessionKey, resolved.agentId);
+				if (!scopedKey) return;
+				const result = await onNotifications("openclaw", hook, {
+					...opts,
+					agentId: resolved.agentId,
+					sessionKey: resolved.sessionKey,
+					project: resolved.project,
+				});
+				if (result?.inject) {
+					pendingNotifications.set(scopedKey, { inject: result.inject, at: Date.now() });
+				} else {
+					pendingNotifications.delete(scopedKey);
+				}
+			};
+
+			api.on("message_received", async (event: Record<string, unknown>, ctx: unknown): Promise<void> => {
+				await cacheNotificationHook(event, ctx, "message_received");
+			});
+			api.on("before_tool_call", async (event: Record<string, unknown>, ctx: unknown): Promise<void> => {
+				await cacheNotificationHook(event, ctx, "before_tool_call");
+			});
+
 			api.on("agent_end", async (event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
 				if (!cfg.enabled) return undefined;
 
@@ -2401,6 +2468,7 @@ const signetPlugin = {
 				if (scopedKey) {
 					claimedSessions.delete(scopedKey);
 					injectedTurns.delete(scopedKey);
+					pendingNotifications.delete(scopedKey);
 					checkpointTurns.delete(scopedKey);
 					bpbGen.delete(scopedKey);
 					basGen.delete(scopedKey);

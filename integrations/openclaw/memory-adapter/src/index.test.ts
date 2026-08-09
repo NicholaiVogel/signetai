@@ -28,6 +28,7 @@ let timeoutSessionStartCount = 0;
 let delaySessionStartMs = 0;
 let delayPromptSubmitMs = 0;
 let checkpointResponse: Record<string, unknown> | null = null;
+let notificationInject: string | null = null;
 let lastRememberBody: unknown = null;
 let lastPreCompactionBody: unknown = null;
 let lastCompactionBody: unknown = null;
@@ -148,6 +149,7 @@ beforeEach(() => {
 	lastCheckpointBody = null;
 	lastHeartbeatBody = null;
 	checkpointResponse = null;
+	notificationInject = null;
 	warnMessages = [];
 	testDir = mkdtempSync(join(tmpdir(), "signet-openclaw-test-"));
 	process.env.SIGNET_PATH = testDir;
@@ -194,6 +196,8 @@ beforeEach(() => {
 						memoryCount: 2,
 						engine: "fts+decay",
 					});
+				case "/api/hooks/notifications":
+					return jsonResponse(notificationInject ? { inject: notificationInject } : {});
 				case "/api/hooks/session-end":
 					lastSessionEndBody = init?.body ? JSON.parse(String(init.body)) : null;
 					return jsonResponse({ memoriesSaved: 0 });
@@ -1911,6 +1915,8 @@ describe("registration guard (#422)", () => {
 			hooksRegistered: [
 				"before_prompt_build",
 				"before_agent_start",
+				"message_received",
+				"before_tool_call",
 				"agent_end",
 				"before_compaction",
 				"after_compaction",
@@ -2505,5 +2511,26 @@ describe("cleanupTimedMap regression", () => {
 		]);
 		cleanupTimedMap(allExpired, 1000, 500);
 		expect(allExpired.size).toBe(0);
+	});
+	it("caches notifications at non-injecting OpenClaw hooks for the next prompt build", async () => {
+		notificationInject = "peer-notification";
+		failPromptSubmitCount = 1;
+		const { api, hooks } = createMockApi();
+		signetPlugin.register(api);
+
+		const event = { sessionKey: "notify-session", agentId: "recipient", project: "/repo" };
+		expect(await hooks.get("message_received")?.(event, {})).toBeUndefined();
+		expect(await hooks.get("before_tool_call")?.(event, {})).toBeUndefined();
+
+		const result = await hooks.get("before_prompt_build")?.(
+			{
+				...event,
+				prompt: "review the queued notification",
+				messages: [{ role: "user", content: "review the queued notification" }],
+			},
+			{},
+		);
+		expect(getPrependContext(result)).toContain("peer-notification");
+		expect(getHits("/api/hooks/notifications")).toBe(2);
 	});
 });

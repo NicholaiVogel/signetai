@@ -236,6 +236,31 @@ export async function endPreviousSession(
 	deps.state.clearPendingSessionData(sessionId);
 }
 
+export async function requestNotifications(
+	deps: LifecycleDeps,
+	ctx: BaseExtensionContext,
+	hook: string,
+	queue = true,
+): Promise<string | undefined> {
+	await ensureSessionContext(deps, ctx);
+	const session = currentSessionRef(ctx);
+	if (!session.sessionId) return undefined;
+	const result = await deps.client.post<{ readonly inject?: string }>(
+		"/api/hooks/notifications",
+		{
+			harness: deps.config.harness,
+			hook,
+			agentId: deps.agentId,
+			sessionKey: session.sessionId,
+			project: session.project,
+		},
+		deps.config.promptSubmitTimeout,
+	);
+	const inject = readTrimmedString(result?.inject);
+	if (inject && queue) deps.state.queuePendingRecall(session.sessionId, inject);
+	return inject;
+}
+
 export async function requestRecallForPrompt(
 	deps: LifecycleDeps,
 	ctx: BaseExtensionContext,

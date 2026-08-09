@@ -733,6 +733,7 @@ Legend:
 | `knowledge-architecture-navigation` | approved | `docs/specs/approved/knowledge-architecture-navigation.md` | `knowledge-architecture-schema` | - | Entity/aspect/group/claim/attribute navigation surface for MCP and daemon API. |
 | `predictive-memory-scorer` | approved | `docs/specs/approved/predictive-memory-scorer.md` | `memory-pipeline-v2`, `knowledge-architecture-schema`, `session-continuity-protocol` | - | |
 | `multi-agent-support` | approved | `docs/specs/approved/multi-agent-support.md` | `memory-pipeline-v2` | - | |
+| `cross-agent-notification-delivery` | approved | `docs/specs/approved/cross-agent-notification-delivery.md` | `multi-agent-support`, `signet-runtime` | - | Durable agent-scoped peer inbox, explicit acknowledgement, and next-compatible-hook delivery for issue #944 |
 | `signet-runtime` | approved | `docs/specs/approved/signet-runtime.md` | `memory-pipeline-v2` | - | |
 | `model-provider-router` | approved | `docs/specs/approved/model-provider-router.md` | `signet-runtime` | - | Shared inference control plane for per-agent rosters, daemon workloads, native RPC, and OpenAI-compatible gateway routing |
 | `pipeline-pause-control` | complete | `docs/specs/complete/pipeline-pause-control.md` | `memory-pipeline-v2` | - | CLI and dashboard pause/resume shipped on top of live daemon pause/resume API, paused-mode observability, and local Ollama unload |
@@ -847,6 +848,10 @@ independent of harness-specific connectors.
 
 **multi-agent-support**: Multiple agents share one SQLite database
 without data collision via agent_id scoping.
+
+**cross-agent-notification-delivery**: Unread peer messages survive daemon
+restarts, remain agent-scoped, arrive through the next compatible hook, and
+stop repeating only after explicit recipient acknowledgement.
 
 **sub-agent-context-continuity**: Parent session transcript is queryable during active sessions, and sub-agents inherit deterministic parent context with no LLM call.
 

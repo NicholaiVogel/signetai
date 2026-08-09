@@ -379,7 +379,7 @@ Supports local daemon delivery and optional ACP relay.
 | `from_agent_id` | string | no | Sender agent id |
 | `from_session_key` | string | no | Sender session key |
 | `to_agent_id` | string | no | Target agent id |
-| `to_session_key` | string | no | Target session key |
+| `to_session_key` | string | no | Active target session key; use `to_agent_id` for durable delivery when the session is offline |
 | `broadcast` | boolean | no | Broadcast to all sessions |
 | `type` | enum | no | `assist_request`, `decision_update`, `info`, `question` |
 | `via` | enum | no | `local` (default) or `acp` |
@@ -387,7 +387,7 @@ Supports local daemon delivery and optional ACP relay.
 | `acp_target_agent_name` | string | no | ACP target agent name (required if `via=acp`) |
 | `acp_timeout_ms` | number | no | ACP relay timeout in milliseconds (used when `via=acp`) |
 
-**Returns:** Stored message object including delivery status.
+**Returns:** Stored message object including delivery status. The durable inbox is capped at 10,000 live rows; when full, the endpoint returns `429` rather than evicting unread messages. Expired rows are pruned before each write.
 
 **Daemon endpoint:** `POST /api/cross-agent/messages`
 
@@ -402,13 +402,31 @@ Read recent inbound cross-agent messages for an agent/session.
 | `agent_id` | string | no | Recipient agent id (default `default`) |
 | `session_key` | string | no | Recipient session key |
 | `since` | string | no | ISO timestamp lower bound |
-| `limit` | number | no | Max messages to return |
+| `limit` | number | no | Max messages to return (MCP cap 25) |
+| `offset` | number | no | Pagination offset |
+| `unread_only` | boolean | no | Return only messages not yet acknowledged by this agent |
 | `include_sent` | boolean | no | Include messages sent by this agent |
 | `include_broadcast` | boolean | no | Include broadcast messages |
 
-**Returns:** Object with `items` array and `count`.
+**Returns:** Object with bounded `items`, `count`, `total`, `unreadCount`, `limit`, `offset`, and `hasMore`. Items include `acknowledgedAt` when read.
 
 **Daemon endpoint:** `GET /api/cross-agent/messages`
+
+### agent_message_ack
+
+Mark one visible message as processed for the receiving agent. Acknowledgement is idempotent and agent-scoped; another agent cannot acknowledge a direct message it cannot read.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `message_id` | string | yes | Stable message ID from hook injection or inbox |
+| `agent_id` | string | no | Recipient agent ID (default `default`) |
+| `session_key` | string | no | Active recipient session key |
+
+**Returns:** `messageId`, `agentId`, `acknowledgedAt`, and `alreadyAcknowledged`.
+
+**Daemon endpoint:** `POST /api/cross-agent/messages/:messageId/ack`
 
 
 ### session_bypass

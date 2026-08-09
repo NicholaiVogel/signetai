@@ -19,6 +19,7 @@ import {
 	endPreviousSession,
 	ensureSessionContext,
 	refreshSessionStart,
+	requestNotifications,
 	requestRecallForPrompt,
 } from "./lifecycle.js";
 import { type PiSessionState, createSessionState } from "./session-state.js";
@@ -352,6 +353,9 @@ interface PiDeps extends LifecycleDeps {
 function registerContextHandlers(pi: PiExtensionApi, deps: PiDeps): void {
 	pi.on("context", async (event: PiContextEvent, ctx): Promise<PiContextEventResult | undefined> => {
 		const session = currentSessionRef(ctx);
+		if (!deps.state.hasPendingRecall(session.sessionId)) {
+			await requestNotifications(deps, ctx, "context");
+		}
 		const hiddenMessages = deps.state.consumeHiddenInjectMessages(session.sessionId);
 		if (hiddenMessages.length === 0) return;
 

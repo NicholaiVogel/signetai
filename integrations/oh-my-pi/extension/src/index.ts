@@ -8,6 +8,7 @@ import {
 	endPreviousSession,
 	ensureSessionContext,
 	refreshSessionStart,
+	requestNotifications,
 	requestRecallForPrompt,
 } from "./lifecycle.js";
 import { type OmpSessionState, createSessionState } from "./session-state.js";
@@ -65,6 +66,8 @@ function registerPromptHandlers(pi: OmpExtensionApi, deps: OmpDeps): void {
 		if (!deps.state.hasPendingRecall(session.sessionId)) {
 			await requestRecallForPrompt(deps, ctx, event.prompt);
 		}
+		const notificationInject = await requestNotifications(deps, ctx, "before_agent_start", false);
+		if (notificationInject) deps.state.mergeIntoNextPendingRecall(session.sessionId, notificationInject);
 
 		const hiddenMessage = deps.state.consumePersistentHiddenInject(session.sessionId);
 		if (!hiddenMessage) return;

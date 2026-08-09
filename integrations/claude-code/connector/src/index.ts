@@ -220,6 +220,7 @@ export class ClaudeCodeConnector extends BaseConnector {
 			if (settings.hooks) {
 				settings.hooks.SessionStart = undefined;
 				settings.hooks.UserPromptSubmit = undefined;
+				settings.hooks.PreToolUse = undefined;
 				settings.hooks.PreCompaction = undefined; // legacy
 				settings.hooks.PreCompact = undefined;
 				settings.hooks.SessionEnd = undefined;
@@ -388,6 +389,20 @@ export class ClaudeCodeConnector extends BaseConnector {
 							type: "command",
 							command: `${signetCmd} hook user-prompt-submit -H claude-code --project "${pwdExpr}"`,
 							timeout: userPromptSubmitHookTimeout(),
+						},
+					],
+				},
+			];
+		}
+
+		if (hooksConfig.userPromptSubmit !== false) {
+			hooks.PreToolUse = [
+				{
+					hooks: [
+						{
+							type: "command",
+							command: `${signetCmd} hook notifications -H claude-code --hook PreToolUse --project "${pwdExpr}" --hook-json`,
+							timeout: 3000,
 						},
 					],
 				},

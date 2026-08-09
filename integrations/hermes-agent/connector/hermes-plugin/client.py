@@ -319,6 +319,26 @@ class SignetClient:
             timeout=_RECALL_TIMEOUT_SECS,
         )
 
+    def notifications(
+        self,
+        session_key: str,
+        hook: str,
+        *,
+        project: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch pending peer notifications for a compatible Hermes hook."""
+        return self._post(
+            "/api/hooks/notifications",
+            {
+                "harness": self._harness,
+                "hook": hook,
+                "sessionKey": session_key,
+                "agentId": self._agent_id,
+                "project": project,
+            },
+            timeout=_RECALL_TIMEOUT_SECS,
+        )
+
     def session_end(
         self,
         session_key: str,

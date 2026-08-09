@@ -8,6 +8,7 @@ import {
 	ensureSessionContext,
 	flushPendingSessionEnds,
 	refreshSessionStart,
+	requestNotifications,
 	requestRecallForPrompt,
 } from "@signet/pi-extension-base";
 import {
@@ -28,6 +29,7 @@ export {
 	ensureSessionContext,
 	flushPendingSessionEnds,
 	refreshSessionStart,
+	requestNotifications,
 	requestRecallForPrompt,
 };
 

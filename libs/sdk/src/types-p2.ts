@@ -409,23 +409,41 @@ export interface AgentPresenceUpdateResponse {
 export interface AgentMessage {
 	readonly id: string;
 	readonly fromAgentId: string;
-	readonly fromSessionKey: string | null;
-	readonly toAgentId: string;
-	readonly toSessionKey: string | null;
-	readonly type: string;
+	readonly fromSessionKey?: string;
+	readonly toAgentId?: string;
+	readonly toSessionKey?: string;
+	readonly toSessionAgentId?: string;
+	readonly type: "assist_request" | "decision_update" | "info" | "question";
 	readonly content: string;
 	readonly broadcast: boolean;
 	readonly createdAt: string;
+	readonly expiresAt: string;
+	readonly deliveryPath: "local" | "acp";
+	readonly deliveryStatus: "queued" | "delivered" | "failed";
+	readonly deliveryError?: string;
+	readonly deliveryReceipt?: Readonly<Record<string, unknown>>;
+	readonly acknowledgedAt?: string;
 }
 
 export interface AgentMessageListResponse {
-	readonly messages: readonly AgentMessage[];
+	readonly items: readonly AgentMessage[];
 	readonly count: number;
+	readonly total: number;
+	readonly unreadCount: number;
+	readonly limit: number;
+	readonly offset: number;
+	readonly hasMore: boolean;
 }
 
 export interface AgentMessageSendResponse {
-	readonly id: string;
-	readonly created: boolean;
+	readonly message: AgentMessage;
+}
+
+export interface AgentMessageAcknowledgeResponse {
+	readonly messageId: string;
+	readonly agentId: string;
+	readonly acknowledgedAt: string;
+	readonly alreadyAcknowledged: boolean;
 }
 
 // ============================================================================

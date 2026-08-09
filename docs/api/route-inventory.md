@@ -42,11 +42,13 @@ silently disappear from the API reference.
 | POST | `/api/graphiq/update` | platform/daemon/src/routes/graphiq-routes.ts |
 | POST | `/api/graphiq/uninstall` | platform/daemon/src/routes/graphiq-routes.ts |
 | POST | `/api/graphiq/index` | platform/daemon/src/routes/graphiq-routes.ts |
+| POST | `/api/hooks/notifications` | platform/daemon/src/routes/hooks-routes.ts |
 | GET | `/api/cross-agent/presence` | platform/daemon/src/routes/hooks-routes.ts |
 | POST | `/api/cross-agent/presence` | platform/daemon/src/routes/hooks-routes.ts |
 | DELETE | `/api/cross-agent/presence/:sessionKey` | platform/daemon/src/routes/hooks-routes.ts |
 | GET | `/api/cross-agent/messages` | platform/daemon/src/routes/hooks-routes.ts |
 | POST | `/api/cross-agent/messages` | platform/daemon/src/routes/hooks-routes.ts |
+| POST | `/api/cross-agent/messages/:messageId/ack` | platform/daemon/src/routes/hooks-routes.ts |
 | GET | `/api/cross-agent/stream` | platform/daemon/src/routes/hooks-routes.ts |
 | POST | `/api/synthesis/trigger` | platform/daemon/src/routes/hooks-routes.ts |
 | GET | `/api/synthesis/status` | platform/daemon/src/routes/hooks-routes.ts |

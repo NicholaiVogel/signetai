@@ -47,8 +47,14 @@ interface PreCompactionResult {
 	readonly summaryPrompt?: string;
 }
 
-interface UserPromptSubmitResult {
+interface HookNotificationResult {
 	readonly inject?: string;
+	readonly notifications?: {
+		readonly inject?: string;
+	};
+}
+
+interface UserPromptSubmitResult extends HookNotificationResult {
 	readonly memoryCount?: number;
 }
 
@@ -58,6 +64,7 @@ interface UserPromptSubmitResult {
 const MAX_ACTIVE_TURNS = 64;
 interface ActiveTurn {
 	inject: string;
+	notificationInject: string;
 }
 const activeTurns = new Map<string, ActiveTurn>();
 
@@ -66,7 +73,7 @@ function beginTurn(sessionID: string): ActiveTurn {
 		const oldest = activeTurns.keys().next().value;
 		if (oldest !== undefined) activeTurns.delete(oldest);
 	}
-	const turn = { inject: "" };
+	const turn = { inject: "", notificationInject: "" };
 	activeTurns.set(sessionID, turn);
 	return turn;
 }
@@ -75,6 +82,13 @@ function appendTurnInject(sessionID: string, turn: ActiveTurn, inject: string): 
 	const active = activeTurns.get(sessionID);
 	if (active !== turn) return;
 	active.inject = active.inject ? `${active.inject}\n${inject}` : inject;
+}
+
+function recallOnlyInject(result: HookNotificationResult): string {
+	const inject = result.inject?.trim() ?? "";
+	const notificationInject = result.notifications?.inject?.trim() ?? "";
+	if (!notificationInject || !inject.endsWith(notificationInject)) return inject;
+	return inject.slice(0, -notificationInject.length).trim();
 }
 
 function readRuntimeEnv(name: string): string | undefined {
@@ -252,11 +266,37 @@ export const SignetPlugin: Plugin = async ({ directory, client: oc }) => {
 		}
 	}
 
+	async function refreshNotifications(sessionID: string, hook: string): Promise<void> {
+		const turn = activeTurns.get(sessionID) ?? beginTurn(sessionID);
+		try {
+			const result = await client.post<HookNotificationResult>(
+				"/api/hooks/notifications",
+				{
+					harness: HARNESS,
+					hook,
+					agentId,
+					sessionKey: sessionID,
+					project: directory,
+				},
+				READ_TIMEOUT,
+			);
+			if (activeTurns.get(sessionID) === turn) {
+				turn.notificationInject = result?.inject?.trim() ?? "";
+			}
+		} catch {
+			// Peer notifications are best-effort and never block OpenCode.
+		}
+	}
+
 	return {
 		// ------------------------------------------------------------------
 		// Record skill usage — OpenCode runs skills via the `skill` tool,
 		// whose args carry { name }. Recorded as a source='agent' invocation.
 		// ------------------------------------------------------------------
+		"tool.execute.before": async (input): Promise<void> => {
+			await refreshNotifications(input.sessionID, "tool.execute.before");
+		},
+
 		"tool.execute.after": async (input, output): Promise<void> => {
 			if (input.tool !== "skill") return;
 			const skillName = typeof input.args?.name === "string" ? input.args.name : "";
@@ -320,8 +360,10 @@ export const SignetPlugin: Plugin = async ({ directory, client: oc }) => {
 					},
 					promptSubmitTimeout(),
 				);
-				if (result?.inject) {
-					appendTurnInject(input.sessionID, turn, result.inject);
+				if (result) {
+					const recallInject = recallOnlyInject(result);
+					if (recallInject) appendTurnInject(input.sessionID, turn, recallInject);
+					turn.notificationInject = result.notifications?.inject?.trim() ?? "";
 				}
 			} catch {
 				// never block the user's message
@@ -339,8 +381,10 @@ export const SignetPlugin: Plugin = async ({ directory, client: oc }) => {
 			} catch {
 				// Signet context is optional; never break OpenCode prompt rendering.
 			}
-			const inject = activeTurns.get(input.sessionID)?.inject;
-			const parts = [...new Set([startInject, inject].filter((part) => part?.trim()))];
+			await refreshNotifications(input.sessionID, "experimental.chat.system.transform");
+			const turn = activeTurns.get(input.sessionID);
+			const startPart = startInject && !turn?.inject.includes(startInject) ? startInject : "";
+			const parts = [...new Set([startPart, turn?.inject, turn?.notificationInject].filter((part) => part?.trim()))];
 			if (parts.length > 0) {
 				output.system.push(parts.join("\n"));
 			}

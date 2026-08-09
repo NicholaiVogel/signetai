@@ -120,6 +120,7 @@ import { up as telemetryFirstUse } from "./111-telemetry-first-use";
 import { up as telemetryQueueOwnership } from "./112-telemetry-queue-ownership";
 import { up as sessionClaims } from "./113-session-claims";
 import { up as memoryTraversalHydrationIndex } from "./114-memory-traversal-hydration-index";
+import { up as crossAgentMessageNotifications } from "./115-cross-agent-message-notifications";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1070,6 +1071,14 @@ export const MIGRATIONS: readonly Migration[] = [
 		version: 114,
 		name: "memory-traversal-hydration-index",
 		up: memoryTraversalHydrationIndex,
+	},
+	{
+		version: 115,
+		name: "cross-agent-message-notifications",
+		up: crossAgentMessageNotifications,
+		artifacts: {
+			tables: ["cross_agent_messages", "cross_agent_message_receipts"],
+		},
 	},
 ];
 

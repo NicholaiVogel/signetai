@@ -327,6 +327,7 @@ class SignetMemoryProvider(MemoryProvider):
         self._inject_cache = ""
         self._inject_lock = threading.Lock()
         self._prefetch_result = ""
+        self._notification_result = ""
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetch_generation = 0
@@ -485,11 +486,27 @@ class SignetMemoryProvider(MemoryProvider):
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             self._prefetch_thread.join(timeout=3.0)
 
-        with self._prefetch_lock:
-            result = self._prefetch_result
-            self._prefetch_result = ""
+        client = self._client
+        if client:
+            try:
+                notification = client.notifications(
+                    self._session_key,
+                    "prefetch",
+                    project=self._project,
+                )
+                if notification is not None:
+                    notification_inject = notification.get("inject", "")
+                    with self._prefetch_lock:
+                        self._notification_result = notification_inject if isinstance(notification_inject, str) else ""
+            except Exception as e:
+                logger.debug("Signet notification prefetch failed: %s", e)
 
-        return result
+        with self._prefetch_lock:
+            parts = [self._prefetch_result, self._notification_result]
+            self._prefetch_result = ""
+            self._notification_result = ""
+
+        return "\n".join(part for part in parts if part and part.strip())
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Fire a background recall via user-prompt-submit hook.
@@ -513,6 +530,7 @@ class SignetMemoryProvider(MemoryProvider):
         with self._prefetch_lock:
             self._prefetch_generation += 1
             self._prefetch_result = ""
+            self._notification_result = ""
             session_key = self._session_key
             project = self._project
             prefetch_generation = self._prefetch_generation
@@ -542,10 +560,16 @@ class SignetMemoryProvider(MemoryProvider):
                             )
                         return
                     inject = result.get("inject", "")
-                    if inject and inject.strip():
+                    notification = result.get("notifications")
+                    notification_inject = notification.get("inject", "") if isinstance(notification, dict) else ""
+                    recall_inject = inject
+                    if notification_inject and inject.rstrip().endswith(notification_inject.strip()):
+                        recall_inject = inject.rstrip()[: -len(notification_inject.strip())].rstrip()
+                    if (recall_inject and recall_inject.strip()) or (notification_inject and notification_inject.strip()):
                         with self._prefetch_lock:
                             if prefetch_generation == self._prefetch_generation and session_key == self._session_key:
-                                self._prefetch_result = inject
+                                self._prefetch_result = recall_inject
+                                self._notification_result = notification_inject
             except Exception as e:
                 logger.debug("Signet prefetch failed: %s", e)
 
@@ -584,6 +608,29 @@ class SignetMemoryProvider(MemoryProvider):
         if assistant_content:
             with self._transcript_lock:
                 self._transcript_lines.append(f"assistant: {assistant_content}")
+        self._queue_notification_refresh("sync_turn")
+
+    def _queue_notification_refresh(self, hook: str) -> None:
+        """Fetch peer notifications without blocking the current Hermes callback."""
+        client = self._client
+        if not client:
+            return
+        session_key = self._session_key
+        project = self._project
+        with self._prefetch_lock:
+            generation = self._prefetch_generation
+
+        def _run():
+            try:
+                result = client.notifications(session_key, hook, project=project)
+                inject = (result or {}).get("inject", "")
+                with self._prefetch_lock:
+                    if generation == self._prefetch_generation and session_key == self._session_key:
+                        self._notification_result = inject if isinstance(inject, str) else ""
+            except Exception as e:
+                logger.debug("Signet %s notification refresh failed: %s", hook, e)
+
+        threading.Thread(target=_run, daemon=True, name=f"signet-notify-{hook}").start()
 
     def on_session_switch(
         self,
@@ -615,6 +662,7 @@ class SignetMemoryProvider(MemoryProvider):
         with self._prefetch_lock:
             self._prefetch_generation += 1
             self._prefetch_result = ""
+            self._notification_result = ""
 
         agent_id = os.environ.get("SIGNET_AGENT_ID", "").strip() or "hermes-agent"
         self._project = _resolve_agent_workspace(agent_id, kwargs)
@@ -818,6 +866,7 @@ class SignetMemoryProvider(MemoryProvider):
 
         t = threading.Thread(target=_run, daemon=True, name="signet-delegation")
         t.start()
+        self._queue_notification_refresh("on_delegation")
 
     def _fire_checkpoint(self) -> None:
         """Fire a checkpoint-extract for long-running sessions."""

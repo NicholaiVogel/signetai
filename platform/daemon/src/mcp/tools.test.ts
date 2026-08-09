@@ -266,6 +266,7 @@ describe("createMcpServer", () => {
 		expect(names).toContain("agent_peers");
 		expect(names).toContain("agent_message_send");
 		expect(names).toContain("agent_message_inbox");
+		expect(names).toContain("agent_message_ack");
 		expect(names).toContain("mcp_server_list");
 		expect(names).toContain("mcp_server_search");
 		expect(names).toContain("mcp_server_call");
@@ -285,7 +286,7 @@ describe("createMcpServer", () => {
 		for (const alias of GRAPHIQ_COMPAT_ALIASES) {
 			expect(names).toContain(alias);
 		}
-		expect(names.length).toBe(62);
+		expect(names.length).toBe(63);
 	});
 
 	it("registers generic code tools when GraphIQ has an active project", async () => {
@@ -1296,6 +1297,24 @@ describe("createMcpServer", () => {
 
 			expect(cap.url).toContain("/api/cross-agent/messages?");
 			expect(cap.url).not.toContain("agent_id=");
+		});
+
+		it("agent_message_ack posts the scoped acknowledgement", async () => {
+			const cap: { url?: string; method?: string; body?: string } = {};
+			mockFetch(200, { messageId: "msg-1", acknowledgedAt: "2026-08-08T00:00:00.000Z" }, cap);
+
+			await callTool(server, "agent_message_ack", {
+				message_id: "msg-1",
+				agent_id: "beta",
+				session_key: "session-beta",
+			});
+
+			expect(cap.method).toBe("POST");
+			expect(cap.url).toContain("/api/cross-agent/messages/msg-1/ack");
+			expect(JSON.parse(cap.body ?? "{}")).toEqual({
+				agentId: "beta",
+				sessionKey: "session-beta",
+			});
 		});
 	});
 

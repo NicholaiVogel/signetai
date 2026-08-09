@@ -5,6 +5,7 @@
 
 import type { SignetTransport } from "./transport.js";
 import type {
+	AgentMessageAcknowledgeResponse,
 	AgentMessageListResponse,
 	AgentMessageSendResponse,
 	// Cross-Agent
@@ -713,17 +714,28 @@ export class SignetClientP2 {
 
 	/**
 	 * @example
-	 * const { messages, count } = await client.listAgentMessages({ limit: 50 });
+	 * const { items, count } = await client.listAgentMessages({ limit: 25, unreadOnly: true });
 	 */
 	async listAgentMessages(opts?: {
 		readonly agentId?: string;
 		readonly sessionKey?: string;
 		readonly since?: string;
 		readonly limit?: number;
+		readonly offset?: number;
+		readonly unreadOnly?: boolean;
 		readonly includeSent?: boolean;
 		readonly includeBroadcast?: boolean;
 	}): Promise<AgentMessageListResponse> {
-		return this.transport.get<AgentMessageListResponse>("/api/cross-agent/messages", opts);
+		return this.transport.get<AgentMessageListResponse>("/api/cross-agent/messages", {
+			agent_id: opts?.agentId,
+			session_key: opts?.sessionKey,
+			since: opts?.since,
+			limit: opts?.limit,
+			offset: opts?.offset,
+			unread_only: opts?.unreadOnly,
+			include_sent: opts?.includeSent,
+			include_broadcast: opts?.includeBroadcast,
+		});
 	}
 
 	/**
@@ -743,6 +755,17 @@ export class SignetClientP2 {
 		readonly via?: "local" | "acp";
 	}): Promise<AgentMessageSendResponse> {
 		return this.transport.post<AgentMessageSendResponse>("/api/cross-agent/messages", opts);
+	}
+
+	/** Mark one visible cross-agent message as processed. */
+	async acknowledgeAgentMessage(
+		messageId: string,
+		opts?: { readonly agentId?: string; readonly sessionKey?: string },
+	): Promise<AgentMessageAcknowledgeResponse> {
+		return this.transport.post<AgentMessageAcknowledgeResponse>(
+			`/api/cross-agent/messages/${encodeURIComponent(messageId)}/ack`,
+			opts ?? {},
+		);
 	}
 
 	// --- Predictor (retired) ---

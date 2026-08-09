@@ -8,15 +8,20 @@ import { aggregateRecall, parseAggregateRecallBudget, readAggregateRecallBudgetI
 import { checkScope, requirePermission, requireRateLimit } from "../auth";
 import {
 	type AgentMessage,
+	AgentMessageCapacityError,
+	AgentMessageNotFoundError,
 	type AgentMessageType,
+	acknowledgeAgentMessage,
 	createAgentMessage,
 	isMessageVisibleToAgent,
+	listAgentMessagePage,
 	listAgentMessages,
 	listAgentPresence,
 	relayMessageViaAcp,
 	removeAgentPresence,
 	subscribeCrossAgentEvents,
 	touchAgentPresence,
+	updateAgentMessageDelivery,
 	upsertAgentPresence,
 } from "../cross-agent";
 import { getDbAccessor } from "../db-accessor";
@@ -45,6 +50,12 @@ import { logger } from "../logger";
 import { type EmbeddingConfig, type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
 import { normalizeMarkdownBody, writeCompactionArtifact } from "../memory-lineage.js";
 import { type RecallParams, hybridRecall } from "../memory-search";
+import {
+	type HookNotificationsBlock,
+	appendNotificationInject,
+	collectCrossAgentNotifications,
+	isNotificationCompatibleHook,
+} from "../notifications/cross-agent-notifications";
 import { getSynthesisWorker, readLastSynthesisTime } from "../pipeline";
 import { isNoiseSession } from "../session-noise";
 import { advanceRecallContextEpoch } from "../session-recall-dedupe";
@@ -219,6 +230,22 @@ function checkBypass(body?: { sessionKey?: string; sessionId?: string; agentId?:
 	return isSessionBypassed(key, resolveAgentId({ agentId: body?.agentId, sessionKey: key }));
 }
 
+interface HookNotificationContext {
+	readonly harness: string;
+	readonly hook: string;
+	readonly agentId: string;
+	readonly sessionKey?: string;
+}
+
+function withCrossAgentNotifications<T extends object>(
+	result: T & { readonly inject?: string },
+	context: HookNotificationContext,
+): T & { readonly inject: string; readonly notifications?: HookNotificationsBlock } {
+	const notifications = collectCrossAgentNotifications(context);
+	const inject = appendNotificationInject(result.inject, notifications);
+	return notifications ? { ...result, inject, notifications } : { ...result, inject };
+}
+
 export function listLiveSessions(agentId: string): Array<{
 	key: string;
 	runtimePath: string;
@@ -274,9 +301,16 @@ function registerSessionStart(app: Hono): void {
 			}
 			if (runtimePath) body.runtimePath = runtimePath;
 
+			const requestedAgentId = resolveAgentId({
+				agentId: parseOptionalString(body.agentId),
+				sessionKey: body.sessionKey,
+			});
+			const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
+			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+			body.agentId = scopedAgent.agentId;
+
 			if (body.sessionKey && runtimePath) {
-				const agentId = resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey: body.sessionKey });
-				const claim = claimSession(body.sessionKey, runtimePath, agentId, body.harness);
+				const claim = claimSession(body.sessionKey, runtimePath, scopedAgent.agentId, body.harness);
 				if (!claim.ok) {
 					return c.json(
 						{
@@ -289,7 +323,7 @@ function registerSessionStart(app: Hono): void {
 
 			upsertAgentPresence({
 				sessionKey: parseOptionalString(body.sessionKey),
-				agentId: resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey: body.sessionKey }),
+				agentId: scopedAgent.agentId,
 				harness: body.harness,
 				project: parseOptionalString(body.project),
 				runtimePath,
@@ -313,7 +347,14 @@ function registerSessionStart(app: Hono): void {
 			}
 
 			const result = await handleSessionStart(body);
-			return c.json(result);
+			return c.json(
+				withCrossAgentNotifications(result, {
+					harness: body.harness,
+					hook: "SessionStart",
+					agentId: scopedAgent.agentId,
+					sessionKey: parseOptionalString(body.sessionKey),
+				}),
+			);
 		} catch (e) {
 			logger.error("hooks", "Session start hook failed", e as Error);
 			return c.json({ error: "Hook execution failed" }, 500);
@@ -378,7 +419,11 @@ function registerUserPromptSubmit(app: Hono): void {
 			if (runtimePath) body.runtimePath = runtimePath;
 
 			const sessionKey = parseOptionalString(body.sessionKey);
-			const agentId = resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey });
+			const requestedAgentId = resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey });
+			const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
+			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+			const agentId = scopedAgent.agentId;
+			body.agentId = agentId;
 			const known = sessionKey ? hasSession(sessionKey, agentId) : false;
 			const duplicate = claimAutomaticSessionOrSkip(
 				sessionKey,
@@ -437,9 +482,77 @@ function registerUserPromptSubmit(app: Hono): void {
 			} finally {
 				promptSubmitAdmission.release();
 			}
-			return c.json({ ...result, sessionKnown: known });
+			return c.json(
+				withCrossAgentNotifications(
+					{ ...result, sessionKnown: known },
+					{
+						harness: body.harness,
+						hook: "UserPromptSubmit",
+						agentId,
+						sessionKey,
+					},
+				),
+			);
 		} catch (e) {
 			logger.error("hooks", "User prompt submit hook failed", e as Error);
+			return c.json({ error: "Hook execution failed" }, 500);
+		}
+	});
+}
+
+// Lightweight notification hook for high-frequency harness lifecycle events.
+function registerNotifications(app: Hono): void {
+	app.post("/api/hooks/notifications", async (c) => {
+		if (isInternalCall(c)) return c.json({ inject: "" });
+		const denied = await requirePermission("recall", authConfig)(c, () => Promise.resolve());
+		if (denied) return denied;
+
+		try {
+			const payload = await readOptionalJsonObject(c);
+			if (payload === null) return c.json({ error: "invalid request body" }, 400);
+			const harness = parseOptionalString(payload.harness);
+			const hook = parseOptionalString(payload.hook);
+			if (!harness || !hook) return c.json({ error: "harness and hook are required" }, 400);
+			if (!isNotificationCompatibleHook(harness, hook)) {
+				return c.json({ error: `hook '${hook}' is not notification-compatible for harness '${harness}'` }, 400);
+			}
+
+			const sessionKey = parseOptionalString(payload.sessionKey);
+			const requestedAgentId = resolveAgentId({ agentId: parseOptionalString(payload.agentId), sessionKey });
+			const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
+			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+			const sessionError = validateSessionAgentBinding(c, sessionKey, scopedAgent.agentId, {
+				requireExisting: false,
+				context: "sessionKey",
+			});
+			if (sessionError) return c.json({ error: sessionError }, 403);
+			if (sessionKey && isSessionBypassed(sessionKey, scopedAgent.agentId)) {
+				return c.json({ inject: "", bypassed: true });
+			}
+
+			if (sessionKey) {
+				const touched = touchAgentPresence(sessionKey, scopedAgent.agentId);
+				if (!touched) {
+					upsertAgentPresence({
+						sessionKey,
+						agentId: scopedAgent.agentId,
+						harness,
+						project: parseOptionalString(payload.project),
+						provider: harness,
+					});
+				}
+			}
+			stampHarness(harness);
+
+			const notifications = collectCrossAgentNotifications({
+				harness,
+				hook,
+				agentId: scopedAgent.agentId,
+				sessionKey,
+			});
+			return notifications ? c.json({ inject: notifications.inject, notifications }) : c.json({ inject: "" });
+		} catch (error) {
+			logger.error("hooks", "Notification hook failed", error instanceof Error ? error : new Error(String(error)));
 			return c.json({ error: "Hook execution failed" }, 500);
 		}
 	});
@@ -1244,7 +1357,10 @@ function registerCrossAgentMessages(app: Hono): void {
 		const since = parseOptionalString(c.req.query("since"));
 		const includeSent = parseOptionalBoolean(c.req.query("include_sent")) ?? false;
 		const includeBroadcast = parseOptionalBoolean(c.req.query("include_broadcast")) ?? true;
+		const unreadOnly = parseOptionalBoolean(c.req.query("unread_only")) ?? false;
 		const limit = parseOptionalInt(c.req.query("limit")) ?? 100;
+		const offset = parseOptionalNonNegativeInt(c.req.query("offset")) ?? 0;
+		const order = c.req.query("order") === "asc" ? "asc" : "desc";
 		const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
 		if (scopedAgent.error) {
 			return c.json({ error: scopedAgent.error }, 403);
@@ -1257,19 +1373,58 @@ function registerCrossAgentMessages(app: Hono): void {
 			return c.json({ error: sessionError }, 403);
 		}
 
-		const items = listAgentMessages({
+		const page = listAgentMessagePage({
 			agentId: scopedAgent.agentId,
 			sessionKey,
 			since,
 			includeSent,
 			includeBroadcast,
+			unreadOnly,
 			limit,
+			offset,
+			order,
 		});
 
-		return c.json({
-			items,
-			count: items.length,
+		return c.json(page);
+	});
+
+	app.post("/api/cross-agent/messages/:messageId/ack", async (c) => {
+		const payload = await readOptionalJsonObject(c);
+		if (payload === null) return c.json({ error: "invalid request body" }, 400);
+		const messageId = parseOptionalString(c.req.param("messageId"));
+		if (!messageId) return c.json({ error: "messageId is required" }, 400);
+
+		const sessionKey =
+			parseOptionalString(payload.sessionKey) ?? parseOptionalString(c.req.header("x-signet-session-key"));
+		const requestedAgentId = resolveAgentId({
+			agentId: parseOptionalString(payload.agentId) ?? parseOptionalString(c.req.header("x-signet-agent-id")),
+			sessionKey,
 		});
+		const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const sessionError = validateSessionAgentBinding(c, sessionKey, scopedAgent.agentId, {
+			requireExisting: false,
+			context: "sessionKey",
+		});
+		if (sessionError) return c.json({ error: sessionError }, 403);
+
+		try {
+			return c.json(
+				acknowledgeAgentMessage({
+					messageId,
+					agentId: scopedAgent.agentId,
+					sessionKey,
+				}),
+			);
+		} catch (error) {
+			if (error instanceof AgentMessageNotFoundError) return c.json({ error: error.message }, 404);
+			logger.error(
+				"hooks",
+				"Cross-agent acknowledgement failed",
+				error instanceof Error ? error : new Error(String(error)),
+			);
+			return c.json({ error: "Failed to acknowledge cross-agent message" }, 500);
+		}
 	});
 
 	app.post("/api/cross-agent/messages", async (c) => {
@@ -1316,47 +1471,28 @@ function registerCrossAgentMessages(app: Hono): void {
 			return c.json({ error: "local target required (toAgentId, toSessionKey, or broadcast=true)" }, 400);
 		}
 
-		let deliveryStatus: "queued" | "delivered" | "failed" = "delivered";
-		let deliveryError: string | undefined;
-		let deliveryReceipt: Record<string, unknown> | undefined;
-
+		let acpRequest:
+			| {
+					readonly baseUrl: string;
+					readonly targetAgentName: string;
+					readonly timeoutMs?: number;
+					readonly metadata?: Record<string, unknown>;
+			  }
+			| undefined;
 		if (deliveryPath === "acp") {
 			const acpPayload = toRecord(payload.acp);
 			const baseUrl = parseOptionalString(acpPayload?.baseUrl) ?? parseOptionalString(acpPayload?.url);
 			const targetAgentName =
 				parseOptionalString(acpPayload?.targetAgentName) ?? parseOptionalString(acpPayload?.agentName);
-
 			if (!baseUrl || !targetAgentName) {
-				return c.json(
-					{
-						error: "acp.baseUrl and acp.targetAgentName are required when via='acp'",
-					},
-					400,
-				);
+				return c.json({ error: "acp.baseUrl and acp.targetAgentName are required when via='acp'" }, 400);
 			}
-
-			const timeoutMs = parseOptionalInt(acpPayload?.timeoutMs);
-			const metadata = toRecord(acpPayload?.metadata) ?? undefined;
-
-			const relay = await relayMessageViaAcp({
+			acpRequest = {
 				baseUrl,
 				targetAgentName,
-				content,
-				fromAgentId: scopedSender.agentId,
-				fromSessionKey,
-				timeoutMs,
-				metadata,
-			});
-
-			deliveryStatus = relay.ok ? "delivered" : "failed";
-			deliveryError = relay.error;
-			const receipt: Record<string, unknown> = {
-				status: relay.status,
+				timeoutMs: parseOptionalInt(acpPayload?.timeoutMs),
+				metadata: toRecord(acpPayload?.metadata) ?? undefined,
 			};
-			if (relay.runId) {
-				receipt.runId = relay.runId;
-			}
-			deliveryReceipt = receipt;
 		}
 
 		let message: AgentMessage;
@@ -1370,15 +1506,36 @@ function registerCrossAgentMessages(app: Hono): void {
 				type,
 				broadcast,
 				deliveryPath,
-				deliveryStatus,
-				deliveryError,
-				deliveryReceipt,
+				deliveryStatus: acpRequest ? "queued" : "delivered",
 			});
 		} catch (error) {
+			if (error instanceof AgentMessageCapacityError) {
+				return c.json({ error: error.message }, 429);
+			}
 			const msg = error instanceof Error ? error.message : String(error);
 			return c.json({ error: msg }, 400);
 		}
 
+		if (acpRequest) {
+			const relay = await relayMessageViaAcp({
+				...acpRequest,
+				content,
+				fromAgentId: scopedSender.agentId,
+				fromSessionKey,
+			});
+			const receipt: Record<string, unknown> = { status: relay.status };
+			if (relay.runId) receipt.runId = relay.runId;
+			try {
+				message = updateAgentMessageDelivery(message.id, {
+					status: relay.ok ? "delivered" : "failed",
+					error: relay.error,
+					receipt,
+				});
+			} catch (error) {
+				logger.error("hooks", "Failed to persist ACP delivery result", error as Error);
+				return c.json({ error: "ACP delivery result could not be persisted", message }, 500);
+			}
+		}
 		return c.json({ message });
 	});
 }
@@ -1667,6 +1824,7 @@ export function registerHooksRoutes(app: Hono): void {
 
 	registerSessionStart(app);
 	registerUserPromptSubmit(app);
+	registerNotifications(app);
 	registerSessionEnd(app);
 	registerSkillInvocation(app);
 	registerCheckpointExtract(app);

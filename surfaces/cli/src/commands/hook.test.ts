@@ -530,6 +530,47 @@ describe("buildUserPromptSubmitBody", () => {
 		expect(lines).toContain("recalled context");
 	});
 
+	test("notification hook emits native PreToolUse context", async () => {
+		const seen: Array<{ path: string; body: string }> = [];
+		const lines: string[] = [];
+		console.log = (line?: unknown) => {
+			lines.push(String(line ?? ""));
+		};
+
+		const program = new Command();
+		registerHookCommands(program, {
+			AGENTS_DIR: "/tmp/agents",
+			fetchDaemonResult: async (path, opts) => {
+				seen.push({ path, body: typeof opts?.body === "string" ? opts.body : "" });
+				return { ok: true, data: { inject: "peer context" } };
+			},
+			readStaticIdentity: () => null,
+		});
+
+		await program.parseAsync([
+			"node",
+			"test",
+			"hook",
+			"notifications",
+			"-H",
+			"codex",
+			"--hook",
+			"PreToolUse",
+			"--hook-json",
+		]);
+
+		expect(seen[0]?.path).toBe("/api/hooks/notifications");
+		expect(seen[0]?.body).toContain('"hook":"PreToolUse"');
+		expect(JSON.parse(lines[0] ?? "{}")).toEqual({
+			continue: true,
+			suppressOutput: true,
+			hookSpecificOutput: {
+				hookEventName: "PreToolUse",
+				additionalContext: "peer context",
+			},
+		});
+	});
+
 	test("hook command can emit Codex user-prompt-submit JSON", async () => {
 		const lines: string[] = [];
 		console.log = (line?: unknown) => {

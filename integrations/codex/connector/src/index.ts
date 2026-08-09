@@ -320,10 +320,11 @@ export function writeCodexPluginBundle(input: {
 // Each handler is a tagged union with "type": "command" and "command" as a string.
 // ---------------------------------------------------------------------------
 
-const HOOK_EVENT_KEYS = ["SessionStart", "UserPromptSubmit", "Stop"] as const;
+const HOOK_EVENT_KEYS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"] as const;
 const CODEX_SESSION_START_GRACE_SECONDS = 5;
 const CODEX_PROMPT_SUBMIT_GRACE_SECONDS = 2;
 const SESSION_END_TIMEOUT_SECONDS = 30;
+const NOTIFICATION_HOOK_TIMEOUT_SECONDS = 5;
 
 interface MatcherGroup {
 	matcher?: string;
@@ -393,13 +394,23 @@ function withRemoteDaemonEnv(command: string, remoteDaemonUrl: string | null): s
 	].join(" ");
 }
 
-function buildHooksFile(signetArgs: string[], remoteDaemonUrl: string | null = resolveRemoteDaemonUrl()): HooksFile {
-	const cmd = (subcommand: string, secs: number, codexJson = true): MatcherGroup => ({
+export function buildHooksFile(
+	signetArgs: string[],
+	remoteDaemonUrl: string | null = resolveRemoteDaemonUrl(),
+): HooksFile {
+	const cmd = (
+		subcommand: string,
+		secs: number,
+		codexJson = true,
+		extraArgs: readonly string[] = [],
+	): MatcherGroup => ({
 		hooks: [
 			{
 				type: "command",
 				command: withRemoteDaemonEnv(
-					[...signetArgs, "hook", subcommand, "-H", "codex", ...(codexJson ? ["--codex-json"] : [])].join(" "),
+					[...signetArgs, "hook", subcommand, "-H", "codex", ...extraArgs, ...(codexJson ? ["--codex-json"] : [])].join(
+						" ",
+					),
 					remoteDaemonUrl,
 				),
 				timeout: secs,
@@ -410,6 +421,7 @@ function buildHooksFile(signetArgs: string[], remoteDaemonUrl: string | null = r
 		hooks: {
 			SessionStart: [cmd("session-start", resolveCodexSessionStartTimeoutSeconds())],
 			UserPromptSubmit: [cmd("user-prompt-submit", resolveCodexPromptSubmitTimeoutSeconds())],
+			PreToolUse: [cmd("notifications", NOTIFICATION_HOOK_TIMEOUT_SECONDS, true, ["--hook", "PreToolUse"])],
 			Stop: [cmd("session-end", SESSION_END_TIMEOUT_SECONDS, false)],
 		},
 	};
@@ -560,6 +572,7 @@ function removeSignetEntries(file: HooksFile): HooksFile {
 const CODEX_HOOK_EVENT_LABELS: Record<(typeof HOOK_EVENT_KEYS)[number], string> = {
 	SessionStart: "session_start",
 	UserPromptSubmit: "user_prompt_submit",
+	PreToolUse: "pre_tool_use",
 	Stop: "stop",
 };
 

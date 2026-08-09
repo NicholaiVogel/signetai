@@ -9,10 +9,10 @@ interface HandlerMap {
 
 afterEach(() => {
 	globalThis.fetch = originalFetch;
-	delete process.env.SIGNET_ENABLED;
-	delete process.env.SIGNET_AGENT_ID;
-	delete process.env.SIGNET_DAEMON_URL;
-	delete process.env.SIGNET_BYPASS;
+	process.env.SIGNET_ENABLED = undefined;
+	process.env.SIGNET_AGENT_ID = undefined;
+	process.env.SIGNET_DAEMON_URL = undefined;
+	process.env.SIGNET_BYPASS = undefined;
 });
 
 describe("SignetOhMyPiExtension", () => {
@@ -24,14 +24,19 @@ describe("SignetOhMyPiExtension", () => {
 			},
 		};
 
+		const requestedUrls: string[] = [];
 		globalThis.fetch = Object.assign(
 			async (input: RequestInfo | URL) => {
 				const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+				requestedUrls.push(url);
 				if (url.endsWith("/api/hooks/session-start")) {
 					return Response.json({ inject: "session context" });
 				}
 				if (url.endsWith("/api/hooks/user-prompt-submit")) {
 					return Response.json({ inject: "[signet:recall]\n- Favorite color is blue" });
+				}
+				if (url.endsWith("/api/hooks/notifications")) {
+					return Response.json({ inject: "peer notification" });
 				}
 				throw new Error(`Unexpected fetch: ${url}`);
 			},
@@ -63,6 +68,8 @@ describe("SignetOhMyPiExtension", () => {
 		});
 		expect((result as { message: { content: string } }).message.content).toContain("session context");
 		expect((result as { message: { content: string } }).message.content).toContain("Favorite color is blue");
+		expect(requestedUrls.some((url) => url.endsWith("/api/hooks/notifications"))).toBe(true);
+		expect((result as { message: { content: string } }).message.content).toContain("peer notification");
 	});
 
 	it("bypass mode skips all handler registration", () => {

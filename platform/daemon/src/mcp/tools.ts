@@ -186,6 +186,7 @@ const BASE_TOOL_NAMES = new Set<string>([
 	"agent_peers",
 	"agent_message_send",
 	"agent_message_inbox",
+	"agent_message_ack",
 	"secret_list",
 	"secret_exec",
 	"secret_exec_status",
@@ -1571,18 +1572,28 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 				agent_id: z.string().optional().describe("Recipient agent id (defaults to authenticated scope/current agent)"),
 				session_key: z.string().optional().describe("Recipient session key"),
 				since: z.string().optional().describe("ISO timestamp filter"),
-				limit: z.number().optional().describe("Max messages to return"),
+				limit: z.number().optional().describe("Max messages to return (default 25, max 25)"),
+				offset: z.number().optional().describe("Pagination offset"),
+				unread_only: z.boolean().optional().describe("Return only messages not yet acknowledged by this agent"),
 				include_sent: z.boolean().optional().describe("Include messages sent by this agent"),
 				include_broadcast: z.boolean().optional().describe("Include broadcast messages"),
 			}),
 		},
-		async ({ agent_id, session_key, since, limit, include_sent, include_broadcast }) => {
+		async ({ agent_id, session_key, since, limit, offset, unread_only, include_sent, include_broadcast }) => {
 			const params = new URLSearchParams();
 			if (agent_id) params.set("agent_id", agent_id);
 			if (session_key) params.set("session_key", session_key);
 			if (since) params.set("since", since);
 			if (typeof limit === "number" && Number.isFinite(limit)) {
-				params.set("limit", String(Math.max(1, Math.min(500, Math.round(limit)))));
+				params.set("limit", String(Math.max(1, Math.min(25, Math.round(limit)))));
+			} else {
+				params.set("limit", "25");
+			}
+			if (typeof offset === "number" && Number.isFinite(offset)) {
+				params.set("offset", String(Math.max(0, Math.round(offset))));
+			}
+			if (typeof unread_only === "boolean") {
+				params.set("unread_only", String(unread_only));
 			}
 			if (typeof include_sent === "boolean") {
 				params.set("include_sent", String(include_sent));
@@ -1596,6 +1607,36 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			if (!result.ok) {
 				return errorResult(`Inbox read failed: ${result.error}`);
 			}
+			return textResult(result.data);
+		},
+	);
+
+	// ------------------------------------------------------------------
+	// agent_message_ack — acknowledge one inbound message
+	// ------------------------------------------------------------------
+	registerMcpTool(
+		server,
+		"agent_message_ack",
+		{
+			title: "Acknowledge Agent Message",
+			description: "Mark one visible cross-agent message as processed so hook delivery stops repeating it.",
+			inputSchema: z.object({
+				message_id: z.string().describe("Message id from a notification or agent_message_inbox"),
+				agent_id: z.string().optional().describe("Recipient agent id (defaults to authenticated scope/current agent)"),
+				session_key: z.string().optional().describe("Recipient session key"),
+			}),
+			annotations: { readOnlyHint: false },
+		},
+		async ({ message_id, agent_id, session_key }) => {
+			const result = await fetchDaemon<unknown>(
+				baseUrl,
+				`/api/cross-agent/messages/${encodeURIComponent(message_id)}/ack`,
+				{
+					method: "POST",
+					body: { agentId: agent_id, sessionKey: session_key },
+				},
+			);
+			if (!result.ok) return errorResult(`Message acknowledgement failed: ${result.error}`);
 			return textResult(result.data);
 		},
 	);

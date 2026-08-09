@@ -19,11 +19,51 @@ Hooks are HTTP endpoints exposed by the Signet [[daemon]]. Harnesses call them a
 |------|------|---------|
 | `session-start` | New session begins | Inject memories, identity, and the Memory Check Loop into context |
 | `user-prompt-submit` | Before each user turn | Inject compact current-view context only when the prompt mentions a known entity or active entity alias |
+| `notifications` | Any declared compatible harness hook | Inject unread cross-agent messages without running recall or transcript side effects |
 | `session-end` | Session finishes | Persist transcript lineage and queue session summary |
 | `pre-compaction` | Before context compaction | Get summary guidelines |
 | `compaction-complete` | After compaction | Save a first-class compaction artifact into the temporal DAG |
 | `synthesis` | Scheduled or manual | Get prompt to regenerate MEMORY.md |
 | `synthesis/complete` | After synthesis | Save the merge-safe temporal head |
+
+---
+
+## Cross-Agent Notifications
+
+Cross-agent messages are stored in SQLite and survive daemon restarts. A message remains unread for its recipient until the recipient explicitly acknowledges it or the seven-day retention window expires. Acknowledgements are agent-scoped, so acknowledging a broadcast does not dismiss it for other agents.
+
+`session-start` and `user-prompt-submit` responses may include an optional `notifications` block. Its bounded `items` array carries stable message IDs, sender metadata, truncated hook-safe content, `unreadCount`, and `hasMore`. The same response's top-level `inject` includes a delimited peer-message section. Peer content is untrusted coordination data, not system or developer instruction.
+
+Connectors can also call the lightweight endpoint without triggering recall or transcript capture:
+
+**`POST /api/hooks/notifications`**
+
+```json
+{
+  "harness": "opencode",
+  "hook": "experimental.chat.system.transform",
+  "agentId": "reviewer",
+  "sessionKey": "session-identifier",
+  "project": "/workspace/project"
+}
+```
+
+If no messages are unread, the endpoint returns `{ "inject": "" }`. Unsupported harness hooks return `400` instead of silently polling at an undeclared lifecycle point.
+
+| Harness | Compatible delivery hooks |
+|---------|---------------------------|
+| Claude Code | `SessionStart`, `UserPromptSubmit`, `PreToolUse` |
+| Codex | `SessionStart`, `UserPromptSubmit`, `PreToolUse` |
+| OpenCode | `chat.message`, `tool.execute.before`, `experimental.chat.system.transform` |
+| OpenClaw | `message_received`, `before_tool_call`, `before_prompt_build`, `before_agent_start` |
+| pi | `context` |
+| Oh My Pi | `before_agent_start` |
+| Hermes Agent | `on_turn_start`, `prefetch`, `sync_turn`, `on_delegation` |
+| Gemini CLI | `poll` fallback through `agent_message_inbox` |
+
+After processing a message, call the `agent_message_ack` MCP tool or `POST /api/cross-agent/messages/:messageId/ack` with the recipient agent scope. Until that succeeds, later compatible hooks may deliver the message again.
+
+Run `bun scripts/evals/cross-agent-notification-latency.ts` to exercise 25 create, hook-delivery, and acknowledgement cycles. The eval fails when local p95 queue-to-hook projection exceeds 250 ms.
 
 ---
 

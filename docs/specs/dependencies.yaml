@@ -216,6 +216,23 @@ specs:
       - "signet agent CLI manages the roster and scaffolds per-agent identity dirs"
     decision: null
 
+  - id: cross-agent-notification-delivery
+    status: approved
+    path: docs/specs/approved/cross-agent-notification-delivery.md
+    hard_depends_on:
+      - multi-agent-support
+      - signet-runtime
+    soft_depends_on: []
+    blocks: []
+    informed_by:
+      - docs/specs/approved/multi-agent-support.md
+    success_criteria:
+      - "Unread cross-agent messages survive daemon restarts until acknowledgement or expiry"
+      - "Universal and harness-native lifecycle hooks deliver bounded peer notification context"
+      - "Acknowledgement is explicit, agent-scoped, idempotent, and available through HTTP, SDK, and MCP"
+      - "Notification selection remains below the 250 ms evaluation budget"
+    decision: null
+
   - id: signet-runtime
     status: approved
     path: docs/specs/approved/signet-runtime.md

@@ -35,6 +35,7 @@ export {
 	ensureSessionContext,
 	flushPendingSessionEnds,
 	refreshSessionStart,
+	requestNotifications,
 	requestRecallForPrompt,
 	type LifecycleConfig,
 	type LifecycleDeps,

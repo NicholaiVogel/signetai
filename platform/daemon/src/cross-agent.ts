@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { isIP } from "node:net";
+import { type ReadDb, type WriteDb, getDbAccessor, hasDbAccessor } from "./db-accessor";
+export { relayMessageViaAcp, type AcpRelayRequest, type AcpRelayResult } from "./cross-agent-acp";
 
 export type AgentMessageType = "assist_request" | "decision_update" | "info" | "question";
 
@@ -50,6 +51,7 @@ interface MutableAgentPresence {
 export interface AgentMessage {
 	readonly id: string;
 	readonly createdAt: string;
+	readonly expiresAt: string;
 	readonly fromAgentId: string;
 	readonly fromSessionKey?: string;
 	readonly toAgentId?: string;
@@ -62,23 +64,26 @@ export interface AgentMessage {
 	readonly deliveryStatus: AgentMessageDeliveryStatus;
 	readonly deliveryError?: string;
 	readonly deliveryReceipt?: Record<string, unknown>;
+	readonly acknowledgedAt?: string;
 }
 
-interface MutableAgentMessage {
-	id: string;
-	createdAt: string;
-	fromAgentId: string;
-	fromSessionKey?: string;
-	toAgentId?: string;
-	toSessionKey?: string;
-	toSessionAgentId?: string;
-	content: string;
-	type: AgentMessageType;
-	broadcast: boolean;
-	deliveryPath: AgentMessageDeliveryPath;
-	deliveryStatus: AgentMessageDeliveryStatus;
-	deliveryError?: string;
-	deliveryReceipt?: Record<string, unknown>;
+interface CrossAgentMessageRow {
+	readonly id: string;
+	readonly created_at: string;
+	readonly expires_at: string;
+	readonly from_agent_id: string;
+	readonly from_session_key: string | null;
+	readonly to_agent_id: string | null;
+	readonly to_session_key: string | null;
+	readonly to_session_agent_id: string | null;
+	readonly content: string;
+	readonly message_type: AgentMessageType;
+	readonly broadcast: number;
+	readonly delivery_path: AgentMessageDeliveryPath;
+	readonly delivery_status: AgentMessageDeliveryStatus;
+	readonly delivery_error: string | null;
+	readonly delivery_receipt_json: string | null;
+	readonly acknowledged_at: string | null;
 }
 
 export interface CreateAgentMessageInput {
@@ -101,7 +106,47 @@ export interface ListAgentMessageOptions {
 	readonly since?: string;
 	readonly includeSent?: boolean;
 	readonly includeBroadcast?: boolean;
+	readonly unreadOnly?: boolean;
 	readonly limit?: number;
+	readonly offset?: number;
+	readonly order?: "asc" | "desc";
+}
+
+export interface AgentMessagePage {
+	readonly items: readonly AgentMessage[];
+	readonly count: number;
+	readonly total: number;
+	readonly unreadCount: number;
+	readonly limit: number;
+	readonly offset: number;
+	readonly hasMore: boolean;
+}
+
+export interface AcknowledgeAgentMessageInput {
+	readonly messageId: string;
+	readonly agentId?: string;
+	readonly sessionKey?: string;
+}
+
+export interface AcknowledgeAgentMessageResult {
+	readonly messageId: string;
+	readonly agentId: string;
+	readonly acknowledgedAt: string;
+	readonly alreadyAcknowledged: boolean;
+}
+
+export class AgentMessageNotFoundError extends Error {
+	constructor(messageId: string) {
+		super(`Cross-agent message not found or not visible: ${messageId}`);
+		this.name = "AgentMessageNotFoundError";
+	}
+}
+
+export class AgentMessageCapacityError extends Error {
+	constructor() {
+		super("Cross-agent message capacity reached; wait for retention cleanup before retrying");
+		this.name = "AgentMessageCapacityError";
+	}
 }
 
 export interface AgentPresenceEvent {
@@ -120,31 +165,14 @@ export interface AgentMessageEvent {
 
 export type CrossAgentEvent = AgentPresenceEvent | AgentMessageEvent;
 
-export interface AcpRelayRequest {
-	readonly baseUrl: string;
-	readonly targetAgentName: string;
-	readonly content: string;
-	readonly fromAgentId?: string;
-	readonly fromSessionKey?: string;
-	readonly timeoutMs?: number;
-	readonly metadata?: Record<string, unknown>;
-}
-
-export interface AcpRelayResult {
-	readonly ok: boolean;
-	readonly status: number;
-	readonly runId?: string;
-	readonly error?: string;
-}
-
 const PRESENCE_STALE_MS = 4 * 60 * 60 * 1000;
-const MESSAGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-const MAX_MESSAGES = 1000;
-const ACP_TIMEOUT_MS = 20_000;
-const ACP_ALLOWED_ORIGINS_ENV = "SIGNET_ACP_ALLOWED_ORIGINS";
+const AGENT_MESSAGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_MESSAGE_LIMIT = 100;
+const MAX_MESSAGE_LIMIT = 500;
+const MAX_MESSAGE_CONTENT_CHARS = 65_536;
+const MAX_DURABLE_MESSAGES = 10_000;
 
 const presenceByKey = new Map<string, MutableAgentPresence>();
-const messages: MutableAgentMessage[] = [];
 const subscribers = new Set<(event: CrossAgentEvent) => void>();
 
 function normalizeText(value: string | undefined): string | undefined {
@@ -168,6 +196,21 @@ function cloneDeliveryReceipt(value: Record<string, unknown> | undefined): Recor
 
 		const cloned = JSON.parse(JSON.stringify(value));
 		return isRecord(cloned) ? cloned : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function serializeDeliveryReceipt(value: Record<string, unknown> | undefined): string | null {
+	const cloned = cloneDeliveryReceipt(value);
+	return cloned ? JSON.stringify(cloned) : null;
+}
+
+function parseDeliveryReceipt(value: string | null): Record<string, unknown> | undefined {
+	if (!value) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(value);
+		return isRecord(parsed) ? parsed : undefined;
 	} catch {
 		return undefined;
 	}
@@ -197,25 +240,6 @@ function clonePresence(presence: MutableAgentPresence): AgentPresence {
 	};
 }
 
-function cloneMessage(message: MutableAgentMessage): AgentMessage {
-	return {
-		id: message.id,
-		createdAt: message.createdAt,
-		fromAgentId: message.fromAgentId,
-		fromSessionKey: message.fromSessionKey,
-		toAgentId: message.toAgentId,
-		toSessionKey: message.toSessionKey,
-		toSessionAgentId: message.toSessionAgentId,
-		content: message.content,
-		type: message.type,
-		broadcast: message.broadcast,
-		deliveryPath: message.deliveryPath,
-		deliveryStatus: message.deliveryStatus,
-		deliveryError: message.deliveryError,
-		deliveryReceipt: cloneDeliveryReceipt(message.deliveryReceipt),
-	};
-}
-
 function emit(event: CrossAgentEvent): void {
 	for (const subscriber of subscribers) {
 		try {
@@ -232,50 +256,25 @@ function parseIsoTimestamp(value: string | undefined): number | null {
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
-function pruneState(nowMs = Date.now()): void {
+function prunePresence(nowMs = Date.now()): void {
 	const nowIso = new Date(nowMs).toISOString();
 	for (const [key, presence] of presenceByKey.entries()) {
 		const seenAt = parseIsoTimestamp(presence.lastSeenAt);
-		if (seenAt === null) {
-			presenceByKey.delete(key);
-			emit({
-				type: "presence",
-				action: "remove",
-				presence: clonePresence(presence),
-				activeCount: presenceByKey.size,
-				timestamp: nowIso,
-			});
-			continue;
-		}
-		if (nowMs - seenAt > PRESENCE_STALE_MS) {
-			presenceByKey.delete(key);
-			emit({
-				type: "presence",
-				action: "remove",
-				presence: clonePresence(presence),
-				activeCount: presenceByKey.size,
-				timestamp: nowIso,
-			});
-		}
-	}
+		if (seenAt !== null && nowMs - seenAt <= PRESENCE_STALE_MS) continue;
 
-	const minCreatedAt = nowMs - MESSAGE_RETENTION_MS;
-	let retainedFrom = 0;
-	for (let i = 0; i < messages.length; i++) {
-		const createdAt = parseIsoTimestamp(messages[i]?.createdAt);
-		if (createdAt !== null && createdAt >= minCreatedAt) {
-			retainedFrom = i;
-			break;
-		}
-		retainedFrom = i + 1;
+		presenceByKey.delete(key);
+		emit({
+			type: "presence",
+			action: "remove",
+			presence: clonePresence(presence),
+			activeCount: presenceByKey.size,
+			timestamp: nowIso,
+		});
 	}
-	if (retainedFrom > 0) {
-		messages.splice(0, retainedFrom);
-	}
+}
 
-	if (messages.length > MAX_MESSAGES) {
-		messages.splice(0, messages.length - MAX_MESSAGES);
-	}
+function pruneExpiredMessages(db: WriteDb, now: string): void {
+	db.prepare("DELETE FROM cross_agent_messages WHERE expires_at <= ?").run(now);
 }
 
 function agentForSession(sessionKey: string): string | undefined {
@@ -283,44 +282,18 @@ function agentForSession(sessionKey: string): string | undefined {
 	return presence?.agentId;
 }
 
+function sessionKeysForAgent(agentId: string): readonly string[] {
+	return [...presenceByKey.values()]
+		.filter((presence) => presence.agentId === agentId && presence.sessionKey !== undefined)
+		.map((presence) => presence.sessionKey as string);
+}
+
 export function getAgentPresenceForSession(sessionKey: string): AgentPresence | null {
 	const normalized = normalizeText(sessionKey);
 	if (!normalized) return null;
-	pruneState();
+	prunePresence();
 	const presence = presenceByKey.get(`session:${normalized}`);
 	return presence ? clonePresence(presence) : null;
-}
-
-function includesMessageForAgent(
-	message: MutableAgentMessage,
-	agentId: string | undefined,
-	sessionKey: string | undefined,
-	includeBroadcast: boolean,
-): boolean {
-	if (sessionKey && message.toSessionKey === sessionKey) {
-		return true;
-	}
-
-	if (agentId && message.toAgentId === agentId) {
-		return true;
-	}
-
-	if (agentId && message.toSessionAgentId === agentId) {
-		return true;
-	}
-
-	// Legacy fallback: when no captured recipient owner exists, resolve toSessionKey
-	// through the current presence map and treat that owner as authoritative.
-	if (agentId && message.toSessionKey && !message.toSessionAgentId) {
-		const owner = agentForSession(message.toSessionKey);
-		if (owner === agentId) return true;
-	}
-
-	if (includeBroadcast && message.broadcast) {
-		return true;
-	}
-
-	return false;
 }
 
 export function isMessageVisibleToAgent(
@@ -329,34 +302,36 @@ export function isMessageVisibleToAgent(
 		readonly agentId?: string;
 		readonly sessionKey?: string;
 		readonly includeBroadcast?: boolean;
+		readonly includeSent?: boolean;
 	},
 ): boolean {
-	const mutableLike: MutableAgentMessage = {
-		id: message.id,
-		createdAt: message.createdAt,
-		fromAgentId: message.fromAgentId,
-		fromSessionKey: message.fromSessionKey,
-		toAgentId: message.toAgentId,
-		toSessionKey: message.toSessionKey,
-		toSessionAgentId: message.toSessionAgentId,
-		content: message.content,
-		type: message.type,
-		broadcast: message.broadcast,
-		deliveryPath: message.deliveryPath,
-		deliveryStatus: message.deliveryStatus,
-		deliveryError: message.deliveryError,
-		deliveryReceipt: message.deliveryReceipt,
-	};
-	return includesMessageForAgent(
-		mutableLike,
-		normalizeText(options.agentId),
-		normalizeText(options.sessionKey),
-		options.includeBroadcast !== false,
-	);
+	const agentId = normalizeText(options.agentId);
+	const sessionKey = normalizeText(options.sessionKey);
+	if (
+		sessionKey &&
+		message.toSessionKey === sessionKey &&
+		(!message.toSessionAgentId || message.toSessionAgentId === agentId)
+	) {
+		return true;
+	}
+	if (agentId && message.toAgentId === agentId) return true;
+	if (agentId && message.toSessionAgentId === agentId) return true;
+	if (
+		agentId &&
+		message.toSessionKey &&
+		!message.toSessionAgentId &&
+		agentForSession(message.toSessionKey) === agentId
+	) {
+		return true;
+	}
+	if (options.includeBroadcast !== false && message.broadcast) {
+		return options.includeSent === true || !agentId || message.fromAgentId !== agentId;
+	}
+	return options.includeSent === true && !!agentId && message.fromAgentId === agentId;
 }
 
 export function upsertAgentPresence(input: UpsertAgentPresenceInput): AgentPresence {
-	pruneState();
+	prunePresence();
 
 	const key = presenceKey(input);
 	const now = new Date().toISOString();
@@ -414,10 +389,9 @@ export function upsertAgentPresence(input: UpsertAgentPresenceInput): AgentPrese
 export function touchAgentPresence(sessionKey: string, agentId?: string): AgentPresence | null {
 	const normalized = normalizeText(sessionKey);
 	if (!normalized) return null;
-	pruneState();
+	prunePresence();
 	const presence = presenceByKey.get(`session:${normalized}`);
 	if (!presence) return null;
-	// Guard: if caller provides agentId, verify record ownership before touching.
 	if (agentId && presence.agentId !== agentId) return null;
 	presence.lastSeenAt = new Date().toISOString();
 	return clonePresence(presence);
@@ -426,7 +400,7 @@ export function touchAgentPresence(sessionKey: string, agentId?: string): AgentP
 export function removeAgentPresence(sessionKey: string): boolean {
 	const normalized = normalizeText(sessionKey);
 	if (!normalized) return false;
-	pruneState();
+	prunePresence();
 	const key = `session:${normalized}`;
 	const existing = presenceByKey.get(key);
 	if (!existing) return false;
@@ -444,7 +418,7 @@ export function removeAgentPresence(sessionKey: string): boolean {
 }
 
 export function listAgentPresence(options: ListAgentPresenceOptions = {}): AgentPresence[] {
-	pruneState();
+	prunePresence();
 
 	const agentId = normalizeText(options.agentId);
 	const sessionKey = normalizeText(options.sessionKey);
@@ -452,13 +426,11 @@ export function listAgentPresence(options: ListAgentPresenceOptions = {}): Agent
 	const includeSelf = options.includeSelf !== false;
 	const limit = options.limit && options.limit > 0 ? options.limit : 50;
 
-	const items = [...presenceByKey.values()]
+	return [...presenceByKey.values()]
 		.filter((presence) => {
 			if (project && presence.project !== project) return false;
 			if (!agentId) return true;
 			if (includeSelf) return true;
-			// Excluding self keeps only other agents, plus other sessions owned
-			// by the same agent when a current sessionKey is provided.
 			if (presence.agentId !== agentId) return true;
 			if (sessionKey && presence.sessionKey && presence.sessionKey !== sessionKey) return true;
 			return false;
@@ -466,16 +438,130 @@ export function listAgentPresence(options: ListAgentPresenceOptions = {}): Agent
 		.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
 		.slice(0, limit)
 		.map(clonePresence);
+}
 
-	return items;
+function rowToAgentMessage(row: CrossAgentMessageRow): AgentMessage {
+	return {
+		id: row.id,
+		createdAt: row.created_at,
+		expiresAt: row.expires_at,
+		fromAgentId: row.from_agent_id,
+		fromSessionKey: row.from_session_key ?? undefined,
+		toAgentId: row.to_agent_id ?? undefined,
+		toSessionKey: row.to_session_key ?? undefined,
+		toSessionAgentId: row.to_session_agent_id ?? undefined,
+		content: row.content,
+		type: row.message_type,
+		broadcast: row.broadcast === 1,
+		deliveryPath: row.delivery_path,
+		deliveryStatus: row.delivery_status,
+		deliveryError: row.delivery_error ?? undefined,
+		deliveryReceipt: parseDeliveryReceipt(row.delivery_receipt_json),
+		acknowledgedAt: row.acknowledged_at ?? undefined,
+	};
+}
+
+function clampLimit(value: number | undefined): number {
+	if (value === undefined || !Number.isFinite(value)) return DEFAULT_MESSAGE_LIMIT;
+	return Math.max(1, Math.min(MAX_MESSAGE_LIMIT, Math.round(value)));
+}
+
+function clampOffset(value: number | undefined): number {
+	if (value === undefined || !Number.isFinite(value)) return 0;
+	return Math.max(0, Math.round(value));
+}
+
+interface MessageQuery {
+	readonly join: string;
+	readonly where: string;
+	readonly args: readonly unknown[];
+	readonly agentId?: string;
+}
+
+function buildMessageQuery(options: ListAgentMessageOptions, now: string): MessageQuery | null {
+	prunePresence();
+	const agentId = normalizeText(options.agentId);
+	const sessionKey = normalizeText(options.sessionKey);
+	const includeSent = options.includeSent === true;
+	const includeBroadcast = options.includeBroadcast !== false;
+	const visibility: string[] = [];
+	const visibilityArgs: unknown[] = [];
+
+	if (sessionKey) {
+		if (agentId) {
+			visibility.push("(m.to_session_key = ? AND (m.to_session_agent_id IS NULL OR m.to_session_agent_id = ?))");
+			visibilityArgs.push(sessionKey, agentId);
+		} else {
+			visibility.push("m.to_session_key = ?");
+			visibilityArgs.push(sessionKey);
+		}
+	}
+	if (agentId) {
+		visibility.push("m.to_agent_id = ?");
+		visibilityArgs.push(agentId);
+		visibility.push("m.to_session_agent_id = ?");
+		visibilityArgs.push(agentId);
+		const activeSessions = sessionKeysForAgent(agentId);
+		if (activeSessions.length > 0) {
+			visibility.push(
+				`(m.to_session_agent_id IS NULL AND m.to_session_key IN (${activeSessions.map(() => "?").join(", ")}))`,
+			);
+			visibilityArgs.push(...activeSessions);
+		}
+	}
+	if (includeBroadcast) {
+		if (agentId && !includeSent) {
+			visibility.push("(m.broadcast = 1 AND m.from_agent_id <> ?)");
+			visibilityArgs.push(agentId);
+		} else {
+			visibility.push("m.broadcast = 1");
+		}
+	}
+	if (includeSent && agentId) {
+		visibility.push("m.from_agent_id = ?");
+		visibilityArgs.push(agentId);
+	}
+	if (visibility.length === 0) return null;
+
+	const filters = ["m.expires_at > ?", `(${visibility.join(" OR ")})`];
+	const args: unknown[] = [now, ...visibilityArgs];
+	const sinceMs = parseIsoTimestamp(options.since);
+	if (sinceMs !== null) {
+		filters.push("m.created_at >= ?");
+		args.push(new Date(sinceMs).toISOString());
+	}
+	if (options.unreadOnly === true) {
+		filters.push("r.acknowledged_at IS NULL");
+	}
+
+	return {
+		join: agentId
+			? "LEFT JOIN cross_agent_message_receipts r ON r.message_id = m.id AND r.agent_id = ?"
+			: "LEFT JOIN cross_agent_message_receipts r ON 1 = 0",
+		where: filters.join(" AND "),
+		args: agentId ? [agentId, ...args] : args,
+		agentId,
+	};
+}
+
+function countRows(db: ReadDb, query: MessageQuery): number {
+	const row = db
+		.prepare(`SELECT COUNT(*) AS total FROM cross_agent_messages m ${query.join} WHERE ${query.where}`)
+		.get(...query.args) as { total?: number } | null | undefined;
+	return typeof row?.total === "number" ? row.total : 0;
+}
+
+function unreadCount(db: ReadDb, options: ListAgentMessageOptions, now: string): number {
+	const query = buildMessageQuery({ ...options, includeSent: false, unreadOnly: true }, now);
+	return query ? countRows(db, query) : 0;
 }
 
 export function createAgentMessage(input: CreateAgentMessageInput): AgentMessage {
-	pruneState();
-
+	prunePresence();
 	const content = normalizeText(input.content);
-	if (!content) {
-		throw new Error("content is required");
+	if (!content) throw new Error("content is required");
+	if (content.length > MAX_MESSAGE_CONTENT_CHARS) {
+		throw new Error(`content must be ${MAX_MESSAGE_CONTENT_CHARS} characters or fewer`);
 	}
 
 	const toAgentId = normalizeText(input.toAgentId);
@@ -486,68 +572,187 @@ export function createAgentMessage(input: CreateAgentMessageInput): AgentMessage
 	if (deliveryPath === "local" && !broadcast && !toAgentId && !toSessionKey) {
 		throw new Error("target required for local delivery (toAgentId, toSessionKey, or broadcast=true)");
 	}
+	if (deliveryPath === "local" && toSessionKey && !toSessionAgentId) {
+		throw new Error("target session is not active; use toAgentId for durable delivery");
+	}
 
-	const now = new Date().toISOString();
-	const message: MutableAgentMessage = {
+	const nowMs = Date.now();
+	const now = new Date(nowMs).toISOString();
+	const expiresAt = new Date(nowMs + AGENT_MESSAGE_RETENTION_MS).toISOString();
+	const row: CrossAgentMessageRow = {
 		id: randomUUID(),
-		createdAt: now,
-		fromAgentId: normalizeText(input.fromAgentId) ?? "default",
-		fromSessionKey: normalizeText(input.fromSessionKey),
-		toAgentId,
-		toSessionKey,
-		toSessionAgentId,
+		created_at: now,
+		expires_at: expiresAt,
+		from_agent_id: normalizeText(input.fromAgentId) ?? "default",
+		from_session_key: normalizeText(input.fromSessionKey) ?? null,
+		to_agent_id: toAgentId ?? null,
+		to_session_key: toSessionKey ?? null,
+		to_session_agent_id: toSessionAgentId ?? null,
 		content,
-		type: input.type ?? "info",
-		broadcast,
-		deliveryPath,
-		deliveryStatus: input.deliveryStatus ?? "delivered",
-		deliveryError: normalizeText(input.deliveryError),
-		deliveryReceipt: cloneDeliveryReceipt(input.deliveryReceipt),
+		message_type: input.type ?? "info",
+		broadcast: broadcast ? 1 : 0,
+		delivery_path: deliveryPath,
+		delivery_status: input.deliveryStatus ?? "delivered",
+		delivery_error: normalizeText(input.deliveryError) ?? null,
+		delivery_receipt_json: serializeDeliveryReceipt(input.deliveryReceipt),
+		acknowledged_at: null,
 	};
 
-	messages.push(message);
-	pruneState();
-
-	const out = cloneMessage(message);
-	emit({
-		type: "message",
-		message: out,
-		timestamp: now,
+	getDbAccessor().withWriteTx((db) => {
+		pruneExpiredMessages(db, now);
+		const countRow = db.prepare("SELECT COUNT(*) AS count FROM cross_agent_messages").get() as
+			| { count: number }
+			| null
+			| undefined;
+		if ((countRow?.count ?? 0) >= MAX_DURABLE_MESSAGES) throw new AgentMessageCapacityError();
+		db.prepare(
+			`INSERT INTO cross_agent_messages (
+				id, from_agent_id, from_session_key, to_agent_id, to_session_key,
+				to_session_agent_id, broadcast, message_type, content, delivery_path,
+				delivery_status, delivery_error, delivery_receipt_json, created_at, expires_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run(
+			row.id,
+			row.from_agent_id,
+			row.from_session_key,
+			row.to_agent_id,
+			row.to_session_key,
+			row.to_session_agent_id,
+			row.broadcast,
+			row.message_type,
+			row.content,
+			row.delivery_path,
+			row.delivery_status,
+			row.delivery_error,
+			row.delivery_receipt_json,
+			row.created_at,
+			row.expires_at,
+		);
 	});
+
+	const out = rowToAgentMessage(row);
+	emit({ type: "message", message: out, timestamp: now });
 	return out;
 }
 
-export function listAgentMessages(options: ListAgentMessageOptions = {}): AgentMessage[] {
-	pruneState();
-
-	const agentId = normalizeText(options.agentId);
-	const sessionKey = normalizeText(options.sessionKey);
-	const includeSent = options.includeSent === true;
-	const includeBroadcast = options.includeBroadcast !== false;
-	const limit = options.limit && options.limit > 0 ? options.limit : 100;
-
-	const sinceMs = parseIsoTimestamp(options.since);
-
-	const filtered = messages.filter((message) => {
-		const createdAtMs = parseIsoTimestamp(message.createdAt);
-		if (sinceMs !== null && createdAtMs !== null && createdAtMs < sinceMs) {
-			return false;
-		}
-
-		const isRecipient = includesMessageForAgent(message, agentId, sessionKey, includeBroadcast);
-		if (isRecipient) return true;
-
-		if (includeSent && agentId && message.fromAgentId === agentId) {
-			return true;
-		}
-
-		return false;
+export function updateAgentMessageDelivery(
+	messageId: string,
+	input: {
+		readonly status: AgentMessageDeliveryStatus;
+		readonly error?: string;
+		readonly receipt?: Record<string, unknown>;
+	},
+): AgentMessage {
+	const normalizedId = normalizeText(messageId);
+	if (!normalizedId) throw new Error("messageId is required");
+	let updated: AgentMessage | null = null;
+	getDbAccessor().withWriteTx((db) => {
+		db.prepare(
+			`UPDATE cross_agent_messages
+			 SET delivery_status = ?, delivery_error = ?, delivery_receipt_json = ?
+			 WHERE id = ?`,
+		).run(input.status, normalizeText(input.error) ?? null, serializeDeliveryReceipt(input.receipt), normalizedId);
+		const row = db
+			.prepare("SELECT m.*, NULL AS acknowledged_at FROM cross_agent_messages m WHERE m.id = ?")
+			.get(normalizedId) as CrossAgentMessageRow | null | undefined;
+		if (row == null) throw new AgentMessageNotFoundError(normalizedId);
+		updated = rowToAgentMessage(row);
 	});
+	if (updated == null) throw new AgentMessageNotFoundError(normalizedId);
+	emit({ type: "message", message: updated, timestamp: new Date().toISOString() });
+	return updated;
+}
 
-	return filtered
-		.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-		.slice(0, limit)
-		.map(cloneMessage);
+export function listAgentMessagePage(options: ListAgentMessageOptions = {}): AgentMessagePage {
+	const now = new Date().toISOString();
+	const limit = clampLimit(options.limit);
+	const offset = clampOffset(options.offset);
+	const query = buildMessageQuery(options, now);
+	if (!query) {
+		return { items: [], count: 0, total: 0, unreadCount: 0, limit, offset, hasMore: false };
+	}
+
+	return getDbAccessor().withReadDb((db) => {
+		const total = countRows(db, query);
+		const unread = options.unreadOnly === true ? total : unreadCount(db, options, now);
+		const order = options.order === "asc" ? "ASC" : "DESC";
+		const rows = db
+			.prepare(
+				`SELECT m.*, r.acknowledged_at
+				 FROM cross_agent_messages m
+				 ${query.join}
+				 WHERE ${query.where}
+				 ORDER BY m.created_at ${order}, m.rowid ${order}
+				 LIMIT ? OFFSET ?`,
+			)
+			.all<CrossAgentMessageRow>(...query.args, limit, offset);
+		const items = rows.map(rowToAgentMessage);
+		return {
+			items,
+			count: items.length,
+			total,
+			unreadCount: unread,
+			limit,
+			offset,
+			hasMore: offset + items.length < total,
+		};
+	});
+}
+
+export function listAgentMessages(options: ListAgentMessageOptions = {}): AgentMessage[] {
+	return [...listAgentMessagePage(options).items];
+}
+
+export function acknowledgeAgentMessage(input: AcknowledgeAgentMessageInput): AcknowledgeAgentMessageResult {
+	const messageId = normalizeText(input.messageId);
+	if (!messageId) throw new Error("messageId is required");
+	const agentId = normalizeText(input.agentId) ?? "default";
+	const sessionKey = normalizeText(input.sessionKey);
+	const now = new Date().toISOString();
+
+	return getDbAccessor().withWriteTx((db) => {
+		pruneExpiredMessages(db, now);
+		const query = buildMessageQuery(
+			{
+				agentId,
+				sessionKey,
+				includeBroadcast: true,
+				includeSent: false,
+			},
+			now,
+		);
+		if (!query) throw new AgentMessageNotFoundError(messageId);
+		const row = db
+			.prepare(
+				`SELECT m.*, r.acknowledged_at
+				 FROM cross_agent_messages m
+				 ${query.join}
+				 WHERE m.id = ? AND ${query.where}`,
+			)
+			.get(...query.args.slice(0, query.agentId ? 1 : 0), messageId, ...query.args.slice(query.agentId ? 1 : 0)) as
+			| CrossAgentMessageRow
+			| null
+			| undefined;
+		if (row == null) throw new AgentMessageNotFoundError(messageId);
+		if (row.acknowledged_at) {
+			return { messageId, agentId, acknowledgedAt: row.acknowledged_at, alreadyAcknowledged: true };
+		}
+
+		db.prepare(
+			`INSERT INTO cross_agent_message_receipts (message_id, agent_id, acknowledged_at)
+			 VALUES (?, ?, ?)
+			 ON CONFLICT(message_id, agent_id) DO NOTHING`,
+		).run(messageId, agentId, now);
+		const receipt = db
+			.prepare(
+				`SELECT acknowledged_at FROM cross_agent_message_receipts
+				 WHERE message_id = ? AND agent_id = ?`,
+			)
+			.get(messageId, agentId) as { acknowledged_at?: string } | null | undefined;
+		const acknowledgedAt = receipt?.acknowledged_at;
+		if (!acknowledgedAt) throw new Error("Failed to persist cross-agent acknowledgement");
+		return { messageId, agentId, acknowledgedAt, alreadyAcknowledged: false };
+	});
 }
 
 export function subscribeCrossAgentEvents(subscriber: (event: CrossAgentEvent) => void): () => void {
@@ -555,228 +760,6 @@ export function subscribeCrossAgentEvents(subscriber: (event: CrossAgentEvent) =
 	return () => {
 		subscribers.delete(subscriber);
 	};
-}
-
-function parseAllowedAcpOrigins(raw: string | undefined): ReadonlySet<string> {
-	const out = new Set<string>();
-	const source = normalizeText(raw);
-	if (!source) return out;
-
-	for (const candidate of source.split(",")) {
-		const trimmed = normalizeText(candidate);
-		if (!trimmed) continue;
-		try {
-			const parsed = new URL(trimmed);
-			if (parsed.protocol !== "http:" && parsed.protocol !== "https:") continue;
-			out.add(parsed.origin);
-		} catch {
-			// Ignore malformed entries and continue with valid origins.
-		}
-	}
-
-	return out;
-}
-
-function parseIpv4Octets(hostname: string): number[] | null {
-	const parts = hostname.split(".");
-	if (parts.length !== 4) return null;
-
-	const octets: number[] = [];
-	for (const part of parts) {
-		if (!/^\d+$/.test(part)) return null;
-		const value = Number.parseInt(part, 10);
-		if (!Number.isInteger(value) || value < 0 || value > 255) return null;
-		octets.push(value);
-	}
-	return octets;
-}
-
-function isPrivateIpv4(hostname: string): boolean {
-	const octets = parseIpv4Octets(hostname);
-	if (!octets) return false;
-
-	const [a, b] = octets;
-	if (a === 10) return true;
-	if (a === 127) return true;
-	if (a === 169 && b === 254) return true;
-	if (a === 172 && b >= 16 && b <= 31) return true;
-	if (a === 192 && b === 168) return true;
-	if (a === 100 && b >= 64 && b <= 127) return true;
-	return false;
-}
-
-function isPrivateIpv6(hostname: string): boolean {
-	const normalized = hostname.toLowerCase();
-	if (normalized === "::1" || normalized === "::") return true;
-	if (normalized.startsWith("fe80:")) return true;
-	if (normalized.startsWith("fc") || normalized.startsWith("fd")) return true;
-	if (normalized.startsWith("::ffff:")) {
-		const mapped = normalized.slice("::ffff:".length);
-		return isPrivateIpv4(mapped);
-	}
-	return false;
-}
-
-function isPrivateOrLocalHostname(hostname: string): boolean {
-	const normalized = hostname.toLowerCase();
-	if (normalized === "localhost" || normalized.endsWith(".localhost") || normalized.endsWith(".local")) {
-		return true;
-	}
-
-	const ipType = isIP(normalized);
-	if (ipType === 4) return isPrivateIpv4(normalized);
-	if (ipType === 6) return isPrivateIpv6(normalized);
-
-	// Single-label hosts are typically local network names.
-	return !normalized.includes(".");
-}
-
-function resolveAcpRunsUrl(baseUrl: string): { ok: true; url: string } | { ok: false; error: string } {
-	let parsed: URL;
-	try {
-		parsed = new URL(baseUrl);
-	} catch {
-		return { ok: false, error: "acp.baseUrl must be a valid absolute URL" };
-	}
-
-	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-		return { ok: false, error: "acp.baseUrl must use http or https" };
-	}
-	if (parsed.username || parsed.password) {
-		return { ok: false, error: "acp.baseUrl must not include credentials" };
-	}
-
-	const allowlist = parseAllowedAcpOrigins(process.env[ACP_ALLOWED_ORIGINS_ENV]);
-	const allowlisted = allowlist.has(parsed.origin);
-
-	if (!allowlisted) {
-		if (parsed.protocol !== "https:") {
-			return {
-				ok: false,
-				error: "acp.baseUrl must use https unless explicitly allowlisted via SIGNET_ACP_ALLOWED_ORIGINS",
-			};
-		}
-
-		if (isPrivateOrLocalHostname(parsed.hostname)) {
-			return {
-				ok: false,
-				error: "acp.baseUrl host is private/local and must be explicitly allowlisted via SIGNET_ACP_ALLOWED_ORIGINS",
-			};
-		}
-	}
-
-	return { ok: true, url: new URL("/runs", parsed).toString() };
-}
-
-function readStringField(record: Record<string, unknown>, key: string): string | undefined {
-	const value = record[key];
-	return typeof value === "string" && value.trim().length > 0 ? value : undefined;
-}
-
-function extractRunId(value: unknown): string | undefined {
-	if (!isRecord(value)) return undefined;
-
-	const direct = readStringField(value, "run_id") ?? readStringField(value, "runId") ?? readStringField(value, "id");
-	if (direct) return direct;
-
-	const nested = value.run;
-	if (!isRecord(nested)) return undefined;
-	return readStringField(nested, "run_id") ?? readStringField(nested, "runId") ?? readStringField(nested, "id");
-}
-
-export async function relayMessageViaAcp(request: AcpRelayRequest): Promise<AcpRelayResult> {
-	const baseUrl = normalizeText(request.baseUrl);
-	if (!baseUrl) {
-		return { ok: false, status: 0, error: "acp.baseUrl is required" };
-	}
-
-	const targetAgentName = normalizeText(request.targetAgentName);
-	if (!targetAgentName) {
-		return { ok: false, status: 0, error: "acp.targetAgentName is required" };
-	}
-
-	const content = normalizeText(request.content);
-	if (!content) {
-		return { ok: false, status: 0, error: "content is required" };
-	}
-
-	const timeoutMs = typeof request.timeoutMs === "number" && request.timeoutMs > 0 ? request.timeoutMs : ACP_TIMEOUT_MS;
-
-	const runsUrl = resolveAcpRunsUrl(baseUrl);
-	if (!runsUrl.ok) {
-		return { ok: false, status: 0, error: runsUrl.error };
-	}
-
-	const payload: Record<string, unknown> = {
-		agent_name: targetAgentName,
-		mode: "sync",
-		input: [
-			{
-				role: "user",
-				parts: [
-					{
-						content_type: "text/plain",
-						content,
-					},
-				],
-			},
-		],
-	};
-
-	const metadata: Record<string, unknown> = {
-		from_agent_id: normalizeText(request.fromAgentId) ?? "default",
-	};
-	const fromSessionKey = normalizeText(request.fromSessionKey);
-	if (fromSessionKey) {
-		metadata.from_session_key = fromSessionKey;
-	}
-	if (request.metadata && Object.keys(request.metadata).length > 0) {
-		metadata.signet = cloneDeliveryReceipt(request.metadata);
-	}
-	payload.metadata = metadata;
-
-	try {
-		const response = await fetch(runsUrl.url, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify(payload),
-			signal: AbortSignal.timeout(timeoutMs),
-		});
-
-		let parsedBody: unknown = null;
-		try {
-			parsedBody = await response.json();
-		} catch {
-			parsedBody = null;
-		}
-
-		if (!response.ok) {
-			const error =
-				isRecord(parsedBody) && typeof parsedBody.error === "string"
-					? parsedBody.error
-					: `ACP request failed with ${response.status}`;
-			return {
-				ok: false,
-				status: response.status,
-				error,
-			};
-		}
-
-		return {
-			ok: true,
-			status: response.status,
-			runId: extractRunId(parsedBody),
-		};
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		return {
-			ok: false,
-			status: 0,
-			error: message,
-		};
-	}
 }
 
 /** Remove all presence entries (for graceful shutdown). Returns count cleared. */
@@ -799,6 +782,10 @@ export function clearAllPresence(): number {
 
 export function resetCrossAgentStateForTest(): void {
 	presenceByKey.clear();
-	messages.length = 0;
 	subscribers.clear();
+	if (!hasDbAccessor()) return;
+	getDbAccessor().withWriteTx((db) => {
+		db.prepare("DELETE FROM cross_agent_message_receipts").run();
+		db.prepare("DELETE FROM cross_agent_messages").run();
+	});
 }

@@ -906,6 +906,9 @@ describe("SignetPiExtension", () => {
 				if (path === "/api/hooks/user-prompt-submit") {
 					return Response.json({ inject: "[signet:recall]\n- Preferred language is TypeScript" });
 				}
+				if (path === "/api/hooks/notifications") {
+					return Response.json({ inject: "peer-notification-content" });
+				}
 				return new Response("not found", { status: 404 });
 			},
 		});
@@ -952,6 +955,16 @@ describe("SignetPiExtension", () => {
 		const recallMsg = messages.find((m) => m.customType === "signet-pi-hidden-recall");
 		expect(typeof recallMsg?.content).toBe("string");
 		expect(recallMsg?.content as string).toContain("Preferred language is TypeScript");
+
+		const next = await handlers.context[0]?.({ messages }, ctx);
+		const nextMessages = (next as { messages: Array<{ customType?: string; content?: unknown }> }).messages;
+		const peerMessage = nextMessages.find(
+			(message) =>
+				message.customType === "signet-pi-hidden-recall" &&
+				typeof message.content === "string" &&
+				message.content.includes("peer-notification-content"),
+		);
+		expect(peerMessage).toBeDefined();
 	});
 
 	it("session_before_compact posts pre-compaction guidance with session metadata", async () => {

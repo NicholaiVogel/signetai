@@ -16,6 +16,7 @@ interface OpenCodeHooks {
 	readonly event: (input: {
 		readonly event: { readonly type: string; readonly properties?: Record<string, unknown> };
 	}) => Promise<void>;
+	readonly "tool.execute.before": (input: { readonly sessionID: string }) => Promise<void>;
 	readonly "chat.message": (
 		input: { readonly sessionID: string },
 		output: { readonly parts: ReadonlyArray<{ readonly type: "text"; readonly text: string }> },
@@ -409,5 +410,34 @@ describe("SignetPlugin OpenCode lifecycle", () => {
 				runtimePath: "plugin",
 			},
 		});
+	});
+	test("refreshes peer notifications at tool and system-transform hooks", async () => {
+		const records = installFetch();
+		const hooks = await createHooks();
+		const original = globalThis.fetch;
+		globalThis.fetch = Object.assign(
+			async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+				const url = new URL(String(input));
+				const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+				records.push({ path: url.pathname, body });
+				if (url.pathname === "/api/hooks/notifications") {
+					return Response.json({ inject: "peer-notification" });
+				}
+				return original(input, init);
+			},
+			{ preconnect: original.preconnect },
+		);
+
+		await hooks["tool.execute.before"]({ sessionID: "notify-session" });
+		const output = { system: [] as string[] };
+		await hooks["experimental.chat.system.transform"]({ sessionID: "notify-session" }, output);
+
+		expect(output.system.join("\n")).toContain("peer-notification");
+		expect(
+			records.some(
+				(record) =>
+					record.path === "/api/hooks/notifications" && record.body.hook === "experimental.chat.system.transform",
+			),
+		).toBe(true);
 	});
 });

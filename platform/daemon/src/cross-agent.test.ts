@@ -1,6 +1,12 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+	acknowledgeAgentMessage,
 	createAgentMessage,
+	isMessageVisibleToAgent,
+	listAgentMessagePage,
 	listAgentMessages,
 	listAgentPresence,
 	relayMessageViaAcp,
@@ -8,11 +14,24 @@ import {
 	resetCrossAgentStateForTest,
 	subscribeCrossAgentEvents,
 	touchAgentPresence,
+	updateAgentMessageDelivery,
 	upsertAgentPresence,
 } from "./cross-agent";
+import { closeDbAccessor, initDbAccessor } from "./db-accessor";
+
+let tempDir = "";
+let dbPath = "";
+
+beforeEach(() => {
+	tempDir = mkdtempSync(join(tmpdir(), "signet-cross-agent-"));
+	dbPath = join(tempDir, "memory.db");
+	initDbAccessor(dbPath, { agentsDir: tempDir });
+});
 
 afterEach(() => {
 	resetCrossAgentStateForTest();
+	closeDbAccessor();
+	rmSync(tempDir, { recursive: true, force: true });
 });
 
 describe("cross-agent presence", () => {
@@ -100,6 +119,24 @@ describe("cross-agent messages", () => {
 		expect(inbox[0]?.content).toContain("migration rollout");
 	});
 
+	it("does not count outbound-only messages as unread when sent items are included", () => {
+		createAgentMessage({
+			fromAgentId: "alpha",
+			toAgentId: "beta",
+			content: "outbound",
+		});
+		const outboundPage = listAgentMessagePage({ agentId: "alpha", includeSent: true });
+		expect(outboundPage.items).toHaveLength(1);
+		expect(outboundPage.unreadCount).toBe(0);
+
+		createAgentMessage({
+			fromAgentId: "alpha",
+			toAgentId: "alpha",
+			content: "self-addressed",
+		});
+		expect(listAgentMessagePage({ agentId: "alpha", includeSent: true }).unreadCount).toBe(1);
+	});
+
 	it("includes broadcast messages in recipient inbox", () => {
 		createAgentMessage({
 			fromAgentId: "alpha",
@@ -134,6 +171,34 @@ describe("cross-agent messages", () => {
 				deliveryPath: "local",
 			}),
 		).toThrow("target required for local delivery");
+	});
+
+	it("persists ACP messages before relay and updates their delivery result", () => {
+		const queued = createAgentMessage({
+			fromAgentId: "alpha",
+			content: "relay me",
+			deliveryPath: "acp",
+			deliveryStatus: "queued",
+		});
+		expect(queued.deliveryStatus).toBe("queued");
+
+		const delivered = updateAgentMessageDelivery(queued.id, {
+			status: "delivered",
+			receipt: { status: 201, runId: "run-1" },
+		});
+		expect(delivered.deliveryStatus).toBe("delivered");
+		expect(delivered.deliveryReceipt).toEqual({ status: 201, runId: "run-1" });
+		expect(listAgentMessages({ agentId: "alpha", includeSent: true })[0]?.deliveryStatus).toBe("delivered");
+	});
+
+	it("rejects unresolved local session targets instead of allowing session-key reassignment leaks", () => {
+		expect(() =>
+			createAgentMessage({
+				fromAgentId: "alpha",
+				toSessionKey: "absent-session",
+				content: "private",
+			}),
+		).toThrow("target session is not active");
 	});
 
 	it("deep-clones delivery receipts to avoid external mutation", () => {
@@ -186,7 +251,7 @@ describe("cross-agent messages", () => {
 			agentId: "beta",
 			harness: "openclaw",
 		});
-		createAgentMessage({
+		const message = createAgentMessage({
 			fromAgentId: "alpha",
 			toSessionKey: "sess-reused",
 			content: "This message should stay with beta.",
@@ -203,6 +268,51 @@ describe("cross-agent messages", () => {
 		const gammaInbox = listAgentMessages({ agentId: "gamma" });
 		expect(betaInbox.length).toBe(1);
 		expect(gammaInbox.length).toBe(0);
+		expect(
+			isMessageVisibleToAgent(message, {
+				agentId: "gamma",
+				sessionKey: "sess-reused",
+				includeBroadcast: true,
+			}),
+		).toBe(false);
+	});
+
+	it("persists unread messages across daemon restarts", () => {
+		createAgentMessage({
+			fromAgentId: "alpha",
+			toAgentId: "beta",
+			content: "Durable restart delivery.",
+		});
+
+		closeDbAccessor();
+		initDbAccessor(dbPath, { agentsDir: tempDir });
+
+		const inbox = listAgentMessagePage({ agentId: "beta", unreadOnly: true });
+		expect(inbox.unreadCount).toBe(1);
+		expect(inbox.items[0]?.content).toBe("Durable restart delivery.");
+	});
+
+	it("acknowledges only visible recipient messages and suppresses unread delivery", () => {
+		const message = createAgentMessage({
+			fromAgentId: "alpha",
+			toAgentId: "beta",
+			content: "Acknowledge after processing.",
+		});
+
+		expect(() => acknowledgeAgentMessage({ messageId: message.id, agentId: "gamma" })).toThrow(
+			"not found or not visible",
+		);
+
+		const first = acknowledgeAgentMessage({ messageId: message.id, agentId: "beta" });
+		const retry = acknowledgeAgentMessage({ messageId: message.id, agentId: "beta" });
+		expect(first.alreadyAcknowledged).toBe(false);
+		expect(retry).toEqual({ ...first, alreadyAcknowledged: true });
+
+		const unread = listAgentMessagePage({ agentId: "beta", unreadOnly: true });
+		const history = listAgentMessagePage({ agentId: "beta" });
+		expect(unread.items).toEqual([]);
+		expect(unread.unreadCount).toBe(0);
+		expect(history.items[0]?.acknowledgedAt).toBe(first.acknowledgedAt);
 	});
 });
 

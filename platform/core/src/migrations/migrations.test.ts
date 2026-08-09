@@ -20,6 +20,7 @@ import { up as compactionRecallProjections } from "./095-compaction-recall-proje
 import { up as retireLegacyIngestion } from "./096-retire-legacy-ingestion";
 import { up as dreamingRunbook } from "./100-dreaming-runbook";
 import { up as agentScopedEntityName } from "./105-agent-scoped-entity-name";
+import { up as crossAgentMessageNotifications } from "./115-cross-agent-message-notifications";
 import { MIGRATIONS, hasPendingMigrations, runMigrations } from "./index";
 
 function createFreshDb(): Database {
@@ -1846,5 +1847,47 @@ describe("migration framework", () => {
 
 		const columns = db.query("PRAGMA table_info(telemetry_events)").all() as Array<{ name: string }>;
 		expect(columns.map((row) => row.name)).toEqual(expect.arrayContaining(["source", "claim_token", "claimed_at"]));
+	});
+});
+
+describe("migration 115: cross-agent message notifications", () => {
+	test("creates durable inbox, acknowledgement, and scoped lookup artifacts idempotently", () => {
+		const db = createFreshDb();
+		db.exec("PRAGMA foreign_keys = ON");
+		crossAgentMessageNotifications(db);
+		crossAgentMessageNotifications(db);
+
+		const tables = new Set(
+			(db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+				(row) => row.name,
+			),
+		);
+		expect(tables.has("cross_agent_messages")).toBe(true);
+		expect(tables.has("cross_agent_message_receipts")).toBe(true);
+
+		const indexes = new Set(
+			(db.query("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Array<{ name: string }>).map(
+				(row) => row.name,
+			),
+		);
+		expect(indexes.has("idx_cross_agent_messages_agent")).toBe(true);
+		expect(indexes.has("idx_cross_agent_messages_session_agent")).toBe(true);
+		expect(indexes.has("idx_cross_agent_receipts_agent")).toBe(true);
+
+		db.query(
+			`INSERT INTO cross_agent_messages (
+				id, from_agent_id, to_agent_id, message_type, content, broadcast,
+				delivery_path, delivery_status, created_at, expires_at
+			) VALUES (?, ?, ?, ?, ?, 0, 'local', 'delivered', ?, ?)`,
+		).run("message-1", "alpha", "beta", "info", "durable", "2026-08-08T00:00:00.000Z", "2026-08-15T00:00:00.000Z");
+		db.query("INSERT INTO cross_agent_message_receipts (message_id, agent_id, acknowledged_at) VALUES (?, ?, ?)").run(
+			"message-1",
+			"beta",
+			"2026-08-08T00:01:00.000Z",
+		);
+		db.query("DELETE FROM cross_agent_messages WHERE id = ?").run("message-1");
+		const receipt = db.query("SELECT message_id FROM cross_agent_message_receipts").get();
+		expect(receipt).toBeNull();
+		db.close();
 	});
 });

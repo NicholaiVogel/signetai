@@ -23,9 +23,19 @@ function combineHiddenInjects(sessionInject: string | undefined, recallInject: s
 
 export interface OmpSessionState extends BaseSessionState {
 	consumePersistentHiddenInject(sessionId: string | undefined): OmpAgentMessage | undefined;
+	mergeIntoNextPendingRecall(sessionId: string, inject: string): void;
 }
 
 class OmpSessionStateStore extends BaseSessionStateStore implements OmpSessionState {
+	mergeIntoNextPendingRecall(sessionId: string, inject: string): void {
+		const queue = this.pendingRecall.get(sessionId);
+		if (!queue || queue.length === 0) {
+			this.queuePendingRecall(sessionId, inject);
+			return;
+		}
+		queue[0] = combineHiddenInjects(queue[0], inject) ?? inject;
+	}
+
 	consumePersistentHiddenInject(sessionId: string | undefined): OmpAgentMessage | undefined {
 		if (!sessionId) return undefined;
 

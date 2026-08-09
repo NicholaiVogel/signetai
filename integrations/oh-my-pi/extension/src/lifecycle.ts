@@ -14,6 +14,7 @@ import {
 	ensureSessionContext,
 	flushPendingSessionEnds,
 	refreshSessionStart,
+	requestNotifications,
 	requestRecallForPrompt,
 } from "@signet/pi-extension-base";
 import { readTrimmedRuntimeEnv } from "@signet/pi-extension-base";
@@ -36,6 +37,7 @@ export {
 	ensureSessionContext,
 	flushPendingSessionEnds,
 	refreshSessionStart,
+	requestNotifications,
 	requestRecallForPrompt,
 };
 
