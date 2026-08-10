@@ -140,8 +140,70 @@ function toolMarker(value: Record<string, unknown>): string {
 	return `[tool call: ${toolName(value)}]`;
 }
 
+const REASONING_TYPES = ["analysis", "thought", "thinking", "reasoning", "redacted_thinking"];
+const TOOL_CALL_TYPES = ["tool_use", "tool_call", "function_call", "function_calling"];
+const TOOL_RESULT_TYPES = [
+	"tool_result",
+	"tool_response",
+	"function_call_output",
+	"function_result",
+	"tool_output",
+	"tool_return",
+];
+
+function recordType(value: Record<string, unknown>): string {
+	return (stringValue(value.type) ?? "").toLowerCase();
+}
+
+function isReasoningRecord(value: Record<string, unknown>): boolean {
+	const type = recordType(value);
+	const role = (stringValue(value.role) ?? "").toLowerCase();
+	const content = value.content;
+	const hasNoContent = content == null || (typeof content === "string" && content.trim().length === 0);
+	return (
+		REASONING_TYPES.some((candidate) => type === candidate || type.includes(candidate)) ||
+		role === "reasoning" ||
+		role === "thinking" ||
+		(role === "assistant" &&
+			hasNoContent &&
+			(value.reasoning !== undefined || value.reasoning_content !== undefined || value.thinking !== undefined)) ||
+		value.thought === true
+	);
+}
+
+function isToolCallRecord(value: Record<string, unknown>): boolean {
+	return TOOL_CALL_TYPES.some((candidate) => recordType(value).includes(candidate));
+}
+
+function isToolResultRecord(value: Record<string, unknown>): boolean {
+	const type = recordType(value);
+	const role = (stringValue(value.role) ?? "").toLowerCase();
+	if (TOOL_RESULT_TYPES.some((candidate) => type.includes(candidate)) || role === "tool" || role === "function")
+		return true;
+	const payload = value.payload;
+	if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
+		return isToolResultRecord(payload as Record<string, unknown>);
+	}
+	return false;
+}
+
+function toolCallMarkers(value: Record<string, unknown>): string[] {
+	const calls = value.tool_calls ?? value.toolCalls ?? value.calls;
+	const records = Array.isArray(calls) ? calls : calls === undefined ? [] : [calls];
+	const markers = records.flatMap((call) => {
+		if (typeof call !== "object" || call === null || Array.isArray(call)) return [];
+		return [toolMarker(call as Record<string, unknown>)];
+	});
+	const functionCall = value.function_call;
+	if (typeof functionCall === "object" && functionCall !== null && !Array.isArray(functionCall)) {
+		markers.push(toolMarker(functionCall as Record<string, unknown>));
+	}
+	return markers;
+}
+
 function contentText(value: unknown): string[] {
 	if (typeof value === "string") return value.trim().length > 0 ? [value.trim()] : [];
+	if (typeof value === "object" && value !== null && !Array.isArray(value)) return contentText([value]);
 	if (!Array.isArray(value)) return [];
 	const text: string[] = [];
 	for (const item of value) {
@@ -151,13 +213,12 @@ function contentText(value: unknown): string[] {
 		}
 		if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
 		const block = item as Record<string, unknown>;
-		const type = stringValue(block.type)?.toLowerCase() ?? "";
-		if (["tool_result", "tool_response", "function_call_output", "function_result"].includes(type)) continue;
-		if (["tool_use", "tool_call", "function_call"].includes(type)) {
+		if (isReasoningRecord(block) || isToolResultRecord(block)) continue;
+		if (isToolCallRecord(block)) {
 			text.push(toolMarker(block));
 			continue;
 		}
-		const blockText = stringValue(block.text) ?? stringValue(block.content);
+		const blockText = stringValue(block.text) ?? stringValue(block.input_text) ?? stringValue(block.content);
 		if (blockText) text.push(blockText);
 	}
 	return text;
@@ -166,52 +227,37 @@ function contentText(value: unknown): string[] {
 function jsonTranscriptLine(value: unknown): string[] {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
 	const record = value as Record<string, unknown>;
-	const nestedItem = record.item;
+	const nestedItem = record.item ?? record.message ?? record.payload;
 	const item =
 		typeof nestedItem === "object" && nestedItem !== null && !Array.isArray(nestedItem)
 			? (nestedItem as Record<string, unknown>)
 			: record;
-	const type = (stringValue(item.type) ?? stringValue(record.type) ?? "").toLowerCase();
-	if (
-		["tool_result", "tool_response", "function_call_output", "function_result", "tool_output", "tool_return"].some(
-			(candidate) => type.includes(candidate),
-		)
-	) {
+	if (isReasoningRecord(item) || isReasoningRecord(record) || isToolResultRecord(item) || isToolResultRecord(record))
 		return [];
-	}
-	if (["tool_use", "tool_call", "function_call", "function_calling"].some((candidate) => type.includes(candidate))) {
+	if (isToolCallRecord(item) || isToolCallRecord(record)) {
 		return [toolMarker(item)];
 	}
 	const role = (stringValue(item.role) ?? stringValue(record.role) ?? "").toLowerCase();
-	if (role === "tool" || role === "function") return [];
-	const payload = record.payload;
-	if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
-		const payloadRecord = payload as Record<string, unknown>;
-		const payloadType = (stringValue(payloadRecord.type) ?? "").toLowerCase();
-		if (payloadType.includes("tool") || payloadType.includes("function_call")) {
-			if (payloadType.includes("result") || payloadType.includes("output")) return [];
-			return [toolMarker(payloadRecord)];
-		}
-		const payloadRole = stringValue(payloadRecord.role)?.toLowerCase();
-		const payloadText = contentText(payloadRecord.content ?? payloadRecord.text);
-		if (payloadRole && payloadText.length > 0)
-			return [`${payloadRole === "user" ? "User" : "Assistant"}: ${payloadText.join("\n")}`];
-	}
 	const text = contentText(item.content ?? item.text ?? item.message);
-	if (text.length === 0) return [];
+	const markers = toolCallMarkers(item);
+	if (text.length === 0 && markers.length === 0) return [];
 	const label =
 		role === "user" ? "User" : role === "assistant" ? "Assistant" : role === "reasoning" ? "Assistant reasoning" : null;
-	return label ? text.map((part) => `${label}: ${part}`) : text;
+	return [...(label ? text.map((part) => `${label}: ${part}`) : text), ...markers];
 }
 
 function sanitizePlainTranscript(content: string): string {
 	const withoutToolBlocks = content
 		.replace(
-			/<(?:tool_result|tool_output|function_result|function_output|tool_response)>[\s\S]*?<\/(?:tool_result|tool_output|function_result|function_output|tool_response)>/gi,
+			/<(?:antml:)?(?:think|thinking|reasoning|analysis|redacted_thinking)\b[^>]*>[\s\S]*?<\/(?:antml:)?(?:think|thinking|reasoning|analysis|redacted_thinking)>/gi,
 			"",
 		)
 		.replace(
-			/<(?:tool_call|tool_use|function_call)(?:\s+([^>]*))?>[\s\S]*?<\/(?:tool_call|tool_use|function_call)>/gi,
+			/<(?:antml:)?(?:tool_result|tool_output|function_result|function_output|tool_response)>[\s\S]*?<\/(?:antml:)?(?:tool_result|tool_output|function_result|function_output|tool_response)>/gi,
+			"",
+		)
+		.replace(
+			/<(?:antml:invoke|(?:antml:)?(?:tool_call|tool_use|function_call))(?:\s+([^>]*))?>[\s\S]*?<\/(?:antml:invoke|(?:antml:)?(?:tool_call|tool_use|function_call))>/gi,
 			(_match, attributes: string) => {
 				const name = /(?:name|tool)=["']([^"']+)["']/i.exec(attributes ?? "")?.[1] ?? "tool";
 				return `[tool call: ${name}]`;
@@ -219,10 +265,29 @@ function sanitizePlainTranscript(content: string): string {
 		);
 	const lines = withoutToolBlocks.split(/\r?\n/);
 	const kept: string[] = [];
+	let omittingReasoning = false;
+	let omittingToolOutput = false;
 	for (const line of lines) {
 		const trimmed = line.trim();
-		if (/^(?:tool[_ -]?(?:output|result)|function[_ -]?(?:output|result)|<tool_result|<tool_response)\b/i.test(trimmed))
+		if (/^(?:tool|function)\s*:/i.test(trimmed)) {
+			omittingToolOutput = true;
 			continue;
+		}
+		if (/^(?:user|human|assistant|system|developer)\s*:/i.test(trimmed)) {
+			omittingReasoning = false;
+			omittingToolOutput = false;
+		}
+		if (/^(?:assistant\s+)?(?:reasoning|thinking|thought|analysis)\s*:/i.test(trimmed)) {
+			omittingReasoning = true;
+			continue;
+		}
+		if (
+			/^(?:tool[_ -]?(?:output|result)|function[_ -]?(?:output|result)|<tool_result|<tool_response)\b/i.test(trimmed)
+		) {
+			omittingToolOutput = true;
+			continue;
+		}
+		if (omittingReasoning || omittingToolOutput) continue;
 		if (/^(?:tool[_ -]?(?:call|use)|function[_ -]?call)\b/i.test(trimmed)) {
 			const name = trimmed.split(/\s*[:=]\s*/, 2)[1]?.trim() || "tool";
 			kept.push(`[tool call: ${name.replace(/[\s\[({].*$/, "")}]`);
@@ -236,43 +301,36 @@ function sanitizePlainTranscript(content: string): string {
 		.trim();
 }
 
-/**
- * Project a canonical transcript for Dreaming without mutating the retained
- * transcript. Tool calls remain as one-line markers; tool outputs are not
- * evidence and are omitted before the exact-quote gate sees the source.
- */
-function isJsonTranscriptToolOutput(value: unknown): boolean {
+/** Return whether a structured line contains no Dreaming-visible evidence. */
+function isJsonTranscriptExcluded(value: unknown): boolean {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const record = value as Record<string, unknown>;
-	const nestedItem = record.item;
+	const nestedItem = record.item ?? record.message ?? record.payload;
 	const item =
 		typeof nestedItem === "object" && nestedItem !== null && !Array.isArray(nestedItem)
 			? (nestedItem as Record<string, unknown>)
 			: record;
-	const type = (stringValue(item.type) ?? stringValue(record.type) ?? "").toLowerCase();
-	if (
-		["tool_result", "tool_response", "function_call_output", "function_result", "tool_output", "tool_return"].some(
-			(candidate) => type.includes(candidate),
-		)
-	)
+	if (isReasoningRecord(record) || isReasoningRecord(item) || isToolResultRecord(record) || isToolResultRecord(item))
 		return true;
-	const role = (stringValue(item.role) ?? stringValue(record.role) ?? "").toLowerCase();
-	if (role === "tool" || role === "function") return true;
-	const payload = record.payload;
-	if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
-		const payloadRecord = payload as Record<string, unknown>;
-		const payloadType = (stringValue(payloadRecord.type) ?? "").toLowerCase();
-		const payloadRole = (stringValue(payloadRecord.role) ?? "").toLowerCase();
-		return (
-			payloadType.includes("result") ||
-			payloadType.includes("output") ||
-			payloadRole === "tool" ||
-			payloadRole === "function"
-		);
-	}
-	return false;
+	const content = item.content;
+	return (
+		Array.isArray(content) &&
+		content.length > 0 &&
+		content.every(
+			(block) =>
+				typeof block === "object" &&
+				block !== null &&
+				!Array.isArray(block) &&
+				(isReasoningRecord(block as Record<string, unknown>) || isToolResultRecord(block as Record<string, unknown>)),
+		)
+	);
 }
 
+/**
+ * Project a canonical transcript for Dreaming without mutating the retained
+ * transcript. Tool calls remain as one-line markers; tool outputs and
+ * reasoning blocks are omitted before the exact-quote gate sees the source.
+ */
 export function sanitizeTranscriptForDreaming(content: string): string {
 	const lines = content.split(/\r?\n/);
 	const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
@@ -304,7 +362,7 @@ export function sanitizeTranscriptForDreaming(content: string): string {
 			const parsed: unknown = JSON.parse(trimmed);
 			const rendered = jsonTranscriptLine(parsed);
 			if (rendered.length > 0) return rendered;
-			if (isJsonTranscriptToolOutput(parsed)) return [];
+			if (isJsonTranscriptExcluded(parsed)) return [];
 		} catch {
 			// Keep non-JSON prose for the plain sanitizer.
 		}
