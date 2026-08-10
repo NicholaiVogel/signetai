@@ -700,6 +700,17 @@ export interface EmbeddingStatusResponse {
 	readonly base_url: string;
 	readonly error?: string;
 	readonly checkedAt: string;
+	readonly index?: {
+		readonly state: "ready" | "building" | "failed";
+		readonly coverage?: {
+			readonly active: number;
+			readonly staged: number;
+			readonly missing: number;
+			readonly wrongDimensions: number;
+			readonly quarantined: number;
+			readonly ready: boolean;
+		};
+	};
 }
 
 export interface EmbeddingHealthResponse {

@@ -216,7 +216,8 @@ to avoid aborted explicit recall embeddings.
 Changing the embedding provider, model, dimensions, or base URL starts a
 background index migration. Existing semantic recall remains on the active
 index until Signet has re-embedded every active memory and source chunk with
-the new profile; only then is the new index promoted. Check
+the new index; rows that the target provider permanently rejects are durably
+quarantined and reported in staging coverage so they do not block promotion. Check
 `GET /api/embeddings/status` for the active/staging profile and migration
 coverage. If the daemon restarts, the incomplete staged build resumes; a
 failed build leaves the active index unchanged.

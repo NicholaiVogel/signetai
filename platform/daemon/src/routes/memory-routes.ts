@@ -3615,7 +3615,9 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		const tracker = embeddingTrackerHandle?.getStats() ?? null;
 		const index = getDbAccessor().withReadDb((db) => {
 			const state = readEmbeddingIndexState(db);
-			return state?.staging ? { ...state, coverage: stagingCoverage(db, state.staging.dimensions) } : state;
+			return state?.staging
+				? { ...state, coverage: stagingCoverage(db, state.staging.dimensions, state.staging.fingerprint) }
+				: state;
 		});
 		return c.json({ ...status, tracker, index });
 	});

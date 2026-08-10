@@ -11,6 +11,7 @@ import { beginEmbeddingIndexBuild, failEmbeddingIndexBuild } from "./embedding-i
 import type { EmbeddingRole } from "./embedding-profile";
 import { logger } from "./logger";
 import type { EmbeddingConfig } from "./memory-config";
+import type { PipelineCauseFamily } from "./pipeline-operation";
 
 const STAGING_VECTOR_TABLE = "vec_embeddings_staging";
 
@@ -34,6 +35,7 @@ export interface EmbeddingMigrationCoverage {
 	readonly staged: number;
 	readonly missing: number;
 	readonly wrongDimensions: number;
+	readonly quarantined: number;
 	readonly ready: boolean;
 }
 
@@ -69,7 +71,7 @@ function configForProfile(profile: PersistedEmbeddingProfile, configured: Embedd
 }
 
 function tableExists(db: ReadDb, name: string): boolean {
-	return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+	return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) != null;
 }
 
 async function withQueuedWrite<T>(accessor: DbAccessor, fn: (db: WriteDb) => T): Promise<T> {
@@ -91,6 +93,25 @@ function createVectorIndex(db: WriteDb, table: string, dimensions: number): void
 			embedding FLOAT[${assertDimensions(dimensions)}] distance_metric=cosine
 		)
 	`);
+}
+
+function isTerminalMigrationFailure(
+	cause: PipelineCauseFamily | undefined,
+): cause is "context_limit" | "invalid_input" {
+	return cause === "context_limit" || cause === "invalid_input";
+}
+
+function migrationFailureCount(db: ReadDb, targetFingerprint: string | undefined): number {
+	if (!targetFingerprint || !tableExists(db, "embedding_index_failures")) return 0;
+	return (
+		(
+			db
+				.prepare(
+					"SELECT COUNT(*) AS n FROM embedding_index_failures f INNER JOIN embeddings e ON e.content_hash = f.content_hash WHERE f.target_fingerprint = ? AND f.retry_policy = 'quarantined'",
+				)
+				.get(targetFingerprint) as { n: number } | undefined
+		)?.n ?? 0
+	);
 }
 
 /** Creates a dimension-safe inactive vec0 table without touching active recall. */
@@ -121,7 +142,11 @@ function rebuildActiveVectorIndex(db: WriteDb, dimensions: number): void {
 	}
 }
 
-export function stagingCoverage(db: ReadDb, dimensions: number): EmbeddingMigrationCoverage {
+export function stagingCoverage(
+	db: ReadDb,
+	dimensions: number,
+	targetFingerprint?: string,
+): EmbeddingMigrationCoverage {
 	const active = (db.prepare("SELECT COUNT(*) AS n FROM embeddings").get() as { n: number } | undefined)?.n ?? 0;
 	const staged =
 		(db.prepare("SELECT COUNT(*) AS n FROM embeddings_staging").get() as { n: number } | undefined)?.n ?? 0;
@@ -141,12 +166,14 @@ export function stagingCoverage(db: ReadDb, dimensions: number): EmbeddingMigrat
 				| { n: number }
 				| undefined
 		)?.n ?? 0;
+	const quarantined = migrationFailureCount(db, targetFingerprint);
 	return {
 		active,
 		staged,
 		missing,
 		wrongDimensions,
-		ready: missing === 0 && wrongDimensions === 0 && active === staged,
+		quarantined,
+		ready: missing === quarantined && wrongDimensions === 0 && active === staged + quarantined,
 	};
 }
 
@@ -167,6 +194,40 @@ async function pruneStagingRows(accessor: DbAccessor): Promise<void> {
 			deleteVector.run(id);
 			deleteEmbedding.run(id);
 		}
+	});
+}
+
+async function recordMigrationFailure(
+	accessor: DbAccessor,
+	row: ActiveEmbeddingRow,
+	profile: PersistedEmbeddingProfile,
+	failureClass: "context_limit" | "invalid_input",
+): Promise<void> {
+	await withQueuedWrite(accessor, (db) => {
+		if (!tableExists(db, "embedding_index_failures")) return;
+		const now = new Date().toISOString();
+		db.prepare(
+			`INSERT INTO embedding_index_failures
+			 (content_hash, source_type, source_id, agent_id, target_fingerprint, provider, model,
+			  failure_class, attempts, retry_policy, first_failed_at, last_failed_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'quarantined', ?, ?)
+			 ON CONFLICT(content_hash, target_fingerprint) DO UPDATE SET
+			   source_type = excluded.source_type, source_id = excluded.source_id, agent_id = excluded.agent_id,
+			   provider = excluded.provider, model = excluded.model, failure_class = excluded.failure_class,
+			   attempts = embedding_index_failures.attempts + 1, retry_policy = 'quarantined',
+			   last_failed_at = excluded.last_failed_at`,
+		).run(
+			row.content_hash,
+			row.source_type,
+			row.source_id,
+			row.agent_id,
+			profile.fingerprint,
+			profile.provider,
+			profile.model,
+			failureClass,
+			now,
+			now,
+		);
 	});
 }
 
@@ -193,24 +254,47 @@ export async function stageEmbeddingBatch(input: {
 	await pruneStagingRows(input.accessor);
 	const rows = input.accessor.withReadDb((db) => {
 		if (!tableExists(db, STAGING_VECTOR_TABLE)) throw new Error("Staging vector index is unavailable");
+		const hasFailures = tableExists(db, "embedding_index_failures");
+		const failureFilter = hasFailures
+			? ` AND NOT EXISTS (
+					SELECT 1 FROM embedding_index_failures f
+					WHERE f.content_hash = e.content_hash
+					  AND f.target_fingerprint = ?
+					  AND f.retry_policy = 'quarantined'
+				)`
+			: "";
 		return db
 			.prepare(
 				`SELECT e.content_hash, e.source_type, e.source_id, e.chunk_text, e.agent_id
 				 FROM embeddings e
 				 LEFT JOIN embeddings_staging s ON s.content_hash = e.content_hash
-				 WHERE s.id IS NULL OR s.dimensions != ?
+				 WHERE (s.id IS NULL OR s.dimensions != ?)
+				 ${failureFilter}
 				 ORDER BY e.created_at ASC
 				 LIMIT ?`,
 			)
-			.all(profile.dimensions, input.batchSize) as ActiveEmbeddingRow[];
+			.all(
+				...(hasFailures
+					? [profile.dimensions, profile.fingerprint, input.batchSize]
+					: [profile.dimensions, input.batchSize]),
+			) as ActiveEmbeddingRow[];
 	});
 
 	let staged = 0;
 	for (const row of rows) {
+		let failureCause: PipelineCauseFamily | undefined;
 		const vector = await input.fetchEmbedding(row.chunk_text, configForProfile(profile, configured), "document", {
 			usage: { source: "artifact-index", agentId: row.agent_id ?? undefined },
+			onFailure: (cause) => {
+				failureCause = cause;
+			},
 		});
-		if (!vector) continue;
+		if (!vector) {
+			if (isTerminalMigrationFailure(failureCause)) {
+				await recordMigrationFailure(input.accessor, row, profile, failureCause);
+			}
+			continue;
+		}
 		if (vector.length !== profile.dimensions) {
 			throw new Error(
 				`Staging provider returned ${vector.length} dimensions for ${profile.model}; expected ${profile.dimensions}`,
@@ -248,7 +332,7 @@ export async function stageEmbeddingBatch(input: {
 		staged++;
 	}
 
-	const coverage = input.accessor.withReadDb((db) => stagingCoverage(db, profile.dimensions));
+	const coverage = input.accessor.withReadDb((db) => stagingCoverage(db, profile.dimensions, profile.fingerprint));
 	return { staged, coverage };
 }
 
@@ -260,7 +344,7 @@ export function promoteStagingIndex(accessor: DbAccessor): boolean {
 	return accessor.withWriteTx((db) => {
 		const state = readEmbeddingIndexState(db);
 		if (state?.state !== "building" || !state.staging) return false;
-		if (!stagingCoverage(db, state.staging.dimensions).ready) return false;
+		if (!stagingCoverage(db, state.staging.dimensions, state.staging.fingerprint).ready) return false;
 		if (!tableExists(db, STAGING_VECTOR_TABLE)) return false;
 		db.prepare(
 			`UPDATE memories SET embedding_model = ?

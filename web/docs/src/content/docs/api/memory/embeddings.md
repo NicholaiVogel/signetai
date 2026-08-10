@@ -48,8 +48,9 @@ Requires `recall` permission.
 
 ### GET /api/embeddings/status
 
-Check the configured embedding provider's availability. Results are cached for
-30 seconds. Requires `recall` permission.
+Check the configured embedding provider's availability and any active embedding
+index migration. Results are cached for 30 seconds. Requires `recall`
+permission.
 
 **Response**
 
@@ -60,9 +61,27 @@ Check the configured embedding provider's availability. Results are cached for
   "available": true,
   "dimensions": 768,
   "base_url": "http://localhost:11434",
-  "checkedAt": "2026-02-21T10:00:00.000Z"
+  "checkedAt": "2026-02-21T10:00:00.000Z",
+  "index": {
+    "state": "building",
+    "coverage": {
+      "active": 45004,
+      "staged": 45003,
+      "missing": 1,
+      "wrongDimensions": 0,
+      "quarantined": 1,
+      "ready": true
+    }
+  }
 }
 ```
+
+`index.coverage.quarantined` counts active rows that the target provider
+rejected as permanently unrepresentable, such as an input exceeding its
+context limit. These rows retain their source id and content hash in the
+durable migration-failure table, are excluded from future polls for that
+target profile, and do not block promotion. The status response therefore
+reports staging coverage separately from active-index coverage.
 
 On failure, `available` is `false` and `error` contains a description.
 If a native inference call times out, Signet disables that native worker for

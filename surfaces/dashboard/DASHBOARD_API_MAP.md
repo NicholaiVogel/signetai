@@ -67,6 +67,7 @@ native `EventSource` with headers, so auth is pumped manually).
 | Fn | Method | Path | Purpose |
 |---|---|---|---|
 | `getEmbeddings` | GET | `/api/embeddings` | Raw embedding vectors (paginated) |
+| `getEmbeddingStatus` | GET | `/api/embeddings/status` | Provider and active/staging migration coverage |
 | `getProjection` | GET | `/api/embeddings/projection` | UMAP 2D/3D projection |
 | `getEmbeddingHealth` | GET | `/api/embeddings/health` | Embedding health report |
 | `getEmbeddingGapStats` | GET | `/api/repair/embedding-gaps` | Missing-vector gaps |

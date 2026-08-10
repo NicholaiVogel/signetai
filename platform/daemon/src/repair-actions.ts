@@ -28,6 +28,8 @@ import {
 	listEmbeddingMigrationSources,
 	listUnembeddedMemories,
 } from "./embedding-coverage";
+import { type EmbeddingMigrationCoverage, stagingCoverage } from "./embedding-index-migration";
+import { readEmbeddingIndexState } from "./embedding-index-state";
 import { classifyEntityQuality } from "./entity-quality";
 import { logger } from "./logger";
 import type { EmbeddingConfig } from "./memory-config";
@@ -559,6 +561,7 @@ export interface EmbeddingGapStats {
 	readonly embedded: number;
 	readonly complete: boolean;
 	readonly coverage: string;
+	readonly staging: EmbeddingMigrationCoverage | null;
 }
 
 export function getEmbeddingGapStats(accessor: DbAccessor): EmbeddingGapStats {
@@ -567,7 +570,12 @@ export function getEmbeddingGapStats(accessor: DbAccessor): EmbeddingGapStats {
 		const total = totalRow.n;
 		const unembedded = countUnembeddedMemories(db);
 		const embedded = total - unembedded;
-		const complete = unembedded === 0;
+		const state = tableExists(db, "embedding_index_state") ? readEmbeddingIndexState(db) : null;
+		const staging =
+			state?.staging && tableExists(db, "embeddings_staging")
+				? stagingCoverage(db, state.staging.dimensions, state.staging.fingerprint)
+				: null;
+		const complete = unembedded === 0 && (staging === null || staging.ready);
 		// Floor to one decimal so a near-complete store never rounds up to
 		// 100% while embeddings are still missing (issue #906). When the
 		// store is complete the ratio is exactly 100%.
@@ -580,6 +588,7 @@ export function getEmbeddingGapStats(accessor: DbAccessor): EmbeddingGapStats {
 			embedded,
 			complete,
 			coverage: `${displayed.toFixed(1)}%`,
+			staging,
 		};
 	});
 }

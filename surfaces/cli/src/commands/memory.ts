@@ -206,15 +206,17 @@ export function registerMemoryCommands(program: Command, deps: MemoryDeps): void
 			}
 
 			spinner.stop();
-			const stats = typeof data === "object" && data !== null ? data : {};
+			const stats = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : {};
 			const total = typeof stats.total === "number" ? stats.total : 0;
 			const unembedded = typeof stats.unembedded === "number" ? stats.unembedded : 0;
 			const embedded = typeof stats.embedded === "number" ? stats.embedded : Math.max(0, total - unembedded);
 			const complete = stats.complete === true;
 			const coverage = typeof stats.coverage === "string" ? stats.coverage : "0%";
+			const staging =
+				typeof stats.staging === "object" && stats.staging !== null ? (stats.staging as Record<string, unknown>) : null;
 
 			if (options.json) {
-				console.log(JSON.stringify({ total, embedded, unembedded, complete, coverage }, null, 2));
+				console.log(JSON.stringify({ total, embedded, unembedded, complete, coverage, staging }, null, 2));
 				return;
 			}
 
@@ -224,6 +226,16 @@ export function registerMemoryCommands(program: Command, deps: MemoryDeps): void
 			console.log(`  Embedded:          ${chalk.green(embedded)}`);
 			console.log(`  Missing:           ${unembedded > 0 ? chalk.red(unembedded) : chalk.green(0)}`);
 			console.log(`  Coverage:          ${coverageColor(coverage)}`);
+			if (staging) {
+				const staged = typeof staging.staged === "number" ? staging.staged : 0;
+				const stagingTotal = typeof staging.active === "number" ? staging.active : 0;
+				const missing = typeof staging.missing === "number" ? staging.missing : 0;
+				const quarantined = typeof staging.quarantined === "number" ? staging.quarantined : 0;
+				console.log(`  Staging:           ${staged}/${stagingTotal} represented`);
+				if (missing > 0 || quarantined > 0) {
+					console.log(`  Staging missing:   ${missing} (${quarantined} quarantined)`);
+				}
+			}
 			console.log();
 
 			if (unembedded > 0) {

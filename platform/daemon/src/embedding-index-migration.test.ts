@@ -25,13 +25,34 @@ describe("staging embedding coverage", () => {
 			INSERT INTO embeddings_staging VALUES ('m2', 'memory-hash', 1024);
 		`);
 		const db = raw as unknown as ReadDb;
-		expect(stagingCoverage(db, 1024)).toEqual({ active: 2, staged: 1, missing: 1, wrongDimensions: 0, ready: false });
+		expect(stagingCoverage(db, 1024)).toEqual({
+			active: 2,
+			staged: 1,
+			missing: 1,
+			wrongDimensions: 0,
+			quarantined: 0,
+			ready: false,
+		});
 
 		raw.exec("INSERT INTO embeddings_staging VALUES ('s2', 'source-hash', 768)");
-		expect(stagingCoverage(db, 1024)).toEqual({ active: 2, staged: 2, missing: 0, wrongDimensions: 1, ready: false });
+		expect(stagingCoverage(db, 1024)).toEqual({
+			active: 2,
+			staged: 2,
+			missing: 0,
+			wrongDimensions: 1,
+			quarantined: 0,
+			ready: false,
+		});
 
 		raw.exec("UPDATE embeddings_staging SET dimensions = 1024 WHERE id = 's2'");
-		expect(stagingCoverage(db, 1024)).toEqual({ active: 2, staged: 2, missing: 0, wrongDimensions: 0, ready: true });
+		expect(stagingCoverage(db, 1024)).toEqual({
+			active: 2,
+			staged: 2,
+			missing: 0,
+			wrongDimensions: 0,
+			quarantined: 0,
+			ready: true,
+		});
 	});
 
 	it("prunes obsolete staged rows while active writes and purges continue", async () => {
@@ -72,7 +93,14 @@ describe("staging embedding coverage", () => {
 			fetchEmbedding: async (text) => [text.length, 0, 0, 1],
 			batchSize: 10,
 		});
-		expect(first.coverage).toEqual({ active: 2, staged: 2, missing: 0, wrongDimensions: 0, ready: true });
+		expect(first.coverage).toEqual({
+			active: 2,
+			staged: 2,
+			missing: 0,
+			wrongDimensions: 0,
+			quarantined: 0,
+			ready: true,
+		});
 		expect(raw.prepare("SELECT COUNT(*) AS count FROM vec_embeddings_staging").get()).toEqual({ count: 2 });
 
 		// A source purge during an asynchronous build must not strand an orphan
@@ -84,7 +112,14 @@ describe("staging embedding coverage", () => {
 			fetchEmbedding: async () => [0, 0, 0, 0],
 			batchSize: 10,
 		});
-		expect(second.coverage).toEqual({ active: 1, staged: 1, missing: 0, wrongDimensions: 0, ready: true });
+		expect(second.coverage).toEqual({
+			active: 1,
+			staged: 1,
+			missing: 0,
+			wrongDimensions: 0,
+			quarantined: 0,
+			ready: true,
+		});
 		expect(raw.prepare("SELECT id FROM vec_embeddings_staging").all()).toHaveLength(1);
 	});
 
@@ -121,6 +156,104 @@ describe("staging embedding coverage", () => {
 			}),
 		).rejects.toThrow("expected 4");
 		expect(stagingCoverage(raw as unknown as ReadDb, 4).ready).toBe(false);
+	});
+
+	it("quarantines a context-limit row and continues staging later rows", async () => {
+		const raw = new Database(":memory:");
+		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		raw.exec(`
+			CREATE TABLE embeddings (
+				id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER,
+				source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT
+			);
+			CREATE TABLE embeddings_staging (
+				id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER,
+				source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT
+			);
+			CREATE TABLE vec_embeddings_staging (id TEXT PRIMARY KEY, embedding BLOB);
+			CREATE TABLE embedding_index_failures (
+				id INTEGER PRIMARY KEY AUTOINCREMENT, content_hash TEXT NOT NULL,
+				source_type TEXT NOT NULL, source_id TEXT NOT NULL, agent_id TEXT,
+				target_fingerprint TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+				failure_class TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1,
+				retry_policy TEXT NOT NULL DEFAULT 'quarantined', first_failed_at TEXT NOT NULL,
+				last_failed_at TEXT NOT NULL, UNIQUE(content_hash, target_fingerprint)
+			);
+			INSERT INTO embeddings VALUES
+				('poison', 'poison-hash', X'00', 768, 'memory', 'memory-poison', 'poison', '2026-01-01', 'agent-a'),
+				('later-a', 'later-hash-a', X'00', 768, 'memory', 'memory-a', 'later-a', '2026-01-02', 'agent-a'),
+				('later-b', 'later-hash-b', X'00', 768, 'memory', 'memory-b', 'later-b', '2026-01-03', 'agent-a');
+		`);
+		const db = raw as unknown as WriteDb;
+		const active = {
+			provider: "ollama",
+			model: "custom-a",
+			dimensions: 768,
+			base_url: "http://127.0.0.1:11434",
+		} as const;
+		const desired = { ...active, model: "custom-b", dimensions: 4 };
+		ensureEmbeddingIndexState(db, active);
+		beginEmbeddingIndexBuild(db, desired);
+		const accessor: DbAccessor = {
+			withWriteTx: (fn) => fn(db),
+			withReadDb: (fn) => fn(raw as unknown as ReadDb),
+			close: () => undefined,
+		};
+		let fetches = 0;
+		const first = await stageEmbeddingBatch({
+			accessor,
+			configured: desired,
+			fetchEmbedding: async (text, _cfg, _role, opts) => {
+				fetches++;
+				if (text === "poison") {
+					opts?.onFailure?.("context_limit");
+					return null;
+				}
+				return [1, 0, 0, 0];
+			},
+			batchSize: 10,
+		});
+		expect(first.coverage).toEqual({
+			active: 3,
+			staged: 2,
+			missing: 1,
+			wrongDimensions: 0,
+			quarantined: 1,
+			ready: true,
+		});
+		expect(raw.prepare("SELECT source_id, failure_class, retry_policy FROM embedding_index_failures").all()).toEqual([
+			{ source_id: "memory-poison", failure_class: "context_limit", retry_policy: "quarantined" },
+		]);
+		expect(fetches).toBe(3);
+
+		const second = await stageEmbeddingBatch({
+			accessor,
+			configured: desired,
+			fetchEmbedding: async () => {
+				fetches++;
+				return [1, 0, 0, 0];
+			},
+			batchSize: 10,
+		});
+		expect(second.staged).toBe(0);
+		expect(second.coverage?.ready).toBe(true);
+		expect(fetches).toBe(3);
+
+		raw.exec("DELETE FROM embeddings WHERE id = 'poison'");
+		const afterPurge = await stageEmbeddingBatch({
+			accessor,
+			configured: desired,
+			fetchEmbedding: async () => [1, 0, 0, 0],
+			batchSize: 10,
+		});
+		expect(afterPurge.coverage).toEqual({
+			active: 2,
+			staged: 2,
+			missing: 0,
+			wrongDimensions: 0,
+			quarantined: 0,
+			ready: true,
+		});
 	});
 });
 

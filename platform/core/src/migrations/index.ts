@@ -128,6 +128,7 @@ import { up as telemetryVersionObservation } from "./119-telemetry-version-obser
 import { up as sourceLifecycleTelemetry } from "./120-source-lifecycle-telemetry";
 import { up as telemetryDeliveryHealth } from "./121-telemetry-delivery-health";
 import { up as dreamingEvidenceRetry } from "./122-dreaming-evidence-retry";
+import { up as embeddingIndexFailures } from "./123-embedding-index-failures";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1155,6 +1156,12 @@ export const MIGRATIONS: readonly Migration[] = [
 				{ table: "dreaming_evidence_exclusions", column: "last_requeued_at" },
 			],
 		},
+	},
+	{
+		version: 123,
+		name: "embedding-index-failures",
+		up: embeddingIndexFailures,
+		artifacts: { tables: ["embedding_index_failures"] },
 	},
 ];
 
