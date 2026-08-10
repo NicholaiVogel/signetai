@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
+import { type DbAccessor, DbWriteQueueFullError, type ReadDb, type WriteDb } from "./db-accessor";
 import { vectorToBlob } from "./db-helpers";
 import type { EmbeddingFetchOptions } from "./embedding-fetch";
 import {
@@ -70,6 +70,11 @@ function configForProfile(profile: PersistedEmbeddingProfile, configured: Embedd
 
 function tableExists(db: ReadDb, name: string): boolean {
 	return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+}
+
+async function withQueuedWrite<T>(accessor: DbAccessor, fn: (db: WriteDb) => T): Promise<T> {
+	if (accessor.withWriteTxAsync) return accessor.withWriteTxAsync(fn);
+	return accessor.withWriteTx(fn);
 }
 
 function isVecVirtualTable(db: ReadDb, name: string): boolean {
@@ -146,8 +151,8 @@ export function stagingCoverage(db: ReadDb, dimensions: number): EmbeddingMigrat
 }
 
 /** Remove rows whose active source was deleted or changed while staging ran. */
-function pruneStagingRows(accessor: DbAccessor): void {
-	accessor.withWriteTx((db) => {
+async function pruneStagingRows(accessor: DbAccessor): Promise<void> {
+	await withQueuedWrite(accessor, (db) => {
 		const stale = db
 			.prepare(
 				`SELECT s.id FROM embeddings_staging s
@@ -185,7 +190,7 @@ export async function stageEmbeddingBatch(input: {
 	// Writes and source purges continue against the active slot during a build.
 	// Without this cleanup, an obsolete staging row would keep the count-based
 	// readiness gate false forever after its active counterpart disappears.
-	pruneStagingRows(input.accessor);
+	await pruneStagingRows(input.accessor);
 	const rows = input.accessor.withReadDb((db) => {
 		if (!tableExists(db, STAGING_VECTOR_TABLE)) throw new Error("Staging vector index is unavailable");
 		return db
@@ -211,7 +216,7 @@ export async function stageEmbeddingBatch(input: {
 				`Staging provider returned ${vector.length} dimensions for ${profile.model}; expected ${profile.dimensions}`,
 			);
 		}
-		input.accessor.withWriteTx((db) => {
+		await withQueuedWrite(input.accessor, (db) => {
 			const id = randomUUID();
 			db.prepare(
 				`INSERT INTO embeddings_staging
@@ -329,6 +334,7 @@ export function startEmbeddingIndexMigration(input: {
 	// ~100% CPU forever retrying an unreachable provider.
 	let consecutiveFailures = 0;
 	let nextDelayMs = input.pollMs;
+	let tickPromise: Promise<void> | null = null;
 
 	const before = input.accessor.withReadDb((db) => readEmbeddingIndexState(db));
 	const initial = input.accessor.withWriteTx((db) => beginEmbeddingIndexBuild(db, input.configured));
@@ -361,7 +367,7 @@ export function startEmbeddingIndexMigration(input: {
 			// from disk each tick): a no-op when nothing changed, a restart when
 			// the config did.
 			const configured = input.readConfigured ? input.readConfigured() : input.configured;
-			const restarted = input.accessor.withWriteTx((db) => beginEmbeddingIndexBuild(db, configured));
+			const restarted = await withQueuedWrite(input.accessor, (db) => beginEmbeddingIndexBuild(db, configured));
 			if (restarted.state !== "building" || !restarted.staging) {
 				// The live config now matches the active generation, so begin
 				// abandoned the in-flight build; stop polling until a new build
@@ -375,7 +381,7 @@ export function startEmbeddingIndexMigration(input: {
 					"embedding",
 					"Embedding config changed during migration; restarting the staging build with the current profile",
 				);
-				input.accessor.withWriteTx((db) => resetStagingVectorIndex(db, currentStaging.dimensions));
+				await withQueuedWrite(input.accessor, (db) => resetStagingVectorIndex(db, currentStaging.dimensions));
 				consecutiveFailures = 0;
 				return;
 			}
@@ -386,7 +392,7 @@ export function startEmbeddingIndexMigration(input: {
 				if (consecutiveFailures >= MAX_CONSECUTIVE_PROVIDER_FAILURES) {
 					const message = `Embedding provider unavailable after ${consecutiveFailures} consecutive checks; aborting the build`;
 					logger.error("embedding", message);
-					input.accessor.withWriteTx((db) => failEmbeddingIndexBuild(db, message));
+					await withQueuedWrite(input.accessor, (db) => failEmbeddingIndexBuild(db, message));
 					running = false;
 					return;
 				}
@@ -402,22 +408,53 @@ export function startEmbeddingIndexMigration(input: {
 				input.onPromoted?.();
 			}
 		} catch (error) {
+			if (error instanceof DbWriteQueueFullError) {
+				nextDelayMs = Math.min(Math.max(input.pollMs, 100), MAX_PROVIDER_BACKOFF_MS);
+				logger.warn("embedding", "Embedding migration write admission is full; retrying later");
+				return;
+			}
+			if (!running || (error instanceof Error && error.message === "DbAccessor is closed")) {
+				running = false;
+				return;
+			}
 			consecutiveFailures++;
 			failed++;
-			input.accessor.withWriteTx((db) =>
-				failEmbeddingIndexBuild(db, error instanceof Error ? error.message : String(error)),
-			);
+			try {
+				await withQueuedWrite(input.accessor, (db) =>
+					failEmbeddingIndexBuild(db, error instanceof Error ? error.message : String(error)),
+				);
+			} catch (persistError) {
+				logger.warn("embedding", "Failed to persist embedding migration failure", {
+					error: persistError instanceof Error ? persistError.message : String(persistError),
+				});
+			}
 			running = false;
 		} finally {
-			if (running) timer = setTimeout(() => void tick(), nextDelayMs);
+			if (running) timer = setTimeout(scheduleTick, nextDelayMs);
 		}
 	};
-	void tick();
+
+	const scheduleTick = (): void => {
+		const promise = tick();
+		tickPromise = promise;
+		void promise
+			.catch((error: unknown) => {
+				running = false;
+				logger.warn("embedding", "Embedding migration tick failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			})
+			.finally(() => {
+				if (tickPromise === promise) tickPromise = null;
+			});
+	};
+	scheduleTick();
 
 	return {
 		async stop(): Promise<void> {
 			running = false;
 			if (timer) clearTimeout(timer);
+			if (tickPromise) await tickPromise;
 		},
 		getStats: () => ({ running, staged, failed, coverage }),
 	};

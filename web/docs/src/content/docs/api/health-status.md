@@ -26,6 +26,12 @@ and `GET /health/ready` for readiness.
   "port": 3850,
   "agentsDir": "/home/user/.agents",
   "db": true,
+  "dbWriter": {
+    "queued": 0,
+    "maxQueue": 64,
+    "oldestWaitMs": null,
+    "lastDurationMs": 2.1
+  },
   "shuttingDown": false,
   "updateAvailable": false,
   "pendingRestart": false,

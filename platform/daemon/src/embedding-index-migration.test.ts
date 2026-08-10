@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { findSqliteVecExtension } from "@signet/core";
 import { up as embeddingIndexGenerations } from "../../core/src/migrations/091-embedding-index-generations";
-import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
+import { type DbAccessor, DbWriteQueueFullError, type ReadDb, type WriteDb } from "./db-accessor";
 import {
 	promoteStagingIndex,
 	stageEmbeddingBatch,
@@ -420,5 +420,45 @@ describe("staging migration lifecycle", () => {
 		const state = readEmbeddingIndexState(raw as unknown as ReadDb);
 		expect(state?.staging?.model).toBe("custom-c");
 		await handle?.stop();
+	});
+
+	it("retries a full async write queue without rejecting the migration tick (#1349)", async () => {
+		const raw = new Database(":memory:");
+		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		raw.exec(`
+			CREATE TABLE embeddings (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
+			CREATE TABLE embeddings_staging (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
+			CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB);
+			CREATE TABLE vec_embeddings_staging (id TEXT PRIMARY KEY, embedding BLOB);
+		`);
+		const db = raw as unknown as WriteDb;
+		const active = {
+			provider: "ollama",
+			model: "custom-a",
+			dimensions: 3,
+			base_url: "http://127.0.0.1:11434",
+		} as const;
+		const desired = { ...active, model: "custom-b" };
+		ensureEmbeddingIndexState(db, active);
+		beginEmbeddingIndexBuild(db, desired);
+		const accessor: DbAccessor = {
+			withWriteTx: (fn) => fn(db),
+			withWriteTxAsync: <T>(_fn: (writeDb: WriteDb) => T): Promise<T> => Promise.reject(new DbWriteQueueFullError()),
+			withReadDb: (fn) => fn(raw as unknown as ReadDb),
+			close: () => undefined,
+		};
+		const handle = startEmbeddingIndexMigration({
+			accessor,
+			configured: desired,
+			fetchEmbedding: async () => [0, 0, 0],
+			checkProvider: async () => ({ available: true }),
+			pollMs: 2,
+			batchSize: 10,
+		});
+		expect(handle).not.toBeNull();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(handle?.getStats().running).toBe(true);
+		await handle?.stop();
+		expect(handle?.getStats().running).toBe(false);
 	});
 });

@@ -1,7 +1,7 @@
 import type { SQLQueryBindings } from "bun:sqlite";
 import { type MigrationDb, hasPendingMigrations } from "@signet/core";
 import type { Hono } from "hono";
-import { type ReadDb, getDbAccessor } from "../db-accessor";
+import { type ReadDb, type WritePressure, getDbAccessor } from "../db-accessor";
 import {
 	QUEUE_MAX_DEAD_RATE,
 	QUEUE_MAX_DEPTH,
@@ -179,11 +179,14 @@ export function mountHealthRoutes(app: Hono): void {
 	app.get("/health", (c) => {
 		const us = getUpdateState();
 		let dbOk = false;
+		let dbWriter: WritePressure | null = null;
 		try {
-			getDbAccessor().withReadDb((db) => {
+			const accessor = getDbAccessor();
+			accessor.withReadDb((db) => {
 				db.prepare("SELECT 1").get();
 				dbOk = true;
 			});
+			dbWriter = accessor.getWritePressure?.() ?? null;
 		} catch {}
 
 		return c.json({
@@ -194,6 +197,7 @@ export function mountHealthRoutes(app: Hono): void {
 			port: PORT,
 			agentsDir: AGENTS_DIR,
 			db: dbOk,
+			dbWriter,
 			shuttingDown,
 			updateAvailable: us.lastCheck?.updateAvailable ?? false,
 			pendingRestart: us.pendingRestartVersion !== null,

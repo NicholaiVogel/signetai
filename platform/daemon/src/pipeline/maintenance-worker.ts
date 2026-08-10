@@ -368,7 +368,11 @@ export function startMaintenanceWorker(
 		try {
 			const ratio = accessor.withReadDb((db) => getFreePageRatio(db));
 			if (ratio >= 0.2) {
-				accessor.incrementalVacuum();
+				if (accessor.incrementalVacuumAsync) {
+					await accessor.incrementalVacuumAsync();
+				} else {
+					accessor.incrementalVacuum();
+				}
 			}
 		} catch {
 			// Non-fatal — vacuum should never interrupt the maintenance cycle

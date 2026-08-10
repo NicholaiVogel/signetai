@@ -6,6 +6,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	DbWriteQueueFullError,
+	MAX_WRITE_QUEUE,
 	backupBeforeMigration,
 	closeDbAccessor,
 	getDbAccessor,
@@ -119,6 +121,76 @@ describe("DbAccessor", () => {
 		});
 		expect(rows).toHaveLength(1);
 		expect(rows[0].id).toBe(1);
+	});
+
+	test("async writes are admitted in order and yield between transactions", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+		const acc = getDbAccessor();
+		const enqueue = acc.withWriteTxAsync;
+		if (!enqueue) throw new Error("async write API is unavailable");
+
+		acc.withWriteTx((db) => {
+			db.exec("CREATE TABLE async_write_test (id INTEGER PRIMARY KEY)");
+		});
+
+		const writes = Array.from({ length: 4 }, (_, id) =>
+			enqueue((db) => {
+				db.prepare("INSERT INTO async_write_test (id) VALUES (?)").run(id);
+				return id;
+			}),
+		);
+		expect(acc.getWritePressure?.().queued).toBe(4);
+		expect(await Promise.all(writes)).toEqual([0, 1, 2, 3]);
+		expect(acc.getWritePressure?.().queued).toBe(0);
+		expect(acc.getWritePressure?.().lastDurationMs).toBeNumber();
+
+		const count = acc.withReadDb(
+			(db) => (db.prepare("SELECT COUNT(*) AS n FROM async_write_test").get() as { n: number }).n,
+		);
+		expect(count).toBe(4);
+	});
+
+	test("async maintenance writes use the bounded writer queue", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+		const acc = getDbAccessor();
+		const checkpoint = acc.checkpointWalAsync;
+		const vacuum = acc.incrementalVacuumAsync;
+		if (!checkpoint || !vacuum) throw new Error("async maintenance API is unavailable");
+
+		await checkpoint();
+		expect(await vacuum()).toBeNumber();
+		expect(acc.getWritePressure?.().lastDurationMs).toBeNumber();
+	});
+
+	test("async write admission rejects work beyond the bounded queue", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+		const acc = getDbAccessor();
+		const enqueue = acc.withWriteTxAsync;
+		if (!enqueue) throw new Error("async write API is unavailable");
+
+		const pending = Array.from({ length: MAX_WRITE_QUEUE }, () => enqueue(() => undefined));
+		const rejected = enqueue(() => undefined);
+		await expect(rejected).rejects.toBeInstanceOf(DbWriteQueueFullError);
+		await Promise.all(pending);
+	});
+
+	test("close rejects queued async writes", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+		const acc = getDbAccessor();
+		const enqueue = acc.withWriteTxAsync;
+		if (!enqueue) throw new Error("async write API is unavailable");
+
+		const pending = enqueue(() => undefined);
+		closeDbAccessor();
+		await expect(pending).rejects.toThrow("DbAccessor is closed");
 	});
 
 	test("close works without error", () => {

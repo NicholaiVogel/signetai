@@ -189,6 +189,11 @@ describe("GET /health (back-compat)", () => {
 		expect(typeof body.uptime).toBe("number");
 		expect(typeof body.pid).toBe("number");
 		expect(typeof body.version).toBe("string");
+		const dbWriter = body.dbWriter as Record<string, unknown>;
+		expect(typeof dbWriter.queued).toBe("number");
+		expect(typeof dbWriter.maxQueue).toBe("number");
+		expect(dbWriter.oldestWaitMs === null || typeof dbWriter.oldestWaitMs === "number").toBe(true);
+		expect(dbWriter.lastDurationMs === null || typeof dbWriter.lastDurationMs === "number").toBe(true);
 		const resources = body.resources as Record<string, unknown>;
 		expect(typeof resources.rss).toBe("number");
 		expect(typeof resources.heapUsed).toBe("number");

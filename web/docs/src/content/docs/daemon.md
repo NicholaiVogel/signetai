@@ -277,6 +277,12 @@ GET /health
   "port": 3850,
   "agentsDir": "/home/user/.agents",
   "db": true,
+  "dbWriter": {
+    "queued": 0,
+    "maxQueue": 64,
+    "oldestWaitMs": null,
+    "lastDurationMs": 2.1
+  },
   "shuttingDown": false,
   "updateAvailable": false,
   "pendingRestart": false,
@@ -284,8 +290,10 @@ GET /health
 }
 ```
 
-`GET /health` is the legacy health check. For orchestration and monitoring,
-prefer the dedicated probes: `GET /health/live` is a cheap liveness probe that
+`GET /health` remains the legacy health check. `dbWriter` is local writer-pressure diagnostics: `queued` counts waiting writes, `oldestWaitMs` reports the oldest wait, and `lastDurationMs` reports the last completed write. Async write paths are admitted through a bounded queue; when `queued` reaches `maxQueue`, callers receive a retryable `DB_WRITE_QUEUE_FULL` error instead of adding unbounded work. The legacy synchronous transaction API remains available for startup and atomic control-plane operations.
+
+For orchestration and monitoring, prefer the dedicated probes: `GET /health/live`
+is a cheap liveness probe that
 never touches the database or subsystems (always 200 while the process is up),
 and `GET /health/ready` returns 200 only when the database, migrations,
 embedding, inference, and queue gates all pass — 503 with a `reasons` list

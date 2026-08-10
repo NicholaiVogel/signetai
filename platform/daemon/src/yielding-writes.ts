@@ -23,8 +23,8 @@
  */
 
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
-import { awaitPressureClear, isSystemPressureHigh } from "./system-pressure";
 import { logger } from "./logger";
+import { awaitPressureClear, isSystemPressureHigh } from "./system-pressure";
 
 /** Yield a macrotask so pending HTTP handlers (and the event-loop monitor) can run. */
 const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -51,6 +51,14 @@ export interface DrainResult {
 	readonly batches: number;
 	readonly paused: number;
 	readonly stopped: "exhausted" | "capped";
+}
+
+async function writeBatch(accessor: DbAccessor, processBatch: (db: WriteDb) => void): Promise<void> {
+	if (accessor.withWriteTxAsync) {
+		await accessor.withWriteTxAsync(processBatch);
+		return;
+	}
+	accessor.withWriteTx(processBatch);
 }
 
 /**
@@ -97,8 +105,8 @@ export async function drainWriteBatches<Item>(
 			await awaitPressureClear();
 		}
 
-		// 3. Process in one short transaction.
-		accessor.withWriteTx((db) => processBatch(db, batch));
+		// 3. Process in one short transaction through bounded writer admission.
+		await writeBatch(accessor, (db) => processBatch(db, batch));
 
 		processed += batch.length;
 		batches++;

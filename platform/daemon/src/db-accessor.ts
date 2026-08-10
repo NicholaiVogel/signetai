@@ -128,9 +128,47 @@ export interface ReadDb {
 	prepare(sql: string): SqliteStatement;
 }
 
+export interface WritePressure {
+	/** Number of async write operations waiting for admission. */
+	readonly queued: number;
+	/** Maximum number of async write operations waiting for admission. */
+	readonly maxQueue: number;
+	/** Age of the oldest queued operation, or null when the queue is empty. */
+	readonly oldestWaitMs: number | null;
+	/** Duration of the most recently completed write operation. */
+	readonly lastDurationMs: number | null;
+}
+
+export class DbWriteQueueFullError extends Error {
+	readonly code = "DB_WRITE_QUEUE_FULL" as const;
+
+	constructor() {
+		super("Database write queue is full; retry after write pressure clears");
+		this.name = "DbWriteQueueFullError";
+	}
+}
+
 export interface DbAccessor {
 	/** Run `fn` inside BEGIN IMMEDIATE / COMMIT (ROLLBACK on error). */
 	withWriteTx<T>(fn: (db: WriteDb) => T): T;
+
+	/**
+	 * Admit a write transaction through the bounded async writer queue.
+	 *
+	 * The synchronous API remains available for transactions that must be
+	 * composed inline. Async request and background paths should prefer this
+	 * method so bursts are bounded instead of accumulating unobserved work.
+	 */
+	withWriteTxAsync?<T>(fn: (db: WriteDb) => T): Promise<T>;
+
+	/** Admit a WAL checkpoint through the bounded async writer queue. */
+	checkpointWalAsync?(): Promise<void>;
+
+	/** Admit incremental vacuum through the bounded async writer queue. */
+	incrementalVacuumAsync?(): Promise<number>;
+
+	/** Return bounded local diagnostics for the writer admission path. */
+	getWritePressure?(): WritePressure;
 
 	/** Open a readonly connection, run `fn`, close it. */
 	withReadDb<T>(fn: (db: ReadDb) => T): T;
@@ -1004,10 +1042,24 @@ function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number): 
 
 const READ_POOL_SIZE = 4;
 const MAX_READ_CONNECTIONS = 16;
+export const MAX_WRITE_QUEUE = 64;
+
+type WriteJob<T> = {
+	readonly run: () => T;
+	readonly queuedAt: number;
+	readonly resolve: (value: T | PromiseLike<T>) => void;
+	readonly reject: (reason?: unknown) => void;
+};
+
+function yieldToEventLoop(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 function createAccessor(writeConn: SqliteDatabase): DbAccessor {
 	let closed = false;
-
+	let writeDraining = false;
+	let lastWriteDurationMs: number | null = null;
+	const writeQueue: WriteJob<unknown>[] = [];
 	// Small pool of reusable read connections. Recall does 3 reads per
 	// request so opening/closing every time adds measurable overhead.
 	const readPool: SqliteDatabase[] = [];
@@ -1040,23 +1092,112 @@ function createAccessor(writeConn: SqliteDatabase): DbAccessor {
 		}
 	}
 
+	function runWriteOperation<T>(fn: () => T): T {
+		const startedAt = performance.now();
+		try {
+			return fn();
+		} finally {
+			lastWriteDurationMs = performance.now() - startedAt;
+			observeDbLatency(lastWriteDurationMs);
+		}
+	}
+
+	function runWriteTx<T>(fn: (db: WriteDb) => T): T {
+		return runWriteOperation(() => {
+			writeConn.exec("BEGIN IMMEDIATE");
+			try {
+				const result = fn(writeConn);
+				writeConn.exec("COMMIT");
+				return result;
+			} catch (err) {
+				writeConn.exec("ROLLBACK");
+				throw err;
+			}
+		});
+	}
+
+	function runCheckpointWal(): void {
+		runWriteOperation(() => {
+			writeConn.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+		});
+	}
+
+	function runIncrementalVacuum(): number {
+		return runWriteOperation(() => {
+			writeConn.exec("PRAGMA incremental_vacuum");
+			const row = writeConn.prepare("PRAGMA freelist_count").get() as { freelist_count?: number } | undefined;
+			return typeof row?.freelist_count === "number" ? row.freelist_count : 0;
+		});
+	}
+
+	function enqueueWrite<T>(run: () => T): Promise<T> {
+		if (closed) return Promise.reject(new Error("DbAccessor is closed"));
+		if (writeQueue.length >= MAX_WRITE_QUEUE) return Promise.reject(new DbWriteQueueFullError());
+		return new Promise<T>((resolve, reject) => {
+			writeQueue.push({
+				run,
+				queuedAt: performance.now(),
+				resolve: (value) => resolve(value as T),
+				reject,
+			});
+			drainWriteQueue();
+		});
+	}
+
+	function drainWriteQueue(): void {
+		if (writeDraining) return;
+		writeDraining = true;
+		const next = (): void => {
+			const job = writeQueue.shift();
+			if (!job) {
+				writeDraining = false;
+				return;
+			}
+			if (closed) {
+				job.reject(new Error("DbAccessor is closed"));
+				setTimeout(next, 0);
+				return;
+			}
+			try {
+				job.resolve(job.run());
+			} catch (err) {
+				job.reject(err);
+			}
+			if (writeQueue.length > 0) {
+				void yieldToEventLoop().then(next);
+			} else {
+				writeDraining = false;
+			}
+		};
+		void yieldToEventLoop().then(next);
+	}
+
 	return {
 		withWriteTx<T>(fn: (db: WriteDb) => T): T {
 			if (closed) throw new Error("DbAccessor is closed");
-			const startedAt = performance.now();
-			try {
-				writeConn.exec("BEGIN IMMEDIATE");
-				try {
-					const result = fn(writeConn);
-					writeConn.exec("COMMIT");
-					return result;
-				} catch (err) {
-					writeConn.exec("ROLLBACK");
-					throw err;
-				}
-			} finally {
-				observeDbLatency(performance.now() - startedAt);
-			}
+			return runWriteTx(fn);
+		},
+
+		withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+			return enqueueWrite(() => runWriteTx(fn));
+		},
+
+		checkpointWalAsync(): Promise<void> {
+			return enqueueWrite(runCheckpointWal);
+		},
+
+		incrementalVacuumAsync(): Promise<number> {
+			return enqueueWrite(runIncrementalVacuum);
+		},
+
+		getWritePressure(): WritePressure {
+			const oldest = writeQueue[0];
+			return {
+				queued: writeQueue.length,
+				maxQueue: MAX_WRITE_QUEUE,
+				oldestWaitMs: oldest ? Math.max(0, performance.now() - oldest.queuedAt) : null,
+				lastDurationMs: lastWriteDurationMs,
+			};
 		},
 
 		withReadDb<T>(fn: (db: ReadDb) => T): T {
@@ -1085,24 +1226,12 @@ function createAccessor(writeConn: SqliteDatabase): DbAccessor {
 
 		checkpointWal(): void {
 			if (closed) throw new Error("DbAccessor is closed");
-			const startedAt = performance.now();
-			try {
-				writeConn.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-			} finally {
-				observeDbLatency(performance.now() - startedAt);
-			}
+			runCheckpointWal();
 		},
 
 		incrementalVacuum(): number {
 			if (closed) throw new Error("DbAccessor is closed");
-			const startedAt = performance.now();
-			try {
-				writeConn.exec("PRAGMA incremental_vacuum");
-				const row = writeConn.prepare("PRAGMA freelist_count").get() as { freelist_count?: number } | undefined;
-				return typeof row?.freelist_count === "number" ? row.freelist_count : 0;
-			} finally {
-				observeDbLatency(performance.now() - startedAt);
-			}
+			return runIncrementalVacuum();
 		},
 
 		close(): void {
