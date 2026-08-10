@@ -217,6 +217,7 @@ export {
 	PROMPT_CONTEXT_VERSION,
 	PromptContextStreamScrubber,
 	createPromptContext,
+	hashPromptContext,
 	normalizePromptContext,
 	scrubPromptContext,
 } from "./prompt-context";

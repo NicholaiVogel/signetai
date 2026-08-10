@@ -6,7 +6,7 @@ Signet memory context is an ephemeral delivery artifact. It is not a user turn a
 
 ## Wire contract
 
-Every non-empty session-start or user-prompt-submit `inject` uses the same deterministic envelope:
+Every non-empty session-start or user-prompt-submit memory injection uses the same deterministic envelope:
 
 ```text
 <signet-memory-context>
@@ -19,7 +19,7 @@ The daemon also returns:
 - `contextVersion`: the envelope version (`1`)
 - `contextHash`: SHA-256 of the exact serialized `inject` bytes
 
-The serializer normalizes CRLF/CR to LF, removes trailing transport whitespace, and always emits one terminal LF. Nested envelope markers in memory content are escaped before serialization. Replaying identical context therefore produces identical bytes and an identical hash.
+The serializer normalizes CRLF/CR to LF, removes trailing transport whitespace, and always emits one terminal LF. Nested envelope markers in memory content are escaped before serialization. Replaying identical context therefore produces identical bytes and an identical hash. Compatible hook responses may append a structured cross-agent notification block after the envelope for legacy adapters; when present, `contextHash` covers the final returned `inject` bytes, including that block.
 
 ## Delivery matrix
 
@@ -32,7 +32,7 @@ The serializer normalizes CRLF/CR to LF, removes trailing transport whitespace, 
 | Pi | Hidden custom session context | Hidden custom recall messages are consumed during `context` | Hidden custom messages are not visible transcript turns |
 | Other hook integrations | Use the same daemon envelope and hash | Use the same daemon envelope and hash | Adapter must append only visible user/assistant content |
 
-The system prefix remains harness-owned. Signet appends context rather than rewriting the existing system prompt. Per-prompt context contains no wall-clock metadata, so repeated transforms do not invalidate the context hash or prompt cache solely because time advanced.
+The system prefix remains harness-owned. Signet appends context rather than rewriting the existing system prompt. Session-start and per-prompt context contain no wall-clock metadata, so repeated transforms do not invalidate the context hash or prompt cache solely because time advanced.
 
 ## Transcript and scope rules
 

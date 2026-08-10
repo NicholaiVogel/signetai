@@ -20,6 +20,11 @@ export function normalizePromptContext(content: string): string {
 	return content.replace(/\r\n?/g, "\n").trimEnd();
 }
 
+/** Hash the exact bytes delivered through the hook response. */
+export function hashPromptContext(serialized: string): string {
+	return createHash("sha256").update(serialized).digest("hex");
+}
+
 function escapeNestedMarkers(content: string): string {
 	return content
 		.replaceAll(PROMPT_CONTEXT_OPEN, "&lt;signet-memory-context&gt;")
@@ -34,7 +39,7 @@ export function createPromptContext(content: string): PromptContextEnvelope | nu
 	return {
 		version: PROMPT_CONTEXT_VERSION,
 		content: safeContent,
-		hash: createHash("sha256").update(serialized).digest("hex"),
+		hash: hashPromptContext(serialized),
 		serialized,
 	};
 }

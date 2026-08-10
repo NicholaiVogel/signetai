@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -124,10 +125,12 @@ describe("cross-agent notification routes", () => {
 		expect(response.status).toBe(200);
 		const body = (await response.json()) as {
 			inject: string;
+			contextHash: string;
 			notifications?: { items: Array<{ id: string }> };
 		};
 		expect(body.inject).toContain("The release candidate is ready.");
 		expect(body.notifications?.items.some((item) => item.id === message.id)).toBe(true);
+		expect(body.contextHash).toBe(createHash("sha256").update(body.inject).digest("hex"));
 	});
 	it("returns 429 instead of dropping unread messages when the durable inbox is full", async () => {
 		getDbAccessor().withWriteTx((db) => {

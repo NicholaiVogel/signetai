@@ -742,6 +742,18 @@ describe("handleSessionStart", () => {
 		expect(result.identity.description).toBeUndefined();
 		expect(result.memories).toEqual([]);
 		expect(typeof result.inject).toBe("string");
+		expect(result.inject).not.toContain("Current Date & Time");
+	});
+
+	test.serial("keeps session-start context free of wall-clock metadata", async () => {
+		createMemoryDb();
+		const db = openTestDb();
+		insertCompletedTranscript(db, { sessionKey: "cache-stable-session", content: "previous session" });
+		db.close();
+
+		const result = await handleSessionStart({ harness: "test", sessionKey: "cache-stable-session-2" });
+		expect(result.inject).not.toContain("Current Date & Time");
+		expect(result.inject).not.toContain("last active");
 	});
 
 	test.serial("inject starts with memory status line", async () => {

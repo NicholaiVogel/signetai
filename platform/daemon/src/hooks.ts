@@ -435,7 +435,7 @@ function buildPluginPromptContributionSection(target: PluginPromptTargetV1, log:
 	}
 }
 
-/** Build a brief "since your last session" summary for temporal awareness */
+/** Build a brief "since your last session" summary */
 function getSessionGapSummary(): string | undefined {
 	if (!existsSync(getMemoryDbPath())) return undefined;
 
@@ -450,19 +450,6 @@ function getSessionGapSummary(): string | undefined {
 			if (!lastSession?.last_end) return undefined;
 
 			const lastEnd = lastSession.last_end;
-			const lastEndMs = new Date(lastEnd).getTime();
-			const gapMs = Date.now() - lastEndMs;
-
-			// Format time gap
-			let gapStr: string;
-			const gapMins = Math.floor(gapMs / 60000);
-			const gapHours = Math.floor(gapMs / 3600000);
-			const gapDays = Math.floor(gapMs / 86400000);
-
-			if (gapDays > 7) gapStr = "7+ days ago";
-			else if (gapDays >= 1) gapStr = `${gapDays}d ago`;
-			else if (gapHours >= 1) gapStr = `${gapHours}h ago`;
-			else gapStr = `${Math.max(1, gapMins)}m ago`;
 
 			// Count new memories since last session
 			const memCount = db
@@ -474,7 +461,7 @@ function getSessionGapSummary(): string | undefined {
 				.prepare("SELECT COUNT(*) as cnt FROM session_transcripts WHERE completed_at > ?")
 				.get(lastEnd) as { cnt: number };
 
-			return `[since last session: ${memCount.cnt} new memories, ${sessionCount.cnt} sessions captured, last active ${gapStr}]`;
+			return `[since last session: ${memCount.cnt} new memories, ${sessionCount.cnt} sessions captured]`;
 		});
 	} catch {
 		return undefined;
@@ -666,19 +653,13 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			harness: req.harness,
 			sessionKey: req.sessionKey,
 		});
-		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-		const now = new Date().toLocaleString("en-US", {
-			timeZone: tz,
-			dateStyle: "full",
-			timeStyle: "short",
-		});
 		const warnings = req.sessionKey
 			? [getExpiryWarning(req.sessionKey, agentId)].filter((w): w is string => w !== null)
 			: undefined;
 		return attachPromptContext({
 			identity: { name: "Agent" },
 			memories: [],
-			inject: `[memory active | /remember | /recall]\n# Current Date & Time\n${now} (${tz})`,
+			inject: "[memory active | /remember | /recall]",
 			warnings: warnings?.length ? warnings : undefined,
 		});
 	}
@@ -1054,15 +1035,6 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	if (gapSummary) {
 		injectParts.push(gapSummary);
 	}
-
-	// Inject local date/time and timezone
-	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-	const now = new Date().toLocaleString("en-US", {
-		timeZone: tz,
-		dateStyle: "full",
-		timeStyle: "short",
-	});
-	injectParts.push(`\n# Current Date & Time\n${now} (${tz})\n`);
 
 	if (req.project) {
 		const peerSessions = listAgentPresence({

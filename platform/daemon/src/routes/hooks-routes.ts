@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { emptyHookRecallResponse, withHookRecallCompat } from "@signet/core";
+import { emptyHookRecallResponse, hashPromptContext, withHookRecallCompat } from "@signet/core";
 import type { Context } from "hono";
 import type { Hono } from "hono";
 import { getAgentScope, resolveAgentId } from "../agent-id";
@@ -290,12 +290,14 @@ interface HookNotificationContext {
 }
 
 function withCrossAgentNotifications<T extends object>(
-	result: T & { readonly inject?: string },
+	result: T & { readonly inject?: string; readonly contextHash?: string },
 	context: HookNotificationContext,
 ): T & { readonly inject: string; readonly notifications?: HookNotificationsBlock } {
 	const notifications = collectCrossAgentNotifications(context);
 	const inject = appendNotificationInject(result.inject, notifications);
-	return notifications ? { ...result, inject, notifications } : { ...result, inject };
+	if (!notifications) return { ...result, inject };
+	if (typeof result.contextHash !== "string") return { ...result, inject, notifications };
+	return { ...result, inject, contextHash: hashPromptContext(inject), notifications };
 }
 
 export function listLiveSessions(agentId: string): Array<{

@@ -4,6 +4,7 @@ import {
 	PROMPT_CONTEXT_OPEN,
 	PromptContextStreamScrubber,
 	createPromptContext,
+	hashPromptContext,
 	normalizePromptContext,
 	scrubPromptContext,
 } from "./prompt-context";
@@ -17,6 +18,12 @@ describe("prompt context contract", () => {
 		expect(first).toEqual(second);
 		expect(first?.serialized).toBe(`${PROMPT_CONTEXT_OPEN}\nmemory one\nmemory two\n${PROMPT_CONTEXT_CLOSE}\n`);
 		expect(first?.hash).toMatch(/^[0-9a-f]{64}$/);
+	});
+
+	test("hashes the exact bytes delivered after transport augmentation", () => {
+		const context = createPromptContext("memory");
+		expect(context).not.toBeNull();
+		expect(hashPromptContext(`${context?.serialized}notification`)).not.toBe(context?.hash);
 	});
 
 	test("escapes nested fences before they can become a second context boundary", () => {
