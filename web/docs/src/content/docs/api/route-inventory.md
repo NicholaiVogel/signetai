@@ -53,6 +53,7 @@ silently disappear from the API reference.
 | POST | `/api/sources/pick-directory` | platform/daemon/src/routes/sources-routes.ts |
 | POST | `/api/sources/obsidian` | platform/daemon/src/routes/sources-routes.ts |
 | POST | `/api/sources/discord` | platform/daemon/src/routes/sources-routes.ts |
+| POST | `/api/sources/import` | platform/daemon/src/routes/import-routes.ts |
 | GET | `/api/sources/:sourceId/health` | platform/daemon/src/routes/sources-routes.ts |
 | GET | `/api/sources/:sourceId/snapshot` | platform/daemon/src/routes/sources-routes.ts |
 | POST | `/api/sources/:sourceId/snapshot/import` | platform/daemon/src/routes/sources-routes.ts |

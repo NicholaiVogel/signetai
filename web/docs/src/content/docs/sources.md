@@ -251,6 +251,26 @@ Removing a source is symmetrical with connecting it:
 
 From the dashboard and daemon API, removal performs the full purge. From the CLI, `signet sources remove <sourceId>` tries the daemon first. If the daemon is unavailable, the CLI falls back to local config-only removal and prints an explicit warning that already indexed database rows were not purged.
 
+## Durable file imports
+
+The dashboard Sources page can import files without creating a connector-specific
+integration. The importer creates one read-only `import` source per file and
+keeps the normalized representation source-backed and immediately searchable.
+It does not write to the original file and does not retain the raw upload bytes.
+
+Accepted inputs are text, Markdown, JSON, HTML, CSV, and AnyDoc-backed document
+formats. JSON is preserved as structured JSON, CSV remains one table artifact,
+and office/PDF/e-book formats are converted to Markdown for indexing. Imports
+are bounded to 25 files per batch, 25 MiB per file, and 100 MiB total. Each file
+reports its own result, so unsupported or malformed files do not hide successful
+imports in the same request.
+
+Duplicate content is selected in the import dialog: skip the existing source,
+replace and re-index it, or re-import it as a separate source. The normalized
+content hash, format, original file name, and converter metadata are retained as
+provenance. Semantic graph refinement remains asynchronous; source-backed recall
+is available as soon as indexing completes.
+
 ## API surface
 
 The daemon exposes the Sources lifecycle under `/api/sources`:
@@ -258,6 +278,7 @@ The daemon exposes the Sources lifecycle under `/api/sources`:
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/sources` | List configured sources. |
+| `POST` | `/api/sources/import` | Import bounded file batches as durable source artifacts. |
 | `POST` | `/api/sources/obsidian` | Add/update an Obsidian vault source and index it. |
 | `POST` | `/api/sources/discord` | Add/update a Discord source and queue a shared source index job. |
 | `POST` | `/api/sources/github` | Add/update a GitHub source and queue a shared source index job. |

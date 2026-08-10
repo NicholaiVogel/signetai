@@ -203,6 +203,7 @@ import {
 import { registerGraphiqRoutes } from "./routes/graphiq-routes.js";
 import { mountHealthRoutes } from "./routes/health.js";
 import { registerHooksRoutes } from "./routes/hooks-routes.js";
+import { registerImportRoutes } from "./routes/import-routes.js";
 import { mountInferenceRoutes } from "./routes/inference.js";
 import { registerKnowledgeRoutes } from "./routes/knowledge-routes.js";
 import { mountMarketplaceReviewsRoutes } from "./routes/marketplace-reviews.js";
@@ -284,6 +285,7 @@ registerGraphiqRoutes(app);
 registerSecretRoutes(app);
 registerSessionRoutes(app, { gitConfig, stopGitSyncTimer, startGitSyncTimer, getGitStatus, gitPull, gitPush, gitSync });
 registerSourcesRoutes(app);
+registerImportRoutes(app);
 registerPipelineRoutes(app);
 registerReflectionRoutes(app);
 registerTelemetryRoutes(app);

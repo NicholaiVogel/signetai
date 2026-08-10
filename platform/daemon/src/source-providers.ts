@@ -6,6 +6,7 @@ import {
 	obsidianNativeMemorySource,
 	purgeNativeMemorySourceArtifacts,
 } from "./native-memory-sources";
+import { purgeSourceOwnedRows } from "./source-purge";
 
 export interface SourceProviderProgressEvent {
 	readonly scanned: number;
@@ -48,6 +49,11 @@ export const obsidianSourceProvider: SourceProviderAdapter = {
 		),
 };
 
+export const importedSourceProvider: SourceProviderAdapter = {
+	kind: "import",
+	purge: (source, agentId) => purgeSourceOwnedRows({ sourceId: source.id, agentId }),
+};
+
 export function registerSourceProvider(provider: SourceProviderAdapter): void {
 	additionalProviders.set(provider.kind, provider);
 }
@@ -56,9 +62,16 @@ export function getSourceProvider(kind: SignetSourceKind): SourceProviderAdapter
 	if (kind === obsidianSourceProvider.kind) return obsidianSourceProvider;
 	if (kind === discordSourceProvider.kind) return discordSourceProvider;
 	if (kind === githubSourceProvider.kind) return githubSourceProvider;
+	if (kind === importedSourceProvider.kind) return importedSourceProvider;
 	return additionalProviders.get(kind);
 }
 
 export function configuredSourceProviders(): readonly SourceProviderAdapter[] {
-	return [obsidianSourceProvider, discordSourceProvider, githubSourceProvider, ...additionalProviders.values()];
+	return [
+		obsidianSourceProvider,
+		discordSourceProvider,
+		githubSourceProvider,
+		importedSourceProvider,
+		...additionalProviders.values(),
+	];
 }

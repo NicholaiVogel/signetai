@@ -101,6 +101,7 @@ native `EventSource` with headers, so auth is pumped manually).
 | `addObsidianSource` | POST | `/api/sources/obsidian` | Add Obsidian vault |
 | `addDiscordSource` | POST | `/api/sources/discord` | Add Discord source |
 | `addGitHubSource` | POST | `/api/sources/github` | Add GitHub source |
+| `importSources` | POST | `/api/sources/import` | Import and index durable files |
 | `removeSource` | DELETE | `/api/sources/{id}` | Disconnect source |
 | `getSourceSnapshot` | GET | `/api/sources/{id}/snapshot` | Source snapshot/export |
 | `importSourceSnapshot` | POST | `/api/sources/{id}/snapshot/import` | Re-import snapshot |

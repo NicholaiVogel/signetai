@@ -131,7 +131,7 @@ the document are soft-deleted one at a time with audit history.
 
 Sources connect read-only external knowledge bases to Signet recall without
 turning them into ordinary saved memories. Supported source kinds are
-`obsidian`, `discord`, and `github`.
+`obsidian`, `discord`, `github`, and `import`.
 
 ### GET /api/sources
 
@@ -172,7 +172,45 @@ agent.
 }
 ```
 
+### POST /api/sources/import
+
+Import one or more files as durable, read-only source artifacts. The request is
+`multipart/form-data` with one or more `files` fields and an optional
+`duplicateMode` field. `duplicateMode` is `skip` by default and can also be
+`replace` or `reimport`.
+
+The dashboard importer accepts text, Markdown, JSON, HTML, CSV, and document
+formats supported by AnyDoc (`doc`, `docx`, `odt`, `rtf`, `pdf`, `ppt`, `pptx`,
+`odp`, `epub`, `xls`, `xlsx`, and `ods`). JSON remains a structured JSON
+projection; CSV remains one table artifact with row metadata; document formats
+are converted to a Markdown projection. Raw upload bytes are not retained by
+the importer.
+
+The default safety bounds are 25 files per request, 25 MiB per file, and 100
+MiB per batch. Each file returns an individual result so a mixed batch can
+partially succeed. A successful import is indexed immediately for source-backed
+recall; semantic Dreaming remains asynchronous.
+
+**Response**
+
+```json
+{
+  "imported": 1,
+  "failed": 0,
+  "files": [
+    {
+      "fileName": "export.json",
+      "status": "imported",
+      "sourceId": "import:abc123",
+      "format": "json",
+      "duplicate": false
+    }
+  ]
+}
+```
+
 ### POST /api/sources/obsidian
+
 
 Add or update an Obsidian vault source and queue a source index job. The vault
 stays read-only; Signet writes only derived source artifacts, graph rows, and

@@ -9,6 +9,7 @@ import {
 	DEFAULT_OBSIDIAN_EXCLUDE_GLOBS,
 	addDiscordSource,
 	addGitHubSource,
+	addImportedSource,
 	addObsidianSource,
 	getSourcesConfigPath,
 	loadSourcesConfig,
@@ -520,6 +521,60 @@ describe("sources-config", () => {
 		if (removed.ok === true) throw new Error("expected removeSource to fail");
 		expect(removed.error).toContain("refusing to overwrite");
 		expect(readFileSync(configPath, "utf8")).toBe("{ not valid json");
+	});
+
+	it("creates imported sources and applies duplicate modes by content hash", () => {
+		const agentsDir = tmp();
+		const input = {
+			fileName: "export.json",
+			contentHash: "a".repeat(64),
+			format: "json",
+			now: "2026-01-01T00:00:00.000Z",
+		};
+
+		const first = addImportedSource(input, agentsDir);
+		expect(first.ok).toBe(true);
+		if (first.ok === false) throw new Error(first.error);
+		expect(first.created).toBe(true);
+		expect(first.duplicate).toBe(false);
+		expect(first.source.kind).toBe("import");
+		expect(first.source.providerSettings).toEqual({
+			fileName: "export.json",
+			contentHash: input.contentHash,
+			format: "json",
+		});
+
+		const skipped = addImportedSource({ ...input, duplicateMode: "skip" }, agentsDir);
+		expect(skipped).toEqual({ ok: true, source: first.source, created: false, duplicate: true });
+
+		const replaced = addImportedSource(
+			{ ...input, duplicateMode: "replace", now: "2026-01-02T00:00:00.000Z" },
+			agentsDir,
+		);
+		expect(replaced.ok).toBe(true);
+		if (replaced.ok === false) throw new Error(replaced.error);
+		expect(replaced.source.id).toBe(first.source.id);
+		expect(replaced.created).toBe(false);
+		expect(replaced.duplicate).toBe(true);
+
+		const reimported = addImportedSource({ ...input, duplicateMode: "reimport" }, agentsDir);
+		expect(reimported.ok).toBe(true);
+		if (reimported.ok === false) throw new Error(reimported.error);
+		expect(reimported.created).toBe(true);
+		expect(reimported.duplicate).toBe(true);
+		expect(reimported.source.id).not.toBe(first.source.id);
+		expect(loadSourcesConfig(agentsDir).sources).toHaveLength(2);
+	});
+
+	it("rejects malformed imported source metadata", () => {
+		const agentsDir = tmp();
+		expect(addImportedSource({ fileName: "", contentHash: "a".repeat(64), format: "json" }, agentsDir)).toEqual({
+			ok: false,
+			error: "Imported file name is required",
+		});
+		expect(
+			addImportedSource({ fileName: "export.json", contentHash: "not-a-hash", format: "json" }, agentsDir),
+		).toEqual({ ok: false, error: "Imported content hash is invalid" });
 	});
 
 	it("returns a not-found result when removing an unknown source", () => {

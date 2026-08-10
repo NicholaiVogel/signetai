@@ -409,6 +409,16 @@ export interface SourcesResponse {
 	sources: SignetSource[];
 }
 
+export interface ImportSourcesResponse {
+	imported: number;
+	failed: number;
+	files: ReadonlyArray<
+		| { fileName: string; status: "imported"; sourceId: string; format: string; duplicate: boolean }
+		| { fileName: string; status: "duplicate"; sourceId: string }
+		| { fileName: string; status: "failed"; error: string }
+	>;
+}
+
 /** Daily brief reflections — daemon `reflection-routes.ts` formatReflection. */
 export interface DailyReflection {
 	id: string;
@@ -697,6 +707,25 @@ export const api = {
 
 	// Sources
 	getSources: () => getJSON<SourcesResponse>("/api/sources"),
+	importSources: async (
+		files: readonly File[],
+		duplicateMode: "skip" | "replace" | "reimport" = "skip",
+	): Promise<{ ok: boolean; data?: ImportSourcesResponse; error?: string }> => {
+		try {
+			const form = new FormData();
+			for (const file of files) form.append("files", file, file.name);
+			form.set("duplicateMode", duplicateMode);
+			const res = await fetch(`${API_BASE}/api/sources/import`, {
+				method: "POST",
+				headers: authHeaders(),
+				body: form,
+			});
+			const data = (await res.json().catch(() => null)) as (ImportSourcesResponse & { error?: string }) | null;
+			return { ok: res.ok || res.status === 207, data: data ?? undefined, error: data?.error };
+		} catch {
+			return { ok: false, error: "daemon unreachable" };
+		}
+	},
 	/** Re-index = re-POST the source's own config; the daemon upserts (created:false) and re-queues an index job. */
 	reindexSource: async (source: SignetSource): Promise<{ ok: boolean; error?: string }> => {
 		const ps = source.providerSettings ?? {};

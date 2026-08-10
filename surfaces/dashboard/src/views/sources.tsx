@@ -1,12 +1,13 @@
-import { Check, Copy, Download, Folder, GitBranch, Globe, Plus, RotateCw, Trash2, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { Surface } from "@/components/ui/surface";
 import { sourceLogo } from "@/components/icons";
 import { ConnectSourceDialog } from "@/components/sources/connect-source-dialog";
-import { api, type SignetSource, type SourceIndexJob } from "@/lib/api";
+import { ImportSourcesDialog } from "@/components/sources/import-sources-dialog";
+import { Surface } from "@/components/ui/surface";
+import { type SignetSource, type SourceIndexJob, api } from "@/lib/api";
 import { useAsync } from "@/lib/use-async";
-import { useView } from "@/lib/view-context";
 import { cn } from "@/lib/utils";
+import { useView } from "@/lib/view-context";
+import { Check, Copy, Download, Folder, GitBranch, Globe, Plus, RotateCw, Trash2, Upload, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 const HEALTH_STYLES: Record<string, string> = {
 	healthy: "text-[oklch(0.72_0.15_150)]",
@@ -27,6 +28,7 @@ export function SourcesView() {
 	const { data, refresh } = useAsync(() => api.getSources(), { intervalMs: 30000 });
 	const sources = data?.sources;
 	const [connectOpen, setConnectOpen] = useState(false);
+	const [importOpen, setImportOpen] = useState(false);
 	const { connectSourceRequested, clearConnectSource } = useView();
 
 	// Cross-view handoff: the memory view's "Ingest source" button sets this
@@ -66,10 +68,21 @@ export function SourcesView() {
 			<div className="grid flex-1 grid-cols-1 content-start gap-3 overflow-y-auto py-3 md:grid-cols-2 [mask-image:linear-gradient(180deg,#000_0,#000_calc(100%-24px),transparent_100%)]">
 				<button
 					type="button"
-					onClick={() => setConnectOpen(true)}
+					onClick={() => setImportOpen(true)}
 					className="flex min-h-[180px] flex-col items-center justify-center gap-2.5 rounded-[var(--radius)] border-[1.5px] border-dashed border-[oklch(1_0_0/0.12)] bg-[color-mix(in_oklch,var(--card)_86%,transparent)] p-6 transition-all hover:border-[color-mix(in_oklch,var(--success)_45%,transparent)] hover:bg-[color-mix(in_oklch,var(--success)_5%,transparent)] [html:not(.dark)_&]:border-[oklch(0_0_0/0.12)]"
 				>
 					<span className="grid size-10 place-items-center rounded-full border border-[oklch(1_0_0/0.08)] bg-[color-mix(in_oklch,var(--foreground)_4%,transparent)] text-muted-foreground transition-all group-hover:text-[oklch(0.82_0.16_150)]">
+						<Upload className="size-[18px]" />
+					</span>
+					<span className="text-[12.5px] font-medium">Import files</span>
+					<span className="font-mono text-[9.5px] text-muted-foreground">JSON · CSV · Markdown · documents</span>
+				</button>
+				<button
+					type="button"
+					onClick={() => setConnectOpen(true)}
+					className="flex min-h-[180px] flex-col items-center justify-center gap-2.5 rounded-[var(--radius)] border-[1.5px] border-dashed border-[oklch(1_0_0/0.12)] bg-[color-mix(in_oklch,var(--card)_86%,transparent)] p-6 transition-all hover:border-[color-mix(in_oklch,var(--success)_45%,transparent)] hover:bg-[color-mix(in_oklch,var(--success)_5%,transparent)] [html:not(.dark)_&]:border-[oklch(0_0_0/0.12)]"
+				>
+					<span className="grid size-10 place-items-center rounded-full border border-[oklch(1_0_0/0.08)] bg-[color-mix(in_oklch,var(--foreground)_4%,transparent)] text-muted-foreground">
 						<Plus className="size-[18px]" />
 					</span>
 					<span className="text-[12.5px] font-medium">Connect a source</span>
@@ -80,6 +93,7 @@ export function SourcesView() {
 				))}
 			</div>
 			<ConnectSourceDialog open={connectOpen} onClose={() => setConnectOpen(false)} onConnected={refresh} />
+			<ImportSourcesDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={refresh} />
 		</div>
 	);
 }
@@ -92,9 +106,12 @@ function SourceCard({ source, onMutate }: { source: SignetSource; onMutate: () =
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-	useEffect(() => () => {
-		if (copyTimer.current) clearTimeout(copyTimer.current);
-	}, []);
+	useEffect(
+		() => () => {
+			if (copyTimer.current) clearTimeout(copyTimer.current);
+		},
+		[],
+	);
 
 	const copyRoot = async () => {
 		try {
@@ -167,7 +184,12 @@ function SourceCard({ source, onMutate }: { source: SignetSource; onMutate: () =
 						<span>{source.mode}</span>
 					</div>
 				</div>
-				<span className={cn("flex shrink-0 items-center gap-1.25 font-mono text-[9.5px] font-medium", HEALTH_STYLES[health])}>
+				<span
+					className={cn(
+						"flex shrink-0 items-center gap-1.25 font-mono text-[9.5px] font-medium",
+						HEALTH_STYLES[health],
+					)}
+				>
 					<span className="size-1.5 rounded-full bg-current shadow-[0_0_6px_currentColor]" />
 					{health.charAt(0).toUpperCase() + health.slice(1)}
 					{failures > 0 && ` · ${failures} fail`}
@@ -198,7 +220,9 @@ function SourceCard({ source, onMutate }: { source: SignetSource; onMutate: () =
 
 			<div className="mt-0.5 flex items-center justify-between border-t border-[oklch(1_0_0/0.06)] pt-2 [html:not(.dark)_&]:border-[oklch(0_0_0/0.06)]">
 				{error ? (
-					<span className="truncate font-mono text-[9.5px] text-destructive" title={error}>{error}</span>
+					<span className="truncate font-mono text-[9.5px] text-destructive" title={error}>
+						{error}
+					</span>
 				) : (
 					<span className="font-mono text-[9.5px] text-muted-foreground">{relTime(source.lastIndexedAt)}</span>
 				)}
@@ -276,15 +300,20 @@ function PipeStrip({ job, health }: { job?: SourceIndexJob | null; health: strin
 				<div
 					className={cn(
 						"h-full rounded-sm transition-[width] duration-500",
-						fill === "error" || fill === "unhealthy" ? "bg-[oklch(0.7_0.18_25)]"
-						: fill === "queued" ? "bg-[oklch(0.75_0.15_85)]"
-						: fill === "degraded" ? "bg-[oklch(0.75_0.15_85)] shadow-[0_0_6px_oklch(0.75_0.15_85/0.4)]"
-						: "bg-success shadow-[0_0_6px_color-mix(in_oklch,var(--success)_50%,transparent)]",
+						fill === "error" || fill === "unhealthy"
+							? "bg-[oklch(0.7_0.18_25)]"
+							: fill === "queued"
+								? "bg-[oklch(0.75_0.15_85)]"
+								: fill === "degraded"
+									? "bg-[oklch(0.75_0.15_85)] shadow-[0_0_6px_oklch(0.75_0.15_85/0.4)]"
+									: "bg-success shadow-[0_0_6px_color-mix(in_oklch,var(--success)_50%,transparent)]",
 					)}
 					style={{ width: `${pct}%` }}
 				/>
 			</div>
-			<span className="max-w-[45%] shrink-0 truncate font-mono text-[9.5px] text-muted-foreground" title={text}>{text}</span>
+			<span className="max-w-[45%] shrink-0 truncate font-mono text-[9.5px] text-muted-foreground" title={text}>
+				{text}
+			</span>
 		</div>
 	);
 }

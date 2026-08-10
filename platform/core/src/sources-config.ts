@@ -113,6 +113,20 @@ export interface AddGitHubSourceInput {
 	readonly now?: string;
 }
 
+export type ImportedSourceDuplicateMode = "skip" | "replace" | "reimport";
+
+export interface AddImportedSourceInput {
+	readonly fileName: string;
+	readonly contentHash: string;
+	readonly format: string;
+	readonly duplicateMode?: ImportedSourceDuplicateMode;
+	readonly now?: string;
+}
+
+export type AddImportedSourceResult =
+	| { readonly ok: true; readonly source: SignetSourceEntry; readonly created: boolean; readonly duplicate: boolean }
+	| { readonly ok: false; readonly error: string };
+
 export type AddSourceResult =
 	| { readonly ok: true; readonly source: SignetSourceEntry; readonly created: boolean }
 	| { readonly ok: false; readonly error: string };
@@ -196,6 +210,53 @@ export function addDiscordSource(input: AddDiscordSourceInput, agentsDir = getAg
 
 export function addGitHubSource(input: AddGitHubSourceInput, agentsDir = getAgentsDir()): AddSourceResult {
 	return withSourcesConfigLock(agentsDir, () => addGitHubSourceUnlocked(input, agentsDir));
+}
+
+export function addImportedSource(input: AddImportedSourceInput, agentsDir = getAgentsDir()): AddImportedSourceResult {
+	return withSourcesConfigLock(agentsDir, () => {
+		const fileName = input.fileName.trim();
+		const contentHash = input.contentHash.trim().toLowerCase();
+		const format = input.format.trim().toLowerCase();
+		if (!fileName) return { ok: false, error: "Imported file name is required" };
+		if (!/^[a-f0-9]{64}$/.test(contentHash)) return { ok: false, error: "Imported content hash is invalid" };
+		if (!format) return { ok: false, error: "Imported file format is required" };
+
+		const now = input.now ?? new Date().toISOString();
+		const config = loadSourcesConfigForWrite(agentsDir);
+		const duplicate = config.sources.find(
+			(source) => source.kind === "import" && source.providerSettings?.contentHash === contentHash,
+		);
+		const mode = input.duplicateMode ?? "skip";
+		if (duplicate && mode === "skip") {
+			return { ok: true, source: duplicate, created: false, duplicate: true };
+		}
+
+		const sourceId =
+			duplicate && mode === "replace"
+				? duplicate.id
+				: `import:${contentHash.slice(0, 16)}${mode === "reimport" ? `:${randomUUID().slice(0, 8)}` : ""}`;
+		const source: SignetSourceEntry = {
+			id: sourceId,
+			kind: "import",
+			name: basename(fileName),
+			root: basename(fileName),
+			enabled: true,
+			mode: "read-only",
+			createdAt: duplicate?.createdAt ?? now,
+			updatedAt: now,
+			providerSettings: {
+				fileName: basename(fileName),
+				contentHash,
+				format,
+			},
+		};
+		const sources =
+			duplicate && mode === "replace"
+				? config.sources.map((entry) => (entry.id === duplicate.id ? source : entry))
+				: [...config.sources, source];
+		saveSourcesConfig({ version: SOURCES_CONFIG_VERSION, sources }, agentsDir);
+		return { ok: true, source, created: !duplicate || mode === "reimport", duplicate: Boolean(duplicate) };
+	});
 }
 
 function addDiscordSourceUnlocked(input: AddDiscordSourceInput, agentsDir = getAgentsDir()): AddSourceResult {

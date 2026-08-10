@@ -273,6 +273,7 @@ export type {
 export {
 	addDiscordSource,
 	addGitHubSource,
+	addImportedSource,
 	addObsidianSource,
 	DEFAULT_DISCORD_DESKTOP_CACHE_PATH,
 	DEFAULT_DISCORD_MAX_ATTACHMENT_TEXT_BYTES,
@@ -297,6 +298,8 @@ export {
 export type {
 	AddDiscordSourceInput,
 	AddGitHubSourceInput,
+	AddImportedSourceInput,
+	AddImportedSourceResult,
 	AddObsidianSourceInput,
 	AddSourceResult,
 	DiscordSourceSettings,
@@ -304,6 +307,7 @@ export type {
 	GitHubSourceResourceType,
 	GitHubSourceSettings,
 	GitHubSourceState,
+	ImportedSourceDuplicateMode,
 	RemoveSourceResult,
 	SignetSourceEntry,
 	SignetSourceKind,
