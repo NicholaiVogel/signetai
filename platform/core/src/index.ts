@@ -42,6 +42,7 @@ export type {
 	AgentConfig,
 	LlmProvider,
 	LlmUsage,
+	LlmCacheRequestAccounting,
 	LlmGenerateResult,
 	AccountingProvenance,
 	AccountingSummaryProvenance,

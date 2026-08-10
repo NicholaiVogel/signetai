@@ -8,6 +8,7 @@ import {
 	mapSessionStatsToUsage,
 	mapUsage,
 	resolvePiModel,
+	summarizeCacheRequests,
 } from "./pi-provider";
 import { configureLlmConcurrency, getLlmConcurrencyStatus, withLlmConcurrency } from "./provider";
 
@@ -62,18 +63,45 @@ describe("pi provider catalog models", () => {
 		};
 
 		expect(provider.accountingProvenance).toBe("unavailable");
-		expect(mapSessionStatsToUsage(stats, 10, provider.accountingProvenance)).toMatchObject({
+		expect(
+			mapSessionStatsToUsage(stats, 10, provider.accountingProvenance, [
+				{ cacheRead: 3, cacheWrite: 0 },
+				{ cacheRead: 0, cacheWrite: 2 },
+				{ cacheRead: 0, cacheWrite: 0 },
+			] as Usage[]),
+		).toMatchObject({
 			totalTokens: 4,
 			totalCost: null,
 			accountingProvenance: "unavailable",
 		});
+		expect(
+			mapSessionStatsToUsage(stats, 10, provider.accountingProvenance, [
+				{ cacheRead: 3, cacheWrite: 0 },
+				{ cacheRead: 0, cacheWrite: 2 },
+				{ cacheRead: 0, cacheWrite: 0 },
+			] as Usage[]).cacheRequests,
+		).toEqual({ requests: 3, hits: 1, misses: 1, unknown: 1, writes: 1 });
 	});
 
 	test("does not label missing remote usage as provider-reported zero tokens", () => {
-		expect(mapUsage({} as Usage, "provider_reported")).toMatchObject({
+		const mapped = mapUsage({} as Usage, "provider_reported");
+		expect(mapped).toMatchObject({
 			totalTokens: null,
 			totalCost: null,
 			accountingProvenance: "unavailable",
+		});
+		expect(mapped.cacheRequests).toEqual({ requests: 1, hits: 0, misses: 0, unknown: 1, writes: 0 });
+	});
+
+	test("classifies per-response cache usage without treating zero reads as a miss", () => {
+		const usage = (cacheRead: number, cacheWrite: number): Usage => ({ cacheRead, cacheWrite }) as Usage;
+
+		expect(summarizeCacheRequests([usage(12, 0), usage(0, 8), usage(0, 0), usage(0, 0)])).toEqual({
+			requests: 4,
+			hits: 1,
+			misses: 1,
+			unknown: 2,
+			writes: 1,
 		});
 	});
 

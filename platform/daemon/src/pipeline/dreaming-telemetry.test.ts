@@ -66,6 +66,7 @@ describe("dreaming telemetry", () => {
 				totalTokens: 502788,
 				totalCost: 0.14574042,
 				accountingProvenance: "provider_reported",
+				cacheRequests: { requests: 4, hits: 1, misses: 1, unknown: 2, writes: 1 },
 			},
 			attribution: {
 				executor: "acpx",
@@ -104,8 +105,14 @@ describe("dreaming telemetry", () => {
 		expect(full?.properties.tokensTotal).toBe(502788);
 		expect(full?.properties.cost).toBe(0.14574042);
 		expect(full?.properties.accountingProvenance).toBe("provider_reported");
-		expect(full?.properties.executor).toBe("acpx");
-		expect(full?.properties.provider).toBe("codex");
+	expect(full?.properties.executor).toBe("acpx");
+	expect(full?.properties.provider).toBe("codex");
+	expect(full?.properties.cacheAccountingAvailable).toBe(true);
+	expect(full?.properties.cacheRequests).toBe(4);
+	expect(full?.properties.cacheHits).toBe(1);
+	expect(full?.properties.cacheMisses).toBe(1);
+	expect(full?.properties.cacheUnknown).toBe(2);
+	expect(full?.properties.cacheWrites).toBe(1);
 		expect(full?.properties.model).toBe("gpt-5.4-mini");
 		expect(full?.properties.locality).toBe("remote");
 		expect(full?.properties.outcome).toBe("completed");
@@ -123,6 +130,12 @@ describe("dreaming telemetry", () => {
 		const bare = passes.find((e) => e.properties.mode === "hygiene");
 		expect(bare?.properties.tokensInput).toBeNull();
 		expect(bare?.properties.cost).toBeNull();
+		expect(bare?.properties.cacheAccountingAvailable).toBe(false);
+		expect(bare?.properties.cacheRequests).toBeNull();
+		expect(bare?.properties.cacheHits).toBeNull();
+		expect(bare?.properties.cacheMisses).toBeNull();
+		expect(bare?.properties.cacheUnknown).toBeNull();
+		expect(bare?.properties.cacheWrites).toBeNull();
 		expect(bare?.properties.outcome).toBe("no-op");
 		expect(bare?.properties.outcomeCode).toBe("no_work");
 	});

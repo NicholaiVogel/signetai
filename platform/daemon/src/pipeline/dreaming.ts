@@ -16,6 +16,7 @@ import {
 	type AccountingProvenance,
 	type DreamingConfig,
 	type IdentityContextFileEntry,
+	type LlmCacheRequestAccounting,
 	type LlmUsage,
 	resolveSpecialIdentityFiles,
 	resolveStartupIdentityFiles,
@@ -973,6 +974,7 @@ export function recordDreamingPassTelemetry(input: {
 		readonly totalTokens?: number | null;
 		readonly totalCost: number | null;
 		readonly accountingProvenance?: AccountingProvenance;
+		readonly cacheRequests?: LlmCacheRequestAccounting | null;
 	} | null;
 }): void {
 	try {
@@ -995,6 +997,12 @@ export function recordDreamingPassTelemetry(input: {
 			tokensTotal: input.usage?.totalTokens ?? null,
 			cost: input.usage?.totalCost ?? null,
 			accountingProvenance: input.usage?.accountingProvenance ?? "unavailable",
+			cacheAccountingAvailable: input.usage?.cacheRequests != null,
+			cacheRequests: input.usage?.cacheRequests?.requests ?? null,
+			cacheHits: input.usage?.cacheRequests?.hits ?? null,
+			cacheMisses: input.usage?.cacheRequests?.misses ?? null,
+			cacheUnknown: input.usage?.cacheRequests?.unknown ?? null,
+			cacheWrites: input.usage?.cacheRequests?.writes ?? null,
 			artifactsConsidered: input.effects.artifactsConsidered,
 			memoriesCreated: input.effects.memoriesCreated,
 			memoriesUpdated: input.effects.memoriesUpdated,

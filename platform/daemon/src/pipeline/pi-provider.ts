@@ -27,7 +27,13 @@ import {
 	type ToolDefinition,
 	createAgentSession,
 } from "@earendil-works/pi-coding-agent";
-import type { AccountingProvenance, LlmGenerateResult, LlmProvider, LlmUsage } from "@signet/core";
+import type {
+	AccountingProvenance,
+	LlmCacheRequestAccounting,
+	LlmGenerateResult,
+	LlmProvider,
+	LlmUsage,
+} from "@signet/core";
 import { logger } from "../logger";
 import {
 	type LlmProviderCallOptions,
@@ -115,6 +121,8 @@ export interface PiAgentSession {
 	 * for providers that never reported usage.
 	 */
 	getStats(): SessionStats | undefined;
+	/** Provider usage for each assistant response in the session, when available. */
+	getRequestUsages(): readonly Usage[] | undefined;
 }
 
 export interface PiAgentSessionProvider {
@@ -294,6 +302,26 @@ function usageHasAccounting(usage: Usage): boolean {
 	]);
 }
 
+function nonNegativeFinite(value: number | null | undefined): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+export function summarizeCacheRequests(usages: readonly Usage[]): LlmCacheRequestAccounting {
+	let hits = 0;
+	let misses = 0;
+	let unknown = 0;
+	let writes = 0;
+	for (const usage of usages) {
+		const cacheRead = nonNegativeFinite(usage.cacheRead);
+		const cacheWrite = nonNegativeFinite(usage.cacheWrite);
+		if (cacheRead > 0) hits += 1;
+		else if (cacheWrite > 0) misses += 1;
+		else unknown += 1;
+		if (cacheWrite > 0) writes += 1;
+	}
+	return { requests: usages.length, hits, misses, unknown, writes };
+}
+
 function effectiveAccountingProvenance(
 	hasUsage: boolean,
 	accountingProvenance: AccountingProvenance,
@@ -312,6 +340,7 @@ export function mapUsage(usage: Usage, accountingProvenance: AccountingProvenanc
 		totalCost: effectiveProvenance === "unavailable" ? null : (usage.cost?.total ?? null),
 		totalDurationMs: null,
 		accountingProvenance: effectiveProvenance,
+		cacheRequests: summarizeCacheRequests([usage]),
 	};
 }
 
@@ -326,6 +355,7 @@ export function mapSessionStatsToUsage(
 	stats: SessionStats | undefined,
 	totalDurationMs: number,
 	accountingProvenance: AccountingProvenance = "unavailable",
+	requestUsages?: readonly Usage[],
 ): LlmUsage {
 	if (stats === undefined) {
 		return {
@@ -337,6 +367,7 @@ export function mapSessionStatsToUsage(
 			totalCost: null,
 			totalDurationMs,
 			accountingProvenance,
+			cacheRequests: requestUsages === undefined ? null : summarizeCacheRequests(requestUsages),
 		};
 	}
 	const effectiveProvenance = effectiveAccountingProvenance(
@@ -359,6 +390,7 @@ export function mapSessionStatsToUsage(
 		totalCost: effectiveProvenance === "unavailable" ? null : stats.cost,
 		totalDurationMs,
 		accountingProvenance: effectiveProvenance,
+		cacheRequests: requestUsages === undefined ? null : summarizeCacheRequests(requestUsages),
 	};
 }
 
@@ -652,6 +684,8 @@ export function createPiModelProvider(
 				dispose: () => session.dispose(),
 				getActiveToolNames: () => session.getActiveToolNames(),
 				getStats: () => session.getSessionStats(),
+				getRequestUsages: () =>
+					session.messages.flatMap((message) => (message.role === "assistant" ? [message.usage] : [])),
 				getFailureMessage: () => {
 					for (const message of [...session.messages].reverse()) {
 						if (

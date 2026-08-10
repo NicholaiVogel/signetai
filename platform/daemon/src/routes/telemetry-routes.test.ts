@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { addAccountingCoverage, emptyAccountingCoverage } from "./telemetry-routes";
+import {
+	addAccountingCoverage,
+	addDreamingCacheAccounting,
+	dreamingCacheHitRate,
+	emptyAccountingCoverage,
+	emptyDreamingCacheAccounting,
+} from "./telemetry-routes";
 
 describe("telemetry accounting coverage", () => {
 	test("keeps mixed session summaries out of unavailable coverage", () => {
@@ -18,5 +24,51 @@ describe("telemetry accounting coverage", () => {
 
 		expect(coverage.unavailable).toEqual({ calls: 1, tokens: 0, cost: 0 });
 		expect(coverage.mixed).toEqual({ calls: 0, tokens: 0, cost: 0 });
+	});
+});
+
+describe("dreaming cache accounting", () => {
+	test("aggregates bounded event fields and preserves unavailable coverage", () => {
+		const totals = emptyDreamingCacheAccounting();
+		addDreamingCacheAccounting(totals, {
+			cacheAccountingAvailable: true,
+			cacheRequests: 4,
+			cacheHits: 1,
+			cacheMisses: 1,
+			cacheUnknown: 2,
+			cacheWrites: 1,
+		});
+		addDreamingCacheAccounting(totals, {
+			cacheAccountingAvailable: false,
+			cacheRequests: null,
+			cacheHits: null,
+			cacheMisses: null,
+			cacheUnknown: null,
+			cacheWrites: null,
+		});
+
+		expect(totals).toEqual({
+			cacheRequests: 4,
+			cacheHits: 1,
+			cacheMisses: 1,
+			cacheUnknown: 2,
+			cacheWrites: 1,
+			cacheAccountingAvailablePasses: 1,
+			cacheAccountingUnavailablePasses: 1,
+		});
+	});
+
+	test("uses only classified requests as the hit-rate denominator", () => {
+		const totals = emptyDreamingCacheAccounting();
+		totals.cacheRequests = 4;
+		totals.cacheHits = 1;
+		totals.cacheMisses = 1;
+		totals.cacheUnknown = 2;
+
+		expect(dreamingCacheHitRate(totals)).toBe(0.5);
+	});
+
+	test("returns no rate when provider cache semantics are unavailable", () => {
+		expect(dreamingCacheHitRate(emptyDreamingCacheAccounting())).toBeNull();
 	});
 });

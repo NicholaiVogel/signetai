@@ -1123,6 +1123,7 @@ export class InferenceRouter {
 							session.getStats(),
 							Date.now() - startedAt,
 							provider.accountingProvenance ?? "unavailable",
+							session.getRequestUsages(),
 						);
 					} finally {
 						if (!releaseDeferred) {

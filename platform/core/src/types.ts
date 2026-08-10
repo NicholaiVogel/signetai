@@ -44,6 +44,14 @@ export function summarizeAccountingProvenance(
 	return "mixed";
 }
 
+export interface LlmCacheRequestAccounting {
+	readonly requests: number;
+	readonly hits: number;
+	readonly misses: number;
+	readonly unknown: number;
+	readonly writes: number;
+}
+
 export interface LlmUsage {
 	readonly inputTokens: number | null;
 	readonly outputTokens: number | null;
@@ -54,6 +62,8 @@ export interface LlmUsage {
 	readonly totalDurationMs: number | null;
 	/** Cost/token accounting source. Omitted by legacy providers means unavailable. */
 	readonly accountingProvenance?: AccountingProvenance;
+	/** Bounded per-request cache accounting, when the provider exposes it. */
+	readonly cacheRequests?: LlmCacheRequestAccounting | null;
 }
 
 export interface LlmGenerateResult {
