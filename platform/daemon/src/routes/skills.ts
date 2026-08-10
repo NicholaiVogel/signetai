@@ -30,8 +30,13 @@ import type { AuthMode } from "../auth/index.js";
 import { type DbAccessor, getDbAccessor } from "../db-accessor.js";
 import { logger } from "../logger.js";
 import { type EmbeddingConfig, type PipelineV2Config, loadMemoryConfig } from "../memory-config.js";
-import { parseSkillFile } from "../pipeline/skill-frontmatter.js";
-import { installSkillNode, uninstallSkillNode } from "../pipeline/skill-graph.js";
+import { uninstallSkillNode } from "../pipeline/skill-graph.js";
+import {
+	type ReconcilerDeps,
+	reconcileSkillFile,
+	resetSkillFailureState,
+	withSkillReconciliationLock,
+} from "../pipeline/skill-reconciler.js";
 
 function getAgentsDir(): string {
 	return resolveDefaultBasePath();
@@ -788,81 +793,42 @@ async function installClawhubSkill(
 	}
 }
 
-// Per-skill lock to serialize graph node creation for the same skill
-const skillLocks = new Map<string, Promise<void>>();
-
-function withSkillLock(skillName: string, fn: () => Promise<void>): Promise<void> {
-	const prev = skillLocks.get(skillName) ?? Promise.resolve();
-	const next = prev.then(fn, fn).finally(() => {
-		if (skillLocks.get(skillName) === next) {
-			skillLocks.delete(skillName);
-		}
-	});
-	skillLocks.set(skillName, next);
-	return next;
-}
-
 /**
- * After a successful skill install, create the graph node.
- * Runs async — does not block the install response.
- * Serialized per skill name to prevent concurrent SKILL.md writes.
+ * After a successful skill install, reconcile the graph node through the same
+ * per-skill flight used by startup, periodic, and filesystem watcher paths.
  */
 async function onSkillInstalled(skillName: string): Promise<void> {
-	return withSkillLock(skillName, () => onSkillInstalledInner(skillName));
-}
-
-async function onSkillInstalledInner(skillName: string): Promise<void> {
 	const accessor = getAccessorSafe();
-	if (!accessor) return;
+	if (!accessor || !fetchEmbeddingFn) return;
 
-	const skillMdPath = join(getSkillsDir(), skillName, "SKILL.md");
-	if (!existsSync(skillMdPath)) return;
+	const memoryCfg = loadMemoryConfig(getAgentsDir());
+	if (!memoryCfg.pipelineV2.procedural.enabled) return;
 
-	try {
-		const content = readFileSync(skillMdPath, "utf-8");
-		const parsed = parseSkillFile(content);
-		if (!parsed) {
-			logger.warn("skills", "Failed to parse SKILL.md frontmatter for graph", { skill: skillName });
-			return;
-		}
-
-		const memoryCfg = loadMemoryConfig(getAgentsDir());
-		if (!memoryCfg.pipelineV2.procedural.enabled) return;
-		if (!fetchEmbeddingFn) return;
-
-		const result = await installSkillNode(
-			{
-				frontmatter: parsed.frontmatter,
-				body: parsed.body,
-				source: "installed",
-				fsPath: skillMdPath,
-			},
-			accessor,
-			memoryCfg.pipelineV2,
-			memoryCfg.embedding,
-			fetchEmbeddingFn,
-		);
-
-		logger.info("skills", "Graph node created for skill", {
-			skill: skillName,
-			entityId: result.entityId,
-			embeddingCreated: result.embeddingCreated,
-		});
-	} catch (e) {
-		logger.error("skills", "Failed to create graph node for skill", e as Error, {
-			skill: skillName,
-		});
+	const deps: ReconcilerDeps = {
+		accessor,
+		pipelineConfig: memoryCfg.pipelineV2,
+		embeddingConfig: memoryCfg.embedding,
+		fetchEmbedding: fetchEmbeddingFn,
+		agentsDir: getAgentsDir(),
+	};
+	resetSkillFailureState(skillName);
+	const result = await reconcileSkillFile(skillName, join(getSkillsDir(), skillName, "SKILL.md"), deps, {
+		forceInstall: true,
+		source: "installed",
+	});
+	if (result === "failed") {
+		throw new Error(`Skill graph reconciliation failed for ${skillName}`);
 	}
 }
 
 /**
  * Before a skill is uninstalled from the filesystem, remove its graph node.
  */
-function onSkillUninstalling(skillName: string): void {
+async function onSkillUninstalling(skillName: string): Promise<void> {
 	const accessor = getAccessorSafe();
 	if (!accessor) return;
 
-	try {
+	await withSkillReconciliationLock(getAgentsDir(), skillName, () => {
 		const result = uninstallSkillNode({ skillName }, accessor);
 		if (result.removed) {
 			logger.info("skills", "Graph node removed for skill", {
@@ -870,11 +836,7 @@ function onSkillUninstalling(skillName: string): void {
 				entityId: result.entityId,
 			});
 		}
-	} catch (e) {
-		logger.error("skills", "Failed to remove graph node for skill", e as Error, {
-			skill: skillName,
-		});
-	}
+	});
 }
 
 export function mountSkillsRoutes(app: Hono, _authMode: AuthMode = "local"): void {
@@ -1226,7 +1188,7 @@ export function mountSkillsRoutes(app: Hono, _authMode: AuthMode = "local"): voi
 	});
 
 	// DELETE /api/skills/:name - uninstall a skill
-	app.delete("/api/skills/:name", (c) => {
+	app.delete("/api/skills/:name", async (c) => {
 		const name = c.req.param("name");
 		if (!name || name.includes("..") || name.includes("/") || name.includes("\\")) {
 			return c.json({ error: "Invalid skill name" }, 400);
@@ -1239,7 +1201,7 @@ export function mountSkillsRoutes(app: Hono, _authMode: AuthMode = "local"): voi
 
 		try {
 			// Remove graph node before filesystem cleanup
-			onSkillUninstalling(name);
+			await onSkillUninstalling(name);
 			rmSync(skillDir, { recursive: true, force: true });
 			logger.info("skills", "Skill removed", { name });
 			return c.json({ success: true, name, message: `Removed ${name}` });

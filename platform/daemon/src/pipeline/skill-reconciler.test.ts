@@ -6,7 +6,7 @@ import { closeDbAccessor, getDbAccessor, initDbAccessor } from "../db-accessor";
 import { type LogEntry, logger } from "../logger";
 import { DEFAULT_PIPELINE_V2, type EmbeddingConfig, type PipelineV2Config } from "../memory-config";
 import { installSkillNode, skillEmbeddingHash } from "./skill-graph";
-import { reconcileOnce, resetSkillFailureState, skillBackoffDelayMs } from "./skill-reconciler";
+import { reconcileOnce, reconcileSkillFile, resetSkillFailureState, skillBackoffDelayMs } from "./skill-reconciler";
 
 function setup(): { root: string; db: string } {
 	const root = join(tmpdir(), `signet-skill-reconciler-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -227,6 +227,60 @@ this skill helps with reconciliation loop debugging.`,
 		});
 
 		expect(pass).toEqual({ installed: 0, updated: 0, removed: 0 });
+	});
+
+	it("prevents overlapping triggers from reaching the embedding provider twice (#1354)", async () => {
+		const paths = setup();
+		root = paths.root;
+		db = paths.db;
+		initDbAccessor(db);
+
+		const skill = "single-flight-skill";
+		const file = join(paths.root, "skills", skill, "SKILL.md");
+		mkdirSync(join(paths.root, "skills", skill), { recursive: true });
+		writeFileSync(
+			file,
+			`---
+name: ${skill}
+description: shared trigger test
+---
+body`,
+		);
+
+		let calls = 0;
+		let releaseEmbedding: (() => void) | undefined;
+		let resolveFirstCall: (() => void) | undefined;
+		const firstCall = new Promise<void>((resolve) => {
+			resolveFirstCall = resolve;
+		});
+		const embeddingGate = new Promise<void>((resolve) => {
+			releaseEmbedding = resolve;
+		});
+		const deps = {
+			accessor: getDbAccessor(),
+			pipelineConfig: cfg(),
+			embeddingConfig: emb,
+			fetchEmbedding: async () => {
+				calls++;
+				resolveFirstCall?.();
+				await embeddingGate;
+				return [0.1, 0.2, 0.3];
+			},
+			agentsDir: root,
+		};
+
+		const startupPass = reconcileOnce(deps);
+		await firstCall;
+		const explicitInstall = reconcileSkillFile(skill, file, deps, { forceInstall: true, source: "installed" });
+
+		// The explicit post-install trigger is queued behind the startup pass,
+		// rather than reaching fetchEmbedding while the first call is pending.
+		expect(calls).toBe(1);
+		releaseEmbedding?.();
+
+		await expect(startupPass).resolves.toEqual({ installed: 1, updated: 0, removed: 0 });
+		await expect(explicitInstall).resolves.toBe("unchanged");
+		expect(calls).toBe(1);
 	});
 
 	it("updates skill metadata when a non-embedding frontmatter field changes on disk", async () => {
