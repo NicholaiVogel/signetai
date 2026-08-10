@@ -199,7 +199,9 @@ anonymous telemetry collector for understanding install and usage
 patterns (see [Configuration](/configuration/)). It buffers events to SQLite and
 flushes them in batches to a PostHog instance when both `posthogHost`
 and `posthogApiKey` are configured (`telemetryEnabled` defaults to
-true; set it to `false` to opt out).
+true; set it to `false` to opt out). The dashboard Settings → Advanced → Privacy
+section exposes the same setting, with a confirmation warning before disabling
+it.
 
 The event catalog, privacy contract, the open JSONL audit log, and how to
 query the project live in **[TELEMETRY.md](https://github.com/Signet-AI/signetai/blob/main/docs/TELEMETRY.md)** — the single

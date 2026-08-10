@@ -459,6 +459,18 @@ describe("telemetry collector", () => {
 		expect(unsentCount()).toBe(0);
 	});
 
+	it("discards buffered and unsent events when telemetry is disabled", async () => {
+		const collector = createTelemetryCollector(getDbAccessor(), { ...TELEMETRY_CONFIG, posthogHost: "" }, "0.0.0-test");
+		collector.record("daemon.heartbeat", { uptimeMs: 1 });
+		await collector.flush();
+		expect(unsentCount()).toBeGreaterThan(0);
+
+		await collector.discardPending?.();
+		collector.record("daemon.heartbeat", { uptimeMs: 2 });
+		expect(captured).toHaveLength(0);
+		expect(unsentCount()).toBe(0);
+	});
+
 	it("emits one config snapshot alongside install activation", async () => {
 		const snapshot: TelemetryConfigSnapshot = {
 			graphEnabled: true,

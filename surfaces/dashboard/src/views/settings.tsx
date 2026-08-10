@@ -1,5 +1,13 @@
 import { ConnectProviderDialog } from "@/components/settings/connect-dialog";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { type AgentConfigStore, isDreamingEnabled, useAgentConfig } from "@/lib/agent-config";
@@ -924,6 +932,69 @@ function DreamingToggle({ store }: { store: AgentConfigStore }) {
 	);
 }
 
+function readTelemetryEnabled(agent: Record<string, unknown>): boolean {
+	const memory = agent.memory;
+	if (memory == null || typeof memory !== "object" || Array.isArray(memory)) return true;
+	const pipeline = (memory as Record<string, unknown>).pipelineV2;
+	if (pipeline == null || typeof pipeline !== "object" || Array.isArray(pipeline)) return true;
+	const value = (pipeline as Record<string, unknown>).telemetryEnabled;
+	return typeof value === "boolean" ? value : true;
+}
+
+function TelemetrySettings({ store }: { store: AgentConfigStore }) {
+	const [confirmOptOut, setConfirmOptOut] = useState(false);
+	const path = ["memory", "pipelineV2", "telemetryEnabled"] as const;
+	const enabled = readTelemetryEnabled(store.agent);
+
+	return (
+		<>
+			<Row title="Anonymous telemetry" desc="Share anonymous usage and performance data to help improve Signet. No memory content or personal identity is sent.">
+				<Switch
+					checked={enabled}
+					onCheckedChange={(next: boolean) => {
+						if (!next) {
+							setConfirmOptOut(true);
+							return;
+						}
+						store.aSetBool(path, true);
+						void store.save();
+					}}
+					aria-label="Anonymous telemetry"
+				/>
+			</Row>
+			<Dialog open={confirmOptOut} onOpenChange={setConfirmOptOut}>
+				<DialogContent className="w-[420px] max-w-[calc(100vw-32px)] rounded-[12px] border border-[oklch(1_0_0/0.12)] bg-card [html:not(.dark)_&]:border-[oklch(0_0_0/0.12)]">
+					<DialogHeader>
+						<DialogTitle>Are you sure?</DialogTitle>
+						<DialogDescription>
+							Turning off anonymous telemetry stops future usage and performance reports. Signet will continue working normally. You can turn telemetry back on here later; it will resume after the daemon restarts.
+						</DialogDescription>
+					</DialogHeader>
+					<div className="rounded-[var(--radius)] border border-[oklch(0.78_0.15_85/0.32)] bg-[oklch(0.78_0.15_85/0.08)] px-3 py-2.5 text-[11.5px] leading-relaxed text-[oklch(0.82_0.15_85)]">
+						This only changes anonymous telemetry. Your memories, configuration, and local Signet data are not deleted.
+					</div>
+					<DialogFooter>
+						<Button type="button" variant="outline" onClick={() => setConfirmOptOut(false)}>
+							Keep telemetry on
+						</Button>
+						<Button
+							type="button"
+							variant="destructive"
+							onClick={() => {
+								store.aSetBool(path, false);
+								void store.save();
+								setConfirmOptOut(false);
+							}}
+						>
+							Turn off telemetry
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+		</>
+	);
+}
+
 function AdvNum({
 	store,
 	path,
@@ -970,6 +1041,11 @@ function AdvancedSection() {
 
 	return (
 		<div className="flex flex-col gap-3">
+			<div className="sig-mcard flex flex-col gap-px">
+				<GroupLabel>Privacy</GroupLabel>
+				<TelemetrySettings store={store} />
+			</div>
+
 			<div className="sig-mcard flex flex-col gap-px">
 				<GroupLabel>Pipeline</GroupLabel>
 				<AdvToggle store={store} path={pv2("enabled")} title="Pipeline enabled" desc="Master switch. The memory pipeline does nothing when disabled." />

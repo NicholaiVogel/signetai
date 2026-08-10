@@ -169,6 +169,7 @@ import {
 	defaultTelemetryLogPath,
 	sanitizeCrashError,
 	setActiveTelemetry,
+	stopActiveTelemetry,
 	telemetryDisabledByEnv,
 } from "./telemetry";
 import { type TranscriptCaptureWorkerHandle, startTranscriptCaptureWorker } from "./transcript-capture-worker";
@@ -1159,6 +1160,15 @@ function startFileWatcher() {
 				logger.info("config", "Auth config reloaded from disk");
 			} catch (e) {
 				logger.error("config", "Failed to reload auth config", e as Error);
+			}
+			try {
+				if (!loadMemoryConfig(AGENTS_DIR).pipelineV2.telemetryEnabled) {
+					setTelemetryRef(undefined);
+					void stopActiveTelemetry();
+					logger.info("telemetry", "Telemetry disabled from configuration");
+				}
+			} catch (e) {
+				logger.error("telemetry", "Failed to apply telemetry configuration; telemetry state unchanged", e as Error);
 			}
 		}
 

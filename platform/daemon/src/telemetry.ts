@@ -257,6 +257,8 @@ export interface TelemetryCollector {
 	deliveryHealth(): TelemetryDeliveryHealth;
 	start(): void;
 	stop(): Promise<void>;
+	/** Discard buffered and unsent events when the user opts out. */
+	discardPending?(): Promise<void>;
 
 	query(opts?: {
 		event?: TelemetryEventType;
@@ -285,6 +287,17 @@ let activeCollector: TelemetryCollector | undefined;
 
 export function setActiveTelemetry(collector: TelemetryCollector | undefined): void {
 	activeCollector = collector;
+}
+
+/** Stop recording immediately when the persisted telemetry opt-out changes. */
+export async function stopActiveTelemetry(): Promise<void> {
+	const collector = activeCollector;
+	activeCollector = undefined;
+	if (collector?.discardPending) {
+		await collector.discardPending();
+	} else if (collector) {
+		await collector.stop();
+	}
 }
 
 export function getActiveTelemetry(): TelemetryCollector | undefined {
@@ -550,6 +563,7 @@ async function sendToPostHog(
 	distinctId: string,
 	events: readonly TelemetryEvent[],
 	daemonVersion: string,
+	signal?: AbortSignal,
 ): Promise<PostHogDeliveryResult> {
 	const batch: readonly PostHogBatchEvent[] = events.map((e) => ({
 		event: e.event,
@@ -568,7 +582,7 @@ async function sendToPostHog(
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ api_key: apiKey, batch }),
-			signal: AbortSignal.timeout(10000),
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000),
 		});
 		return res.ok ? { ok: true } : { ok: false, failureCode: "http" };
 	} catch (error) {
@@ -620,6 +634,7 @@ export function createTelemetryCollector(
 	const installChannel = telemetryInstallChannel(config.installChannel, opts.env);
 	let flushTimer: ReturnType<typeof setTimeout> | null = null;
 	let running = false;
+	let flushAbortController: AbortController | null = null;
 	let recordingStopped = false;
 	let consecutiveFailures = 0;
 	let flushCount = 0;
@@ -1092,22 +1107,29 @@ export function createTelemetryCollector(
 		if (allowRemote && posthogConfigured) {
 			const claimed = claimUnsent(config.flushBatchSize);
 			if (claimed) {
-				const result = await sendToPostHog(
-					config.posthogHost,
-					config.posthogApiKey,
-					installId,
-					claimed.events,
-					reportedVersion,
-				);
-				if (result.ok) {
-					markSent(claimed.token);
-				} else {
-					releaseClaim(claimed.token, result.failureCode);
-					if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-						logger.warn("telemetry", "PostHog unreachable, backing off", {
-							intervalMs: effectiveIntervalMs,
-						});
+				const abortController = new AbortController();
+				flushAbortController = abortController;
+				try {
+					const result = await sendToPostHog(
+						config.posthogHost,
+						config.posthogApiKey,
+						installId,
+						claimed.events,
+						reportedVersion,
+						abortController.signal,
+					);
+					if (result.ok) {
+						markSent(claimed.token);
+					} else {
+						releaseClaim(claimed.token, result.failureCode);
+						if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+							logger.warn("telemetry", "PostHog unreachable, backing off", {
+								intervalMs: effectiveIntervalMs,
+							});
+						}
 					}
+				} finally {
+					if (flushAbortController === abortController) flushAbortController = null;
 				}
 			}
 		}
@@ -1279,6 +1301,26 @@ export function createTelemetryCollector(
 			recordingStopped = true;
 			await flushInternal(true, true);
 			logger.info("telemetry", "Telemetry collector stopped");
+		},
+
+		async discardPending(): Promise<void> {
+			running = false;
+			if (flushTimer !== null) {
+				clearTimeout(flushTimer);
+				flushTimer = null;
+			}
+			recordingStopped = true;
+			buffer.splice(0, buffer.length);
+			flushAbortController?.abort();
+			if (flushPromise) await flushPromise;
+			try {
+				db.withWriteTx((w) => {
+					w.prepare("DELETE FROM telemetry_events WHERE sent_to_posthog = 0").run();
+				});
+			} catch {
+				logger.warn("telemetry", "Failed to discard pending telemetry events");
+			}
+			logger.info("telemetry", "Telemetry collector disabled");
 		},
 
 		query(opts): readonly TelemetryEvent[] {
