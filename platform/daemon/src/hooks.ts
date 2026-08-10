@@ -34,7 +34,7 @@ import {
 	shouldCheckpoint,
 } from "./continuity-state";
 import { listAgentPresence } from "./cross-agent";
-import { getDbAccessor } from "./db-accessor";
+import { type ReadDb, getDbAccessor } from "./db-accessor";
 import { fetchEmbedding } from "./embedding-fetch";
 import {
 	DEFAULT_SESSION_START_MAX_INJECT_TOKENS,
@@ -842,8 +842,11 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			traversalEntityNames = focal.entityNames;
 
 			if (focal.entityIds.length > 0) {
-				const traversalResult = await getDbAccessor().withReadDbAsync((db) =>
-					traverseKnowledgeGraph(focal.entityIds, db, traversalAgentId, traversalRuntimeCfg),
+				const traversalResult = await traverseKnowledgeGraph(
+					focal.entityIds,
+					<T>(fn: (db: ReadDb) => T): T => getDbAccessor().withReadDb(fn),
+					traversalAgentId,
+					traversalRuntimeCfg,
 				);
 				traversalTimedOut = traversalResult.timedOut;
 				traversalTraversedEntities = traversalResult.entityCount;

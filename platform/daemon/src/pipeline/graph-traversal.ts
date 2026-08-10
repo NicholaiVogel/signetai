@@ -61,6 +61,18 @@ export interface TraversalConfig {
 	readonly aspectFilter?: string;
 }
 
+/**
+ * Traversal yields between SQL stages to keep the event loop responsive. A
+ * callback source lets each synchronous query acquire and release a pooled
+ * connection independently; the direct ReadDb form remains useful for
+ * callers that already own a bounded read scope.
+ */
+type ReadDbSource = ReadDb | (<T>(fn: (db: ReadDb) => T) => T);
+
+function withReadDb<T>(source: ReadDbSource, fn: (db: ReadDb) => T): T {
+	return typeof source === "function" ? source(fn) : fn(source);
+}
+
 export interface FocalEntityResult {
 	readonly entityIds: string[];
 	readonly entityNames: string[];
@@ -360,7 +372,7 @@ function pathSize(path: TraversalPath): number {
  * long row loops (#1118) — query shapes and result identity are unchanged.
  */
 async function batchCollectForEntities(
-	db: ReadDb,
+	db: ReadDbSource,
 	entityIds: ReadonlyArray<string>,
 	agentId: string,
 	config: TraversalConfig,
@@ -390,9 +402,12 @@ async function batchCollectForEntities(
 	const entityPh = entityIds.map(() => "?").join(", ");
 
 	// --- 1. Batch constraints for all entities ---
-	const constraintRows = db
-		.prepare(
-			`SELECT asp.entity_id, e.name as entity_name, ea.content, ea.importance
+	const constraintRows = withReadDb(
+		db,
+		(readDb) =>
+			readDb
+				.prepare(
+					`SELECT asp.entity_id, e.name as entity_name, ea.content, ea.importance
 				 FROM entity_aspects asp INDEXED BY idx_entity_aspects_entity
 				 CROSS JOIN entity_attributes ea INDEXED BY idx_entity_attributes_aspect
 				   ON ea.aspect_id = asp.id
@@ -403,13 +418,14 @@ async function batchCollectForEntities(
 				   AND ea.kind = 'constraint'
 				   AND ea.status = 'active'
 				 ORDER BY ea.importance DESC`,
-		)
-		.all(...entityIds, agentId, agentId) as Array<{
-		entity_id: string;
-		entity_name: string;
-		content: string;
-		importance: number;
-	}>;
+				)
+				.all(...entityIds, agentId, agentId) as Array<{
+				entity_id: string;
+				entity_name: string;
+				content: string;
+				importance: number;
+			}>,
+	);
 
 	for (const row of constraintRows) {
 		const key = `${row.entity_name}::${row.content}`;
@@ -441,10 +457,14 @@ async function batchCollectForEntities(
 		aspectArgs = [...entityIds, agentId];
 	}
 
-	const allAspectRows = db.prepare(aspectQuery).all(...aspectArgs) as Array<{
-		id: string;
-		entity_id: string;
-	}>;
+	const allAspectRows = withReadDb(
+		db,
+		(readDb) =>
+			readDb.prepare(aspectQuery).all(...aspectArgs) as Array<{
+				id: string;
+				entity_id: string;
+			}>,
+	);
 
 	// Apply maxAspectsPerEntity budget by grouping and slicing
 	const aspectsByEntity = new Map<string, Array<{ id: string }>>();
@@ -484,9 +504,12 @@ async function batchCollectForEntities(
 		if (config.scope !== undefined) {
 			const scopeClause = config.scope === null ? "AND m.scope IS NULL" : "AND m.scope = ?";
 			const scopeArgs: unknown[] = config.scope === null ? [] : [config.scope];
-			attributeRows = db
-				.prepare(
-					`SELECT ea.memory_id, ea.importance, ea.aspect_id
+			attributeRows = withReadDb(
+				db,
+				(readDb) =>
+					readDb
+						.prepare(
+							`SELECT ea.memory_id, ea.importance, ea.aspect_id
 						 FROM entity_attributes ea INDEXED BY idx_entity_attributes_aspect
 						 JOIN memories m ON m.id = ea.memory_id
 						 WHERE ea.aspect_id IN (${aspectPh})
@@ -494,26 +517,31 @@ async function batchCollectForEntities(
 						   AND ea.status = 'active'
 						   AND m.is_deleted = 0 ${scopeClause}
 						 ORDER BY ea.importance DESC`,
-				)
-				.all(...budgetedAspectIds, agentId, ...scopeArgs) as Array<{
-				memory_id: string | null;
-				importance: number;
-				aspect_id: string;
-			}>;
+						)
+						.all(...budgetedAspectIds, agentId, ...scopeArgs) as Array<{
+						memory_id: string | null;
+						importance: number;
+						aspect_id: string;
+					}>,
+			);
 		} else {
-			attributeRows = db
-				.prepare(
-					`SELECT memory_id, importance, aspect_id FROM entity_attributes INDEXED BY idx_entity_attributes_aspect
+			attributeRows = withReadDb(
+				db,
+				(readDb) =>
+					readDb
+						.prepare(
+							`SELECT memory_id, importance, aspect_id FROM entity_attributes INDEXED BY idx_entity_attributes_aspect
 						 WHERE aspect_id IN (${aspectPh})
 						   AND agent_id = ?
 						   AND status = 'active'
 						 ORDER BY importance DESC`,
-				)
-				.all(...budgetedAspectIds, agentId) as Array<{
-				memory_id: string | null;
-				importance: number;
-				aspect_id: string;
-			}>;
+						)
+						.all(...budgetedAspectIds, agentId) as Array<{
+						memory_id: string | null;
+						importance: number;
+						aspect_id: string;
+					}>,
+			);
 		}
 
 		// Apply maxAttributesPerAspect budget and collect memories
@@ -549,37 +577,45 @@ async function batchCollectForEntities(
 		if (config.scope !== undefined) {
 			const scopeClause = config.scope === null ? "AND m.scope IS NULL" : "AND m.scope = ?";
 			const scopeArgs: unknown[] = config.scope === null ? [] : [config.scope];
-			mentionRows = db
-				.prepare(
-					`SELECT mem.memory_id, COALESCE(m.importance, 0.5) AS importance, mem.entity_id
+			mentionRows = withReadDb(
+				db,
+				(readDb) =>
+					readDb
+						.prepare(
+							`SELECT mem.memory_id, COALESCE(m.importance, 0.5) AS importance, mem.entity_id
 						 FROM memory_entity_mentions mem
 						 JOIN memories m ON m.id = mem.memory_id
 						 WHERE mem.entity_id IN (${entityPh})
 						   AND m.is_deleted = 0 ${scopeClause}
 						 ORDER BY mem.confidence DESC, m.importance DESC
 						 LIMIT ?`,
-				)
-				.all(...entityIds, ...scopeArgs, mentionBudget) as Array<{
-				memory_id: string;
-				importance: number;
-				entity_id: string;
-			}>;
+						)
+						.all(...entityIds, ...scopeArgs, mentionBudget) as Array<{
+						memory_id: string;
+						importance: number;
+						entity_id: string;
+					}>,
+			);
 		} else {
-			mentionRows = db
-				.prepare(
-					`SELECT mem.memory_id, COALESCE(m.importance, 0.5) AS importance, mem.entity_id
+			mentionRows = withReadDb(
+				db,
+				(readDb) =>
+					readDb
+						.prepare(
+							`SELECT mem.memory_id, COALESCE(m.importance, 0.5) AS importance, mem.entity_id
 						 FROM memory_entity_mentions mem
 						 JOIN memories m ON m.id = mem.memory_id
 						 WHERE mem.entity_id IN (${entityPh})
 						   AND m.is_deleted = 0
 						 ORDER BY mem.confidence DESC, m.importance DESC
 						 LIMIT ?`,
-				)
-				.all(...entityIds, mentionBudget) as Array<{
-				memory_id: string;
-				importance: number;
-				entity_id: string;
-			}>;
+						)
+						.all(...entityIds, mentionBudget) as Array<{
+						memory_id: string;
+						importance: number;
+						entity_id: string;
+					}>,
+			);
 		}
 
 		for (const row of mentionRows) {
@@ -608,7 +644,7 @@ async function batchCollectForEntities(
  */
 export async function traverseKnowledgeGraph(
 	focalEntityIds: ReadonlyArray<string>,
-	db: ReadDb,
+	db: ReadDbSource,
 	agentId: string,
 	config: TraversalConfig,
 ): Promise<TraversalResult> {
@@ -624,7 +660,7 @@ export async function traverseKnowledgeGraph(
 	};
 
 	try {
-		if (!hasTraversalTables(db)) return empty;
+		if (!withReadDb(db, hasTraversalTables)) return empty;
 
 		const focalIds = sanitizeEntityIds(focalEntityIds);
 		if (focalIds.length === 0) return empty;
@@ -643,9 +679,12 @@ export async function traverseKnowledgeGraph(
 		// --- Phase 2: Dependency expansion + batch collect for hops ---
 		if (!timedOut && phase1.memoryIds.size < budget) {
 			const focalPh = focalIds.map(() => "?").join(", ");
-			const dependencyRows = db
-				.prepare(
-					`SELECT id, source_entity_id, target_entity_id FROM entity_dependencies
+			const dependencyRows = withReadDb(
+				db,
+				(readDb) =>
+					readDb
+						.prepare(
+							`SELECT id, source_entity_id, target_entity_id FROM entity_dependencies
 						 INDEXED BY idx_entity_dependencies_source
 						 WHERE agent_id = ?
 						   AND source_entity_id IN (${focalPh})
@@ -653,14 +692,15 @@ export async function traverseKnowledgeGraph(
 						   AND COALESCE(confidence, 0.7) >= ?
 						 ORDER BY (COALESCE(confidence, 0.7) * strength) DESC
 						 LIMIT ?`,
-				)
-				.all(
-					agentId,
-					...focalIds,
-					config.minDependencyStrength,
-					config.minConfidence,
-					config.maxBranching * focalIds.length,
-				) as Array<{ id: string; source_entity_id: string; target_entity_id: string }>;
+						)
+						.all(
+							agentId,
+							...focalIds,
+							config.minDependencyStrength,
+							config.minConfidence,
+							config.maxBranching * focalIds.length,
+						) as Array<{ id: string; source_entity_id: string; target_entity_id: string }>,
+			);
 
 			// Filter to hop targets not already visited
 			const hopTargetIds = dependencyRows
@@ -705,7 +745,12 @@ export async function traverseKnowledgeGraph(
 						if (!source) continue;
 						// Check if the memory path involves this hop entity
 						if (existingPath.entityIds.includes(hopId) && !existingPath.dependencyIds.length) {
-							const upgraded = toPathStatic(hopId, source.sourceEntityId, existingPath.aspectIds[0], source.dependencyId);
+							const upgraded = toPathStatic(
+								hopId,
+								source.sourceEntityId,
+								existingPath.aspectIds[0],
+								source.dependencyId,
+							);
 							if (pathSize(upgraded) > pathSize(existingPath)) {
 								phase1.memoryPaths.set(mid, upgraded);
 							}

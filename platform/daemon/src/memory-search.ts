@@ -25,7 +25,7 @@ import {
 	scanMemoryContent,
 	vectorSearch,
 } from "@signet/core";
-import { getDbAccessor, prepareTypedStatement } from "./db-accessor";
+import { type ReadDb, getDbAccessor, prepareTypedStatement } from "./db-accessor";
 import type { EmbeddingRole } from "./embedding-profile";
 import { getLlmProvider } from "./llm";
 import { logger } from "./logger";
@@ -1693,8 +1693,11 @@ export async function hybridRecall(
 						const focal = getFocalEntities(agentId);
 
 						if (focal.entityIds.length > 0) {
-							const traversal = await getDbAccessor().withReadDbAsync((db) =>
-								traverseKnowledgeGraph(focal.entityIds, db, agentId, {
+							const traversal = await traverseKnowledgeGraph(
+								focal.entityIds,
+								<T>(fn: (db: ReadDb) => T): T => getDbAccessor().withReadDb(fn),
+								agentId,
+								{
 									maxAspectsPerEntity: traversalCfg.maxAspectsPerEntity,
 									maxAttributesPerAspect: traversalCfg.maxAttributesPerAspect,
 									maxDependencyHops: traversalCfg.maxDependencyHops,
@@ -1704,7 +1707,7 @@ export async function hybridRecall(
 									minConfidence: traversalCfg.minConfidence,
 									timeoutMs: traversalCfg.timeoutMs,
 									scope: params.scope,
-								}),
+								},
 							);
 
 							// Cosine re-scoring: when query embedding is available,
@@ -1833,8 +1836,11 @@ export async function hybridRecall(
 						const focal = getFocalEntities(agentId);
 
 						if (focal.entityIds.length > 0) {
-							const traversal = await getDbAccessor().withReadDbAsync((db) =>
-								traverseKnowledgeGraph(focal.entityIds, db, agentId, {
+							const traversal = await traverseKnowledgeGraph(
+								focal.entityIds,
+								<T>(fn: (db: ReadDb) => T): T => getDbAccessor().withReadDb(fn),
+								agentId,
+								{
 									maxAspectsPerEntity: traversalCfg.maxAspectsPerEntity,
 									maxAttributesPerAspect: traversalCfg.maxAttributesPerAspect,
 									maxDependencyHops: traversalCfg.maxDependencyHops,
@@ -1843,7 +1849,7 @@ export async function hybridRecall(
 									maxTraversalPaths: traversalCfg.maxTraversalPaths,
 									minConfidence: traversalCfg.minConfidence,
 									timeoutMs: traversalCfg.timeoutMs,
-								}),
+								},
 							);
 
 							const tw = traversalCfg.boostWeight;

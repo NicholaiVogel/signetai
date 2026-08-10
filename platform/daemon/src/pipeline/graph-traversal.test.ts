@@ -33,15 +33,25 @@ function seedGraph(db: Database): void {
 		CREATE INDEX idx_entity_attributes_aspect ON entity_attributes (aspect_id);
 		CREATE INDEX idx_entity_dependencies_source ON entity_dependencies (source_entity_id);
 	`);
-	db.exec(`INSERT INTO entities VALUES ('e1', 'Alpha', 'default'), ('e2', 'Beta', 'default')`);
 	db.exec(
-		`INSERT INTO entity_aspects VALUES ('a1', 'e1', 'default', 1.0, 'preference'), ('a2', 'e2', 'default', 1.0, 'fact')`,
+		`INSERT INTO entities VALUES ('e1', 'Alpha', 'default'), ('e2', 'Beta', 'default'), ('e3', 'Other', 'other')`,
 	);
-	db.exec(`INSERT INTO memories VALUES ('m1', 0.8, 0), ('m2', 0.6, 0), ('m3', 0.5, 0)`);
+	db.exec(
+		`INSERT INTO entity_aspects VALUES
+			('a1', 'e1', 'default', 1.0, 'preference'),
+			('a2', 'e2', 'default', 1.0, 'fact'),
+			('a3', 'e3', 'other', 1.0, 'fact')`,
+	);
+	db.exec(`INSERT INTO memories VALUES
+		('m1', 0.8, 0),
+		('m2', 0.6, 0),
+		('m3', 0.5, 0),
+		('m-other', 0.9, 0)`);
 	db.exec(`INSERT INTO entity_attributes VALUES
 		('a1', 'm1', 'default', 'active', 'fact', 'alpha fact', 0.9),
 		('a1', 'm2', 'default', 'active', 'fact', 'alpha fact 2', 0.7),
-		('a2', 'm3', 'default', 'active', 'fact', 'beta fact', 0.6)`);
+		('a2', 'm3', 'default', 'active', 'fact', 'beta fact', 0.6),
+		('a3', 'm-other', 'other', 'active', 'fact', 'other fact', 0.95)`);
 	db.exec(`INSERT INTO entity_dependencies VALUES ('d1', 'e1', 'e2', 'default', 0.9, 0.8)`);
 	db.exec(`INSERT INTO memory_entity_mentions VALUES ('m1', 'e1', 0.9)`);
 }
@@ -101,5 +111,57 @@ describe("traverseKnowledgeGraph event-loop yields (#1118)", () => {
 		expect(first.memoryIds.size).toBeGreaterThan(0);
 		expect(second.memoryIds.has("m3")).toBe(true);
 		expect(loopBreaths).toBeGreaterThan(0);
+	});
+
+	test("does not retain a read connection across traversal yields (#1348)", async () => {
+		let activeReads = 0;
+		let maxActiveReads = 0;
+		let activeAtYield = 0;
+		const read = <T>(fn: (readDb: ReadDb) => T): T => {
+			activeReads++;
+			maxActiveReads = Math.max(maxActiveReads, activeReads);
+			try {
+				const result = fn(db as unknown as ReadDb);
+				setImmediate(() => {
+					activeAtYield = Math.max(activeAtYield, activeReads);
+				});
+				return result;
+			} finally {
+				activeReads--;
+			}
+		};
+
+		const result = await traverseKnowledgeGraph(["e1"], read, "default", CONFIG);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		expect(result.memoryIds.has("m1")).toBe(true);
+		expect(result.memoryIds.has("m-other")).toBe(false);
+		expect(maxActiveReads).toBe(1);
+		expect(activeAtYield).toBe(0);
+		expect(activeReads).toBe(0);
+	});
+
+	test("releases the read connection when a traversal query fails (#1348)", async () => {
+		let activeReads = 0;
+		const failingDb: ReadDb = {
+			prepare(sql: string) {
+				if (sql.includes("entity_dependencies")) throw new Error("injected traversal failure");
+				return db.prepare(sql) as unknown as ReturnType<ReadDb["prepare"]>;
+			},
+		};
+		const read = <T>(fn: (readDb: ReadDb) => T): T => {
+			activeReads++;
+			try {
+				return fn(failingDb);
+			} finally {
+				activeReads--;
+			}
+		};
+
+		const result = await traverseKnowledgeGraph(["e1"], read, "default", CONFIG);
+
+		expect(result.memoryIds.size).toBe(0);
+		expect(result.constraints).toEqual([]);
+		expect(activeReads).toBe(0);
 	});
 });

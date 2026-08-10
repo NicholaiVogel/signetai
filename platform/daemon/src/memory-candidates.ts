@@ -140,14 +140,14 @@ export async function fetchTraversalCandidates(
 	}
 
 	try {
-		const rows = await getDbAccessor().withReadDbAsync(async (db) => {
-			const rows: ScoredMemory[] = [];
-			const yieldBetweenBatches = yieldEvery(1);
+		const rows: ScoredMemory[] = [];
+		const yieldBetweenBatches = yieldEvery(1);
 
-			for (let offset = 0; offset < boundedMemoryIds.length; offset += TRAVERSAL_CANDIDATE_BATCH_SIZE) {
-				const batch = boundedMemoryIds.slice(offset, offset + TRAVERSAL_CANDIDATE_BATCH_SIZE);
-				const placeholders = batch.map(() => "?").join(", ");
-				const batchRows = db
+		for (let offset = 0; offset < boundedMemoryIds.length; offset += TRAVERSAL_CANDIDATE_BATCH_SIZE) {
+			const batch = boundedMemoryIds.slice(offset, offset + TRAVERSAL_CANDIDATE_BATCH_SIZE);
+			const placeholders = batch.map(() => "?").join(", ");
+			const batchRows = getDbAccessor().withReadDb((db) => {
+				const queried = db
 					.prepare(
 						`SELECT
 						 m.id,
@@ -173,21 +173,19 @@ export async function fetchTraversalCandidates(
 					   AND m.is_deleted = 0`,
 					)
 					.all(agentId, ...batch) as unknown as ScoredMemory[];
-				rows.push(
-					...batchRows.filter((row) =>
-						isMemoryContentContextEligible(db, {
-							agentId,
-							sourceKind: "memory",
-							sourceId: row.id,
-							content: row.content,
-						}),
-					),
+				return queried.filter((row) =>
+					isMemoryContentContextEligible(db, {
+						agentId,
+						sourceKind: "memory",
+						sourceId: row.id,
+						content: row.content,
+					}),
 				);
-				await yieldBetweenBatches();
-			}
+			});
+			rows.push(...batchRows);
+			await yieldBetweenBatches();
+		}
 
-			return rows;
-		});
 		return rows.map((row) => ({
 			...row,
 			effScore: clampScore01(row.effScore),

@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 
 import { resolveAgentId, resolveDaemonAgentId } from "../agent-id";
 import { requirePermission } from "../auth";
-import { getDbAccessor } from "../db-accessor";
+import { type ReadDb, getDbAccessor } from "../db-accessor";
 import { walkImpact } from "../graph-impact";
 import {
 	getAttributesForAspectFiltered,
@@ -399,8 +399,11 @@ export function registerKnowledgeRoutes(app: Hono): void {
 
 		const primaryEntityId = focal.entityIds[0];
 
-		return getDbAccessor().withReadDbAsync(async (db) => {
-			const traversal = await traverseKnowledgeGraph(focal.entityIds, db, agentId, {
+		const traversal = await traverseKnowledgeGraph(
+			focal.entityIds,
+			<T>(fn: (db: ReadDb) => T): T => getDbAccessor().withReadDb(fn),
+			agentId,
+			{
 				maxAspectsPerEntity: traversalCfg.maxAspectsPerEntity,
 				maxAttributesPerAspect: traversalCfg.maxAttributesPerAspect,
 				maxDependencyHops: traversalCfg.maxDependencyHops,
@@ -410,8 +413,10 @@ export function registerKnowledgeRoutes(app: Hono): void {
 				minConfidence: traversalCfg.minConfidence,
 				timeoutMs: traversalCfg.timeoutMs,
 				aspectFilter: aspectFilter || undefined,
-			});
+			},
+		);
 
+		return getDbAccessor().withReadDb((db) => {
 			const entityRow = db
 				.prepare(
 					`SELECT id, name, entity_type, description
