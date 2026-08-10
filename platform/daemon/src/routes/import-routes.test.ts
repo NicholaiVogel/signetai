@@ -86,6 +86,28 @@ describe("import routes", () => {
 		expect(loadSourcesConfig(dir).sources).toHaveLength(1);
 	});
 
+	it("indexes an existing duplicate for a different agent scope", async () => {
+		const content = "name,email\nAda,ada@example.com\n";
+		const first = await app().request("/api/sources/import", {
+			method: "POST",
+			body: formWithFile(new File([content], "contacts.csv", { type: "text/csv" })),
+		});
+		process.env.SIGNET_AGENT_ID = "second-import-test-agent";
+		const second = await app().request("/api/sources/import", {
+			method: "POST",
+			body: formWithFile(new File([content], "contacts.csv", { type: "text/csv" })),
+		});
+
+		expect(first.status).toBe(201);
+		expect(second.status).toBe(201);
+		expect(await second.json()).toMatchObject({
+			imported: 1,
+			failed: 0,
+			files: [{ fileName: "contacts.csv", status: "imported", duplicate: true }],
+		});
+		expect(loadSourcesConfig(dir).sources).toHaveLength(1);
+	});
+
 	it("rejects a batch that exceeds the file-count boundary", async () => {
 		const form = new FormData();
 		for (let index = 0; index < 26; index++)

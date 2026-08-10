@@ -1,6 +1,7 @@
 import { addImportedSource, markSourceIndexed, removeSource } from "@signet/core";
 import type { Hono } from "hono";
 import { resolveDaemonAgentId } from "../agent-id";
+import { getDbAccessor } from "../db-accessor";
 import {
 	IMPORT_MAX_BATCH_BYTES,
 	IMPORT_MAX_FILES,
@@ -85,7 +86,7 @@ export function registerImportRoutes(app: Hono): void {
 				statuses.push({ fileName: file.name, status: "failed", error: added.error });
 				continue;
 			}
-			if (added.duplicate && duplicateMode === "skip") {
+			if (added.duplicate && duplicateMode === "skip" && hasIndexedSource(added.source.id, resolveDaemonAgentId())) {
 				statuses.push({ fileName: file.name, status: "duplicate", sourceId: added.source.id });
 				continue;
 			}
@@ -148,6 +149,20 @@ export function registerImportRoutes(app: Hono): void {
 
 		const failed = statuses.filter((status) => status.status === "failed").length;
 		return c.json({ imported, failed, files: statuses }, failed > 0 ? 207 : 201);
+	});
+}
+
+function hasIndexedSource(sourceId: string, agentId: string): boolean {
+	return getDbAccessor().withReadDb((db) => {
+		const row = db
+			.prepare(
+				`SELECT 1 AS present
+				 FROM memory_artifacts
+				 WHERE agent_id = ? AND source_id = ? AND COALESCE(is_deleted, 0) = 0
+				 LIMIT 1`,
+			)
+			.get(agentId, sourceId) as { present: number } | null | undefined;
+		return row != null;
 	});
 }
 
