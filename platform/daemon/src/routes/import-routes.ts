@@ -96,6 +96,7 @@ export function registerImportRoutes(app: Hono): void {
 			return c.json({ error: `Import batch exceeds the ${IMPORT_MAX_BATCH_BYTES} byte limit` }, 413);
 
 		let imported = 0;
+		let normalizedBatchBytes = 0;
 		for (const file of entries) {
 			if (file.size > IMPORT_MAX_FILE_BYTES) {
 				statuses.push({
@@ -110,6 +111,16 @@ export function registerImportRoutes(app: Hono): void {
 				statuses.push({ fileName: file.name, status: "failed", error: normalized.error });
 				continue;
 			}
+			const normalizedBytes = persistedImportBytes(normalized.value);
+			if (normalizedBatchBytes + normalizedBytes > IMPORT_MAX_BATCH_BYTES) {
+				statuses.push({
+					fileName: file.name,
+					status: "failed",
+					error: `Normalized import batch exceeds the ${IMPORT_MAX_BATCH_BYTES} byte limit`,
+				});
+				continue;
+			}
+			normalizedBatchBytes += normalizedBytes;
 
 			const agentsDir = process.env.SIGNET_PATH;
 			const replacedSource =
@@ -276,6 +287,18 @@ function hasIndexedSource(sourceId: string, agentId: string): boolean {
 			.get(agentId, sourceId) as { present: number } | null | undefined;
 		return row != null;
 	});
+}
+
+function persistedImportBytes(value: {
+	readonly content: string;
+	readonly format: string;
+	readonly searchChunks: readonly { readonly content: string }[];
+}): number {
+	const encoder = new TextEncoder();
+	const contentBytes = encoder.encode(value.content).byteLength;
+	const canonicalBytes = value.format === "json" ? contentBytes : 0;
+	const chunkBytes = value.searchChunks.reduce((total, chunk) => total + encoder.encode(chunk.content).byteLength, 0);
+	return contentBytes + canonicalBytes + chunkBytes;
 }
 
 async function boundedFormData(request: Request): Promise<FormData> {

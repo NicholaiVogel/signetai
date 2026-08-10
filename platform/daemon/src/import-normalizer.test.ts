@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { normalizeImportedFile } from "./import-normalizer";
+import { IMPORT_MAX_FILE_BYTES, normalizeImportedFile } from "./import-normalizer";
 
 function bytes(value: string): Uint8Array {
 	return new TextEncoder().encode(value);
@@ -33,6 +33,19 @@ describe("import normalizer", () => {
 		expect(result.value.format).toBe("csv");
 		expect(result.value.content).toBe("name,email\nAda,ada@example.com\n");
 		expect(result.value.sourceMeta).toEqual({ representation: "table", rowCount: 1 });
+	});
+
+	it("rejects normalized content that expands beyond the per-file limit", async () => {
+		const result = await normalizeImportedFile(
+			"large.txt",
+			new Uint8Array(IMPORT_MAX_FILE_BYTES).fill(97),
+			"text/plain",
+		);
+
+		expect(result).toEqual({
+			ok: false,
+			error: `Normalized file exceeds the ${IMPORT_MAX_FILE_BYTES} byte limit`,
+		});
 	});
 
 	it("projects HTML to text without scripts or markup", async () => {

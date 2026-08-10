@@ -107,9 +107,12 @@ export async function normalizeImportedFile(
 		}
 		if (!ANYDOC_EXTENSIONS.has(extension)) return failure(`Unsupported file format: ${extension || "unknown"}`);
 
-		const markdown = normalizeText(await toMarkdownBytes(bytes, formatFromExtension(extension)));
-		if (!markdown.trim()) return failure("Document conversion produced no meaningful content");
-		return success(safeName, extension.slice(1), markdown, {
+		const markdown = await toMarkdownBytes(bytes, formatFromExtension(extension));
+		if (new TextEncoder().encode(markdown).byteLength > IMPORT_MAX_FILE_BYTES)
+			return failure(`Converted file exceeds the ${IMPORT_MAX_FILE_BYTES} byte limit`);
+		const normalizedMarkdown = normalizeText(markdown);
+		if (!normalizedMarkdown.trim()) return failure("Document conversion produced no meaningful content");
+		return success(safeName, extension.slice(1), normalizedMarkdown, {
 			representation: "markdown-projection",
 			converter: "anydoc",
 		});
@@ -126,6 +129,8 @@ function success(
 	sourceMeta: Readonly<Record<string, unknown>>,
 	searchChunks: readonly NormalizedImportChunk[] = [],
 ): NormalizeImportResult {
+	if (new TextEncoder().encode(content).byteLength > IMPORT_MAX_FILE_BYTES)
+		return failure(`Normalized file exceeds the ${IMPORT_MAX_FILE_BYTES} byte limit`);
 	return {
 		ok: true,
 		value: {
