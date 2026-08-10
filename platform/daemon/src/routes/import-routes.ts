@@ -64,6 +64,8 @@ export function registerImportRoutes(app: Hono): void {
 			duplicateModeValue === "replace" || duplicateModeValue === "reimport" ? duplicateModeValue : "skip";
 		const statuses: ImportFileStatus[] = [];
 		const pathFiles: File[] = [];
+		const uploadedBytes = uploadedEntries.reduce((total, file) => total + file.size, 0);
+		let pathBytes = 0;
 		for (const path of pathEntries) {
 			try {
 				const fileStat = await stat(path);
@@ -76,6 +78,9 @@ export function registerImportRoutes(app: Hono): void {
 					});
 					continue;
 				}
+				pathBytes += fileStat.size;
+				if (uploadedBytes + pathBytes > IMPORT_MAX_BATCH_BYTES)
+					return c.json({ error: `Import batch exceeds the ${IMPORT_MAX_BATCH_BYTES} byte limit` }, 413);
 				pathFiles.push(new File([new Uint8Array(await readFile(path))], basename(path)));
 			} catch (error) {
 				statuses.push({
