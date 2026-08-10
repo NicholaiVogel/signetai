@@ -6,8 +6,8 @@
  * embedding, and indexing are handled downstream by the document worker.
  */
 
-import { type Dirent, readFileSync, readdirSync } from "node:fs";
-import { constants, access, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { constants, access, open, readdir, stat } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import type {
 	ConnectorConfig,
@@ -17,6 +17,7 @@ import type {
 	SyncError,
 	SyncResult,
 } from "@signet/core";
+import { yieldEvery } from "../async-yield";
 import type { DbAccessor } from "../db-accessor";
 import { logger } from "../logger";
 import { enqueueDocumentIngestJob } from "../pipeline/document-worker";
@@ -75,11 +76,13 @@ async function* walkDir(
 ): AsyncGenerator<string> {
 	let entries: Dirent<string>[];
 	try {
-		entries = readdirSync(dir, { withFileTypes: true });
+		entries = await readdir(dir, { withFileTypes: true });
 	} catch {
 		return;
 	}
+	const yielder = yieldEvery(100);
 	for (const entry of entries) {
+		await yielder();
 		if (!dot && entry.name.startsWith(".")) continue;
 		const relativePath = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
 		if (ignorePatterns.some((p) => entry.name === p || relativePath === p || relativePath.startsWith(`${p}/`)))
@@ -146,12 +149,11 @@ export async function discoverFiles(settings: FilesystemSettings): Promise<reado
 
 		if (!fileStat.isFile()) continue;
 		if (fileStat.size > maxFileSize) {
-			logger.debug("pipeline", "Skipping oversized file", {
+			logger.debug("pipeline", "Discovered oversized file", {
 				path: rel,
 				size: fileStat.size,
 				maxFileSize,
 			});
-			continue;
 		}
 
 		seen.add(rel);
@@ -184,11 +186,28 @@ function findDocBySourceUrl(accessor: DbAccessor, sourceUrl: string): ExistingDo
 	});
 }
 
-function readFileContent(absolutePath: string, maxFileSize: number): string | null {
+export async function readFileContent(file: DiscoveredFile, maxFileSize: number): Promise<string | null> {
+	if (file.size > maxFileSize) return null;
 	try {
-		const buf = readFileSync(absolutePath);
-		if (buf.length > maxFileSize) return null;
-		return buf.toString("utf-8");
+		const handle = await open(file.absolutePath, "r");
+		try {
+			const fileStat = await handle.stat();
+			if (!fileStat.isFile() || fileStat.size > maxFileSize) return null;
+
+			const maxBytes = Math.floor(maxFileSize);
+			const buffer = Buffer.alloc(maxBytes + 1);
+			let bytesRead = 0;
+			while (bytesRead < buffer.length) {
+				const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+				bytesRead += result.bytesRead;
+				if (result.bytesRead === 0) break;
+			}
+
+			if (bytesRead > maxFileSize) return null;
+			return buffer.subarray(0, bytesRead).toString("utf-8");
+		} finally {
+			await handle.close();
+		}
 	} catch {
 		return null;
 	}
@@ -253,7 +272,7 @@ async function processFile(
 ): Promise<{ added: number; updated: number; error: SyncError | null }> {
 	const sourceUrl = file.absolutePath;
 
-	const content = readFileContent(file.absolutePath, maxFileSize);
+	const content = await readFileContent(file, maxFileSize);
 	if (content === null) {
 		return {
 			added: 0,

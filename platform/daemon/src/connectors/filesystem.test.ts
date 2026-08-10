@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverFiles, matchConnectorPattern, matchGlob } from "./filesystem";
+import { discoverFiles, matchConnectorPattern, matchGlob, readFileContent } from "./filesystem";
 
 describe("globToRegex", () => {
 	test("**/*.md matches root-level files", () => {
@@ -85,6 +85,29 @@ describe("globToRegex", () => {
 			});
 
 			expect(files.map((file) => file.relativePath).sort()).toEqual(["README.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("filesystem discovery reports oversized files without reading their contents", async () => {
+		const root = mkdtempSync(join(tmpdir(), "signet-fs-connector-"));
+		try {
+			const path = join(root, "large.md");
+			writeFileSync(path, Buffer.alloc(32, "x"));
+
+			const files = await discoverFiles({
+				rootPath: root,
+				patterns: ["**/*.md"],
+				ignorePatterns: [],
+				maxFileSize: 16,
+			});
+
+			expect(files).toHaveLength(1);
+			const file = files[0];
+			expect(file?.size).toBe(32);
+			if (!file) throw new Error("expected oversized file metadata");
+			expect(await readFileContent(file, 16)).toBeNull();
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
