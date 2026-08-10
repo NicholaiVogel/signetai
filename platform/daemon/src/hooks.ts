@@ -14,6 +14,8 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type AgentRosterReadPolicy,
+	type PROMPT_CONTEXT_VERSION,
+	createPromptContext,
 	identityModeManagesFiles,
 	identityModeReadsFiles,
 	loadIdentityMode,
@@ -279,6 +281,8 @@ export interface SessionStartResponse {
 	}>;
 	recentContext?: string;
 	inject: string;
+	contextHash?: string;
+	contextVersion?: typeof PROMPT_CONTEXT_VERSION;
 	warnings?: string[];
 }
 
@@ -314,6 +318,8 @@ export interface UserPromptSubmitRequest {
 
 export interface UserPromptSubmitResponse {
 	inject: string;
+	contextHash?: string;
+	contextVersion?: typeof PROMPT_CONTEXT_VERSION;
 	memoryCount: number;
 	queryTerms?: string;
 	engine?: string;
@@ -669,12 +675,12 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 		const warnings = req.sessionKey
 			? [getExpiryWarning(req.sessionKey, agentId)].filter((w): w is string => w !== null)
 			: undefined;
-		return {
+		return attachPromptContext({
 			identity: { name: "Agent" },
 			memories: [],
 			inject: `[memory active | /remember | /recall]\n# Current Date & Time\n${now} (${tz})`,
 			warnings: warnings?.length ? warnings : undefined,
-		};
+		});
 	}
 
 	// Anonymous usage telemetry: a real session start (dedup stubs and
@@ -1241,7 +1247,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	// Mark this session as having received the full inject
 	markSessionStartDedupe(req);
 
-	return {
+	return attachPromptContext({
 		identity,
 		memories: memories.map((m) => ({
 			id: m.id,
@@ -1257,7 +1263,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			const w = [getExpiryWarning(req.sessionKey, resolveAgentId(req))].filter((v): v is string => v !== null);
 			return w.length > 0 ? w : undefined;
 		})(),
-	};
+	});
 }
 
 export function handlePreCompaction(req: PreCompactionRequest): PreCompactionResponse {
@@ -1366,7 +1372,8 @@ function finalizeUserPromptSubmitSuccess(
 	log: typeof logger,
 	engineOverride?: string,
 ): UserPromptSubmitResponse {
-	const inject = typeof result.inject === "string" ? result.inject : "";
+	const contextualResult = attachPromptContext(result);
+	const inject = contextualResult.inject;
 	const rawMemoryCount = typeof result.memoryCount === "number" ? result.memoryCount : 0;
 	const memoryCount = Number.isFinite(rawMemoryCount) && rawMemoryCount >= 0 ? rawMemoryCount : 0;
 	const engine =
@@ -1389,7 +1396,23 @@ function finalizeUserPromptSubmitSuccess(
 		durationMs: duration,
 	});
 
-	return result;
+	return contextualResult;
+}
+
+function attachPromptContext<T extends { readonly inject: string }>(
+	result: T,
+): T & {
+	readonly contextHash?: string;
+	readonly contextVersion?: typeof PROMPT_CONTEXT_VERSION;
+} {
+	const context = createPromptContext(result.inject);
+	if (!context) return { ...result, inject: "" };
+	return {
+		...result,
+		inject: context.serialized,
+		contextHash: context.hash,
+		contextVersion: context.version,
+	};
 }
 
 function entityMemoryToRecallResult(memory: PromptEntityContextMemory): RecallResult {
@@ -1643,14 +1666,10 @@ export async function handleUserPromptSubmit(
 		}
 	}
 
-	// Build lightweight metadata header (injected on every prompt)
-	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-	const now = new Date().toLocaleString("en-US", {
-		timeZone: tz,
-		dateStyle: "full",
-		timeStyle: "short",
-	});
-	const metadataHeader = `# Current Date & Time\n${now} (${tz})\n`;
+	// Per-prompt context must not contain a wall-clock value. Harnesses may
+	// replay the same response for title, primary, retry, and tool-loop calls;
+	// dynamic metadata would invalidate their prompt cache and its hash.
+	const metadataHeader = "";
 	const expiryWarning = req.sessionKey ? deps.getExpiryWarning(req.sessionKey, agentId) : null;
 	const warnings = expiryWarning ? [expiryWarning] : undefined;
 

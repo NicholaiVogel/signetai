@@ -34,6 +34,21 @@ specs:
       - "Agent recovers meaningful context when resuming after session compaction or restart"
     decision: null
 
+  - id: prompt-context-contract
+    status: complete
+    path: docs/specs/complete/prompt-context-contract.md
+    hard_depends_on:
+      - session-continuity-protocol
+      - signet-runtime
+    soft_depends_on: []
+    blocks: []
+    informed_by: []
+    success_criteria:
+      - "Identical memory state produces identical injected API bytes and a verifiable context hash across supported harnesses"
+      - "Injected memory context remains outside canonical user/assistant transcripts and provider output cannot expose internal context fences"
+      - "Session, agent, branch, resume, compression, and rewind boundaries do not reuse context across scopes"
+    decision: null
+
   - id: memory-md-temporal-head
     status: approved
     path: docs/specs/approved/memory-md-temporal-head.md

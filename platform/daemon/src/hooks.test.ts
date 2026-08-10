@@ -747,6 +747,10 @@ describe("handleSessionStart", () => {
 	test.serial("inject starts with memory status line", async () => {
 		const result = await handleSessionStart({ harness: "test" });
 		expect(result.inject).toContain("[memory active");
+		expect(result.inject.startsWith("<signet-memory-context>\n")).toBe(true);
+		expect(result.inject.endsWith("\n</signet-memory-context>\n")).toBe(true);
+		expect(result.contextVersion).toBe(1);
+		expect(result.contextHash).toMatch(/^[0-9a-f]{64}$/);
 	});
 
 	test.serial("keeps tokenizer encodes off the event loop for a populated recall pool (#1114)", async () => {

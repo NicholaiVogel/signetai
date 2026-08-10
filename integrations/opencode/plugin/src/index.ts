@@ -19,6 +19,7 @@ import {
 	readStaticIdentity,
 	resolvePromptSubmitTimeoutMs,
 	resolveSessionStartTimeoutMs,
+	scrubPromptContext,
 } from "@signet/core";
 import { createDaemonClient } from "./daemon-client.js";
 import { createTools } from "./tools.js";
@@ -388,6 +389,9 @@ export const SignetPlugin: Plugin = async ({ directory, client: oc }) => {
 			if (parts.length > 0) {
 				output.system.push(parts.join("\n"));
 			}
+		},
+		"experimental.text.complete": async (_input, output): Promise<void> => {
+			output.text = scrubPromptContext(output.text);
 		},
 
 		// ------------------------------------------------------------------

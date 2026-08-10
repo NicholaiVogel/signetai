@@ -25,6 +25,10 @@ interface OpenCodeHooks {
 		input: { readonly sessionID: string },
 		output: { readonly system: string[] },
 	) => Promise<void>;
+	readonly "experimental.text.complete": (
+		input: { readonly sessionID: string; readonly messageID: string; readonly partID: string },
+		output: { text: string },
+	) => Promise<void>;
 	readonly "experimental.session.compacting": (
 		input: { readonly sessionID: string },
 		output: { readonly context: string[] },
@@ -144,8 +148,8 @@ describe("SignetPlugin OpenCode lifecycle", () => {
 			{ sessionID: "child-chat-first" },
 			{ parts: [{ type: "text", text: "start the delegated task" }] },
 		);
-		const titleOutput = { system: [] };
-		const primaryOutput = { system: [] };
+		const titleOutput = { system: ["provider system prefix"] };
+		const primaryOutput = { system: ["provider system prefix"] };
 		await hooks["experimental.chat.system.transform"]({ sessionID: "child-chat-first" }, titleOutput);
 		await hooks["experimental.chat.system.transform"]({ sessionID: "child-chat-first" }, primaryOutput);
 
@@ -153,6 +157,20 @@ describe("SignetPlugin OpenCode lifecycle", () => {
 			expect(output.system.join("\n")).toContain("session-start:child-chat-first");
 			expect(output.system.join("\n")).toContain("prompt-submit-context");
 		}
+		expect(titleOutput.system).toEqual(primaryOutput.system);
+	});
+
+	test("scrubs a memory fence before completed assistant text is exposed", async () => {
+		installFetch();
+		const hooks = await createHooks();
+		const output = { text: "visible <signet-memory-context>private context</signet-memory-context> text" };
+
+		await hooks["experimental.text.complete"](
+			{ sessionID: "scrub-session", messageID: "message", partID: "part" },
+			output,
+		);
+
+		expect(output.text).toBe("visible  text");
 	});
 
 	test("clears prior turn context when the next message has no text", async () => {

@@ -211,6 +211,16 @@ export type {
 	MigrationResult,
 } from "./migration";
 export * from "./constants";
+export {
+	PROMPT_CONTEXT_CLOSE,
+	PROMPT_CONTEXT_OPEN,
+	PROMPT_CONTEXT_VERSION,
+	PromptContextStreamScrubber,
+	createPromptContext,
+	normalizePromptContext,
+	scrubPromptContext,
+} from "./prompt-context";
+export type { PromptContextEnvelope } from "./prompt-context";
 
 export {
 	SIGNET_GRAPHIQ_PLUGIN_ID,

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor, initDbAccessorAsync } from "./db-accessor";
 import type { EmbeddingConfig } from "./memory-config";
-import { buildEntityPromptContext, promptPhraseSpan } from "./prompt-entity-context";
+import { buildEntityContextInject, buildEntityPromptContext, promptPhraseSpan } from "./prompt-entity-context";
 
 let dir = "";
 let prev: string | undefined;
@@ -96,6 +96,15 @@ function seedEntityContext(): void {
 }
 
 describe("prompt entity context scaling (#1059)", () => {
+	it("formats prompt context without a dynamic wall-clock header", () => {
+		const first = buildEntityContextInject("", ["Memory one", "Memory two"]);
+		const second = buildEntityContextInject("", ["Memory one", "Memory two"]);
+
+		expect(first).toBe(second);
+		expect(first).toBe("\n\n## Relevant Entity Context\n\nMemory one\nMemory two\n");
+		expect(first).not.toContain("Current Date & Time");
+	});
+
 	beforeAll(async () => {
 		prev = process.env.SIGNET_PATH;
 		dir = mkdtempSync(join(tmpdir(), "signet-prompt-entity-context-"));
