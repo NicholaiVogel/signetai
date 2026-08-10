@@ -150,12 +150,11 @@ ratio (soft-deleted rows / total rows). A tombstone ratio above 30%
 deducts 0.3. The `dbSizeBytes` field is always 0 from a read connection
 — it's present in the type for future use.
 
-**Index** (weight 0.19) compares the FTS5 content table row count against
-active (non-deleted) memory rows, and measures embedding coverage —
+**Index** (weight 0.19) compares the physical FTS5 document count against
+canonical memory rows, including retained tombstones, and measures embedding coverage —
 the fraction of active memories that have an `embedding_model` set (see
-[Memory](/memory/) for how memories are stored). FTS mismatch (FTS row count
-more than 10% above active count, indicating tombstones are surfacing
-in full-text search) deducts 0.5. Embedding
+[Memory](/memory/) for how memories are stored). FTS mismatch deducts 0.5.
+Embedding
 coverage below 80% deducts 0.3.
 
 **Provider** (weight 0.24) uses a separate in-memory ring buffer

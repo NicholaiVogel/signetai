@@ -5,6 +5,7 @@
  * data structs — no side effects, no mutations.
  */
 
+import { readMemoriesFtsIndexRowCount } from "@signet/core";
 import type { ReadDb } from "./db-accessor";
 import {
 	DEFAULT_QUEUE_THRESHOLDS,
@@ -339,30 +340,34 @@ function getDatabaseSizeBytes(db: ReadDb): number {
 }
 
 export function getIndexHealth(db: ReadDb): IndexHealth {
-	// Active (non-deleted) memories are what should be searchable
-	const memRow = db.prepare("SELECT COUNT(*) AS cnt FROM memories WHERE is_deleted = 0").get() as
+	// FTS external-content indexes intentionally retain soft-deleted memories;
+	// health must compare the physical index to the full canonical row set.
+	const canonicalMemRow = db.prepare("SELECT COUNT(*) AS cnt FROM memories").get() as { cnt: number } | undefined;
+	const activeMemRow = db.prepare("SELECT COUNT(*) AS cnt FROM memories WHERE is_deleted = 0").get() as
 		| { cnt: number }
 		| undefined;
 
-	const memoriesRowCount = memRow?.cnt ?? 0;
+	const canonicalMemoriesRowCount = canonicalMemRow?.cnt ?? 0;
+	// Preserve the existing public field and embedding denominator: embedding
+	// coverage describes live memories, not retained tombstones.
+	const memoriesRowCount = activeMemRow?.cnt ?? 0;
 
-	// memories_fts is a content table backed by memories — COUNT(*) returns
-	// the total memories row count (active + tombstones). A mismatch against
-	// the active count reveals tombstone accumulation visible in FTS.
-	// Guard against missing table (can happen on upgrades before self-heal).
+	// COUNT(*) FROM memories_fts resolves through the external content table and
+	// therefore cannot detect an index gap. The docsize shadow table counts the
+	// documents actually present in the FTS index.
 	let ftsRowCount = 0;
+	let ftsIndexAvailable = false;
 	try {
-		const ftsRow = db.prepare("SELECT COUNT(*) AS cnt FROM memories_fts").get() as { cnt: number } | undefined;
-		ftsRowCount = ftsRow?.cnt ?? 0;
+		const indexRowCount = readMemoriesFtsIndexRowCount(db);
+		if (indexRowCount !== null) {
+			ftsRowCount = indexRowCount;
+			ftsIndexAvailable = true;
+		}
 	} catch {
-		// FTS table missing — report as full mismatch
+		// Missing FTS shadow state — report as a full mismatch.
 	}
 
-	// Mismatch means FTS backing table has more rows than active memories,
-	// i.e., tombstones are included in the FTS index. Detect when the gap
-	// exceeds 10% of the active count (a content table will always show
-	// at least the active rows, so ftsRowCount >= memoriesRowCount).
-	const ftsMismatch = memoriesRowCount > 0 && ftsRowCount > memoriesRowCount * 1.1;
+	const ftsMismatch = !ftsIndexAvailable || canonicalMemoriesRowCount !== ftsRowCount;
 
 	const embRow = db
 		.prepare(

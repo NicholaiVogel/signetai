@@ -306,13 +306,11 @@ describe("getIndexHealth", () => {
 		expect(result.embeddingCoverage).toBe(1);
 	});
 
-	test("FTS mismatch detected when tombstones exceed 10% of active count", () => {
-		// memories_fts is a content table backed by memories.
-		// COUNT(*) on it returns ALL memories (active + deleted).
-		// Insert 5 active, 6 deleted => ftsRowCount=11, memoriesRowCount=5
-		// 11 > 5 * 1.1 (5.5) => mismatch
+	test("tombstones remain searchable in the FTS index without degrading health", () => {
+		// memories_fts is an external-content table. Soft deletion changes the
+		// canonical row, but intentionally does not remove its indexed document.
 		for (let i = 0; i < 5; i++) {
-			insertMemory(db, `mem-active-fts-${i}`);
+			insertMemory(db, `mem-active-fts-${i}`, { embeddingModel: "text-embedding-3" });
 		}
 		for (let i = 0; i < 6; i++) {
 			insertMemory(db, `mem-del-fts-${i}`, { isDeleted: 1 });
@@ -321,8 +319,9 @@ describe("getIndexHealth", () => {
 		const result = getIndexHealth(asReadDb(db));
 		expect(result.memoriesRowCount).toBe(5);
 		expect(result.ftsRowCount).toBe(11);
-		expect(result.ftsMismatch).toBe(true);
-		expect(result.score).toBeLessThanOrEqual(0.5);
+		expect(result.ftsMismatch).toBe(false);
+		expect(result.embeddingCoverage).toBe(1);
+		expect(result.score).toBe(1);
 	});
 
 	test("low embedding coverage degrades index health", () => {

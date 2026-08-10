@@ -83,7 +83,7 @@ function buildRecommendations(report: DiagnosticsReport): RepairRecommendation[]
 		recs.push({
 			domain: "index",
 			action: "checkFtsConsistency",
-			trigger: `FTS mismatch: ${report.index.memoriesRowCount} active vs ${report.index.ftsRowCount} FTS`,
+			trigger: `FTS mismatch: ${report.index.ftsRowCount} indexed rows`,
 		});
 	}
 	if (report.storage.deletedTombstones > 0) {

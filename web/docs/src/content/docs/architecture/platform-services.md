@@ -131,9 +131,11 @@ scan.
   (batch limit 50 per call).
 - `releaseStaleLeases`: resets `leased` jobs whose `leased_at` predates
   the lease timeout back to `pending`.
-- `checkFtsConsistency`: compares FTS row count to active memory count.
-  If mismatch > 10% and `repair = true`, runs
-  `INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`.
+- `checkFtsConsistency`: compares the physical FTS index document count to
+  the canonical memory row count, including retained tombstones. A mismatch
+  is reported without repair; with `repair = true`, rebuild admission is
+  rate-limited, confirmed for autonomous callers, and sent through the async
+  write queue before `INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`.
 - `triggerRetentionSweep`: calls the retention worker's `sweep()` method
   immediately outside the normal schedule.
 

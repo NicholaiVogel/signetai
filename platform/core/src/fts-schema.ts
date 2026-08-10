@@ -58,6 +58,18 @@ export function readMemoriesFtsSql(db: FtsSchemaQueryDb): string | null {
 	return typeof row?.sql === "string" ? row.sql : null;
 }
 
+/**
+ * Return the number of documents physically present in the FTS index.
+ *
+ * An external-content FTS table resolves COUNT(*) through its content table,
+ * so COUNT(*) FROM memories_fts includes tombstones and cannot describe index
+ * integrity. The docsize shadow table tracks indexed documents instead.
+ */
+export function readMemoriesFtsIndexRowCount(db: FtsSchemaQueryDb): number | null {
+	const row = db.prepare("SELECT COUNT(*) AS count FROM memories_fts_docsize").get() as { count?: unknown } | undefined;
+	return typeof row?.count === "number" ? row.count : null;
+}
+
 export function memoriesFtsNeedsTokenizerRepair(sql: string | null): boolean {
 	if (sql === null) return false;
 	const normalized = normalizeSql(sql);

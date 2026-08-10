@@ -35,7 +35,7 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function asAccessor(db: Database): DbAccessor {
+function asAccessor(db: Database, onAsyncWrite?: () => void): DbAccessor {
 	return {
 		withWriteTx<T>(fn: (wdb: WriteDb) => T): T {
 			db.exec("BEGIN IMMEDIATE");
@@ -48,6 +48,18 @@ function asAccessor(db: Database): DbAccessor {
 				throw err;
 			}
 		},
+		withWriteTxAsync<T>(fn: (wdb: WriteDb) => T): Promise<T> {
+			onAsyncWrite?.();
+			return new Promise<T>((resolve, reject) => {
+				setTimeout(() => {
+					try {
+						resolve(this.withWriteTx(fn));
+					} catch (error) {
+						reject(error);
+					}
+				}, 0);
+			});
+		},
 		withReadDb<T>(fn: (rdb: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
 		},
@@ -57,7 +69,7 @@ function asAccessor(db: Database): DbAccessor {
 	};
 }
 
-function installLegacyPorterMemoriesFts(db: Database): void {
+function installLegacyPorterMemoriesFts(db: Database, indexedId?: string, tokenizer = "porter unicode61"): void {
 	db.exec("DROP TRIGGER IF EXISTS memories_ai");
 	db.exec("DROP TRIGGER IF EXISTS memories_ad");
 	db.exec("DROP TRIGGER IF EXISTS memories_au");
@@ -67,7 +79,7 @@ function installLegacyPorterMemoriesFts(db: Database): void {
 			content,
 			content='memories',
 			content_rowid='rowid',
-			tokenize='porter unicode61'
+			tokenize='${tokenizer}'
 		);
 	`);
 	db.exec(`
@@ -86,7 +98,13 @@ function installLegacyPorterMemoriesFts(db: Database): void {
 			INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
 		END;
 	`);
-	db.exec("INSERT INTO memories_fts(rowid, content) SELECT rowid, content FROM memories");
+	if (indexedId === undefined) {
+		db.exec("INSERT INTO memories_fts(rowid, content) SELECT rowid, content FROM memories");
+	} else {
+		db.prepare("INSERT INTO memories_fts(rowid, content) SELECT rowid, content FROM memories WHERE id = ?").run(
+			indexedId,
+		);
+	}
 }
 
 const TEST_CFG: PipelineV2Config = {
@@ -762,11 +780,15 @@ describe("releaseStaleLeases", () => {
 describe("checkFtsConsistency", () => {
 	let db: Database;
 	let accessor: DbAccessor;
+	let asyncWriterUsed = false;
 
 	beforeEach(() => {
 		db = new Database(":memory:");
+		asyncWriterUsed = false;
 		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
-		accessor = asAccessor(db);
+		accessor = asAccessor(db, () => {
+			asyncWriterUsed = true;
+		});
 		resetFtsRebuildConfirmation();
 	});
 
@@ -774,10 +796,10 @@ describe("checkFtsConsistency", () => {
 		db.close();
 	});
 
-	it("reports consistent FTS when counts match", () => {
+	it("reports consistent FTS when counts match", async () => {
 		insertMemory(db, "mem-fts-ok");
 		const limiter = createRateLimiter();
-		const result = checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, limiter, false);
+		const result = await checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, limiter, false);
 
 		expect(result.success).toBe(true);
 		// counts match (FTS5 external content reads from memories)
@@ -785,20 +807,20 @@ describe("checkFtsConsistency", () => {
 		expect(result.message).toMatch(/consistent/);
 	});
 
-	it("runs rebuild without error when repair=true", () => {
+	it("runs rebuild without error when repair=true", async () => {
 		insertMemory(db, "mem-fts-rebuild");
 		const limiter = createRateLimiter();
 		// repair=true triggers rebuild even when consistent; should not throw
-		const result = checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, limiter, true);
+		const result = await checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, limiter, true);
 		// Rebuild only runs on mismatch; consistent case is a no-op
 		expect(result.success).toBe(true);
 	});
 
-	it("detects legacy porter tokenizer drift", () => {
+	it("detects legacy porter tokenizer drift", async () => {
 		insertMemory(db, "We celebrate wins together");
 		installLegacyPorterMemoriesFts(db);
 		const limiter = createRateLimiter();
-		const result = checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, limiter, false);
+		const result = await checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, limiter, false);
 
 		expect(result.success).toBe(true);
 		expect(result.affected).toBe(1);
@@ -806,11 +828,11 @@ describe("checkFtsConsistency", () => {
 		expect(readMemoriesFtsSql(toFtsSchemaQueryDb(db))).toContain("porter unicode61");
 	});
 
-	it("repairs legacy porter tokenizer drift when repair=true", () => {
+	it("repairs legacy porter tokenizer drift when repair=true", async () => {
 		insertMemory(db, "We celebrate wins together");
 		installLegacyPorterMemoriesFts(db);
 		const limiter = createRateLimiter();
-		const result = checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, limiter, true);
+		const result = await checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, limiter, true);
 
 		expect(result.success).toBe(true);
 		expect(result.affected).toBe(1);
@@ -821,38 +843,65 @@ describe("checkFtsConsistency", () => {
 		expect(sql).not.toContain("porter unicode61");
 	});
 
-	it("defers autonomous FTS rebuilds until the mismatch persists (#1142)", () => {
-		insertMemory(db, "mem-fts-defer");
-		// A soft-deleted (tombstoned) memory pushes the FTS backing count past
-		// the 10% tolerance — the mismatch signal the check acts on.
-		insertMemory(db, "mem-fts-defer-tombstone");
-		db.prepare("UPDATE memories SET is_deleted = 1 WHERE id = ?").run("mem-fts-defer-tombstone");
+	it("does not treat legitimate tombstones as FTS corruption", async () => {
+		insertMemory(db, "mem-fts-tombstone");
+		insertMemory(db, "mem-fts-tombstone-deleted");
+		db.prepare("UPDATE memories SET is_deleted = 1 WHERE id = ?").run("mem-fts-tombstone-deleted");
 
-		// First observation: held back so a transient spike cannot trigger a
-		// synchronous (event-loop-blocking) rebuild on every cycle.
-		const first = checkFtsConsistency(accessor, TEST_CFG, CTX_DAEMON, createRateLimiter(), true);
+		const result = await checkFtsConsistency(accessor, TEST_CFG, CTX_DAEMON, createRateLimiter(), true);
+		expect(result.success).toBe(true);
+		expect(result.affected).toBe(0);
+		expect(result.message).toMatch(/consistent/);
+		expect(repairAuditCount(db, "checkFtsConsistency")).toBe(0);
+	});
+
+	it("defers autonomous repair until a genuine mismatch persists", async () => {
+		insertMemory(db, "mem-fts-deferred");
+		insertMemory(db, "mem-fts-deferred-missing");
+		installLegacyPorterMemoriesFts(db, "mem-fts-deferred", "unicode61");
+
+		const first = await checkFtsConsistency(accessor, TEST_CFG, CTX_DAEMON, createRateLimiter(), true);
 		expect(first.success).toBe(true);
 		expect(first.affected).toBe(0);
-		expect(first.message).toMatch(/deferred/);
+		expect(first.message).toMatch(/deferred/i);
+		expect(asyncWriterUsed).toBe(false);
 		expect(repairAuditCount(db, "checkFtsConsistency")).toBe(0);
 
-		// Same mismatch on the next maintenance cycle: persistent, rebuild.
-		const second = checkFtsConsistency(accessor, TEST_CFG, CTX_DAEMON, createRateLimiter(), true);
+		const second = await checkFtsConsistency(accessor, TEST_CFG, CTX_DAEMON, createRateLimiter(), true);
 		expect(second.success).toBe(true);
 		expect(second.affected).toBe(1);
-		expect(second.message).toMatch(/rebuilt/);
+		expect(second.message).toMatch(/rebuilt/i);
+		expect(asyncWriterUsed).toBe(true);
 		expect(repairAuditCount(db, "checkFtsConsistency")).toBe(1);
 	});
 
-	it("rebuilds immediately when an operator explicitly triggers repair (#1142)", () => {
-		insertMemory(db, "mem-fts-operator");
-		insertMemory(db, "mem-fts-operator-tombstone");
-		db.prepare("UPDATE memories SET is_deleted = 1 WHERE id = ?").run("mem-fts-operator-tombstone");
+	it("repairs a genuinely incomplete FTS index", async () => {
+		insertMemory(db, "mem-fts-corrupt-indexed");
+		insertMemory(db, "mem-fts-corrupt-missing");
+		installLegacyPorterMemoriesFts(db, "mem-fts-corrupt-indexed", "unicode61");
 
-		const result = checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), true);
+		const result = await checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), true);
 		expect(result.success).toBe(true);
 		expect(result.affected).toBe(1);
 		expect(result.message).toMatch(/rebuilt/);
+		expect(asyncWriterUsed).toBe(true);
+		expect(repairAuditCount(db, "checkFtsConsistency")).toBe(1);
+		expect(db.prepare("SELECT COUNT(*) AS count FROM memories_fts_docsize").get()).toEqual({ count: 2 });
+	});
+
+	it("coalesces concurrent FTS rebuilds through one async write", async () => {
+		insertMemory(db, "mem-fts-concurrent-indexed");
+		insertMemory(db, "mem-fts-concurrent-missing");
+		installLegacyPorterMemoriesFts(db, "mem-fts-concurrent-indexed", "unicode61");
+
+		const results = await Promise.all([
+			checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), true),
+			checkFtsConsistency(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), true),
+		]);
+
+		expect(results.filter((result) => result.affected === 1)).toHaveLength(1);
+		expect(results.filter((result) => /already in progress/i.test(result.message))).toHaveLength(1);
+		expect(asyncWriterUsed).toBe(true);
 		expect(repairAuditCount(db, "checkFtsConsistency")).toBe(1);
 	});
 });

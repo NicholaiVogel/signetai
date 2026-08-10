@@ -218,7 +218,7 @@ domains and returns a composite score:
 |--------|-----------------|
 | `queue` | Job queue depth, dead job rate, stale leases |
 | `storage` | Total memories, tombstone ratio, database size |
-| `index` | FTS row count vs active memories, embedding coverage |
+| `index` | Physical FTS document count vs canonical memories, embedding coverage |
 | `provider` | Ollama availability rate, recent timeouts and failures |
 | `mutation` | Recent recover and delete event rates |
 | `connector` | Active connector count, sync errors, error age |

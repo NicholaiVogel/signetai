@@ -136,7 +136,7 @@ on-demand inspection.
 
 Each maintenance cycle runs three phases. First, `getDiagnostics` produces
 a `DiagnosticsReport` that captures queue health (dead rate, stale lease
-count), index health (FTS row count vs active memory count), storage health
+count), index health (physical FTS document count vs canonical memory count), storage health
 (tombstone ratio and SQLite page size), and graph health. A composite score in
 [0, 1] summarizes overall health, and when graph is enabled the composite
 status propagates graph degradation when the graph has flatlined across many
@@ -146,8 +146,8 @@ Second, `buildRecommendations` translates the report into a list of repair
 actions:
 - `requeueDeadJobs` when the dead job rate exceeds 1%.
 - `releaseStaleLeases` when stale leases are detected.
-- `checkFtsConsistency` when the FTS row count does not match active
-  memories.
+- `checkFtsConsistency` when the physical FTS document count does not match
+  canonical memory rows, including retained tombstones.
 - `triggerRetentionSweep` when tombstones exceed 30% of total memories.
 
 Third, if `maintenanceMode` is `observe`, the recommendations are logged and

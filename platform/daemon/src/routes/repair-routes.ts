@@ -114,7 +114,7 @@ export function registerRepairRoutes(
 		} catch {
 			// no body or invalid JSON — default repair=false
 		}
-		const result = checkFtsConsistency(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter, repair);
+		const result = await checkFtsConsistency(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter, repair);
 		return c.json(result, result.success ? 200 : 429);
 	});
 

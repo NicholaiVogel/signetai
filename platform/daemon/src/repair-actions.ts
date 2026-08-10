@@ -6,7 +6,12 @@
  * All actions respect autonomousFrozen regardless of actor type.
  */
 
-import { memoriesFtsNeedsTokenizerRepair, readMemoriesFtsSql, recreateMemoriesFts } from "@signet/core";
+import {
+	memoriesFtsNeedsTokenizerRepair,
+	readMemoriesFtsIndexRowCount,
+	readMemoriesFtsSql,
+	recreateMemoriesFts,
+} from "@signet/core";
 import { normalizeAndHashContent } from "./content-normalization";
 import type { IntegrityCheckStatus } from "./database-integrity";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
@@ -205,15 +210,23 @@ const DEFAULT_REQUEUE_BATCH = 50;
 // FTS rebuilds are heavyweight; cap their hourly budget at 5
 const FTS_HOURLY_BUDGET = 5;
 
-// FTS rebuilds run synchronously and can block the daemon event loop for
-// seconds on large stores. Hold an autonomous rebuild until the same mismatch
-// is observed on a second check, so a transient spike from in-flight artifact
-// writes cannot trigger a rebuild on every maintenance cycle (#1142).
+async function withRepairWriteTx<T>(accessor: DbAccessor, fn: (db: WriteDb) => T): Promise<T> {
+	if (accessor.withWriteTxAsync) {
+		return accessor.withWriteTxAsync(fn);
+	}
+	return accessor.withWriteTx(fn);
+}
+
+// Hold an autonomous rebuild until the same mismatch is observed on a second
+// check, so a transient spike from in-flight artifact writes cannot trigger a
+// rebuild on every maintenance cycle (#1142).
 let ftsMismatchPendingRebuild = false;
+let ftsRebuildInFlight = false;
 
 /** Reset the FTS rebuild confirmation state (for tests). */
 export function resetFtsRebuildConfirmation(): void {
 	ftsMismatchPendingRebuild = false;
+	ftsRebuildInFlight = false;
 }
 
 // ---- Issue #901 shared constants ----
@@ -373,13 +386,13 @@ export function releaseStaleLeases(
  * Check FTS row count and tokenizer definition, optionally rebuilding.
  * Uses a longer cooldown since FTS recreation is expensive.
  */
-export function checkFtsConsistency(
+export async function checkFtsConsistency(
 	accessor: DbAccessor,
 	cfg: PipelineV2Config,
 	ctx: RepairContext,
 	limiter: RateLimiter,
 	repair = false,
-): RepairResult {
+): Promise<RepairResult> {
 	const action = "checkFtsConsistency";
 	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.reembedCooldownMs, FTS_HOURLY_BUDGET);
 
@@ -393,21 +406,22 @@ export function checkFtsConsistency(
 	}
 
 	const { memCount, ftsCount, ftsMissing, tokenizerDrift } = accessor.withReadDb((db) => {
-		const memRow = db.prepare("SELECT COUNT(*) as n FROM memories WHERE is_deleted = 0").get() as { n: number };
+		const memRow = db.prepare("SELECT COUNT(*) as n FROM memories").get() as { n: number };
 
-		// Guard against missing FTS table (can happen on upgrades)
-		let ftsN = 0;
-		let missing = false;
+		// Guard against missing FTS index state (can happen on upgrades before
+		// self-heal). Count the physical docsize rows, not the external-content
+		// table, whose COUNT(*) resolves through memories and includes tombstones.
+		let ftsN: number | null = null;
 		try {
-			const ftsRow = db.prepare("SELECT COUNT(*) as n FROM memories_fts").get() as { n: number };
-			ftsN = ftsRow.n;
+			ftsN = readMemoriesFtsIndexRowCount(toFtsSchemaQueryDb(db));
 		} catch {
-			missing = true;
+			// Missing FTS shadow state.
 		}
+		const missing = ftsN === null;
 		const ftsSql = missing ? null : readMemoriesFtsSql(toFtsSchemaQueryDb(db));
 		return {
 			memCount: memRow.n,
-			ftsCount: ftsN,
+			ftsCount: ftsN ?? 0,
 			ftsMissing: missing,
 			tokenizerDrift: memoriesFtsNeedsTokenizerRepair(ftsSql),
 		};
@@ -418,9 +432,9 @@ export function checkFtsConsistency(
 	if (ftsMissing) {
 		limiter.record(action);
 		const msg = repair
-			? "FTS table missing — restart daemon to trigger self-healing rebuild"
-			: "FTS table missing — run with repair=true or restart daemon";
-		logger.warn("pipeline", "repair: FTS table missing", {
+			? "FTS index state missing — restart daemon to trigger self-healing rebuild"
+			: "FTS index state missing — run with repair=true or restart daemon";
+		logger.warn("pipeline", "repair: FTS index state missing", {
 			memCount,
 			actor: ctx.actor,
 		});
@@ -434,9 +448,21 @@ export function checkFtsConsistency(
 
 	if (tokenizerDrift) {
 		if (repair) {
-			accessor.withWriteTx((db) => {
+			if (ftsRebuildInFlight) {
+				limiter.record(action);
+				return {
+					action,
+					success: true,
+					affected: 0,
+					message: "FTS rebuild already in progress",
+				};
+			}
+			ftsRebuildInFlight = true;
+			await withRepairWriteTx(accessor, (db) => {
 				recreateMemoriesFts(db);
 				writeRepairAudit(db, action, ctx, 1, "FTS recreated with unicode61 tokenizer");
+			}).finally(() => {
+				ftsRebuildInFlight = false;
 			});
 			// The recreate is itself a full rebuild; any prior mismatch is moot.
 			ftsMismatchPendingRebuild = false;
@@ -460,10 +486,10 @@ export function checkFtsConsistency(
 		};
 	}
 
-	// FTS5 external content tables include tombstones, so ftsCount >=
-	// memCount is normal. Only flag when the gap exceeds 10%, matching
-	// the threshold in diagnostics.ts getIndexHealth().
-	const mismatch = memCount > 0 && ftsCount > memCount * 1.1;
+	// The physical FTS index must contain one document for every canonical
+	// memory row, including tombstones. Async writer admission keeps a repair
+	// out of the request call stack while preserving the existing transaction.
+	const mismatch = memCount !== ftsCount;
 
 	let rebuilt = false;
 	if (mismatch && repair) {
@@ -472,9 +498,21 @@ export function checkFtsConsistency(
 		// mismatch cannot trigger a synchronous rebuild every cycle (#1142).
 		const confirmed = ctx.actorType === "operator" || ftsMismatchPendingRebuild;
 		if (confirmed) {
-			accessor.withWriteTx((db) => {
+			if (ftsRebuildInFlight) {
+				limiter.record(action);
+				return {
+					action,
+					success: true,
+					affected: 0,
+					message: "FTS rebuild already in progress",
+				};
+			}
+			ftsRebuildInFlight = true;
+			await withRepairWriteTx(accessor, (db) => {
 				db.prepare("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')").run();
-				writeRepairAudit(db, action, ctx, 1, `FTS rebuilt: ${memCount} active vs ${ftsCount} FTS rows`);
+				writeRepairAudit(db, action, ctx, 1, `FTS rebuilt: ${memCount} canonical vs ${ftsCount} indexed rows`);
+			}).finally(() => {
+				ftsRebuildInFlight = false;
 			});
 			ftsMismatchPendingRebuild = false;
 			rebuilt = true;
@@ -494,9 +532,9 @@ export function checkFtsConsistency(
 
 	const message = mismatch
 		? rebuilt
-			? `FTS mismatch: ${memCount} active vs ${ftsCount} FTS rows — rebuilt`
-			: `FTS mismatch: ${memCount} active vs ${ftsCount} FTS rows (rebuild deferred until mismatch persists)`
-		: `FTS consistent: ${memCount} active, ${ftsCount} FTS rows`;
+			? `FTS mismatch: ${memCount} canonical vs ${ftsCount} indexed rows — rebuilt`
+			: `FTS mismatch: ${memCount} canonical vs ${ftsCount} indexed rows (rebuild deferred until mismatch persists)`
+		: `FTS consistent: ${memCount} canonical, ${ftsCount} indexed rows`;
 
 	logger.info("pipeline", "repair: FTS consistency check", {
 		memCount,
@@ -2043,7 +2081,7 @@ export async function rebuildDerivedIndexes(
 	const integrity = integrityCheck(accessor);
 
 	// Step 1: FTS rebuild
-	const ftsResult = checkFtsConsistency(accessor, cfg, ctx, limiter, true);
+	const ftsResult = await checkFtsConsistency(accessor, cfg, ctx, limiter, true);
 
 	// Step 2: Re-embed missing memories (batch of 200, not full sweep)
 	const reembedResult = await reembedMissingMemoriesBatch(accessor, embeddingFn, embeddingCfg, 200);
