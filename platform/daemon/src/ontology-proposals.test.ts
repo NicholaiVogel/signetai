@@ -1303,6 +1303,116 @@ describe("ontology proposals", () => {
 		expect(applied.result?.mergedEntities).toEqual([{ name: "Signet Alias", entityId: ids.sourceId, movedAspects: 1 }]);
 	});
 
+	it("deduplicates dependency edges while merging entities", () => {
+		insertEntity("entity-target", "Target", "target", "ant", 8);
+		insertEntity("entity-source", "Source", "source", "ant", 4);
+		insertEntity("entity-dependency-target", "Dependency Target", "dependency target", "ant", 2);
+		getDbAccessor().withWriteTx((db) => {
+			const insert = db.prepare(
+				`INSERT INTO entity_dependencies
+				 (id, source_entity_id, target_entity_id, agent_id, dependency_type, strength, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			);
+			insert.run(
+				"dep-target",
+				"entity-target",
+				"entity-dependency-target",
+				"ant",
+				"built",
+				1,
+				"2026-05-06T00:00:00.000Z",
+				"2026-05-06T00:00:00.000Z",
+			);
+			insert.run(
+				"dep-source",
+				"entity-source",
+				"entity-dependency-target",
+				"ant",
+				"built",
+				1,
+				"2026-05-06T00:00:00.000Z",
+				"2026-05-06T00:00:00.000Z",
+			);
+		});
+
+		const proposal = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "merge_entities",
+			payload: {
+				target_entity_id: "entity-target",
+				source_entity_ids: ["entity-source"],
+			},
+		});
+		const applied = applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: proposal.id, actor: "test" });
+
+		expect(applied.status).toBe("applied");
+		const edges = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare(
+						`SELECT source_entity_id, target_entity_id, dependency_type
+						 FROM entity_dependencies
+						 WHERE agent_id = ? AND dependency_type = ?`,
+					)
+					.all("ant", "built") as Array<{
+					source_entity_id: string;
+					target_entity_id: string;
+					dependency_type: string;
+				}>,
+		);
+		expect(edges).toEqual([
+			{ source_entity_id: "entity-target", target_entity_id: "entity-dependency-target", dependency_type: "built" },
+		]);
+	});
+
+	it("treats a merge proposal as applied when its source was already merged", () => {
+		insertEntity("entity-target", "Target", "target", "ant", 8);
+		insertEntity("entity-source", "Source", "source", "ant", 4);
+		const first = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "merge_entities",
+			payload: {
+				target_entity_id: "entity-target",
+				source_entities: ["Source"],
+				source_entity_ids: ["entity-source"],
+			},
+		});
+		applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: first.id, actor: "test" });
+
+		const retry = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "merge_entities",
+			payload: {
+				target_entity_id: "entity-target",
+				source_entities: ["Source"],
+				source_entity_ids: ["entity-source"],
+			},
+		});
+		const applied = applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: retry.id, actor: "test" });
+
+		expect(applied.status).toBe("applied");
+		expect(applied.result?.mergedEntities).toEqual([]);
+		expect(applied.result?.alreadyMergedEntities).toEqual(["Source"]);
+
+		const nameOnlyRetry = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "merge_entities",
+			payload: {
+				target_entity_id: "entity-target",
+				source_entities: ["Source"],
+			},
+		});
+		const nameOnlyApplied = applyOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			id: nameOnlyRetry.id,
+			actor: "test",
+		});
+
+		expect(nameOnlyApplied.status).toBe("applied");
+		expect(nameOnlyApplied.result?.mergedEntities).toEqual([]);
+		expect(nameOnlyApplied.result?.alreadyMergedEntities).toEqual(["Source"]);
+	});
+
 	it("rejects merge_entities when supplied IDs and names disagree", () => {
 		insertEntity("entity-signet", "Signet", "signet", "ant", 8);
 		insertEntity("entity-other", "Other", "other", "ant", 4);

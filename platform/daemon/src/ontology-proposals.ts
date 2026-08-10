@@ -1664,16 +1664,7 @@ function mergeEntityAspects(db: WriteDb, agentId: string, sourceId: string, targ
 }
 
 function mergeEntityEdges(db: WriteDb, agentId: string, sourceId: string, targetId: string): number {
-	let relationshipChanges = 0;
-	relationshipChanges += db
-		.prepare("UPDATE entity_dependencies SET source_entity_id = ? WHERE source_entity_id = ? AND agent_id = ?")
-		.run(targetId, sourceId, agentId).changes;
-	relationshipChanges += db
-		.prepare("UPDATE entity_dependencies SET target_entity_id = ? WHERE target_entity_id = ? AND agent_id = ?")
-		.run(targetId, sourceId, agentId).changes;
-	relationshipChanges += db
-		.prepare("DELETE FROM entity_dependencies WHERE source_entity_id = target_entity_id AND agent_id = ?")
-		.run(agentId).changes;
+	let relationshipChanges = mergeEntityDependencies(db, agentId, sourceId, targetId);
 
 	relationshipChanges += db
 		.prepare("UPDATE relations SET source_entity_id = ? WHERE source_entity_id = ?")
@@ -1689,18 +1680,102 @@ function mergeEntityEdges(db: WriteDb, agentId: string, sourceId: string, target
 	return relationshipChanges;
 }
 
+function mergeEntityDependencies(db: WriteDb, agentId: string, sourceId: string, targetId: string): number {
+	const rows = db
+		.prepare(
+			`SELECT id, source_entity_id, target_entity_id, dependency_type
+			 FROM entity_dependencies
+			 WHERE agent_id = ? AND (source_entity_id = ? OR target_entity_id = ?)`,
+		)
+		.all(agentId, sourceId, sourceId) as Array<{
+		id: string;
+		source_entity_id: string;
+		target_entity_id: string;
+		dependency_type: string;
+	}>;
+	let changes = 0;
+	for (const row of rows) {
+		const nextSource = row.source_entity_id === sourceId ? targetId : row.source_entity_id;
+		const nextTarget = row.target_entity_id === sourceId ? targetId : row.target_entity_id;
+		if (nextSource === nextTarget) {
+			changes += db
+				.prepare("DELETE FROM entity_dependencies WHERE id = ? AND agent_id = ?")
+				.run(row.id, agentId).changes;
+			continue;
+		}
+
+		const duplicate = db
+			.prepare(
+				`SELECT id FROM entity_dependencies
+				 WHERE agent_id = ? AND id != ?
+				   AND source_entity_id = ? AND target_entity_id = ? AND dependency_type = ?
+				 LIMIT 1`,
+			)
+			.get(agentId, row.id, nextSource, nextTarget, row.dependency_type) as { id: string } | undefined;
+		if (duplicate) {
+			changes += db
+				.prepare("DELETE FROM entity_dependencies WHERE id = ? AND agent_id = ?")
+				.run(row.id, agentId).changes;
+			continue;
+		}
+		changes += db
+			.prepare(
+				`UPDATE entity_dependencies
+				 SET source_entity_id = ?, target_entity_id = ?, updated_at = datetime('now')
+				 WHERE id = ? AND agent_id = ?`,
+			)
+			.run(nextSource, nextTarget, row.id, agentId).changes;
+	}
+	return changes;
+}
+
 function applyMergeEntities(
 	db: WriteDb,
 	agentId: string,
 	payload: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> {
 	const sources = sourceMergeSpecs(payload);
+	const target = resolveMergeEntityRef(
+		db,
+		agentId,
+		"payload.target_entity",
+		readString(payload, "target_entity") ?? readString(payload, "target") ?? null,
+		readString(payload, "target_entity_id") ?? readString(payload, "target_id") ?? null,
+	);
+	const alreadyMerged = sources.filter((source) => {
+		if (source.id !== null) {
+			return (
+				getEntityRefById(db, agentId, source.id) === null &&
+				wasEntityMergeApplied(db, agentId, source.id, target.id, source.selector)
+			);
+		}
+		if (source.selector === null) return false;
+		try {
+			resolveEntityRefStrict(db, agentId, source.selector);
+			return false;
+		} catch (err) {
+			if (!(err instanceof OntologyProposalError) || err.status !== 404) throw err;
+			return wasEntityMergeApplied(db, agentId, null, target.id, source.selector);
+		}
+	});
+	const pendingSources = sources.filter((source) => !alreadyMerged.includes(source));
+	if (pendingSources.length === 0 && alreadyMerged.length > 0) {
+		return {
+			targetEntityId: target.id,
+			targetEntityName: target.name,
+			mergedEntities: [],
+			alreadyMergedEntities: alreadyMerged.map((source) => source.selector ?? source.id),
+			warnings: [],
+			relationshipsChanged: 0,
+		};
+	}
 	const plan = buildEntityMergePlan(db, {
 		agentId,
-		targetEntity: readString(payload, "target_entity") ?? readString(payload, "target") ?? undefined,
-		targetEntityId: readString(payload, "target_entity_id") ?? readString(payload, "target_id") ?? undefined,
-		sourceEntities: sources.map((spec) => spec.selector).filter((selector): selector is string => selector !== null),
-		sourceEntityIds: sources.map((spec) => spec.id).filter((id): id is string => id !== null),
+		targetEntityId: target.id,
+		sourceEntities: pendingSources
+			.map((spec) => spec.selector)
+			.filter((selector): selector is string => selector !== null),
+		sourceEntityIds: pendingSources.map((spec) => spec.id).filter((id): id is string => id !== null),
 		force: truthy(payload.force),
 	});
 	if (plan.blocked) throw new OntologyProposalError(`Merge blocked: ${plan.warnings.join("; ")}`, 409);
@@ -1724,6 +1799,7 @@ function applyMergeEntities(
 		targetEntityId: plan.target.id,
 		targetEntityName: plan.target.name,
 		mergedEntities: merged,
+		alreadyMergedEntities: alreadyMerged.map((source) => source.selector ?? source.id),
 		warnings: plan.warnings,
 		relationshipsChanged: relationshipChanges,
 	};
@@ -2449,6 +2525,45 @@ function resolveMergeEntityRef(
 function selectorMatchesEntityRef(selector: string, entity: DuplicateEntityRef): boolean {
 	const key = canonical(selector);
 	return selector === entity.id || key === canonical(entity.name) || key === canonical(entity.canonicalName);
+}
+
+function wasEntityMergeApplied(
+	db: ReadDb,
+	agentId: string,
+	sourceId: string | null,
+	targetId: string,
+	sourceSelector: string | null,
+): boolean {
+	const needle = sourceId ?? sourceSelector;
+	if (needle === null) return false;
+	const rows = db
+		.prepare(
+			`SELECT result FROM ontology_proposals
+			 WHERE agent_id = ? AND operation = 'merge_entities' AND status = 'applied'
+			   AND result LIKE ?`,
+		)
+		.all(agentId, `%${needle}%`) as Array<{ result: string | null }>;
+	for (const row of rows) {
+		if (row.result === null) continue;
+		try {
+			const result = parseJsonRecord(row.result);
+			if (readString(result, "targetEntityId") !== targetId) continue;
+			const merged = result.mergedEntities;
+			if (!Array.isArray(merged)) continue;
+			if (
+				merged.some((item) => {
+					if (!isRecord(item)) return false;
+					if (sourceId !== null) return readString(item, "entityId") === sourceId;
+					const name = readString(item, "name");
+					return name !== null && canonical(name) === canonical(sourceSelector ?? "");
+				})
+			)
+				return true;
+		} catch {
+			// Ignore malformed historical proposal results.
+		}
+	}
+	return false;
 }
 
 function sourceMergeSpecs(payload: Readonly<Record<string, unknown>>): Array<{
