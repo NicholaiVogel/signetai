@@ -78,7 +78,9 @@ Common refinements:
 
 Exact date queries such as `2026/05/13`, `2026-05-13`, and `May 13 2026`
 activate temporal recall automatically. Date-only queries return a timeline;
-date plus topic filters recall to matching temporal rows.
+date plus topic filters recall to matching temporal rows. Date ranges accept
+full `YYYY-MM-DD/YYYY-MM-DD` or abbreviated same-month `YYYY-MM-DD/DD`
+notation, and named ranges such as `July 25/26 2026`.
 
 Advanced controls:
 

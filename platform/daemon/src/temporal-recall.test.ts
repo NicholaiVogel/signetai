@@ -3,7 +3,46 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
-import { resolveTemporalRecall } from "./temporal-recall";
+import { parseTemporalRecallIntent, resolveTemporalRecall } from "./temporal-recall";
+
+describe("temporal recall parser", () => {
+	it("parses abbreviated numeric ranges without leaving the end day in the content query", () => {
+		const parsed = parseTemporalRecallIntent({ query: "what happened on 2026-07-25/26?" });
+		expect(parsed).toMatchObject({
+			source: "query",
+			contentQuery: "happened",
+			mode: "filter",
+			start: new Date(2026, 6, 25).toISOString(),
+			end: new Date(2026, 6, 27).toISOString(),
+		});
+	});
+
+	it("consumes expanded and named date ranges as complete temporal expressions", () => {
+		const expanded = parseTemporalRecallIntent({ query: "2026-07-25/2026-07-26" });
+		const named = parseTemporalRecallIntent({ query: "what happened on July 25/26 2026?" });
+
+		expect(expanded).toMatchObject({
+			contentQuery: "",
+			mode: "timeline",
+			start: new Date(2026, 6, 25).toISOString(),
+			end: new Date(2026, 6, 27).toISOString(),
+		});
+		expect(named).toMatchObject({
+			contentQuery: "happened",
+			mode: "filter",
+			start: new Date(2026, 6, 25).toISOString(),
+			end: new Date(2026, 6, 27).toISOString(),
+		});
+	});
+
+	it("does not treat a reversed abbreviated range as a valid temporal query", () => {
+		expect(parseTemporalRecallIntent({ query: "what happened on 2026-07-25/01?" })).toBeNull();
+	});
+
+	it("does not partially parse an unsupported numeric range suffix", () => {
+		expect(parseTemporalRecallIntent({ query: "report 2026-07-25/26th" })).toBeNull();
+	});
+});
 
 describe("temporal recall", () => {
 	let dir = "";
@@ -11,7 +50,7 @@ describe("temporal recall", () => {
 	beforeEach(() => {
 		dir = mkdtempSync(join(tmpdir(), "signet-temporal-recall-"));
 		mkdirSync(join(dir, "memory"), { recursive: true });
-		initDbAccessor(join(dir, "memory", "memories.db"));
+		initDbAccessor(join(dir, "memory", "memories.db"), { agentsDir: dir });
 	});
 
 	afterEach(() => {
@@ -34,9 +73,33 @@ describe("temporal recall", () => {
 				 (id, agent_id, subject_type, subject_id, facet, start_at, end_at, confidence, created_at, updated_at)
 				 VALUES (?, ?, 'source_document', ?, 'occurred', ?, ?, 1.0, ?, ?)`,
 			);
-			edge.run("owner-edge", "owner", "owner-doc", "2026-05-13T12:00:00.000Z", "2026-05-13T12:00:00.000Z", createdAt, createdAt);
-			edge.run("teammate-edge", "teammate", "teammate-doc", "2026-05-13T13:00:00.000Z", "2026-05-13T13:00:00.000Z", createdAt, createdAt);
-			edge.run("outsider-edge", "outsider", "outsider-doc", "2026-05-13T14:00:00.000Z", "2026-05-13T14:00:00.000Z", createdAt, createdAt);
+			edge.run(
+				"owner-edge",
+				"owner",
+				"owner-doc",
+				"2026-05-13T12:00:00.000Z",
+				"2026-05-13T12:00:00.000Z",
+				createdAt,
+				createdAt,
+			);
+			edge.run(
+				"teammate-edge",
+				"teammate",
+				"teammate-doc",
+				"2026-05-13T13:00:00.000Z",
+				"2026-05-13T13:00:00.000Z",
+				createdAt,
+				createdAt,
+			);
+			edge.run(
+				"outsider-edge",
+				"outsider",
+				"outsider-doc",
+				"2026-05-13T14:00:00.000Z",
+				"2026-05-13T14:00:00.000Z",
+				createdAt,
+				createdAt,
+			);
 		});
 
 		const time = {

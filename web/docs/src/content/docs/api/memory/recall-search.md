@@ -50,11 +50,13 @@ camel-case wire fields shown above. False opt-in flags are omitted, except an
 explicit `saveAggregate: false`, which is significant for recall-only callers.
 
 Exact date phrases in `query`, such as `2026/05/13`, `2026-05-13`, or
-`May 13 2026`, activate temporal recall automatically. A date-only query
-returns a timeline assembled from existing session, source, captured-memory,
+`May 13 2026`, activate temporal recall automatically. Date-only queries return
+a timeline assembled from existing session, source, captured-memory,
 and explicit temporal-edge metadata. A date plus topic uses the date as a
-filter and the remaining words as the content query. Callers can also pass a
-`time` object directly. Supported temporal facets are `session`, `source`,
+filter and the remaining words as the content query. Date ranges accept full
+`YYYY-MM-DD/YYYY-MM-DD` or abbreviated same-month `YYYY-MM-DD/DD` notation;
+named ranges such as `July 25/26 2026` are also accepted. Callers can also pass
+a `time` object directly. Supported temporal facets are `session`, `source`,
 `captured`, `observed`, `occurred`, and `valid`; `mode` may be `auto`,
 `timeline`, or `filter`.
 

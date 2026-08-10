@@ -167,9 +167,50 @@ function localDayRange(year: number, month: number, day: number): { start: strin
 	return { start: start.toISOString(), end: end.toISOString() };
 }
 
+function localDateRange(
+	startYear: number,
+	startMonth: number,
+	startDay: number,
+	endYear: number,
+	endMonth: number,
+	endDay: number,
+): { start: string; end: string } | null {
+	const start = localDayRange(startYear, startMonth, startDay);
+	const end = localDayRange(endYear, endMonth, endDay);
+	if (!start || !end || new Date(end.start).getTime() <= new Date(start.start).getTime()) return null;
+	return { start: start.start, end: end.end };
+}
+
 function parseExplicitDay(raw: string): { range: { start: string; end: string }; matched: string } | null {
+	const numericRange = raw.match(/\b(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s*\/\s*(?:(\d{4})[/-](\d{1,2})[/-])?(\d{1,2})\b/);
+	if (numericRange) {
+		const year = Number.parseInt(numericRange[1] ?? "", 10);
+		const month = Number.parseInt(numericRange[2] ?? "", 10);
+		const day = Number.parseInt(numericRange[3] ?? "", 10);
+		const endYear = Number.parseInt(numericRange[4] ?? String(year), 10);
+		const endMonth = Number.parseInt(numericRange[5] ?? String(month), 10);
+		const endDay = Number.parseInt(numericRange[6] ?? "", 10);
+		const range = localDateRange(year, month, day, endYear, endMonth, endDay);
+		return range ? { range, matched: numericRange[0] } : null;
+	}
+
+	const namedRange = raw.match(
+		/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?\s*\/\s*(?:(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+)?(\d{1,2})(?:st|nd|rd|th)?[,]?\s+(\d{4})\b/i,
+	);
+	if (namedRange) {
+		const month = MONTHS.get((namedRange[1] ?? "").toLowerCase());
+		const endMonth = MONTHS.get((namedRange[3] ?? namedRange[1] ?? "").toLowerCase());
+		const day = Number.parseInt(namedRange[2] ?? "", 10);
+		const endDay = Number.parseInt(namedRange[4] ?? "", 10);
+		const year = Number.parseInt(namedRange[5] ?? "", 10);
+		const range = month && endMonth ? localDateRange(year, month, day, year, endMonth, endDay) : null;
+		return range ? { range, matched: namedRange[0] } : null;
+	}
+
 	const numeric = raw.match(/\b(\d{4})[/-](\d{1,2})[/-](\d{1,2})\b/);
 	if (numeric) {
+		const end = (numeric.index ?? 0) + numeric[0].length;
+		if (/^\s*\//.test(raw.slice(end))) return null;
 		const year = Number.parseInt(numeric[1] ?? "", 10);
 		const month = Number.parseInt(numeric[2] ?? "", 10);
 		const day = Number.parseInt(numeric[3] ?? "", 10);
