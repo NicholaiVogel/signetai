@@ -13,6 +13,9 @@ import { indexSourceArtifactStructure } from "../source-artifact-graph";
 import { purgeSourceOwnedRows } from "../source-purge";
 
 const MAX_MULTIPART_OVERHEAD = 1 * 1024 * 1024;
+const MAX_MULTIPART_BYTES = IMPORT_MAX_BATCH_BYTES + MAX_MULTIPART_OVERHEAD;
+
+class ImportPayloadTooLargeError extends Error {}
 
 type ImportFileStatus =
 	| {
@@ -34,8 +37,10 @@ export function registerImportRoutes(app: Hono): void {
 
 		let form: FormData;
 		try {
-			form = await c.req.formData();
-		} catch {
+			form = await boundedFormData(c.req.raw);
+		} catch (error) {
+			if (error instanceof ImportPayloadTooLargeError)
+				return c.json({ error: `Import batch exceeds the ${IMPORT_MAX_BATCH_BYTES} byte limit` }, 413);
 			return c.json({ error: "Expected a multipart form with files" }, 400);
 		}
 		const entries = form.getAll("files").filter((entry): entry is File => entry instanceof File);
@@ -144,4 +149,41 @@ export function registerImportRoutes(app: Hono): void {
 		const failed = statuses.filter((status) => status.status === "failed").length;
 		return c.json({ imported, failed, files: statuses }, failed > 0 ? 207 : 201);
 	});
+}
+
+async function boundedFormData(request: Request): Promise<FormData> {
+	if (request.body === null) return request.formData();
+	const body = new ReadableStream<Uint8Array>({
+		async start(controller) {
+			const reader = request.body?.getReader();
+			if (reader === undefined) {
+				controller.close();
+				return;
+			}
+			let totalBytes = 0;
+			try {
+				while (true) {
+					const next = await reader.read();
+					if (next.done) {
+						controller.close();
+						return;
+					}
+					totalBytes += next.value.byteLength;
+					if (totalBytes > MAX_MULTIPART_BYTES) {
+						await reader.cancel();
+						controller.error(new ImportPayloadTooLargeError());
+						return;
+					}
+					controller.enqueue(next.value);
+				}
+			} catch (error) {
+				controller.error(error);
+			}
+		},
+	});
+	const boundedRequest = new Request(request, {
+		body,
+		duplex: "half",
+	} as RequestInit & { duplex: "half" });
+	return boundedRequest.formData();
 }

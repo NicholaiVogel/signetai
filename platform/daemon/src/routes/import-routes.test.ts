@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { loadSourcesConfig } from "@signet/core";
 import { Hono } from "hono";
 import { closeDbAccessor, initDbAccessor } from "../db-accessor";
+import { IMPORT_MAX_BATCH_BYTES } from "../import-normalizer";
 import { registerImportRoutes } from "./import-routes";
 
 function formWithFile(file: File, duplicateMode = "skip"): FormData {
@@ -93,5 +94,25 @@ describe("import routes", () => {
 
 		expect(response.status).toBe(413);
 		expect(await response.json()).toEqual({ error: "Import accepts at most 25 files" });
+	});
+
+	it("rejects oversized chunked request bodies before form-data buffering", async () => {
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new Uint8Array(IMPORT_MAX_BATCH_BYTES + 1 * 1024 * 1024 + 1));
+				controller.close();
+			},
+		});
+		const request = new Request("http://localhost/api/sources/import", {
+			method: "POST",
+			headers: { "Content-Type": "multipart/form-data; boundary=import-test" },
+			body,
+			duplex: "half",
+		} as RequestInit & { duplex: "half" });
+
+		const response = await app().request(request);
+
+		expect(response.status).toBe(413);
+		expect(await response.json()).toEqual({ error: "Import batch exceeds the 104857600 byte limit" });
 	});
 });
