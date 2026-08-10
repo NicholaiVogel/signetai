@@ -1338,8 +1338,15 @@ export async function runDreamingAgentPass(
 								if (!isRecord(operation)) return [];
 								return [{ evidence: Array.isArray(operation.evidence) ? operation.evidence : [] }];
 							});
+							const operationAgentId =
+								typeof input?.agentId === "string" && input.agentId.trim().length > 0 ? input.agentId.trim() : agentId;
 							rejectedEvidence.push(
-								...collectRejectedDreamingEvidence(accessor, agentId, { ok: false, items: [] }, evidenceOperations),
+								...collectRejectedDreamingEvidence(
+									accessor,
+									operationAgentId,
+									{ ok: false, items: [] },
+									evidenceOperations,
+								),
 							);
 						}
 						failed++;

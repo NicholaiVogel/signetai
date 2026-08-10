@@ -99,16 +99,21 @@ function seedTranscript(db: Database, id: string, content: string, capturedAt?: 
 	).run(id, content, AGENT, timestamp, timestamp, timestamp);
 }
 
-function seedSummary(db: Database, id: string, content: string, tokens: number): void {
+function seedSummary(db: Database, id: string, content: string, tokens: number, agentId = AGENT): void {
 	// Keep a legacy row for explicit provenance-compatibility assertions, but
 	// seed the canonical direct transcript path used by Dreaming's default
 	// evidence selector.
-	seedTranscript(db, id, content);
+	const timestamp = (db.prepare("SELECT datetime('now') AS now").get() as { now: string }).now;
+	db.prepare(
+		`INSERT INTO session_transcripts
+		 (session_key, content, agent_id, created_at, updated_at, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+	).run(id, content, agentId, timestamp, timestamp, timestamp);
 	db.prepare(
 		`INSERT INTO session_summaries
 		 (id, agent_id, content, token_count, depth, kind, source_type, earliest_at, latest_at, created_at)
 		 VALUES (?, ?, ?, ?, 0, 'session', 'summary', datetime('now'), datetime('now'), datetime('now'))`,
-	).run(id, AGENT, content, tokens);
+	).run(id, agentId, content, tokens);
 }
 
 describe("Dreaming", () => {
@@ -807,8 +812,17 @@ describe("Dreaming", () => {
 		).toMatchObject({ resolvedAt: expect.any(String) });
 	});
 
-	it("records the repair classification when an agent operation fails exact quote validation", async () => {
-		seedSummary(db, "rejected-citation", "The canonical source says the deployment is local.", 12);
+	it("records the repair classification under the operation's target scope when pre-apply validation fails", async () => {
+		accessor.withWriteTx((tx) => {
+			enqueueDreamingAttentionInTx(tx, {
+				agentId: AGENT,
+				kind: "review_due",
+				subjectRef: "entity:rejected-citation",
+				details: { reason: "force the apply path for scope attribution" },
+				priority: 90,
+			});
+		});
+		seedSummary(db, "rejected-citation", "The canonical source says the deployment is local.", 12, "other-agent");
 		const result = await runDreamingAgentPass(
 			accessor,
 			{
@@ -818,12 +832,9 @@ describe("Dreaming", () => {
 					await apply.execute(
 						"call",
 						{
-							agentId: AGENT,
+							agentId: "other-agent",
 							operations: [
 								{
-									operation: "create_entity",
-									payload: { name: "Local deployment", type: "project" },
-									reason: "The source describes the deployment.",
 									evidence: [{ source_ref: "summary:rejected-citation", quote: "the deployment is remote" }],
 								},
 							],
@@ -842,8 +853,8 @@ describe("Dreaming", () => {
 			"incremental",
 		);
 
-		expect(result.failed).toBe(1);
-		expect(getDreamingEvidenceExclusions(accessor, AGENT)).toContainEqual(
+		expect(result.summary).toBe("Rejected citation");
+		expect(getDreamingEvidenceExclusions(accessor, "other-agent")).toContainEqual(
 			expect.objectContaining({
 				sourceKind: "summary",
 				sourceId: "rejected-citation",
@@ -851,6 +862,7 @@ describe("Dreaming", () => {
 				retryCount: 0,
 			}),
 		);
+		expect(getDreamingEvidenceExclusions(accessor, AGENT)).toEqual([]);
 	});
 
 	it("applies cited operations only through the daemon-owned tool surface", async () => {
