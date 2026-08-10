@@ -18,7 +18,8 @@
 // On Windows, use node:child_process spawn with windowsHide to prevent
 // console window flashing. Bun.spawn doesn't support windowsHide.
 import { spawn as nodeSpawn } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { readFile, readdir } from "node:fs/promises";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import {
@@ -927,18 +928,22 @@ function acpxProcRoot(): string {
 	return process.env.SIGNET_ACPX_PROC_ROOT || "/proc";
 }
 
-function procEnvContainsRunId(procRoot: string, pid: string, runId: string): boolean {
+async function procEnvContainsRunId(procRoot: string, pid: string, runId: string): Promise<boolean> {
 	try {
-		const environ = readFileSync(`${procRoot}/${pid}/environ`, "utf8");
+		const environ = await readFile(`${procRoot}/${pid}/environ`, "utf8");
 		return environ.includes(`SIGNET_ACPX_RUN_ID=${runId}`);
 	} catch {
 		return false;
 	}
 }
 
-function procCommandMatchesAgent(procRoot: string, pid: string, basenames: ReadonlySet<string>): boolean {
+async function procCommandMatchesAgent(
+	procRoot: string,
+	pid: string,
+	basenames: ReadonlySet<string>,
+): Promise<boolean> {
 	try {
-		const cmdline = readFileSync(`${procRoot}/${pid}/cmdline`, "utf8");
+		const cmdline = await readFile(`${procRoot}/${pid}/cmdline`, "utf8");
 		return cmdline
 			.split("\0")
 			.filter(Boolean)
@@ -948,23 +953,25 @@ function procCommandMatchesAgent(procRoot: string, pid: string, basenames: Reado
 	}
 }
 
-function cleanupAcpxAgentProcesses(agent: string, runId: string): void {
+async function cleanupAcpxAgentProcesses(agent: string, runId: string): Promise<void> {
 	if (process.platform !== "linux") return;
 	const basenames = new Set(acpxAgentProcessBasenames(agent));
 	if (basenames.size === 0) return;
 	const procRoot = acpxProcRoot();
 	let procEntries: string[];
 	try {
-		procEntries = readdirSync(procRoot);
+		procEntries = await readdir(procRoot);
 	} catch {
 		return;
 	}
-	const pids = procEntries
-		.filter((pid) => /^\d+$/.test(pid))
-		.filter((pid) => procCommandMatchesAgent(procRoot, pid, basenames))
-		.filter((pid) => procEnvContainsRunId(procRoot, pid, runId))
-		.map((pid) => Number(pid))
-		.filter((pid) => Number.isFinite(pid) && pid > 0);
+	const pids: number[] = [];
+	for (const pid of procEntries) {
+		if (!/^\d+$/.test(pid)) continue;
+		if (!(await procCommandMatchesAgent(procRoot, pid, basenames))) continue;
+		if (!(await procEnvContainsRunId(procRoot, pid, runId))) continue;
+		const numericPid = Number(pid);
+		if (Number.isFinite(numericPid) && numericPid > 0) pids.push(numericPid);
+	}
 	for (const pid of pids) {
 		try {
 			process.kill(pid, "SIGTERM");
@@ -1174,12 +1181,14 @@ function runAcpxAttempt(
 			detached: process.platform !== "win32",
 			windowsHide: true,
 		});
-		const finish = (fn: () => void): void => {
+		const finish = async (fn: () => void, waitForCleanup = true): Promise<void> => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
-			cleanupAcpxAgentProcesses(config.agent, runId);
+			const cleanup = cleanupAcpxAgentProcesses(config.agent, runId).catch(() => undefined);
+			if (waitForCleanup) await cleanup;
+			else void cleanup;
 			fn();
 		};
 		const onAbort = (): void => {
@@ -1190,7 +1199,7 @@ function runAcpxAttempt(
 		else signal?.addEventListener("abort", onAbort, { once: true });
 		const timer = setTimeout(() => {
 			terminateChildProcessTreeWithEscalation(child);
-			finish(() => reject(new Error(`${config.agent} via ACPX timeout after ${Math.ceil(remainingMs)}ms`)));
+			void finish(() => reject(new Error(`${config.agent} via ACPX timeout after ${Math.ceil(remainingMs)}ms`)), false);
 		}, remainingMs);
 		child.stdout?.setEncoding("utf8");
 		child.stderr?.setEncoding("utf8");
@@ -1200,52 +1209,56 @@ function runAcpxAttempt(
 		child.stderr?.on("data", (chunk) => {
 			stderr += String(chunk);
 		});
-		child.on("error", (error) => finish(() => reject(error)));
-		child.on("close", (code) =>
-			finish(() => {
-				if (aborted) {
-					reject(new Error(`${config.agent} via ACPX aborted`));
-					return;
-				}
-				if (code !== 0) {
-					reject(new Error(`${config.agent} via ACPX exited ${code}: ${stderr.slice(0, 300)}`));
-					return;
-				}
-				let text: string | undefined;
-				let parsed: AcpxParsedJsonOutput | undefined;
-				try {
-					if (outputFormat === "json") {
-						parsed = parseAcpxJsonOutput(stdout, config);
-						text = parsed.text;
-					} else {
-						text = stdout.trim();
-					}
-				} catch (error) {
-					reject(error);
-					return;
-				}
-				if (!text) {
-					if (parsed && (!parsed.finalSeen || parsed.sideEffects)) {
-						reject(new Error(`${config.agent} via ACPX JSON output did not include a final response`));
+		child.on("error", (error) => {
+			void finish(() => reject(error));
+		});
+		child.on(
+			"close",
+			(code) =>
+				void finish(() => {
+					if (aborted) {
+						reject(new Error(`${config.agent} via ACPX aborted`));
 						return;
 					}
-					reject(
-						new AcpxEmptyResponseError(config.agent, {
-							exitCode: 0,
-							stdoutBytes: Buffer.byteLength(stdout),
-							stderrBytes: Buffer.byteLength(stderr),
-							format: outputFormat,
-							durationMs: performance.now() - startedAt,
-							sideEffects: parsed?.sideEffects ?? false,
-							...(parsed?.sessionId ? { sessionId: parsed.sessionId } : {}),
-							...(parsed?.stopReason ? { stopReason: parsed.stopReason } : {}),
-							...(parsed?.usage || quietUsage(stderr) ? { usage: parsed?.usage ?? quietUsage(stderr) } : {}),
-						}),
-					);
-					return;
-				}
-				resolve(text);
-			}),
+					if (code !== 0) {
+						reject(new Error(`${config.agent} via ACPX exited ${code}: ${stderr.slice(0, 300)}`));
+						return;
+					}
+					let text: string | undefined;
+					let parsed: AcpxParsedJsonOutput | undefined;
+					try {
+						if (outputFormat === "json") {
+							parsed = parseAcpxJsonOutput(stdout, config);
+							text = parsed.text;
+						} else {
+							text = stdout.trim();
+						}
+					} catch (error) {
+						reject(error);
+						return;
+					}
+					if (!text) {
+						if (parsed && (!parsed.finalSeen || parsed.sideEffects)) {
+							reject(new Error(`${config.agent} via ACPX JSON output did not include a final response`));
+							return;
+						}
+						reject(
+							new AcpxEmptyResponseError(config.agent, {
+								exitCode: 0,
+								stdoutBytes: Buffer.byteLength(stdout),
+								stderrBytes: Buffer.byteLength(stderr),
+								format: outputFormat,
+								durationMs: performance.now() - startedAt,
+								sideEffects: parsed?.sideEffects ?? false,
+								...(parsed?.sessionId ? { sessionId: parsed.sessionId } : {}),
+								...(parsed?.stopReason ? { stopReason: parsed.stopReason } : {}),
+								...(parsed?.usage || quietUsage(stderr) ? { usage: parsed?.usage ?? quietUsage(stderr) } : {}),
+							}),
+						);
+						return;
+					}
+					resolve(text);
+				}),
 		);
 		child.stdin?.end(prompt);
 	});

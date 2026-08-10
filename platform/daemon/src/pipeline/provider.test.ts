@@ -426,6 +426,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
 		const bin = join(root, "fake-acpx-daemonizes.sh");
 		const codexAcp = join(root, "codex-acp");
 		const childPidPath = join(root, "child.pid");
+		const unrelatedPidPath = join(root, "unrelated.pid");
 		writeFileSync(
 			codexAcp,
 			`#!/usr/bin/env bash
@@ -437,6 +438,8 @@ sleep 30
 			`#!/usr/bin/env bash
 setsid ${JSON.stringify(codexAcp)} >/dev/null 2>&1 < /dev/null &
 printf '%s' "$!" > ${JSON.stringify(childPidPath)}
+SIGNET_ACPX_RUN_ID=unrelated setsid ${JSON.stringify(codexAcp)} >/dev/null 2>&1 < /dev/null &
+printf '%s' "$!" > ${JSON.stringify(unrelatedPidPath)}
 printf 'ok\\n'
 `,
 		);
@@ -459,7 +462,20 @@ printf 'ok\\n'
 				}
 			}
 			expect(alive).toBe(false);
+			const unrelatedPid = Number(readFileSync(unrelatedPidPath, "utf-8"));
+			expect(unrelatedPid).toBeGreaterThan(0);
+			expect(() => process.kill(unrelatedPid, 0)).not.toThrow();
 		} finally {
+			if (existsSync(unrelatedPidPath)) {
+				const unrelatedPid = Number(readFileSync(unrelatedPidPath, "utf-8"));
+				if (unrelatedPid > 0) {
+					try {
+						process.kill(unrelatedPid, "SIGKILL");
+					} catch {
+						// Already exited.
+					}
+				}
+			}
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -484,6 +500,45 @@ printf 'ok\\n'
 		} finally {
 			if (previousProcRoot === undefined) Reflect.deleteProperty(process.env, "SIGNET_ACPX_PROC_ROOT");
 			else process.env.SIGNET_ACPX_PROC_ROOT = previousProcRoot;
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the event loop responsive while ACPX cleanup waits on proc I/O (#1328)", async () => {
+		if (process.platform !== "linux") return;
+		const root = join(tmpdir(), `signet-acpx-async-cleanup-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const procRoot = join(root, "proc");
+		const procPid = join(procRoot, "12345");
+		const cmdlinePath = join(procPid, "cmdline");
+		const bin = join(root, "fake-acpx-hang.sh");
+		mkdirSync(procPid, { recursive: true });
+		const mkfifo = Bun.spawnSync(["mkfifo", cmdlinePath]);
+		expect(mkfifo.exitCode).toBe(0);
+		writeFileSync(
+			bin,
+			`#!/usr/bin/env bash
+sleep 30
+`,
+		);
+		chmodSync(bin, 0o755);
+		const writer = nodeSpawn("bash", ["-c", `sleep 0.25; printf 'not-codex\\0' > ${JSON.stringify(cmdlinePath)}`]);
+		const previousProcRoot = process.env.SIGNET_ACPX_PROC_ROOT;
+		process.env.SIGNET_ACPX_PROC_ROOT = procRoot;
+		let heartbeats = 0;
+		const heartbeat = setInterval(() => {
+			heartbeats += 1;
+		}, 0);
+		try {
+			const provider = createAcpxProvider({ agent: "codex", bin, hooks: "disabled" });
+			const startedAt = performance.now();
+			await expect(provider.generate("hello", { timeoutMs: 50 })).rejects.toThrow("codex via ACPX timeout after 50ms");
+			expect(performance.now() - startedAt).toBeLessThan(200);
+			expect(heartbeats).toBeGreaterThan(5);
+		} finally {
+			clearInterval(heartbeat);
+			if (previousProcRoot === undefined) Reflect.deleteProperty(process.env, "SIGNET_ACPX_PROC_ROOT");
+			else process.env.SIGNET_ACPX_PROC_ROOT = previousProcRoot;
+			writer.kill();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
