@@ -235,7 +235,15 @@ Runs both SQLite integrity modes and returns the existing top-level `ok` and
 is authoritative for index consistency. The daemon also runs these checks at
 startup, then transactionally rebuilds the disposable telemetry indexes when
 only `telemetry_events` is corrupt. A failed repair prevents background workers
-from starting and is reported by `/health` and `/health/ready`.
+from starting and is reported by `/health` and `/health/ready`. If the audit store itself prevents
+committing a verified repair, the default remains fail-closed. An operator doing
+an explicitly unaudited emergency recovery can set
+`SIGNET_ALLOW_UNAUDITED_TELEMETRY_REPAIR=1` for one daemon start; the verified
+telemetry repair is logged as unaudited and the flag should then be removed.
+
+```bash
+SIGNET_ALLOW_UNAUDITED_TELEMETRY_REPAIR=1 signet daemon start
+```
 
 ```bash
 curl http://localhost:3850/api/repair/integrity-check

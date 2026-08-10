@@ -37,6 +37,7 @@ const DEAD_JOB_RETENTION_DAYS = 7;
 const BATCH_SIZE = 500;
 const JOB_MAX_TOTAL = 50_000;
 const STAGING_MAX_TOTAL = 200_000;
+const ALLOW_UNAUDITED_TELEMETRY_REPAIR = "1";
 
 /**
  * Synchronous bounded batch drain. No yielding, no pressure checks.
@@ -70,17 +71,25 @@ export function runStartupRecovery(accessor: DbAccessor): StartupRecoveryReport 
 	logger.info("startup-recovery", "Running startup recovery");
 
 	const databaseIntegrity = repairTelemetryIndexes(accessor, (db, indexes) => {
-		insertHistoryEvent(db, {
-			memoryId: "system",
-			event: "none",
-			oldContent: null,
-			newContent: null,
-			changedBy: "daemon",
-			reason: "startup database integrity repair",
-			metadata: JSON.stringify({ repairAction: "reindex-telemetry", indexes }),
-			createdAt: new Date().toISOString(),
-			actorType: "daemon",
-		});
+		try {
+			insertHistoryEvent(db, {
+				memoryId: "system",
+				event: "none",
+				oldContent: null,
+				newContent: null,
+				changedBy: "daemon",
+				reason: "startup database integrity repair",
+				metadata: JSON.stringify({ repairAction: "reindex-telemetry", indexes }),
+				createdAt: new Date().toISOString(),
+				actorType: "daemon",
+			});
+		} catch (error) {
+			if (process.env.SIGNET_ALLOW_UNAUDITED_TELEMETRY_REPAIR !== ALLOW_UNAUDITED_TELEMETRY_REPAIR) throw error;
+			logger.error("startup-recovery", "Telemetry index repair committed without audit", undefined, {
+				error: error instanceof Error ? error.message : String(error),
+				indexes,
+			});
+		}
 	});
 	if (databaseIntegrity.state === "repaired") {
 		logger.warn("startup-recovery", "Rebuilt corrupt telemetry indexes", {

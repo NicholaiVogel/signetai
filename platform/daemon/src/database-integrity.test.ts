@@ -26,6 +26,17 @@ function fakeAccessor(options: { readonly quickMessage?: string; readonly teleme
 							if (sql === "PRAGMA integrity_check(telemetry_events)") {
 								return [{ integrity_check: repaired ? "ok" : (options.telemetryMessage ?? "ok") }];
 							}
+							if (
+								sql ===
+								"SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'telemetry_events' AND sql IS NOT NULL ORDER BY name"
+							) {
+								return [
+									{ name: "idx_telemetry_events_event" },
+									{ name: "idx_telemetry_events_queue" },
+									{ name: "idx_telemetry_events_timestamp" },
+									{ name: "idx_telemetry_events_unsent" },
+								];
+							}
 							throw new Error(`unexpected query: ${sql}`);
 						},
 					};
@@ -75,6 +86,7 @@ describe("telemetry database integrity recovery (#1360)", () => {
 		expect(result.telemetryCheck.ok).toBe(true);
 		expect(reindexed).toEqual([
 			'REINDEX "idx_telemetry_events_event"',
+			'REINDEX "idx_telemetry_events_queue"',
 			'REINDEX "idx_telemetry_events_timestamp"',
 			'REINDEX "idx_telemetry_events_unsent"',
 		]);
@@ -93,10 +105,23 @@ describe("telemetry database integrity recovery (#1360)", () => {
 		expect(result.state).toBe("repaired");
 		expect(auditedIndexes).toEqual([
 			"idx_telemetry_events_event",
+			"idx_telemetry_events_queue",
 			"idx_telemetry_events_timestamp",
 			"idx_telemetry_events_unsent",
 		]);
 		expect(detectionMessages).toEqual(["index mismatch"]);
+	});
+
+	it("fails closed when the repair audit cannot be written", () => {
+		const { accessor } = fakeAccessor({ telemetryMessage: "index mismatch" });
+
+		const result = repairTelemetryIndexes(accessor, () => {
+			throw new Error("memory_history unavailable");
+		});
+
+		expect(result.state).toBe("corrupt");
+		expect(result.rebuiltIndexes).toEqual([]);
+		expect(result.telemetryCheck.messages).toContain("memory_history unavailable");
 	});
 
 	it("does not rewrite an unrelated database when quick_check fails", () => {

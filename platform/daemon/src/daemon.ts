@@ -1994,7 +1994,7 @@ async function main() {
 		startupRecovery.databaseIntegrity.state === "unavailable"
 	) {
 		throw new Error(
-			`Database integrity check failed before workers started (${startupRecovery.databaseIntegrity.state}). Run \`GET /api/repair/integrity-check\` after resolving the database issue.`,
+			`Database integrity check failed before workers started (${startupRecovery.databaseIntegrity.state}). Resolve the database issue offline; if only the audit store prevents a verified telemetry repair, restart once with SIGNET_ALLOW_UNAUDITED_TELEMETRY_REPAIR=1.`,
 		);
 	}
 

@@ -9,12 +9,6 @@
 
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 
-const TELEMETRY_INDEXES = [
-	"idx_telemetry_events_event",
-	"idx_telemetry_events_timestamp",
-	"idx_telemetry_events_unsent",
-] as const;
-
 export type DatabaseIntegrityState = "unknown" | "healthy" | "repaired" | "corrupt" | "unavailable";
 
 export interface IntegrityCheckStatus {
@@ -47,6 +41,15 @@ function check(db: ReadDb, pragma: "quick_check" | "integrity_check", table?: st
 	const messages = rows.map((row) => String(row[key] ?? ""));
 	if (messages.length === 1 && messages[0] === "ok") return { ok: true, messages: [] };
 	return { ok: false, messages };
+}
+
+function listTelemetryIndexes(db: ReadDb): readonly string[] {
+	const rows = db
+		.prepare(
+			"SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'telemetry_events' AND sql IS NOT NULL ORDER BY name",
+		)
+		.all() as ReadonlyArray<{ name?: unknown }>;
+	return rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : []));
 }
 
 function escapedIdentifier(name: string): string {
@@ -90,13 +93,16 @@ export function repairTelemetryIndexes(
 ): DatabaseIntegrityStatus {
 	let quickCheck: IntegrityCheckStatus;
 	let telemetryCheck: IntegrityCheckStatus;
+	let telemetryIndexes: readonly string[];
 	try {
 		const checks = accessor.withReadDb((db) => ({
 			quick: check(db, "quick_check"),
 			telemetry: check(db, "integrity_check", "telemetry_events"),
+			indexes: listTelemetryIndexes(db),
 		}));
 		quickCheck = checks.quick;
 		telemetryCheck = checks.telemetry;
+		telemetryIndexes = checks.indexes;
 	} catch (error) {
 		latestStatus = statusWith(
 			"unavailable",
@@ -123,12 +129,12 @@ export function repairTelemetryIndexes(
 	if (!telemetryCheck.ok) {
 		try {
 			accessor.withWriteTx((db) => {
-				for (const index of TELEMETRY_INDEXES) db.exec(`REINDEX ${escapedIdentifier(index)}`);
-				audit?.(db, TELEMETRY_INDEXES, telemetryCheck.messages);
+				for (const index of telemetryIndexes) db.exec(`REINDEX ${escapedIdentifier(index)}`);
+				audit?.(db, telemetryIndexes, telemetryCheck.messages);
 			});
 			const verifiedTelemetry = accessor.withReadDb((db) => check(db, "integrity_check", "telemetry_events"));
 			if (verifiedTelemetry.ok) {
-				latestStatus = statusWith("repaired", quickCheck, verifiedTelemetry, [...TELEMETRY_INDEXES]);
+				latestStatus = statusWith("repaired", quickCheck, verifiedTelemetry, [...telemetryIndexes]);
 				return latestStatus;
 			}
 			telemetryCheck = verifiedTelemetry;
