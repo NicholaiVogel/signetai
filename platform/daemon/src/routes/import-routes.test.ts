@@ -108,6 +108,30 @@ describe("import routes", () => {
 		expect(loadSourcesConfig(dir).sources).toHaveLength(1);
 	});
 
+	it("stages replacement before removing the old source", async () => {
+		const content = "name,email\nAda,ada@example.com\n";
+		const first = await app().request("/api/sources/import", {
+			method: "POST",
+			body: formWithFile(new File([content], "old-name.csv", { type: "text/csv" })),
+		});
+		const second = await app().request("/api/sources/import", {
+			method: "POST",
+			body: formWithFile(new File([content], "new-name.csv", { type: "text/csv" }), "replace"),
+		});
+
+		expect(first.status).toBe(201);
+		expect(second.status).toBe(201);
+		expect(await second.json()).toMatchObject({
+			imported: 1,
+			failed: 0,
+			files: [{ fileName: "new-name.csv", status: "imported", duplicate: true }],
+		});
+		expect(loadSourcesConfig(dir).sources).toMatchObject([
+			{ kind: "import", providerSettings: { fileName: "new-name.csv" } },
+		]);
+		expect(loadSourcesConfig(dir).sources).toHaveLength(1);
+	});
+
 	it("rejects a batch that exceeds the file-count boundary", async () => {
 		const form = new FormData();
 		for (let index = 0; index < 26; index++)

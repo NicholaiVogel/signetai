@@ -1,4 +1,4 @@
-import { addImportedSource, markSourceIndexed, removeSource } from "@signet/core";
+import { addImportedSource, loadSourcesConfig, markSourceIndexed, removeSource } from "@signet/core";
 import type { Hono } from "hono";
 import { resolveDaemonAgentId } from "../agent-id";
 import { getDbAccessor } from "../db-accessor";
@@ -73,14 +73,22 @@ export function registerImportRoutes(app: Hono): void {
 				continue;
 			}
 
+			const agentsDir = process.env.SIGNET_PATH;
+			const replacedSource =
+				duplicateMode === "replace"
+					? loadSourcesConfig(agentsDir).sources.find(
+							(source) =>
+								source.kind === "import" && source.providerSettings?.contentHash === normalized.value.contentHash,
+						)
+					: undefined;
 			const added = addImportedSource(
 				{
 					fileName: normalized.value.fileName,
 					contentHash: normalized.value.contentHash,
 					format: normalized.value.format,
-					duplicateMode,
+					duplicateMode: replacedSource === undefined ? duplicateMode : "reimport",
 				},
-				process.env.SIGNET_PATH,
+				agentsDir,
 			);
 			if (added.ok === false) {
 				statuses.push({ fileName: file.name, status: "failed", error: added.error });
@@ -92,8 +100,6 @@ export function registerImportRoutes(app: Hono): void {
 			}
 
 			try {
-				if (added.duplicate && duplicateMode === "replace")
-					purgeSourceOwnedRows({ sourceId: added.source.id, agentId: resolveDaemonAgentId() });
 				const sourcePath = `imports/${added.source.id}/${normalized.value.fileName}`;
 				const now = new Date().toISOString();
 				indexExternalMemoryArtifact({
@@ -118,7 +124,23 @@ export function registerImportRoutes(app: Hono): void {
 					displayName: normalized.value.fileName,
 					content: normalized.value.content,
 				});
-				markSourceIndexed(added.source.id, now, process.env.SIGNET_PATH);
+				if (replacedSource !== undefined) {
+					try {
+						purgeSourceOwnedRows({ sourceId: replacedSource.id, agentId: resolveDaemonAgentId() });
+					} catch (cleanupError) {
+						logger.warn("documents", "Replaced dashboard import purge failed", {
+							sourceId: replacedSource.id,
+							error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+						});
+					}
+					const removed = removeSource(replacedSource.id, agentsDir);
+					if (removed.ok === false)
+						logger.warn("documents", "Replaced dashboard import config cleanup failed", {
+							sourceId: replacedSource.id,
+							error: removed.error,
+						});
+				}
+				markSourceIndexed(added.source.id, now, agentsDir);
 				imported += 1;
 				statuses.push({
 					fileName: file.name,
