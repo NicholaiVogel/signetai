@@ -108,9 +108,9 @@ function ImportedDocumentsCard({
 		<Surface
 			data-testid="imported-documents-card"
 			aria-label="Imported documents"
-			className="sig-src-card sig-keylight-src flex flex-col gap-2.5 p-4"
+			className="sig-src-card sig-keylight-src flex h-[clamp(360px,45vh,480px)] min-h-0 flex-col gap-2.5 p-4"
 		>
-			<div className="flex items-center gap-3">
+			<div className="flex shrink-0 items-center gap-3">
 				<span className="grid size-9.5 shrink-0 place-items-center rounded-[9px] border border-[oklch(1_0_0/0.06)] bg-[color-mix(in_oklch,var(--foreground)_5%,transparent)] text-foreground">
 					<Folder className="size-5" />
 				</span>
@@ -123,16 +123,17 @@ function ImportedDocumentsCard({
 				</span>
 			</div>
 
-			<div
-				className="flex max-h-[360px] flex-col gap-1.5 overflow-y-auto scrollbar-none"
+			<ul
+				aria-label="Imported documents"
+				className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pr-1 scrollbar-none"
 				data-testid="imported-document-list"
 			>
 				{documents.map((source) => (
 					<ImportedDocumentRow key={source.id} source={source} onMutate={onMutate} />
 				))}
-			</div>
+			</ul>
 
-			<div className="grid grid-cols-3 gap-2 border-t border-[oklch(1_0_0/0.06)] pt-2 [html:not(.dark)_&]:border-[oklch(0_0_0/0.06)]">
+			<div className="grid shrink-0 grid-cols-3 gap-2 border-t border-[oklch(1_0_0/0.06)] pt-2 [html:not(.dark)_&]:border-[oklch(0_0_0/0.06)]">
 				<MiniStat value={totals.artifacts.toLocaleString()} label="artifacts" />
 				<MiniStat value={totals.chunks.toLocaleString()} label="chunks" />
 				<MiniStat value={totals.indexed.toLocaleString()} label="indexed" />
@@ -151,7 +152,10 @@ function ImportedDocumentRow({ source, onMutate }: { source: SignetSource; onMut
 	const format = typeof source.providerSettings?.format === "string" ? source.providerSettings.format : "document";
 
 	return (
-		<div className="flex min-w-0 flex-col gap-2 rounded-lg border border-[oklch(1_0_0/0.07)] bg-[color-mix(in_oklch,var(--foreground)_2.5%,transparent)] p-2.5 [html:not(.dark)_&]:border-[oklch(0_0_0/0.08)]">
+		<li
+			data-testid="imported-document-row"
+			className="flex min-w-0 flex-col gap-1.5 border-b border-[oklch(1_0_0/0.07)] py-2 first:pt-0 last:border-b-0 last:pb-0 [html:not(.dark)_&]:border-[oklch(0_0_0/0.08)]"
+		>
 			<div className="flex min-w-0 items-center gap-2">
 				<span className="grid size-7 shrink-0 place-items-center rounded-md bg-[color-mix(in_oklch,var(--foreground)_5%,transparent)] text-muted-foreground">
 					<Folder className="size-3.5" />
@@ -228,7 +232,7 @@ function ImportedDocumentRow({ source, onMutate }: { source: SignetSource; onMut
 					{error}
 				</span>
 			)}
-		</div>
+		</li>
 	);
 }
 

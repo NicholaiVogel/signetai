@@ -228,6 +228,15 @@ describe("sources grouping", () => {
 		expect(documents.querySelectorAll('[aria-label="Re-index"]')).toHaveLength(0);
 		expect(documents.querySelectorAll('[aria-label="Snapshot"]')).toHaveLength(2);
 		expect(documents.querySelectorAll('[aria-label="Remove"]')).toHaveLength(2);
+		const list = documents.querySelector('[data-testid="imported-document-list"]');
+		if (!(list instanceof HTMLUListElement)) throw new Error("Imported document list not found");
+		expect(list.getAttribute("aria-label")).toBe("Imported documents");
+		expect(list.className).toContain("min-h-0");
+		expect(list.className).toContain("overflow-x-hidden");
+		expect(list.className).toContain("overflow-y-auto");
+		expect(list.className).toContain("pr-1");
+		expect(list.querySelectorAll('[data-testid="imported-document-row"]')).toHaveLength(2);
+		expect(documents.className).toContain("h-[clamp(360px,45vh,480px)]");
 		expect(documents.textContent).toContain("3 artifacts · 4 chunks · 5 indexed");
 		expect(mounted.container.querySelectorAll(".sig-src-card")).toHaveLength(2);
 		expect(mounted.container.textContent).toContain("Vault");
