@@ -925,6 +925,49 @@ describe("reembedMissingMemories", () => {
 		db.close();
 	});
 
+	it("preserves a committed memory when embedding persistence fails, then retries idempotently", async () => {
+		insertMemory(db, "mem-write-failure");
+		let failWrite = true;
+		const flakyAccessor: DbAccessor = {
+			...accessor,
+			withWriteTx<T>(fn: (wdb: WriteDb) => T): T {
+				if (failWrite) {
+					failWrite = false;
+					throw new Error("simulated embedding persistence failure");
+				}
+				return accessor.withWriteTx(fn);
+			},
+		};
+
+		const first = reembedMissingMemories(
+			flakyAccessor,
+			TEST_CFG,
+			CTX_OPERATOR,
+			createRateLimiter(),
+			async () => [0.1, 0.2, 0.3],
+			TEST_EMBEDDING_CFG,
+			1,
+			false,
+		);
+		await expect(first).rejects.toThrow("simulated embedding persistence failure");
+		expect(db.prepare("SELECT id FROM memories WHERE id = ?").get("mem-write-failure")).toBeTruthy();
+		expect(db.prepare("SELECT id FROM embeddings WHERE source_id = ?").get("mem-write-failure")).toBeNull();
+
+		const second = await reembedMissingMemories(
+			accessor,
+			TEST_CFG,
+			CTX_OPERATOR,
+			createRateLimiter(),
+			async () => [0.1, 0.2, 0.3],
+			TEST_EMBEDDING_CFG,
+			1,
+			false,
+		);
+		expect(second.success).toBe(true);
+		expect(second.affected).toBe(1);
+		expect(db.prepare("SELECT id FROM embeddings WHERE source_id = ?").get("mem-write-failure")).toBeTruthy();
+	});
+
 	it("repairs memories even when content_hash is NULL", async () => {
 		insertMemory(db, "mem-null-hash");
 

@@ -153,6 +153,31 @@ describe("transactions: txModifyMemory + txForgetMemory + txRecoverMemory", () =
 		expect(history.reason).toBe("manual correction");
 	});
 
+	it("rolls back an ingest before memory commit without losing existing durable state", () => {
+		insertMemory(db, {
+			id: "mem-existing",
+			content: "Existing durable memory",
+			contentHash: "hash-existing",
+		});
+
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			insertMemory(db, {
+				id: "mem-aborted",
+				content: "Should not commit",
+				contentHash: "hash-aborted",
+			});
+			throw new Error("simulated failure before memory commit");
+		} catch (error) {
+			db.exec("ROLLBACK");
+			expect(error).toEqual(new Error("simulated failure before memory commit"));
+		}
+
+		expect(db.prepare("SELECT id FROM memories WHERE id = ?").get("mem-existing")).toBeTruthy();
+		expect(db.prepare("SELECT id FROM memories WHERE id = ?").get("mem-aborted")).toBeNull();
+		expect(db.prepare("SELECT id FROM memory_history WHERE memory_id = ?").get("mem-aborted")).toBeNull();
+	});
+
 	it("keeps a materialized semantic claim on the ontology write path", () => {
 		insertMemory(db, {
 			id: "semantic-claim",

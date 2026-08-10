@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { findSqliteVecExtension } from "@signet/core";
 import { up as embeddingIndexGenerations } from "../../core/src/migrations/091-embedding-index-generations";
-import { type DbAccessor, DbWriteQueueFullError, type ReadDb, type WriteDb } from "./db-accessor";
+import { type DbAccessor, DbWriteQueueFullError, type ReadDb, type SqliteStatement, type WriteDb } from "./db-accessor";
 import {
 	promoteStagingIndex,
 	stageEmbeddingBatch,
@@ -12,6 +12,34 @@ import {
 import { beginEmbeddingIndexBuild, ensureEmbeddingIndexState, readEmbeddingIndexState } from "./embedding-index-state";
 
 const VEC_EXTENSION = findSqliteVecExtension();
+
+function failIndexStateUpdateOnce(raw: Database): WriteDb {
+	let failed = false;
+	return {
+		exec(sql: string): void {
+			raw.exec(sql);
+		},
+		prepare(sql: string): SqliteStatement {
+			const statement = raw.prepare(sql) as unknown as SqliteStatement;
+			if (!sql.includes("UPDATE embedding_index_state")) return statement;
+			return {
+				run(...params: unknown[]) {
+					if (!failed) {
+						failed = true;
+						throw new Error("simulated index-state update failure");
+					}
+					return statement.run(...params);
+				},
+				get(...params: unknown[]) {
+					return statement.get(...params);
+				},
+				all<Row = unknown>(...params: unknown[]) {
+					return statement.all<Row>(...params);
+				},
+			};
+		},
+	};
+}
 
 describe("staging embedding coverage", () => {
 	it("requires every active row, including source chunks, at the staged dimensions", () => {
@@ -375,6 +403,72 @@ describe("staging promotion", () => {
 			.prepare("SELECT id FROM vec_embeddings WHERE embedding MATCH ? AND k = 1")
 			.get(new Float32Array([0, 1, 0]));
 		expect(nearest).toEqual({ id: "new" });
+	});
+
+	it("rolls back vec rebuild when index state commit fails after vector insertion", () => {
+		if (!VEC_EXTENSION) return;
+		const raw = new Database(":memory:");
+		raw.loadExtension(VEC_EXTENSION);
+		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		raw.exec(`
+			CREATE TABLE memories (id TEXT PRIMARY KEY, embedding_model TEXT);
+			CREATE TABLE embeddings (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, created_at TEXT);
+			CREATE TABLE embeddings_staging (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, created_at TEXT);
+			CREATE VIRTUAL TABLE vec_embeddings USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[3] distance_metric=cosine);
+			CREATE VIRTUAL TABLE vec_embeddings_staging USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[3] distance_metric=cosine);
+		`);
+		const db = raw as unknown as WriteDb;
+		const active = {
+			provider: "ollama",
+			model: "nomic-embed-text",
+			dimensions: 3,
+			base_url: "http://127.0.0.1:11434",
+		} as const;
+		const staged = { ...active, model: "qwen3-embedding:0.6b" };
+		ensureEmbeddingIndexState(db, active);
+		beginEmbeddingIndexBuild(db, staged);
+		raw.exec(`
+			INSERT INTO memories VALUES ('memory-1', 'nomic-embed-text');
+			INSERT INTO embeddings VALUES ('old', 'shared-content', X'0000803F0000000000000000', 3, 'memory', 'memory-1', '2026-01-01');
+			INSERT INTO embeddings_staging VALUES ('new', 'shared-content', X'000000000000803F00000000', 3, 'memory', 'memory-1', '2026-01-01');
+		`);
+		raw.prepare("INSERT INTO vec_embeddings (id, embedding) VALUES (?, ?)").run("old", new Float32Array([1, 0, 0]));
+		raw
+			.prepare("INSERT INTO vec_embeddings_staging (id, embedding) VALUES (?, ?)")
+			.run("new", new Float32Array([0, 1, 0]));
+
+		const failingDb = failIndexStateUpdateOnce(raw);
+		const accessor: DbAccessor = {
+			withWriteTx: (fn) => {
+				raw.exec("BEGIN IMMEDIATE");
+				try {
+					const result = fn(failingDb);
+					raw.exec("COMMIT");
+					return result;
+				} catch (error) {
+					raw.exec("ROLLBACK");
+					throw error;
+				}
+			},
+			withReadDb: (fn) => fn(raw as unknown as ReadDb),
+			close: () => undefined,
+		};
+
+		expect(() => promoteStagingIndex(accessor)).toThrow("simulated index-state update failure");
+		expect(readEmbeddingIndexState(raw as unknown as ReadDb)?.state).toBe("building");
+		expect(raw.prepare("SELECT id, content_hash FROM embeddings").get()).toEqual({
+			id: "old",
+			content_hash: "shared-content",
+		});
+		expect(raw.prepare("SELECT id, content_hash FROM embeddings_staging").get()).toEqual({
+			id: "new",
+			content_hash: "shared-content",
+		});
+		expect(raw.prepare("SELECT id FROM vec_embeddings").get()).toEqual({ id: "old" });
+		expect(raw.prepare("SELECT id FROM vec_embeddings_staging").get()).toEqual({ id: "new" });
+		expect(raw.prepare("SELECT embedding_model FROM memories WHERE id = 'memory-1'").get()).toEqual({
+			embedding_model: "nomic-embed-text",
+		});
 	});
 });
 

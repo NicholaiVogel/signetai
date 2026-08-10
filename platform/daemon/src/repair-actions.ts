@@ -1079,7 +1079,9 @@ export function cleanOrphanedEmbeddings(
 		if (orphans.length === 0) return 0;
 
 		const ids = orphans.map((r) => r.id);
-		syncVecDeleteByEmbeddingIds(db, ids);
+		if (!syncVecDeleteByEmbeddingIds(db, ids)) {
+			throw new Error("failed to reconcile vec_embeddings before orphan cleanup");
+		}
 
 		const placeholders = ids.map(() => "?").join(", ");
 		const result = db.prepare(`DELETE FROM embeddings WHERE id IN (${placeholders})`).run(...ids);

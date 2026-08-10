@@ -59,7 +59,7 @@ function invalidateUmapCache(db: WriteDb): void {
 function vecTableExists(db: WriteDb): boolean {
 	try {
 		const row = db.prepare("SELECT name FROM sqlite_master WHERE name = 'vec_embeddings' AND type = 'table'").get();
-		return row !== undefined;
+		return row != null;
 	} catch {
 		return false;
 	}
@@ -102,19 +102,21 @@ export function syncVecInsert(db: WriteDb, embeddingId: string, vector: readonly
 
 /**
  * Remove rows from vec_embeddings that match embedding ids.
- * Call after deleting from the embeddings table.
+ * Call before deleting from the embeddings table so a failed derived-index
+ * write leaves the canonical row available for retry.
  */
-export function syncVecDeleteByEmbeddingIds(db: WriteDb, embeddingIds: readonly string[]): void {
-	if (embeddingIds.length === 0) return;
+export function syncVecDeleteByEmbeddingIds(db: WriteDb, embeddingIds: readonly string[]): boolean {
+	if (embeddingIds.length === 0) return true;
 	invalidateUmapCache(db);
-	if (!vecTableExists(db)) return;
+	if (!vecTableExists(db)) return true;
 	try {
 		const stmt = db.prepare("DELETE FROM vec_embeddings WHERE id = ?");
 		for (const id of embeddingIds) {
 			stmt.run(id);
 		}
+		return true;
 	} catch {
-		// non-fatal
+		return false;
 	}
 }
 

@@ -152,10 +152,13 @@ function purgeEmbeddings(db: WriteDb, cutoff: string, limit: number): number {
 			 WHERE source_type = 'memory' AND source_id IN (${placeholders})`,
 		)
 		.all(...ids) as Array<{ id: string }>;
-	syncVecDeleteByEmbeddingIds(
+	const vectorsDeleted = syncVecDeleteByEmbeddingIds(
 		db,
 		embRows.map((r) => r.id),
 	);
+	if (!vectorsDeleted) {
+		throw new Error("failed to reconcile vec_embeddings before retention purge");
+	}
 
 	const result = db
 		.prepare(
