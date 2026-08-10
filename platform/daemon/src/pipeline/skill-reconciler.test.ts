@@ -343,6 +343,58 @@ body`,
 		).toBeNull();
 	});
 
+	it("does not let an in-flight failure cancel a queued fresh trigger (#1354)", async () => {
+		const paths = setup();
+		root = paths.root;
+		db = paths.db;
+		initDbAccessor(db);
+
+		const skill = "fresh-trigger-skill";
+		const file = join(paths.root, "skills", skill, "SKILL.md");
+		mkdirSync(join(paths.root, "skills", skill), { recursive: true });
+		writeFileSync(
+			file,
+			`---
+name: ${skill}
+description: fresh trigger test
+---
+body`,
+		);
+
+		let calls = 0;
+		let rejectFirstEmbedding: ((error: Error) => void) | undefined;
+		let resolveFirstCall: (() => void) | undefined;
+		const firstCall = new Promise<void>((resolve) => {
+			resolveFirstCall = resolve;
+		});
+		const firstEmbedding = new Promise<number[] | null>((_, reject) => {
+			rejectFirstEmbedding = reject;
+		});
+		const deps = {
+			accessor: getDbAccessor(),
+			pipelineConfig: cfg(),
+			embeddingConfig: emb,
+			fetchEmbedding: async () => {
+				calls++;
+				if (calls === 1) {
+					resolveFirstCall?.();
+					return firstEmbedding;
+				}
+				return [0.1, 0.2, 0.3];
+			},
+			agentsDir: root,
+		};
+
+		const first = reconcileSkillFile(skill, file, deps);
+		await firstCall;
+		const fresh = reconcileSkillFile(skill, file, deps, { forceInstall: true });
+		rejectFirstEmbedding?.(new Error("first provider call failed"));
+
+		expect(await first).toBe("failed");
+		expect(await fresh).toBe("updated");
+		expect(calls).toBe(2);
+	});
+
 	it("updates skill metadata when a non-embedding frontmatter field changes on disk", async () => {
 		const paths = setup();
 		root = paths.root;

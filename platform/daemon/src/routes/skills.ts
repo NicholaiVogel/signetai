@@ -31,12 +31,7 @@ import { type DbAccessor, getDbAccessor } from "../db-accessor.js";
 import { logger } from "../logger.js";
 import { type EmbeddingConfig, type PipelineV2Config, loadMemoryConfig } from "../memory-config.js";
 import { uninstallSkillNode } from "../pipeline/skill-graph.js";
-import {
-	type ReconcilerDeps,
-	reconcileSkillFile,
-	resetSkillFailureState,
-	withSkillReconciliationLock,
-} from "../pipeline/skill-reconciler.js";
+import { type ReconcilerDeps, reconcileSkillFile, withSkillReconciliationLock } from "../pipeline/skill-reconciler.js";
 
 function getAgentsDir(): string {
 	return resolveDefaultBasePath();
@@ -811,7 +806,6 @@ async function onSkillInstalled(skillName: string): Promise<void> {
 		fetchEmbedding: fetchEmbeddingFn,
 		agentsDir: getAgentsDir(),
 	};
-	resetSkillFailureState(skillName);
 	const result = await reconcileSkillFile(skillName, join(getSkillsDir(), skillName, "SKILL.md"), deps, {
 		forceInstall: true,
 		source: "installed",

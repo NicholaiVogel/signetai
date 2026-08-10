@@ -215,6 +215,10 @@ export async function reconcileSkillFile(
 	options: ReconcileSkillFileOptions = {},
 ): Promise<ReconcileSkillResult> {
 	return withSkillReconciliationLock(deps.agentsDir, skillName, async () => {
+		// A watcher or explicit install is a fresh signal. Reset only after
+		// entering the flight so an older in-flight failure cannot overwrite
+		// this reset before the queued trigger starts.
+		if (options.forceInstall) resetSkillFailureState(skillName);
 		const failureState = skillFailureState.get(skillName);
 		if (failureState && failureState.nextAttemptAt > Date.now()) {
 			return "skipped";
@@ -375,7 +379,6 @@ export function startReconciler(deps: ReconcilerDeps): ReconcilerHandle {
 		watcher.on("add", (filePath) => {
 			const skillName = basename(dirname(filePath));
 			logger.info("reconciler", "SKILL.md added", { skill: skillName });
-			resetSkillFailureState(skillName);
 			reconcileSkillFile(skillName, filePath, deps, { forceInstall: true }).catch((e) => {
 				logger.error("reconciler", "Watcher reconciliation failed", e instanceof Error ? e : undefined, {
 					skill: skillName,
@@ -387,7 +390,6 @@ export function startReconciler(deps: ReconcilerDeps): ReconcilerHandle {
 		watcher.on("change", (filePath) => {
 			const skillName = basename(dirname(filePath));
 			logger.info("reconciler", "SKILL.md changed", { skill: skillName });
-			resetSkillFailureState(skillName);
 			reconcileSkillFile(skillName, filePath, deps, { forceInstall: true }).catch((e) => {
 				logger.error("reconciler", "Watcher reconciliation failed", e instanceof Error ? e : undefined, {
 					skill: skillName,
