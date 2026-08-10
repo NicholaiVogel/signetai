@@ -21,11 +21,13 @@ import type { DatabaseIntegrityStatus } from "./database-integrity";
 import { repairTelemetryIndexes } from "./database-integrity";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { logger } from "./logger";
+import { recoverStaleLeases } from "./pipeline/stale-leases";
 import { insertHistoryEvent } from "./transactions";
 
 export interface StartupRecoveryReport {
 	readonly walCheckpointed: boolean;
 	readonly databaseIntegrity: DatabaseIntegrityStatus;
+	readonly documentLeasesRecovered: number;
 	readonly deadJobsPurged: number;
 	readonly stagingRowsCleaned: number;
 	readonly orphanedPassesSwept: number;
@@ -112,7 +114,48 @@ export function runStartupRecovery(accessor: DbAccessor): StartupRecoveryReport 
 	// WAL management without blocking. The checkpointWal() method is kept on
 	// DbAccessor for post-startup callers but must not be called during boot.
 
-	// 1. Purge old dead jobs.
+	// 1. Recover document leases stranded by a previous daemon process. This
+	// must not depend on autonomous maintenance: observe mode, disabled
+	// maintenance, and a frozen worker are all valid configurations.
+	let documentLeasesRecovered = 0;
+	try {
+		const now = new Date().toISOString();
+		documentLeasesRecovered = accessor.withWriteTx((db) => {
+			// The daemon lock is held before this function runs, so every document
+			// lease belongs to a process that is no longer alive. Unlike maintenance,
+			// startup recovery must not wait for the lease timeout: a fresh lease can
+			// otherwise remain permanently invisible to the document worker.
+			const recovered = recoverStaleLeases(db, { now, jobType: "document_ingest" });
+			if (recovered.dead > 0) {
+				db.prepare(
+					`UPDATE documents
+					 SET status = 'failed',
+					     error = COALESCE(error, ?),
+					     updated_at = ?
+					 WHERE id IN (
+					     SELECT DISTINCT document_id FROM memory_jobs
+					      WHERE job_type = 'document_ingest'
+					        AND status = 'dead'
+					        AND failed_at = ?
+					        AND document_id IS NOT NULL
+					 )
+					   AND status != 'deleted'`,
+				).run("Document ingest lease expired before completion", now, now);
+			}
+			return recovered.total;
+		});
+		if (documentLeasesRecovered > 0) {
+			logger.info("startup-recovery", "Recovered document ingest leases", {
+				count: documentLeasesRecovered,
+			});
+		}
+	} catch (err) {
+		logger.warn("startup-recovery", "Document lease recovery failed", {
+			error: err instanceof Error ? err.message : String(err),
+		});
+	}
+
+	// 2. Purge old dead jobs.
 	const cutoff = new Date(Date.now() - DEAD_JOB_RETENTION_DAYS * 86_400_000).toISOString();
 	let deadJobsPurged = 0;
 	try {
@@ -226,6 +269,7 @@ export function runStartupRecovery(accessor: DbAccessor): StartupRecoveryReport 
 	const report: StartupRecoveryReport = {
 		walCheckpointed: false,
 		databaseIntegrity,
+		documentLeasesRecovered,
 		deadJobsPurged,
 		stagingRowsCleaned,
 		orphanedPassesSwept,
@@ -235,6 +279,7 @@ export function runStartupRecovery(accessor: DbAccessor): StartupRecoveryReport 
 
 	const totalCleaned =
 		databaseIntegrity.rebuiltIndexes.length +
+		documentLeasesRecovered +
 		deadJobsPurged +
 		stagingRowsCleaned +
 		orphanedPassesSwept +

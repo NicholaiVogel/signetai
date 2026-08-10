@@ -8,13 +8,19 @@ export interface StaleLeaseRecovery {
 }
 
 interface RecoverOpts {
-	readonly cutoff: string;
+	readonly cutoff?: string;
 	readonly now: string;
+	readonly jobType?: string;
 }
 
 const LEASE_EXPIRED = "lease expired before completion";
 
 export function recoverStaleLeases(db: WriteDb, opts: RecoverOpts): StaleLeaseRecovery {
+	const jobTypeFilter = opts.jobType === undefined ? "" : " AND job_type = ?";
+	const cutoffFilter = opts.cutoff === undefined ? "" : " AND leased_at < ?";
+	const jobTypeParams = opts.jobType === undefined ? [] : [opts.jobType];
+	const cutoffParams = opts.cutoff === undefined ? [] : [opts.cutoff];
+	const deadParams = [opts.now, LEASE_EXPIRED, opts.now, ...jobTypeParams, ...cutoffParams];
 	const dead = countChanges(
 		db
 			.prepare(
@@ -25,12 +31,14 @@ export function recoverStaleLeases(db: WriteDb, opts: RecoverOpts): StaleLeaseRe
 				     error = COALESCE(error, ?),
 				     updated_at = ?
 				 WHERE status = 'leased'
-				   AND leased_at < ?
+				   ${jobTypeFilter}
+				   ${cutoffFilter}
 				   AND attempts >= max_attempts`,
 			)
-			.run(opts.now, LEASE_EXPIRED, opts.now, opts.cutoff),
+			.run(...deadParams),
 	);
 
+	const pendingParams = [opts.now, ...jobTypeParams, ...cutoffParams];
 	const pending = countChanges(
 		db
 			.prepare(
@@ -39,10 +47,11 @@ export function recoverStaleLeases(db: WriteDb, opts: RecoverOpts): StaleLeaseRe
 				     leased_at = NULL,
 				     updated_at = ?
 				 WHERE status = 'leased'
-				   AND leased_at < ?
+				   ${jobTypeFilter}
+				   ${cutoffFilter}
 				   AND attempts < max_attempts`,
 			)
-			.run(opts.now, opts.cutoff),
+			.run(...pendingParams),
 	);
 
 	return {
