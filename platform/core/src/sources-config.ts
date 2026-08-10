@@ -230,7 +230,7 @@ export function addImportedSource(input: AddImportedSourceInput, agentsDir = get
 			(source) =>
 				source.kind === "import" &&
 				source.providerSettings?.contentHash === contentHash &&
-				(mode !== "replace" || agentId === undefined || source.providerSettings?.agentId === agentId),
+				(agentId === undefined || source.providerSettings?.agentId === agentId),
 		);
 		if (duplicate && mode === "skip") {
 			return { ok: true, source: duplicate, created: false, duplicate: true };

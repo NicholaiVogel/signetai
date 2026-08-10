@@ -17,6 +17,8 @@ describe("import normalizer", () => {
 		if (result.ok === false) throw new Error(result.error);
 		expect(result.value.format).toBe("json");
 		expect(result.value.content).toContain('"messages"');
+		expect(result.value.canonicalContent).toBe('{"messages":[{"role":"user","content":"hello"}]}\n');
+		expect(result.value.canonicalContent).not.toBe(result.value.content);
 		expect(result.value.sourceMeta).toEqual({ representation: "structured-json", rootType: "object" });
 		expect(result.value.contentHash).toMatch(/^[a-f0-9]{64}$/);
 	});

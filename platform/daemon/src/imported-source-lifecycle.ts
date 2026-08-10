@@ -13,6 +13,11 @@ export interface MarkImportedSourceUnsupportedInput {
 export interface MarkImportedSourceUnsupportedResult {
 	readonly artifacts: number;
 	readonly embeddings: number;
+	readonly derivedMemories: number;
+	readonly entities: number;
+	readonly aspects: number;
+	readonly attributes: number;
+	readonly dependencies: number;
 }
 
 /**
@@ -25,7 +30,8 @@ export function markImportedSourceUnsupported(
 ): MarkImportedSourceUnsupportedResult {
 	const sourceId = input.sourceId.trim();
 	const agentId = input.agentId.trim();
-	if (!sourceId || !agentId) return { artifacts: 0, embeddings: 0 };
+	if (!sourceId || !agentId)
+		return { artifacts: 0, embeddings: 0, derivedMemories: 0, entities: 0, aspects: 0, attributes: 0, dependencies: 0 };
 	return getDbAccessor().withWriteTx((db) => {
 		const now = new Date().toISOString();
 		const reason = input.reason?.trim() || "imported source removed";
@@ -64,6 +70,67 @@ export function markImportedSourceUnsupported(
 			for (const id of embeddingIds) stmt.run(id);
 		}
 
+		const derivedMemoryRows = db
+			.prepare(
+				`SELECT DISTINCT dms.derived_memory_id AS id
+				 FROM derived_memory_sources dms
+				 JOIN memories derived ON derived.id = dms.derived_memory_id
+				 WHERE dms.agent_id = ? AND dms.source_id = ?
+				   AND derived.agent_id = ? AND derived.is_deleted = 0
+				   AND derived.stale_at IS NULL`,
+			)
+			.all(agentId, sourceId, agentId) as Array<{ id: string }>;
+		const derivedMemoryIds = derivedMemoryRows.map((row) => row.id);
+		if (derivedMemoryIds.length > 0) {
+			db.prepare(
+				`UPDATE memories SET stale_at = ?
+				 WHERE agent_id = ? AND stale_at IS NULL
+				   AND id IN (${derivedMemoryIds.map(() => "?").join(", ")})`,
+			).run(now, agentId, ...derivedMemoryIds);
+		}
+
+		const entityIds = db
+			.prepare("SELECT id FROM entities WHERE agent_id = ? AND source_id = ?")
+			.all(agentId, sourceId) as Array<{ id: string }>;
+		const entityIdValues = entityIds.map((row) => row.id);
+		const archiveReason = `unsupported source: ${reason}`;
+		const entities = countChanges(
+			db
+				.prepare(
+					`UPDATE entities SET status = 'archived', archived_at = ?, archived_by = ?, archive_reason = ?, updated_at = ?
+				 WHERE agent_id = ? AND source_id = ? AND status = 'active'`,
+				)
+				.run(now, "source-lifecycle", archiveReason, now, agentId, sourceId),
+		);
+		let aspects = 0;
+		if (entityIdValues.length > 0) {
+			aspects = countChanges(
+				db
+					.prepare(
+						`UPDATE entity_aspects SET status = 'archived', archived_at = ?, archived_by = ?, archive_reason = ?, updated_at = ?
+					 WHERE agent_id = ? AND status = 'active'
+					   AND entity_id IN (${entityIdValues.map(() => "?").join(", ")})`,
+					)
+					.run(now, "source-lifecycle", archiveReason, now, agentId, ...entityIdValues),
+			);
+		}
+		const attributes = countChanges(
+			db
+				.prepare(
+					`UPDATE entity_attributes SET status = 'archived', archived_at = ?, archived_by = ?, archive_reason = ?, updated_at = ?
+				 WHERE agent_id = ? AND source_id = ? AND status = 'active'`,
+				)
+				.run(now, "source-lifecycle", archiveReason, now, agentId, sourceId),
+		);
+		const dependencies = countChanges(
+			db
+				.prepare(
+					`UPDATE entity_dependencies SET status = 'archived', archived_at = ?, archived_by = ?, archive_reason = ?, updated_at = ?
+				 WHERE agent_id = ? AND source_id = ? AND status = 'active'`,
+				)
+				.run(now, "source-lifecycle", archiveReason, now, agentId, sourceId),
+		);
+
 		enqueueDreamingAttentionInTx(db, {
 			agentId,
 			kind: "hygiene",
@@ -71,6 +138,14 @@ export function markImportedSourceUnsupported(
 			details: { sourceId, reason: "import-source-removed", lifecycle: "unsupported" },
 			priority: 90,
 		});
-		return { artifacts, embeddings: embeddingIds.length };
+		return {
+			artifacts,
+			embeddings: embeddingIds.length,
+			derivedMemories: derivedMemoryIds.length,
+			entities,
+			aspects,
+			attributes,
+			dependencies,
+		};
 	});
 }

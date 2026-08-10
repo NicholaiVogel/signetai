@@ -10,6 +10,7 @@ export interface NormalizedImport {
 	readonly fileName: string;
 	readonly format: string;
 	readonly content: string;
+	readonly canonicalContent?: string;
 	readonly contentHash: string;
 	readonly sourceMeta: Readonly<Record<string, unknown>>;
 	readonly searchChunks: readonly NormalizedImportChunk[];
@@ -58,6 +59,7 @@ export async function normalizeImportedFile(
 	try {
 		if (extension === ".json" || mediaType === "application/json") {
 			const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+			const canonicalContent = `${JSON.stringify(parsed)}\n`;
 			const content = `${JSON.stringify(parsed, null, 2)}\n`;
 			return success(
 				safeName,
@@ -68,6 +70,7 @@ export async function normalizeImportedFile(
 					rootType: Array.isArray(parsed) ? "array" : typeof parsed,
 				},
 				[],
+				canonicalContent,
 			);
 		}
 		if (extension === ".html" || extension === ".htm" || mediaType === "text/html") {
@@ -128,15 +131,20 @@ function success(
 	content: string,
 	sourceMeta: Readonly<Record<string, unknown>>,
 	searchChunks: readonly NormalizedImportChunk[] = [],
+	canonicalContent?: string,
 ): NormalizeImportResult {
-	if (new TextEncoder().encode(content).byteLength > IMPORT_MAX_FILE_BYTES)
+	const encoder = new TextEncoder();
+	if (encoder.encode(content).byteLength > IMPORT_MAX_FILE_BYTES)
 		return failure(`Normalized file exceeds the ${IMPORT_MAX_FILE_BYTES} byte limit`);
+	if (canonicalContent !== undefined && encoder.encode(canonicalContent).byteLength > IMPORT_MAX_FILE_BYTES)
+		return failure(`Canonical file exceeds the ${IMPORT_MAX_FILE_BYTES} byte limit`);
 	return {
 		ok: true,
 		value: {
 			fileName,
 			format,
 			content,
+			...(canonicalContent === undefined ? {} : { canonicalContent }),
 			contentHash: createHash("sha256").update(content, "utf8").digest("hex"),
 			sourceMeta,
 			searchChunks,

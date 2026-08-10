@@ -93,10 +93,14 @@ describe("import routes", () => {
 		writeFileSync(path, '{"selected":true}');
 		const localForm = new FormData();
 		localForm.append("paths", path);
-		const localResponse = await app().request("http://localhost/api/sources/import", {
-			method: "POST",
-			body: localForm,
-		});
+		const localResponse = await app().request(
+			"http://localhost/api/sources/import",
+			{
+				method: "POST",
+				body: localForm,
+			},
+			{ incoming: { socket: { remoteAddress: "127.0.0.1" } } },
+		);
 		expect(localResponse.status).toBe(201);
 		expect((await localResponse.json()).imported).toBe(1);
 
@@ -164,9 +168,9 @@ describe("import routes", () => {
 		expect(await second.json()).toMatchObject({
 			imported: 1,
 			failed: 0,
-			files: [{ fileName: "contacts.csv", status: "imported", duplicate: true }],
+			files: [{ fileName: "contacts.csv", status: "imported", duplicate: false }],
 		});
-		expect(loadSourcesConfig(dir).sources).toHaveLength(1);
+		expect(loadSourcesConfig(dir).sources).toHaveLength(2);
 	});
 
 	it("does not replace another agent's imported source", async () => {

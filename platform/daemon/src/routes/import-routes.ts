@@ -1,8 +1,10 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { addImportedSource, loadSourcesConfig, markSourceIndexed, removeSource } from "@signet/core";
+import type { Context } from "hono";
 import type { Hono } from "hono";
 import { resolveDaemonAgentId } from "../agent-id";
+import { getPeerAddress } from "../auth/middleware";
 import { getDbAccessor } from "../db-accessor";
 import {
 	IMPORT_MAX_BATCH_BYTES,
@@ -52,7 +54,7 @@ export function registerImportRoutes(app: Hono): void {
 		const pathEntries = form
 			.getAll("paths")
 			.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-		if (pathEntries.length > 0 && !isLoopbackRequest(c.req.raw))
+		if (pathEntries.length > 0 && !isLoopbackRequest(c))
 			return c.json({ error: "Filesystem path imports are only available on a local daemon" }, 400);
 		if (uploadedEntries.length + pathEntries.length === 0)
 			return c.json({ error: "At least one file is required" }, 400);
@@ -176,7 +178,7 @@ export function registerImportRoutes(app: Hono): void {
 						sourcePath: `${sourcePath}#canonical`,
 						sourceKind: "source_import_json_canonical",
 						harness: "dashboard-import",
-						content: normalized.value.content,
+						content: normalized.value.canonicalContent ?? normalized.value.content,
 						sourceMtimeMs: Date.now(),
 						capturedAt: now,
 						sourceId: added.source.id,
@@ -274,9 +276,19 @@ export function registerImportRoutes(app: Hono): void {
 	});
 }
 
-function isLoopbackRequest(request: Request): boolean {
-	const hostname = new URL(request.url).hostname;
-	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
+function isLoopbackRequest(c: Context): boolean {
+	const peer = getPeerAddress(c);
+	if (peer === null) return false;
+	const normalizedPeer = peer
+		.trim()
+		.toLowerCase()
+		.replace(/^\[|\]$/g, "");
+	return (
+		normalizedPeer === "localhost" ||
+		normalizedPeer === "127.0.0.1" ||
+		normalizedPeer === "::1" ||
+		normalizedPeer === "::ffff:127.0.0.1"
+	);
 }
 
 function hasIndexedSource(sourceId: string, agentId: string): boolean {
@@ -295,12 +307,13 @@ function hasIndexedSource(sourceId: string, agentId: string): boolean {
 
 function persistedImportBytes(value: {
 	readonly content: string;
+	readonly canonicalContent?: string;
 	readonly format: string;
 	readonly searchChunks: readonly { readonly content: string }[];
 }): number {
 	const encoder = new TextEncoder();
 	const contentBytes = encoder.encode(value.content).byteLength;
-	const canonicalBytes = value.format === "json" ? contentBytes : 0;
+	const canonicalBytes = value.format === "json" ? encoder.encode(value.canonicalContent ?? "").byteLength : 0;
 	const chunkBytes = value.searchChunks.reduce((total, chunk) => total + encoder.encode(chunk.content).byteLength, 0);
 	return contentBytes + canonicalBytes + chunkBytes;
 }

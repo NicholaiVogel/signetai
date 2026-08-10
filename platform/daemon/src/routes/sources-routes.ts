@@ -15,8 +15,9 @@ import {
 	markSourceIndexed,
 	removeSource,
 } from "@signet/core";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { resolveDaemonAgentId } from "../agent-id";
+import { getPeerAddress } from "../auth/middleware";
 import { type ReadDb, getDbAccessor } from "../db-accessor";
 import { fetchEmbedding } from "../embedding-fetch";
 import { logger } from "../logger";
@@ -192,7 +193,7 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 	});
 
 	app.post("/api/sources/pick-files", async (c) => {
-		if (!isLoopbackRequest(c.req.raw)) return c.json({ error: "Native file picking is local-only" }, 400);
+		if (!isLoopbackRequest(c)) return c.json({ error: "Native file picking is local-only" }, 400);
 		let body: PickDirectoryBody = {};
 		try {
 			body = (await c.req.json().catch(() => ({}))) as PickDirectoryBody;
@@ -434,11 +435,15 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 
 	app.delete("/api/sources/:sourceId", (c) => {
 		const sourceId = c.req.param("sourceId");
+		const source = findConfiguredSource(sourceId, agentsDir);
+		if (source === undefined) return c.json({ error: "Source not found" }, 404);
+		const sourceAgentId = resolveDaemonAgentId();
+		if (source.kind === "import" && source.providerSettings?.agentId !== sourceAgentId)
+			return c.json({ error: "Source not found" }, 404);
 		const result = removeSource(sourceId, agentsDir);
 		if (result.ok === false) return c.json({ error: result.error }, 404);
 		cancelSourceIndexJob(result.source.id);
 
-		const sourceAgentId = resolveDaemonAgentId();
 		removeSourceLifecycleState(result.source, sourceAgentId);
 		recordSourceDeletionTombstone(result.source, sourceAgentId, agentsDir);
 		const provider = getSourceProvider(result.source.kind);
@@ -1169,9 +1174,19 @@ async function pickFiles(title: string): Promise<{ ok: true; paths: string[] } |
 	};
 }
 
-function isLoopbackRequest(request: Request): boolean {
-	const hostname = new URL(request.url).hostname;
-	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
+function isLoopbackRequest(c: Context): boolean {
+	const peer = getPeerAddress(c);
+	if (peer === null) return false;
+	const normalized = peer
+		.trim()
+		.toLowerCase()
+		.replace(/^\[|\]$/g, "");
+	return (
+		normalized === "localhost" ||
+		normalized === "127.0.0.1" ||
+		normalized === "::1" ||
+		normalized === "::ffff:127.0.0.1"
+	);
 }
 
 function filePickerCommands(title: string): Array<{ command: string; args: string[] }> {
