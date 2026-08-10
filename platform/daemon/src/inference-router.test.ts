@@ -472,6 +472,86 @@ printf 'never reached\\n'
 		}
 	});
 
+	it("does not reuse or cache a stale snapshot across credential invalidation (#1329)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "signet-router-invalidation-flight-"));
+		try {
+			mkdirSync(join(dir, "memory"), { recursive: true });
+			writeFileSync(
+				join(dir, "agent.yaml"),
+				`inference:
+  defaultPolicy: local
+  targets:
+    local:
+      executor: openai-compatible
+      endpoint: http://127.0.0.1:1234/v1
+      models:
+        default:
+          model: local-model
+  policies:
+    local:
+      mode: automatic
+      defaultTargets:
+        - local/default
+  workloads:
+    interactive:
+      policy: local
+`,
+			);
+
+			let probeCount = 0;
+			let releaseStaleProbe: ((response: Response) => void) | undefined;
+			let resolveStaleProbeStarted: (() => void) | undefined;
+			let resolveFreshProbeStarted: (() => void) | undefined;
+			const staleProbeStarted = new Promise<void>((resolve) => {
+				resolveStaleProbeStarted = resolve;
+			});
+			const freshProbeStarted = new Promise<void>((resolve) => {
+				resolveFreshProbeStarted = resolve;
+			});
+			globalThis.fetch = mock((input: string | URL | Request) => {
+				if (String(input).endsWith("/models")) {
+					probeCount += 1;
+					if (probeCount === 1) {
+						resolveStaleProbeStarted?.();
+						return new Promise<Response>((resolve) => {
+							releaseStaleProbe = resolve;
+						});
+					}
+					resolveFreshProbeStarted?.();
+					return Promise.reject(new Error("fresh probe failed"));
+				}
+				return Promise.resolve(openAiSseResponse("unused"));
+			}) as unknown as typeof fetch;
+
+			const router = getOrCreateInferenceRouter(dir);
+			const stale = router.status(true);
+			await staleProbeStarted;
+			router.invalidateCredentialState();
+			const fresh = router.status(true);
+			await freshProbeStarted;
+			expect(probeCount).toBe(2);
+
+			const freshResult = await fresh;
+			expect(freshResult.ok).toBe(true);
+			if (!freshResult.ok) return;
+			expect(freshResult.value.runtimeSnapshot.targets["local/default"]?.available).toBe(false);
+			if (!releaseStaleProbe) throw new Error("stale runtime snapshot probe did not start");
+			releaseStaleProbe(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+
+			const staleResult = await stale;
+			expect(staleResult.ok).toBe(true);
+			if (!staleResult.ok) return;
+			expect(staleResult.value.runtimeSnapshot.targets["local/default"]?.available).toBe(true);
+
+			const cachedResult = await router.status();
+			expect(cachedResult.ok).toBe(true);
+			if (!cachedResult.ok) return;
+			expect(cachedResult.value.runtimeSnapshot.targets["local/default"]?.available).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("requires an explicit inference workload instead of compiling legacy pipeline routing", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "signet-router-no-legacy-routing-"));
 		try {

@@ -303,6 +303,7 @@ function buildPromptFromMessages(messages: ReadonlyArray<{ readonly role: string
 export class InferenceRouter {
 	private snapshotCache: SnapshotCacheEntry | null = null;
 	private readonly snapshotFlights = new Map<string, Promise<RoutingRuntimeSnapshot>>();
+	private runtimeCacheGeneration = 0;
 	private readonly providerCache = new Map<string, Promise<StreamCapableLlmProvider>>();
 	private readonly observedTargetState = new Map<string, ObservedRuntimeOverride>();
 	private readonly observedAccountState = new Map<string, ObservedRuntimeOverride>();
@@ -497,7 +498,9 @@ export class InferenceRouter {
 	}
 
 	private resetRuntimeCaches(): void {
+		this.runtimeCacheGeneration += 1;
 		this.snapshotCache = null;
+		this.snapshotFlights.clear();
 	}
 
 	private pruneObservedState(now = Date.now()): void {
@@ -805,6 +808,7 @@ export class InferenceRouter {
 		const existingFlight = this.snapshotFlights.get(loaded.signature);
 		if (existingFlight) return existingFlight;
 
+		const generation = this.runtimeCacheGeneration;
 		const build = (async (): Promise<RoutingRuntimeSnapshot> => {
 			const entries = await Promise.all(
 				allTargetRefs(loaded.config).map(async (targetRef) => {
@@ -815,11 +819,13 @@ export class InferenceRouter {
 			const snapshot: RoutingRuntimeSnapshot = {
 				targets: Object.fromEntries(entries),
 			};
-			this.snapshotCache = {
-				signature: loaded.signature,
-				expiresAt: Date.now() + SNAPSHOT_TTL_MS,
-				snapshot,
-			};
+			if (generation === this.runtimeCacheGeneration) {
+				this.snapshotCache = {
+					signature: loaded.signature,
+					expiresAt: Date.now() + SNAPSHOT_TTL_MS,
+					snapshot,
+				};
+			}
 			return snapshot;
 		})();
 		this.snapshotFlights.set(loaded.signature, build);
