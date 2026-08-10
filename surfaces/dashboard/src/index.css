@@ -165,6 +165,15 @@
 }
 
 @layer components {
+	/* Scroll containers keep the canvas clean while remaining keyboard/touch accessible. */
+	.scrollbar-none {
+		-ms-overflow-style: none;
+		scrollbar-width: none;
+	}
+	.scrollbar-none::-webkit-scrollbar {
+		display: none;
+	}
+
 	/*
 	 * `.sig-content` — the floating content card. Same key-light border as
 	 * `.sig-surface` but a distinct, larger shadow/radius (12px). Used once.

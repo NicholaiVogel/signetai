@@ -256,9 +256,9 @@ export function DreamsView() {
 
 			{/* Summary prose sits on the canvas to the left; the two cards share the
 			    right column so they keep the same width. */}
-			<div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(13rem,1fr)_1.9fr]">
+			<div className="grid min-h-0 flex-1 grid-cols-1 gap-6 lg:grid-cols-[minmax(13rem,1fr)_1.9fr] lg:grid-rows-[minmax(0,1fr)]">
 				<DreamingSummarySection pass={lastSuccessful} summary={summaryText} loading={runbook.loading} />
-				<div className="flex min-w-0 flex-col gap-4.5">
+				<div className="flex min-h-0 min-w-0 flex-col gap-4.5">
 					<LivePassPanel
 						pass={trackedPass}
 						running={running}
@@ -373,30 +373,32 @@ function DreamingSummarySection({
 	loading: boolean;
 }) {
 	return (
-		<section className="flex flex-col gap-2">
-			<div className="flex items-baseline gap-2.5">
-				<span className="text-[13px] font-semibold tracking-tight text-foreground">Dreaming summary</span>
-				{pass ? (
-					<span className="font-mono text-[10.5px] text-slate-500 dark:text-slate-400">
-						{modeLabel(pass.mode)} · {fmtTime(pass.completedAt ?? pass.startedAt)}
+		<section className="min-h-0 min-w-0 overflow-y-auto scrollbar-none">
+			<div className="flex flex-col gap-2">
+				<div className="flex items-baseline gap-2.5">
+					<span className="text-[13px] font-semibold tracking-tight text-foreground">Dreaming summary</span>
+					{pass ? (
+						<span className="font-mono text-[10.5px] text-slate-500 dark:text-slate-400">
+							{modeLabel(pass.mode)} · {fmtTime(pass.completedAt ?? pass.startedAt)}
+						</span>
+					) : (
+						<span className="font-mono text-[10.5px] text-slate-500 dark:text-slate-400">no completed pass</span>
+					)}
+				</div>
+				{loading && !summary ? (
+					<span className="flex items-center gap-2 font-mono text-[10.5px] text-muted-foreground">
+						<Loader2 className="size-3.5 animate-spin" /> loading…
 					</span>
+				) : summary ? (
+					<div className="max-w-3xl">
+						<MarkdownSummary text={summary} />
+					</div>
 				) : (
-					<span className="font-mono text-[10.5px] text-slate-500 dark:text-slate-400">no completed pass</span>
+					<span className="font-mono text-[10.5px] text-muted-foreground">
+						No summary recorded for the last completed pass.
+					</span>
 				)}
 			</div>
-			{loading && !summary ? (
-				<span className="flex items-center gap-2 font-mono text-[10.5px] text-muted-foreground">
-					<Loader2 className="size-3.5 animate-spin" /> loading…
-				</span>
-			) : summary ? (
-				<div className="max-w-3xl">
-					<MarkdownSummary text={summary} />
-				</div>
-			) : (
-				<span className="font-mono text-[10.5px] text-muted-foreground">
-					No summary recorded for the last completed pass.
-				</span>
-			)}
 		</section>
 	);
 }
