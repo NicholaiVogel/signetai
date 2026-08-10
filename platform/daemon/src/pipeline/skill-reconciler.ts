@@ -293,6 +293,18 @@ export async function reconcileSkillFile(
 	});
 }
 
+/**
+ * Remove one skill through the shared per-skill flight. This is the watcher
+ * unlink path and must use the workspace key, not the skills directory path.
+ */
+export function reconcileUnlinkedSkill(skillName: string, deps: ReconcilerDeps): Promise<ReconcileSkillResult> {
+	return withSkillReconciliationLock(deps.agentsDir, skillName, () => {
+		const result = uninstallSkillNode({ skillName }, deps.accessor);
+		resetSkillFailureState(skillName);
+		return result.removed ? "removed" : "unchanged";
+	});
+}
+
 // ---------------------------------------------------------------------------
 // Reconciler lifecycle
 // ---------------------------------------------------------------------------
@@ -387,10 +399,7 @@ export function startReconciler(deps: ReconcilerDeps): ReconcilerHandle {
 		watcher.on("unlink", (filePath) => {
 			const skillName = basename(dirname(filePath));
 			logger.info("reconciler", "SKILL.md removed", { skill: skillName });
-			resetSkillFailureState(skillName);
-			withSkillReconciliationLock(dir, skillName, () => {
-				uninstallSkillNode({ skillName }, deps.accessor);
-			}).catch((e) => {
+			reconcileUnlinkedSkill(skillName, deps).catch((e) => {
 				logger.error("reconciler", "Watcher uninstall failed", e instanceof Error ? e : undefined, {
 					skill: skillName,
 					error: String(e),

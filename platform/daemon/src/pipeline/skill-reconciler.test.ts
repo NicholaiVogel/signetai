@@ -6,7 +6,13 @@ import { closeDbAccessor, getDbAccessor, initDbAccessor } from "../db-accessor";
 import { type LogEntry, logger } from "../logger";
 import { DEFAULT_PIPELINE_V2, type EmbeddingConfig, type PipelineV2Config } from "../memory-config";
 import { installSkillNode, skillEmbeddingHash } from "./skill-graph";
-import { reconcileOnce, reconcileSkillFile, resetSkillFailureState, skillBackoffDelayMs } from "./skill-reconciler";
+import {
+	reconcileOnce,
+	reconcileSkillFile,
+	reconcileUnlinkedSkill,
+	resetSkillFailureState,
+	skillBackoffDelayMs,
+} from "./skill-reconciler";
 
 function setup(): { root: string; db: string } {
 	const root = join(tmpdir(), `signet-skill-reconciler-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -281,6 +287,60 @@ body`,
 		await expect(startupPass).resolves.toEqual({ installed: 1, updated: 0, removed: 0 });
 		await expect(explicitInstall).resolves.toBe("unchanged");
 		expect(calls).toBe(1);
+	});
+
+	it("serializes watcher unlink with an in-flight install under the same workspace key (#1354)", async () => {
+		const paths = setup();
+		root = paths.root;
+		db = paths.db;
+		initDbAccessor(db);
+
+		const skill = "unlink-single-flight-skill";
+		const file = join(paths.root, "skills", skill, "SKILL.md");
+		mkdirSync(join(paths.root, "skills", skill), { recursive: true });
+		writeFileSync(
+			file,
+			`---
+name: ${skill}
+description: unlink trigger test
+---
+body`,
+		);
+
+		let releaseEmbedding: (() => void) | undefined;
+		let resolveEmbeddingCall: (() => void) | undefined;
+		const embeddingCall = new Promise<void>((resolve) => {
+			resolveEmbeddingCall = resolve;
+		});
+		const embeddingGate = new Promise<void>((resolve) => {
+			releaseEmbedding = resolve;
+		});
+		const deps = {
+			accessor: getDbAccessor(),
+			pipelineConfig: cfg(),
+			embeddingConfig: emb,
+			fetchEmbedding: async () => {
+				resolveEmbeddingCall?.();
+				await embeddingGate;
+				return [0.1, 0.2, 0.3];
+			},
+			agentsDir: root,
+		};
+
+		const install = reconcileSkillFile(skill, file, deps);
+		await embeddingCall;
+		const unlink = reconcileUnlinkedSkill(skill, deps);
+
+		// The watcher unlink must wait for the install to finish before removing
+		// the graph node that the install is about to write.
+		releaseEmbedding?.();
+		await expect(install).resolves.toBe("installed");
+		await expect(unlink).resolves.toBe("removed");
+		expect(
+			getDbAccessor().withReadDb((dbh) =>
+				dbh.prepare("SELECT id FROM entities WHERE id = ?").get(`skill:default:${skill}`),
+			),
+		).toBeNull();
 	});
 
 	it("updates skill metadata when a non-embedding frontmatter field changes on disk", async () => {
