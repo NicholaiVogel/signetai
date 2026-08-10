@@ -69,34 +69,24 @@ export function runStartupRecovery(accessor: DbAccessor): StartupRecoveryReport 
 	const startedAt = Date.now();
 	logger.info("startup-recovery", "Running startup recovery");
 
-	const databaseIntegrity = repairTelemetryIndexes(accessor);
+	const databaseIntegrity = repairTelemetryIndexes(accessor, (db, indexes) => {
+		insertHistoryEvent(db, {
+			memoryId: "system",
+			event: "none",
+			oldContent: null,
+			newContent: null,
+			changedBy: "daemon",
+			reason: "startup database integrity repair",
+			metadata: JSON.stringify({ repairAction: "reindex-telemetry", indexes }),
+			createdAt: new Date().toISOString(),
+			actorType: "daemon",
+		});
+	});
 	if (databaseIntegrity.state === "repaired") {
 		logger.warn("startup-recovery", "Rebuilt corrupt telemetry indexes", {
 			indexes: databaseIntegrity.rebuiltIndexes,
 			messages: databaseIntegrity.telemetryCheck.messages,
 		});
-		try {
-			accessor.withWriteTx((db) => {
-				insertHistoryEvent(db, {
-					memoryId: "system",
-					event: "none",
-					oldContent: null,
-					newContent: null,
-					changedBy: "daemon",
-					reason: "startup database integrity repair",
-					metadata: JSON.stringify({
-						repairAction: "reindex-telemetry",
-						indexes: databaseIntegrity.rebuiltIndexes,
-					}),
-					createdAt: new Date().toISOString(),
-					actorType: "daemon",
-				});
-			});
-		} catch (error) {
-			logger.warn("startup-recovery", "Telemetry index repair audit write failed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
-		}
 	} else if (databaseIntegrity.state === "corrupt" || databaseIntegrity.state === "unavailable") {
 		logger.error("startup-recovery", "Database integrity check failed", undefined, {
 			state: databaseIntegrity.state,

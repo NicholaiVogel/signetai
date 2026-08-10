@@ -7,7 +7,7 @@
  * when SQLite reports an index mismatch.
  */
 
-import type { DbAccessor, ReadDb } from "./db-accessor";
+import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 
 const TELEMETRY_INDEXES = [
 	"idx_telemetry_events_event",
@@ -73,11 +73,21 @@ export function getDatabaseIntegrityStatus(): DatabaseIntegrityStatus {
 	return latestStatus;
 }
 
+export type TelemetryIndexRepairAudit = (
+	db: WriteDb,
+	indexes: readonly string[],
+	detectionMessages: readonly string[],
+) => void;
+
 /**
  * Check the database before background workers start and repair only the
  * disposable telemetry indexes when the targeted check identifies damage.
+ * The optional audit runs inside the same write transaction as REINDEX.
  */
-export function repairTelemetryIndexes(accessor: DbAccessor): DatabaseIntegrityStatus {
+export function repairTelemetryIndexes(
+	accessor: DbAccessor,
+	audit?: TelemetryIndexRepairAudit,
+): DatabaseIntegrityStatus {
 	let quickCheck: IntegrityCheckStatus;
 	let telemetryCheck: IntegrityCheckStatus;
 	try {
@@ -114,6 +124,7 @@ export function repairTelemetryIndexes(accessor: DbAccessor): DatabaseIntegrityS
 		try {
 			accessor.withWriteTx((db) => {
 				for (const index of TELEMETRY_INDEXES) db.exec(`REINDEX ${escapedIdentifier(index)}`);
+				audit?.(db, TELEMETRY_INDEXES, telemetryCheck.messages);
 			});
 			const verifiedTelemetry = accessor.withReadDb((db) => check(db, "integrity_check", "telemetry_events"));
 			if (verifiedTelemetry.ok) {

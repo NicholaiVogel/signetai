@@ -80,6 +80,25 @@ describe("telemetry database integrity recovery (#1360)", () => {
 		]);
 	});
 
+	it("audits the repair inside the write transaction", () => {
+		const { accessor } = fakeAccessor({ telemetryMessage: "index mismatch" });
+		let auditedIndexes: readonly string[] = [];
+		let detectionMessages: readonly string[] = [];
+
+		const result = repairTelemetryIndexes(accessor, (_db, indexes, messages) => {
+			auditedIndexes = indexes;
+			detectionMessages = messages;
+		});
+
+		expect(result.state).toBe("repaired");
+		expect(auditedIndexes).toEqual([
+			"idx_telemetry_events_event",
+			"idx_telemetry_events_timestamp",
+			"idx_telemetry_events_unsent",
+		]);
+		expect(detectionMessages).toEqual(["index mismatch"]);
+	});
+
 	it("does not rewrite an unrelated database when quick_check fails", () => {
 		const { accessor, reindexed } = fakeAccessor({
 			quickMessage: "database disk image is malformed",
