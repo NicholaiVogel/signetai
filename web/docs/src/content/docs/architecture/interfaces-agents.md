@@ -101,6 +101,11 @@ All endpoints are served by the Hono server on port 3850.
 | `/mcp` | ALL | none | MCP server (Streamable HTTP) |
 | `/*` | GET | none | Dashboard static files |
 
+Memory capture admission: `POST /api/memory/remember` accepts up to 8 in-flight
+requests, including chunked captures. When the limit is saturated, the daemon
+returns `503` with retry guidance instead of queueing more embedding and SQLite
+work. The internal remember aliases share the same admission boundary.
+
 ---
 
 ## Key Files

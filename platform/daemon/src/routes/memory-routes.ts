@@ -3,10 +3,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { applyRecallScoreThreshold, vectorSearch } from "@signet/core";
-import type { Context, Hono } from "hono";
+import type { Context, Hono, MiddlewareHandler } from "hono";
 import { ensureAgentRegistered, getAgentScope, resolveAgentId } from "../agent-id";
 import { aggregateRecall, parseAggregateRecallBudget, readAggregateRecallBudgetInput } from "../aggregate-recall";
 import { checkScope, requirePermission, requireRateLimit } from "../auth";
+import { type ConcurrencyAdmission, createConcurrencyAdmission } from "../concurrency-admission";
 import { normalizeAndHashContent } from "../content-normalization";
 import { type ReadDb, type WriteDb, getDbAccessor, prepareTypedStatement } from "../db-accessor";
 import { syncVecDeleteBySourceId, syncVecInsert, vectorToBlob } from "../db-helpers";
@@ -110,6 +111,7 @@ function withActiveEmbeddingConfig(cfg: ResolvedMemoryConfig): ResolvedMemoryCon
 }
 
 const MAX_MUTATION_BATCH = 200;
+export const MEMORY_CAPTURE_MAX_IN_FLIGHT = 8;
 const FORGET_CONFIRM_THRESHOLD = 25;
 const SOFT_DELETE_RETENTION_DAYS = 30;
 const SOFT_DELETE_RETENTION_MS = SOFT_DELETE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -119,6 +121,7 @@ export interface MemoryRoutesDeps {
 	readonly hybridRecall?: typeof hybridRecall;
 	readonly fetchEmbedding?: typeof fetchEmbedding;
 	readonly getInferenceRouterOrNull?: typeof getInferenceRouterOrNull;
+	readonly memoryCaptureAdmission?: ConcurrencyAdmission;
 }
 
 function parseOptionalIsoTimestamp(value: unknown): string | null {
@@ -692,11 +695,41 @@ async function responseOperationSummary(
 	}
 }
 
+export function createMemoryCaptureAdmissionMiddleware(
+	admission: ConcurrencyAdmission,
+	maxInFlight = MEMORY_CAPTURE_MAX_IN_FLIGHT,
+): MiddlewareHandler {
+	return async (c, next) => {
+		if (!admission.acquire()) {
+			logger.warn("memory", "Memory capture admission limit reached", {
+				maxInFlight,
+				inFlight: admission.inFlight(),
+			});
+			return c.json(
+				{
+					error: `Too many concurrent memory captures (max ${maxInFlight}); retry shortly`,
+				},
+				503,
+			);
+		}
+
+		const complete = logger.time("memory", "Memory capture");
+		try {
+			return await next();
+		} finally {
+			admission.release();
+			complete({ inFlight: admission.inFlight() });
+		}
+	};
+}
+
 export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): void {
 	const aggregateRecallFn = deps.aggregateRecall ?? aggregateRecall;
 	const hybridRecallFn = deps.hybridRecall ?? hybridRecall;
 	const fetchEmbeddingFn = deps.fetchEmbedding ?? fetchEmbedding;
 	const getInferenceRouterOrNullFn = deps.getInferenceRouterOrNull ?? getInferenceRouterOrNull;
+	const memoryCaptureAdmission =
+		deps.memoryCaptureAdmission ?? createConcurrencyAdmission(MEMORY_CAPTURE_MAX_IN_FLIGHT);
 	// =========================================================================
 	// Permission guards — memory routes
 	// =========================================================================
@@ -781,6 +814,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 	}
 
 	app.use("/api/memory/remember", async (c, next) => recordRequestOperation(c, next, "memory_capture"));
+	app.use("/api/memory/remember", createMemoryCaptureAdmissionMiddleware(memoryCaptureAdmission));
 	app.use("/api/memory/save", async (c, next) => recordRequestOperation(c, next, "memory_capture"));
 	app.use("/api/hook/remember", async (c, next) => recordRequestOperation(c, next, "memory_capture"));
 	app.use("/api/memory/recall", async (c, next) => recordRequestOperation(c, next, "recall"));

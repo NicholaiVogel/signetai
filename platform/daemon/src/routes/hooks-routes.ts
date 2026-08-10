@@ -6,6 +6,7 @@ import type { Hono } from "hono";
 import { getAgentScope, resolveAgentId } from "../agent-id";
 import { aggregateRecall, parseAggregateRecallBudget, readAggregateRecallBudgetInput } from "../aggregate-recall";
 import { checkScope, requirePermission, requireRateLimit } from "../auth";
+import { type ConcurrencyAdmission, createConcurrencyAdmission } from "../concurrency-admission";
 import {
 	type AcpDeliveryAttempt,
 	type AgentMessage,
@@ -60,8 +61,8 @@ import {
 } from "../notifications/cross-agent-notifications";
 import { getSynthesisWorker, readLastSynthesisTime } from "../pipeline";
 import { type PipelineCauseFamily, normalizePipelineCause, recordPipelineOperation } from "../pipeline-operation";
-import { effectiveRecallLimit, recordRecallAttempt, recordRecallOutcome } from "../recall-telemetry";
 import { DEFAULT_SYNTHESIS_WORKER_CONFIG } from "../pipeline/synthesis-worker";
+import { effectiveRecallLimit, recordRecallAttempt, recordRecallOutcome } from "../recall-telemetry";
 import { isNoiseSession } from "../session-noise";
 import { advanceRecallContextEpoch } from "../session-recall-dedupe";
 import {
@@ -432,27 +433,10 @@ function registerSessionStart(app: Hono): void {
 // of queueing indefinitely.
 export const PROMPT_SUBMIT_MAX_IN_FLIGHT = 8;
 
-export interface PromptSubmitAdmission {
-	acquire(): boolean;
-	release(): void;
-	inFlight(): number;
-}
+export type PromptSubmitAdmission = ConcurrencyAdmission;
 
 export function createPromptSubmitAdmission(maxInFlight: number): PromptSubmitAdmission {
-	let inFlight = 0;
-	return {
-		acquire(): boolean {
-			if (inFlight >= maxInFlight) return false;
-			inFlight += 1;
-			return true;
-		},
-		release(): void {
-			inFlight -= 1;
-		},
-		inFlight(): number {
-			return inFlight;
-		},
-	};
+	return createConcurrencyAdmission(maxInFlight);
 }
 
 let promptSubmitAdmission: PromptSubmitAdmission = createPromptSubmitAdmission(PROMPT_SUBMIT_MAX_IN_FLIGHT);
