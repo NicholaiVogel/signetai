@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFile as readFileAsync, stat as statAsync } from "node:fs/promises";
 import { join } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type {
@@ -206,12 +206,8 @@ function normalizePromptPreview(prompt: string): string {
 	return prompt.slice(0, 8000);
 }
 
-function readInferencePath(agentsDir: string): string | null {
-	for (const name of ["agent.yaml", "AGENT.yaml"]) {
-		const path = join(agentsDir, name);
-		if (existsSync(path)) return path;
-	}
-	return null;
+function inferenceConfigPaths(agentsDir: string): readonly string[] {
+	return [join(agentsDir, "agent.yaml"), join(agentsDir, "AGENT.yaml")];
 }
 
 function defaultAgentIdForConfig(config: RoutingConfig): string {
@@ -301,6 +297,9 @@ function buildPromptFromMessages(messages: ReadonlyArray<{ readonly role: string
 }
 
 export class InferenceRouter {
+	private configCache: RouterResult<LoadedRoutingConfig> | null = null;
+	private configLoad: Promise<RouterResult<LoadedRoutingConfig>> | null = null;
+	private configGeneration = 0;
 	private snapshotCache: SnapshotCacheEntry | null = null;
 	private readonly snapshotFlights = new Map<string, Promise<RoutingRuntimeSnapshot>>();
 	private runtimeCacheGeneration = 0;
@@ -420,15 +419,56 @@ export class InferenceRouter {
 		this.backgroundSettledWaiters.clear();
 	}
 
-	private async loadConfig(): Promise<RouterResult<LoadedRoutingConfig>> {
+	/**
+	 * Drop the cached routing config after the daemon watcher observes a config
+	 * change. Concurrent callers that already started loading may finish with
+	 * the old snapshot, but the next caller starts a fresh load.
+	 */
+	invalidateConfig(): void {
+		this.configGeneration += 1;
+		this.configCache = null;
+		this.configLoad = null;
+		this.providerCacheSignature = null;
+		this.lastValidationSignature = null;
+		this.providerCache.clear();
+		this.observedTargetState.clear();
+		this.observedAccountState.clear();
+		this.resetRuntimeCaches();
+	}
+
+	private async loadConfig(forceReload = false): Promise<RouterResult<LoadedRoutingConfig>> {
+		if (forceReload) this.invalidateConfig();
+		if (this.configCache) return this.configCache;
+		if (this.configLoad) return this.configLoad;
+
+		const generation = this.configGeneration;
+		const load = this.loadConfigFromDisk();
+		const pending = load.then((result) => {
+			if (generation === this.configGeneration) this.configCache = result;
+			return result;
+		});
+		const tracked = pending.finally(() => {
+			if (this.configLoad === tracked) this.configLoad = null;
+		});
+		this.configLoad = tracked;
+		return tracked;
+	}
+
+	private async loadConfigFromDisk(): Promise<RouterResult<LoadedRoutingConfig>> {
 		let raw: unknown = {};
-		const path = readInferencePath(this.agentsDir);
+		let path: string | null = null;
 		let signature = "no-config";
-		if (path) {
+		for (const candidate of inferenceConfigPaths(this.agentsDir)) {
+			let stat: Awaited<ReturnType<typeof statAsync>>;
 			try {
-				const stat = statSync(path);
-				signature = `${path}:${stat.mtimeMs}:${stat.size}`;
-				raw = parseYamlDocument(readFileSync(path, "utf-8"));
+				stat = await statAsync(candidate);
+			} catch {
+				continue;
+			}
+			path = candidate;
+			signature = `${candidate}:${stat.mtimeMs}:${stat.size}`;
+			try {
+				raw = parseYamlDocument(await readFileAsync(candidate, "utf-8"));
 			} catch (error) {
 				return {
 					ok: false,
@@ -438,6 +478,7 @@ export class InferenceRouter {
 					},
 				};
 			}
+			break;
 		}
 
 		const parsed = parseRoutingConfig(raw);
@@ -839,7 +880,7 @@ export class InferenceRouter {
 	}
 
 	async explain(request: RouteRequest, refresh = false): Promise<RouterResult<RouteDecision>> {
-		const loaded = await this.loadConfig();
+		const loaded = await this.loadConfig(refresh);
 		if (!loaded.ok) return loaded;
 		const snapshot = await this.runtimeSnapshot(loaded.value, refresh);
 		return resolveRoutingDecision(
@@ -911,9 +952,9 @@ export class InferenceRouter {
 		}
 		const backgroundExecutionId = background?.id;
 		try {
-			const loaded = await this.loadConfig();
+			const loaded = await this.loadConfig(opts?.refresh ?? false);
 			if (!loaded.ok) return loaded;
-			const decision = await this.explain(request, opts?.refresh ?? false);
+			const decision = await this.explain(request, false);
 			if (!decision.ok) return decision;
 			const attempts: InferenceExecutionAttempt[] = [];
 			for (const targetRef of [decision.value.targetRef, ...decision.value.fallbackTargetRefs]) {
@@ -1028,9 +1069,9 @@ export class InferenceRouter {
 			readonly signal?: AbortSignal;
 		},
 	): Promise<RouterResult<InferenceExecutionResult>> {
-		const loaded = await this.loadConfig();
+		const loaded = await this.loadConfig(opts?.refresh ?? false);
 		if (!loaded.ok) return loaded;
-		const decision = await this.explain(request, opts?.refresh ?? false);
+		const decision = await this.explain(request, false);
 		if (!decision.ok) return decision;
 		const attempts: InferenceExecutionAttempt[] = [];
 		for (const targetRef of [decision.value.targetRef, ...decision.value.fallbackTargetRefs]) {
@@ -1124,14 +1165,14 @@ export class InferenceRouter {
 			readonly abortSignal?: AbortSignal;
 		},
 	): Promise<RouterResult<InferenceStreamResult>> {
-		const loaded = await this.loadConfig();
+		const loaded = await this.loadConfig(opts?.refresh ?? false);
 		if (!loaded.ok) return loaded;
 		const decision = await this.explain(
 			{
 				...request,
 				requireStreaming: true,
 			},
-			opts?.refresh ?? false,
+			false,
 		);
 		if (!decision.ok) return decision;
 
@@ -1363,7 +1404,7 @@ export class InferenceRouter {
 	}
 
 	async status(refresh = false): Promise<RouterResult<InferenceStatusSummary>> {
-		const loaded = await this.loadConfig();
+		const loaded = await this.loadConfig(refresh);
 		if (!loaded.ok) return loaded;
 		const snapshot = await this.runtimeSnapshot(loaded.value, refresh);
 		const accounts = Object.fromEntries(

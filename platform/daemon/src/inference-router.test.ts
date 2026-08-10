@@ -81,6 +81,35 @@ printf 'dreaming agent completed\\n'
 	return { argsPath, mcpConfigPathPath, mcpConfigCopyPath };
 }
 
+function writeMinimalRoutingConfig(root: string, policy?: string): void {
+	mkdirSync(join(root, "memory"), { recursive: true });
+	writeFileSync(
+		join(root, "agent.yaml"),
+		policy
+			? `inference:
+  defaultPolicy: ${policy}
+  targets:
+    local:
+      executor: ollama
+      endpoint: http://127.0.0.1:11434
+      models:
+        default:
+          model: gemma4
+  policies:
+    ${policy}:
+      mode: strict
+      defaultTargets:
+        - local/default
+  workloads:
+    interactive:
+      policy: ${policy}
+`
+			: `inference:
+  enabled: false
+`,
+	);
+}
+
 afterEach(() => {
 	globalThis.fetch = originalFetch;
 	resetOAuthStateForTests();
@@ -98,6 +127,57 @@ afterEach(() => {
 		process.env.OPENAI_API_KEY = originalOpenAiApiKey;
 	}
 	resetInferenceRouterForTests();
+});
+
+describe("InferenceRouter config caching", () => {
+	it("reuses the cached config until explicit invalidation", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "signet-router-config-cache-"));
+		try {
+			writeMinimalRoutingConfig(dir, "first");
+			const router = getOrCreateInferenceRouter(dir);
+			expect(await router.hasWorkload("interactive")).toBe(true);
+
+			writeMinimalRoutingConfig(dir);
+			expect(await router.hasWorkload("interactive")).toBe(true);
+
+			router.invalidateConfig();
+			expect(await router.hasWorkload("interactive")).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("coalesces concurrent first loads", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "signet-router-config-concurrent-"));
+		try {
+			writeMinimalRoutingConfig(dir, "concurrent");
+			const router = getOrCreateInferenceRouter(dir);
+			const results = await Promise.all(Array.from({ length: 32 }, () => router.hasWorkload("interactive")));
+			expect(results).toEqual(Array.from({ length: 32 }, () => true));
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves structured malformed-config errors after invalidation", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "signet-router-config-invalid-"));
+		try {
+			writeMinimalRoutingConfig(dir, "valid");
+			const router = getOrCreateInferenceRouter(dir);
+			expect(await router.hasWorkload("interactive")).toBe(true);
+			writeFileSync(join(dir, "agent.yaml"), "inference: [\\n");
+			router.invalidateConfig();
+
+			const result = await router.execute(
+				{ operation: "interactive", promptPreview: "malformed config" },
+				"must not execute",
+			);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error.code).toBe("invalid-config");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("InferenceRouter legacy API credentials", () => {

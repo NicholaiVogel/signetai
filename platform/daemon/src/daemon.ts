@@ -1128,6 +1128,13 @@ function stopAcpDeliveryReconciliation(): void {
 	acpDeliveryReconciliationTimer = null;
 }
 
+const INFERENCE_ROUTER_CONFIG_FILES = new Set(["agent.yaml", "AGENT.yaml", "config.yaml"]);
+
+function invalidateInferenceConfigForPath(path: string): void {
+	if (!INFERENCE_ROUTER_CONFIG_FILES.has(basename(path))) return;
+	getOrCreateInferenceRouter(AGENTS_DIR).invalidateConfig();
+}
+
 function startFileWatcher() {
 	// Do NOT watch the memory/ directory directly — Bun's fs.watch()
 	// opens one O_RDONLY FD per file in a watched directory and never
@@ -1162,6 +1169,7 @@ function startFileWatcher() {
 
 	watcher.on("change", (path) => {
 		logger.info("watcher", "File changed", { path });
+		invalidateInferenceConfigForPath(path);
 		scheduleAutoCommit(path);
 
 		const base = basename(path);
@@ -1216,6 +1224,7 @@ function startFileWatcher() {
 
 	watcher.on("unlink", (path) => {
 		logger.info("watcher", "File removed", { path });
+		invalidateInferenceConfigForPath(path);
 		if (path.endsWith("SIGNET-ARCHITECTURE.md")) {
 			void ensureArchitectureDoc();
 		}
@@ -1224,6 +1233,7 @@ function startFileWatcher() {
 
 	watcher.on("add", (path) => {
 		logger.info("watcher", "File added", { path });
+		invalidateInferenceConfigForPath(path);
 		scheduleAutoCommit(path);
 
 		const normalizedAddPath = path.replace(/\\/g, "/");
