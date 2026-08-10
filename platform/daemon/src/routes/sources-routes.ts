@@ -167,15 +167,17 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 		const agentId = resolveDaemonAgentId();
 		return c.json({
 			version: config.version,
-			sources: config.sources.map((source) => {
-				const stats = sourceStats(source, agentId);
-				return {
-					...source,
-					stats,
-					health: sourceHealth(source, agentId, stats),
-					indexJob: getSourceIndexJob(source.id),
-				};
-			}),
+			sources: config.sources
+				.filter((source) => isSourceVisibleToAgent(source, agentId))
+				.map((source) => {
+					const stats = sourceStats(source, agentId);
+					return {
+						...source,
+						stats,
+						health: sourceHealth(source, agentId, stats),
+						indexJob: getSourceIndexJob(source.id),
+					};
+				}),
 		});
 	});
 
@@ -297,7 +299,7 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 
 	app.get("/api/sources/:sourceId/snapshot", (c) => {
 		const sourceId = c.req.param("sourceId");
-		const source = findConfiguredSource(sourceId, agentsDir);
+		const source = findConfiguredSource(sourceId, agentsDir, resolveDaemonAgentId());
 		if (!source) return c.json({ error: "Source not found" }, 404);
 		const includeLocalDiscord = c.req.query("includeLocalDiscord") === "true";
 		return c.json(
@@ -311,7 +313,7 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 
 	app.get("/api/sources/:sourceId/health", (c) => {
 		const sourceId = c.req.param("sourceId");
-		const source = findConfiguredSource(sourceId, agentsDir);
+		const source = findConfiguredSource(sourceId, agentsDir, resolveDaemonAgentId());
 		if (!source) return c.json({ error: "Source not found" }, 404);
 		const agentId = resolveDaemonAgentId();
 		const stats = sourceStats(source, agentId);
@@ -321,7 +323,7 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 	app.post("/api/sources/:sourceId/snapshot/import", async (c) => {
 		const startedAt = Date.now();
 		const sourceId = c.req.param("sourceId");
-		const source = findConfiguredSource(sourceId, agentsDir);
+		const source = findConfiguredSource(sourceId, agentsDir, resolveDaemonAgentId());
 		if (!source) return c.json({ error: "Source not found" }, 404);
 		if (isSourceImportBlocked(source.id)) {
 			return c.json({ error: "Source snapshot import cannot run while source indexing is queued or running" }, 409);
@@ -435,7 +437,7 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 
 	app.delete("/api/sources/:sourceId", (c) => {
 		const sourceId = c.req.param("sourceId");
-		const source = findConfiguredSource(sourceId, agentsDir);
+		const source = findConfiguredSource(sourceId, agentsDir, resolveDaemonAgentId());
 		if (source === undefined) return c.json({ error: "Source not found" }, 404);
 		const sourceAgentId = resolveDaemonAgentId();
 		if (source.kind === "import" && source.providerSettings?.agentId !== sourceAgentId)
@@ -454,8 +456,14 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 	});
 }
 
-function findConfiguredSource(sourceId: string, agentsDir: string): SignetSourceEntry | undefined {
-	return loadSourcesConfig(agentsDir).sources.find((source) => source.id === sourceId);
+function findConfiguredSource(sourceId: string, agentsDir: string, agentId: string): SignetSourceEntry | undefined {
+	return loadSourcesConfig(agentsDir).sources.find(
+		(source) => source.id === sourceId && isSourceVisibleToAgent(source, agentId),
+	);
+}
+
+function isSourceVisibleToAgent(source: SignetSourceEntry, agentId: string): boolean {
+	return source.kind !== "import" || source.providerSettings?.agentId === agentId;
 }
 
 function isSourceImportBlocked(sourceId: string): boolean {
