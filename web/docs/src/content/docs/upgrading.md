@@ -51,9 +51,12 @@ back to another provider.
 ## Memory pipeline routing migration
 
 On startup, the config migrator advances eligible `agent.yaml` files through
-`configVersion: 8`. It removes the obsolete `memory.synthesis` and
+`configVersion: 9`. It removes the obsolete `memory.synthesis` and
 `memory.pipelineV2.synthesis` blocks and removes provider/model/endpoint fields
-that can be migrated safely. The migration is atomic and idempotent.
+that can be migrated safely. It also removes retired extraction-writer settings
+left behind by older migrations. Version 9 repairs workspaces that were already
+stamped `configVersion: 8` before those cleanups were added. The migration is
+atomic and idempotent.
 
 If a legacy provider cannot be mapped to a supported inference executor, its
 routing fields are preserved and the strict loader stops with an actionable

@@ -6,6 +6,7 @@ import {
 	migrateLegacyRoutingToRegistry,
 	migrateRetiredExtractionWriterConfig,
 	migrateRetiredMemoryPipelineRouting,
+	migrateRetiredMemoryPipelineRoutingV9,
 	migrateSessionSynthesisRoute,
 } from "./config-migration";
 import { loadMemoryConfig } from "./memory-config";
@@ -17,6 +18,49 @@ function setupDir(): string {
 }
 
 describe("migrateLegacyRoutingToRegistry (#947 v4, #1004 v5 cleanup)", () => {
+	it("repairs retired synthesis in an already-v8 config before strict loading (#1380)", () => {
+		const dir = setupDir();
+		try {
+			writeFileSync(
+				join(dir, "agent.yaml"),
+				`configVersion: 8
+memory:
+  pipelineV2:
+    enabled: true
+    extraction: {}
+    writeGate:
+      threshold: 0.45
+    durability:
+      enabled: true
+    synthesis:
+      enabled: false
+      timeout: 120000
+    paused: false
+inference:
+  workloads:
+    memoryExtraction:
+      target: canonical/default
+  targets:
+    canonical:
+      executor: openai-compatible
+      models:
+        default:
+          model: local-model
+`,
+			);
+
+			migrateRetiredMemoryPipelineRoutingV9(dir);
+			const after = readFileSync(join(dir, "agent.yaml"), "utf-8");
+			expect(after).toMatch(/^configVersion: 9/m);
+			expect(after).not.toMatch(/^\s+synthesis:/m);
+			expect(after).not.toContain("writeGate:");
+			expect(after).not.toContain("durability:");
+			expect(() => loadMemoryConfig(dir)).not.toThrow();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("compiles legacy extraction and removes the obsolete synthesis block", () => {
 		const dir = setupDir();
 		try {

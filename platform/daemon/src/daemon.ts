@@ -43,6 +43,7 @@ import {
 	migrateInferenceProviders,
 	migrateLegacyRoutingToRegistry,
 	migrateRetiredExtractionWriterConfig,
+	migrateRetiredMemoryPipelineRoutingV9,
 	migrateSessionSynthesisRoute,
 } from "./config-migration";
 import { listConnectors } from "./connectors/registry";
@@ -1956,6 +1957,7 @@ async function main() {
 		migrateSessionSynthesisRoute(AGENTS_DIR);
 		migrateRetiredExtractionWriterConfig(AGENTS_DIR);
 		migrateEmbeddingBaseUrl(AGENTS_DIR);
+		migrateRetiredMemoryPipelineRoutingV9(AGENTS_DIR);
 	} catch (err) {
 		logger.warn("config-migration", "Config migration failed; continuing startup", {
 			error: err instanceof Error ? err.message : String(err),

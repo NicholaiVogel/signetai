@@ -610,6 +610,52 @@ const RETIRED_MEMORY_ROUTING_KEYS = [
 	"extractionCommand",
 ] as const;
 
+function removeRetiredMemoryPipelineRouting(doc: Document.Parsed, mutations: string[]): void {
+	const memory = doc.getIn(["memory"], true);
+	if (isMap(memory) && memory.has("synthesis")) {
+		memory.delete("synthesis");
+		mutations.push("removed memory.synthesis");
+	}
+
+	const pipeline = doc.getIn(["memory", "pipelineV2"], true);
+	if (!isMap(pipeline)) return;
+
+	if (pipeline.has("synthesis")) {
+		pipeline.delete("synthesis");
+		mutations.push("removed memory.pipelineV2.synthesis");
+	}
+	const flatProvider = String(pipeline.get("extractionProvider", true) ?? "").trim();
+	const preserveFlatRouting =
+		flatProvider !== "" && flatProvider !== "none" && legacyExecutorFor(flatProvider) === null;
+	for (const key of RETIRED_MEMORY_ROUTING_KEYS) {
+		if (!pipeline.has(key)) continue;
+		if (preserveFlatRouting && key !== "allowRemoteProviders") continue;
+		pipeline.delete(key);
+		mutations.push(`removed memory.pipelineV2.${key}`);
+	}
+	const extraction = pipeline.get("extraction", true);
+	if (!isMap(extraction)) return;
+
+	const nestedProvider = String(extraction.get("provider", true) ?? "").trim();
+	const preserveNestedRouting =
+		nestedProvider !== "" && nestedProvider !== "none" && legacyExecutorFor(nestedProvider) === null;
+	for (const key of [
+		"provider",
+		"model",
+		"endpoint",
+		"baseUrl",
+		"base_url",
+		"fallbackProvider",
+		"allowRemoteProviders",
+		"command",
+	]) {
+		if (!extraction.has(key)) continue;
+		if (preserveNestedRouting && key !== "allowRemoteProviders") continue;
+		extraction.delete(key);
+		mutations.push(`removed memory.pipelineV2.extraction.${key}`);
+	}
+}
+
 function migrateV8(agentsDir: string): void {
 	const path = findConfigPath(agentsDir);
 	if (!path) return;
@@ -652,54 +698,58 @@ function migrateV8(agentsDir: string): void {
 		block.delete("endpoint");
 	}
 
-	const memory = doc.getIn(["memory"], true);
-	if (isMap(memory) && memory.has("synthesis")) {
-		memory.delete("synthesis");
-		mutations.push("removed memory.synthesis");
-	}
-
-	const pipeline = doc.getIn(["memory", "pipelineV2"], true);
-	if (isMap(pipeline)) {
-		if (pipeline.has("synthesis")) {
-			pipeline.delete("synthesis");
-			mutations.push("removed memory.pipelineV2.synthesis");
-		}
-		const flatProvider = String(pipeline.get("extractionProvider", true) ?? "").trim();
-		const preserveFlatRouting =
-			flatProvider !== "" && flatProvider !== "none" && legacyExecutorFor(flatProvider) === null;
-		for (const key of RETIRED_MEMORY_ROUTING_KEYS) {
-			if (!pipeline.has(key)) continue;
-			if (preserveFlatRouting && key !== "allowRemoteProviders") continue;
-			pipeline.delete(key);
-			mutations.push(`removed memory.pipelineV2.${key}`);
-		}
-		const extraction = pipeline.get("extraction", true);
-		if (isMap(extraction)) {
-			const nestedProvider = String(extraction.get("provider", true) ?? "").trim();
-			const preserveNestedRouting =
-				nestedProvider !== "" && nestedProvider !== "none" && legacyExecutorFor(nestedProvider) === null;
-			for (const key of [
-				"provider",
-				"model",
-				"endpoint",
-				"baseUrl",
-				"base_url",
-				"fallbackProvider",
-				"allowRemoteProviders",
-				"command",
-			]) {
-				if (!extraction.has(key)) continue;
-				if (preserveNestedRouting && key !== "allowRemoteProviders") continue;
-				extraction.delete(key);
-				mutations.push(`removed memory.pipelineV2.extraction.${key}`);
-			}
-		}
-	}
+	removeRetiredMemoryPipelineRouting(doc, mutations);
 
 	stampConfigVersion(doc, 8);
 	writeAtomic(path, doc.toString());
 	if (mutations.length > 0) {
 		logger.info("config-migration", "Applied v8 config migration", { mutations, file: path });
+	}
+}
+
+// ---------------------------------------------------------------------------
+// v9: repair retired routing left behind by the v8 migration
+// ---------------------------------------------------------------------------
+// v8 originally owned this cleanup, but configs already stamped v8 were
+// skipped when the cleanup was added. Keep the repair on its own version so
+// those workspaces can reach validation without manual agent.yaml edits.
+export function migrateRetiredMemoryPipelineRoutingV9(agentsDir: string): void {
+	const path = findConfigPath(agentsDir);
+	if (!path) return;
+
+	let text: string;
+	try {
+		text = readFileSync(path, "utf-8");
+	} catch {
+		return;
+	}
+
+	const vMatch = /^configVersion:\s*(\d+)/m.exec(text);
+	if (vMatch && Number(vMatch[1]) >= 9) return;
+
+	const doc = parseDocument(text);
+	if (doc.errors.length > 0) {
+		logger.warn("config-migration", "Skipping v9 config migration: agent.yaml has parse errors", {
+			file: path,
+			errors: doc.errors.map((error) => error.message).slice(0, 3),
+		});
+		return;
+	}
+
+	const mutations: string[] = [];
+	removeRetiredMemoryPipelineRouting(doc, mutations);
+	const pipeline = doc.getIn(["memory", "pipelineV2"], true);
+	if (isMap(pipeline)) {
+		for (const key of RETIRED_EXTRACTION_WRITER_KEYS) {
+			if (!pipeline.has(key)) continue;
+			pipeline.delete(key);
+			mutations.push(`removed memory.pipelineV2.${key}`);
+		}
+	}
+	stampConfigVersion(doc, 9);
+	writeAtomic(path, doc.toString());
+	if (mutations.length > 0) {
+		logger.info("config-migration", "Applied v9 config migration", { mutations, file: path });
 	}
 }
 
