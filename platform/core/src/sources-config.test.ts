@@ -577,6 +577,25 @@ describe("sources-config", () => {
 		).toEqual({ ok: false, error: "Imported content hash is invalid" });
 	});
 
+	it("does not replace an imported source owned by another agent", () => {
+		const agentsDir = tmp();
+		const input = {
+			fileName: "export.json",
+			contentHash: "b".repeat(64),
+			format: "json",
+			agentId: "agent-a",
+		};
+		const first = addImportedSource(input, agentsDir);
+		expect(first.ok).toBe(true);
+		if (first.ok === false) throw new Error(first.error);
+
+		const replaced = addImportedSource({ ...input, agentId: "agent-b", duplicateMode: "replace" }, agentsDir);
+		expect(replaced).toMatchObject({ ok: true, created: true, duplicate: false });
+		if (replaced.ok === false) throw new Error(replaced.error);
+		expect(replaced.source.id).not.toBe(first.source.id);
+		expect(loadSourcesConfig(agentsDir).sources).toHaveLength(2);
+	});
+
 	it("returns a not-found result when removing an unknown source", () => {
 		const agentsDir = tmp();
 		const removed = removeSource("obsidian:missing", agentsDir);

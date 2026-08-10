@@ -123,11 +123,14 @@ export function registerImportRoutes(app: Hono): void {
 			normalizedBatchBytes += normalizedBytes;
 
 			const agentsDir = process.env.SIGNET_PATH;
+			const agentId = resolveDaemonAgentId();
 			const replacedSource =
 				duplicateMode === "replace"
 					? loadSourcesConfig(agentsDir).sources.find(
 							(source) =>
-								source.kind === "import" && source.providerSettings?.contentHash === normalized.value.contentHash,
+								source.kind === "import" &&
+								source.providerSettings?.contentHash === normalized.value.contentHash &&
+								source.providerSettings?.agentId === agentId,
 						)
 					: undefined;
 			const added = addImportedSource(
@@ -135,6 +138,7 @@ export function registerImportRoutes(app: Hono): void {
 					fileName: normalized.value.fileName,
 					contentHash: normalized.value.contentHash,
 					format: normalized.value.format,
+					agentId,
 					duplicateMode: replacedSource === undefined ? duplicateMode : "reimport",
 				},
 				agentsDir,
@@ -152,7 +156,7 @@ export function registerImportRoutes(app: Hono): void {
 				const sourcePath = `imports/${added.source.id}/${normalized.value.fileName}`;
 				const sourceKind = `source_import_${normalized.value.format}`;
 				const now = new Date().toISOString();
-				const agentId = resolveDaemonAgentId();
+
 				indexExternalMemoryArtifact({
 					agentId,
 					sourcePath,

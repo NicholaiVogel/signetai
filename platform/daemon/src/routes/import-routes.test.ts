@@ -169,6 +169,43 @@ describe("import routes", () => {
 		expect(loadSourcesConfig(dir).sources).toHaveLength(1);
 	});
 
+	it("does not replace another agent's imported source", async () => {
+		const content = "name,email\nAda,ada@example.com\n";
+		const first = await app().request("/api/sources/import", {
+			method: "POST",
+			body: formWithFile(new File([content], "old-name.csv", { type: "text/csv" })),
+		});
+		const firstBody = (await first.json()) as { files: Array<{ sourceId: string }> };
+		process.env.SIGNET_AGENT_ID = "second-import-test-agent";
+		const second = await app().request("/api/sources/import", {
+			method: "POST",
+			body: formWithFile(new File([content], "new-name.csv", { type: "text/csv" }), "replace"),
+		});
+		const secondBody = (await second.json()) as {
+			imported: number;
+			failed: number;
+			files: Array<{ status: string; duplicate: boolean; sourceId: string }>;
+		};
+
+		expect(first.status).toBe(201);
+		expect(second.status).toBe(201);
+		expect(secondBody).toMatchObject({
+			imported: 1,
+			failed: 0,
+			files: [{ status: "imported", duplicate: false }],
+		});
+		expect(secondBody.files[0]?.sourceId).not.toBe(firstBody.files[0]?.sourceId);
+		expect(loadSourcesConfig(dir).sources).toHaveLength(2);
+		expect(
+			getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare("SELECT COUNT(*) AS count FROM memory_artifacts WHERE agent_id = ? AND source_id = ?")
+						.get("import-test-agent", firstBody.files[0]?.sourceId) as { count: number },
+			).count,
+		).toBeGreaterThan(0);
+	});
+
 	it("stages replacement before removing the old source", async () => {
 		const content = "name,email\nAda,ada@example.com\n";
 		const first = await app().request("/api/sources/import", {

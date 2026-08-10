@@ -119,6 +119,7 @@ export interface AddImportedSourceInput {
 	readonly fileName: string;
 	readonly contentHash: string;
 	readonly format: string;
+	readonly agentId?: string;
 	readonly duplicateMode?: ImportedSourceDuplicateMode;
 	readonly now?: string;
 }
@@ -217,24 +218,29 @@ export function addImportedSource(input: AddImportedSourceInput, agentsDir = get
 		const fileName = input.fileName.trim();
 		const contentHash = input.contentHash.trim().toLowerCase();
 		const format = input.format.trim().toLowerCase();
+		const agentId = input.agentId?.trim() || undefined;
 		if (!fileName) return { ok: false, error: "Imported file name is required" };
 		if (!/^[a-f0-9]{64}$/.test(contentHash)) return { ok: false, error: "Imported content hash is invalid" };
 		if (!format) return { ok: false, error: "Imported file format is required" };
 
 		const now = input.now ?? new Date().toISOString();
 		const config = loadSourcesConfigForWrite(agentsDir);
-		const duplicate = config.sources.find(
-			(source) => source.kind === "import" && source.providerSettings?.contentHash === contentHash,
-		);
 		const mode = input.duplicateMode ?? "skip";
+		const duplicate = config.sources.find(
+			(source) =>
+				source.kind === "import" &&
+				source.providerSettings?.contentHash === contentHash &&
+				(mode !== "replace" || agentId === undefined || source.providerSettings?.agentId === agentId),
+		);
 		if (duplicate && mode === "skip") {
 			return { ok: true, source: duplicate, created: false, duplicate: true };
 		}
 
+		const ownerSuffix = agentId ? `:${createHash("sha256").update(agentId).digest("hex").slice(0, 8)}` : "";
 		const sourceId =
 			duplicate && mode === "replace"
 				? duplicate.id
-				: `import:${contentHash.slice(0, 16)}${mode === "reimport" ? `:${randomUUID().slice(0, 8)}` : ""}`;
+				: `import:${contentHash.slice(0, 16)}${mode === "reimport" ? `:${randomUUID().slice(0, 8)}` : ownerSuffix}`;
 		const source: SignetSourceEntry = {
 			id: sourceId,
 			kind: "import",
@@ -248,6 +254,7 @@ export function addImportedSource(input: AddImportedSourceInput, agentsDir = get
 				fileName: basename(fileName),
 				contentHash,
 				format,
+				...(agentId === undefined ? {} : { agentId }),
 			},
 		};
 		const sources =
