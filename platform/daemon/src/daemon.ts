@@ -48,7 +48,7 @@ import {
 import { listConnectors } from "./connectors/registry";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
 import { closeDbAccessor, getDbAccessor, getVectorRuntimeStatus, initDbAccessorAsync } from "./db-accessor";
-import { getQueueDiagnosticsSnapshot } from "./diagnostics-queue";
+import { getQueueDiagnosticsSnapshot, getQueuePressureSnapshot } from "./diagnostics-queue";
 import { fetchEmbedding } from "./embedding-fetch";
 import { type EmbeddingIndexMigrationHandle, startEmbeddingIndexMigration } from "./embedding-index-migration";
 import { resolveActiveEmbeddingConfig } from "./embedding-index-state";
@@ -2115,16 +2115,16 @@ async function main() {
 					const connectors = listConnectors(getDbAccessor());
 					let runtimePressure: ReturnType<typeof buildRuntimePressureEnvelope> | undefined;
 					try {
-						const queue = getDbAccessor().withReadDb((db) => getQueueDiagnosticsSnapshot(db, { fresh: true }));
+						const queue = getDbAccessor().withReadDb((db) => getQueuePressureSnapshot(db));
 						const workers = getPipelineWorkerStatus();
 						const resources = getResourceSnapshot();
 						const recoveryOutcome: PressureRecoveryOutcome = restartedHeartbeatPending
 							? "restarted"
 							: getPressureRecoveryOutcome();
 						runtimePressure = buildRuntimePressureEnvelope({
-							memoryQueueDepth: queue.memory.pending + queue.memory.leased,
-							summaryQueueDepth: queue.summary.pending + queue.summary.leased,
-							oldestJobAgeSec: Math.max(queue.memory.oldestAgeSec, queue.summary.oldestAgeSec),
+							memoryQueueDepth: queue.memoryQueueDepth,
+							summaryQueueDepth: queue.summaryQueueDepth,
+							oldestJobAgeSec: queue.oldestJobAgeSec,
 							activeWorkers: countActiveWorkers(
 								[
 									workers.summary.running,

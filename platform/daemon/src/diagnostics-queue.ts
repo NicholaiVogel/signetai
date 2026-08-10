@@ -148,6 +148,81 @@ export function getQueueCounts(db: ReadDb, source: QueueSource): QueueCounts {
 	return EMPTY_QUEUE_COUNTS;
 }
 
+const QUEUE_PRESSURE_DEPTH_LIMIT = 1_001;
+
+interface QueuePressureQueryResult {
+	readonly depth: number;
+	readonly oldestAt: string | null;
+}
+
+/**
+ * Read only the bounded data needed by heartbeat pressure telemetry.
+ *
+ * The full diagnostics snapshot intentionally remains exact for operator
+ * routes. Heartbeats use this separate path so a large terminal queue cannot
+ * turn a liveness callback into an unbounded synchronous scan.
+ */
+function getQueuePressureQueryResult(db: ReadDb, source: QueueSource): QueuePressureQueryResult | undefined {
+	const table = source === "memory" ? "memory_jobs" : "summary_jobs";
+	const statusIndex = source === "memory" ? "idx_memory_jobs_pressure_status" : "idx_summary_jobs_pressure_status";
+	const createdIndex =
+		source === "memory" ? "idx_memory_jobs_pressure_created_at" : "idx_summary_jobs_pressure_created_at";
+	const predicate = source === "memory" ? " AND job_type <> 'extract'" : "";
+	if (!tableExists(db, table)) return undefined;
+
+	try {
+		const rows = db
+			.prepare(
+				`SELECT 1
+				 FROM ${table} INDEXED BY ${statusIndex}
+				 WHERE status IN ('pending', 'leased')${predicate}
+				 LIMIT ${QUEUE_PRESSURE_DEPTH_LIMIT}`,
+			)
+			.all();
+		const oldest = db
+			.prepare(
+				`SELECT created_at AS oldestAt
+				 FROM ${table} INDEXED BY ${createdIndex}
+				 WHERE status IN ('pending', 'leased')${predicate}
+				 ORDER BY created_at ASC
+				 LIMIT 1`,
+			)
+			.get() as { readonly oldestAt?: string | null } | undefined;
+		return { depth: rows.length, oldestAt: oldest?.oldestAt ?? null };
+	} catch {
+		// A partially repaired legacy schema must not break the heartbeat.
+		return undefined;
+	}
+}
+
+export interface QueuePressureSnapshot {
+	/** Capped at 1,001 because the next bucket is already `1001+`. */
+	readonly memoryQueueDepth: number | undefined;
+	/** Capped at 1,001 because the next bucket is already `1001+`. */
+	readonly summaryQueueDepth: number | undefined;
+	/** Undefined when neither queue has an active row or age is unavailable. */
+	readonly oldestJobAgeSec: number | undefined;
+}
+
+/**
+ * Bounded queue observation for the daemon heartbeat and wedge context.
+ *
+ * This function is deliberately not used by the exact diagnostics routes.
+ */
+export function getQueuePressureSnapshot(db: ReadDb): QueuePressureSnapshot {
+	const memory = getQueuePressureQueryResult(db, "memory");
+	const summary = getQueuePressureQueryResult(db, "summary");
+	const oldestAt = [memory?.oldestAt, summary?.oldestAt].filter(
+		(value): value is string => value !== undefined && value !== null,
+	);
+	const ages = oldestAt.map((value) => ageSec(value));
+	return {
+		memoryQueueDepth: memory?.depth,
+		summaryQueueDepth: summary?.depth,
+		oldestJobAgeSec: ages.length === 0 ? undefined : Math.max(...ages),
+	};
+}
+
 /**
  * Oldest `dead` row's identifying fields. `null` when no dead rows or
  * when the queue table is missing.

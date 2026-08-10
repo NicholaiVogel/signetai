@@ -184,8 +184,9 @@ function sessionCostProperties(cost: SessionCostAccumulator): TelemetryPropertie
 export interface TelemetryCollector {
 	record(event: TelemetryEventType, properties: TelemetryProperties): void;
 	/**
-	 * Record without synchronous JSONL or SQLite work. Used by the event-loop
-	 * wedge path, where even best-effort persistence can block recovery.
+	 * Record with a bounded synchronous JSONL audit append while deferring
+	 * SQLite persistence. The local line survives a hard process kill; the
+	 * wedge path does not enter SQLite or provider work.
 	 */
 	recordDeferred?(event: TelemetryEventType, properties: TelemetryProperties): void;
 	reopenSession(sessionHash: string): void;
@@ -457,7 +458,6 @@ export function createTelemetryCollector(
 	} = {},
 ): TelemetryCollector {
 	const buffer: TelemetryEvent[] = [];
-	const deferredAuditIds = new Set<string>();
 	const logPath = opts.telemetryLogPath ?? null;
 	const deployment = telemetryDeployment(opts.env);
 	const reportedVersion = telemetryReportedVersion(daemonVersion, deployment);
@@ -639,11 +639,6 @@ export function createTelemetryCollector(
 		flushCount++;
 		// Drain buffer to SQLite
 		const pending = buffer.splice(0, buffer.length);
-		for (const event of pending) {
-			if (deferredAuditIds.delete(event.id)) {
-				appendToTelemetryLog(logPath, JSON.stringify(event));
-			}
-		}
 		writeToDb(pending);
 
 		// Send to PostHog if configured
@@ -762,13 +757,16 @@ export function createTelemetryCollector(
 		return cost ? { ...properties, ...sessionCostProperties(cost) } : properties;
 	}
 
-	function recordEvent(event: TelemetryEventType, properties: TelemetryProperties, persistAuditLog: boolean): void {
+	function recordEvent(
+		event: TelemetryEventType,
+		properties: TelemetryProperties,
+		options: { readonly persistAuditLog: boolean; readonly flushWhenFull: boolean },
+	): void {
 		if (recordingStopped) return;
 		if (buffer.length >= MAX_BUFFER_EVENTS) {
 			const dropCount = buffer.length - MAX_BUFFER_EVENTS + 1;
-			const dropped = buffer.splice(0, dropCount);
-			for (const event of dropped) deferredAuditIds.delete(event.id);
-			if (persistAuditLog) {
+			buffer.splice(0, dropCount);
+			if (options.persistAuditLog) {
 				logger.warn("telemetry", "Buffer exceeded max capacity, dropping oldest events", {
 					dropped: dropCount,
 					maxBufferEvents: MAX_BUFFER_EVENTS,
@@ -782,22 +780,17 @@ export function createTelemetryCollector(
 			timestamp: new Date().toISOString(),
 			properties: addContext(enrichSessionEvent(event, properties)),
 		});
-		if (!persistAuditLog) {
-			const deferred = buffer[buffer.length - 1];
-			if (deferred) deferredAuditIds.add(deferred.id);
-		}
-
-		if (persistAuditLog && logPath) {
+		if (options.persistAuditLog && logPath) {
 			const last = buffer[buffer.length - 1];
 			if (last) {
 				appendToTelemetryLog(logPath, JSON.stringify(last));
 			}
 		}
 
-		// Deferred records wait for the normal timer. Calling doFlush here would
+		// Deferred records skip the eager flush. Calling doFlush here would
 		// synchronously enter SQLite before its first await, defeating the wedge
 		// path's non-blocking guarantee.
-		if (persistAuditLog && buffer.length >= MAX_BUFFER_SIZE) {
+		if (options.flushWhenFull && buffer.length >= MAX_BUFFER_SIZE) {
 			flush().catch(() => {});
 		}
 	}
@@ -810,11 +803,11 @@ export function createTelemetryCollector(
 		},
 
 		record(event, properties): void {
-			recordEvent(event, properties, true);
+			recordEvent(event, properties, { persistAuditLog: true, flushWhenFull: true });
 		},
 
 		recordDeferred(event, properties): void {
-			recordEvent(event, properties, false);
+			recordEvent(event, properties, { persistAuditLog: true, flushWhenFull: false });
 		},
 
 		recordFirstUse(kind): void {

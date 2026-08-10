@@ -604,7 +604,7 @@ describe("telemetry lifecycle events (issue #1026 Phase 2)", () => {
 		expect(third.properties.command).toBe("status");
 	});
 
-	it("defers wedge persistence until the normal flush", async () => {
+	it("persists wedge events to the local audit log before normal flush", async () => {
 		const collector = createTelemetryCollector(
 			fakeDbAccessor(),
 			{
@@ -621,7 +621,9 @@ describe("telemetry lifecycle events (issue #1026 Phase 2)", () => {
 
 		const before = readFileSync(logPath, "utf-8");
 		collector.recordDeferred?.("error.occurred", { type: "EventLoopLag", lagMs: 900 });
-		expect(readFileSync(logPath, "utf-8")).toBe(before);
+		const afterRecord = readFileSync(logPath, "utf-8");
+		expect(afterRecord).not.toBe(before);
+		expect(afterRecord).toContain('"event":"error.occurred"');
 		await collector.flush();
 		expect(readFileSync(logPath, "utf-8")).toContain('"event":"error.occurred"');
 	});

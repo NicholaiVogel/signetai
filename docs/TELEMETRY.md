@@ -133,9 +133,11 @@ Notes on individual events:
   `EventLoopLag` reports carry `runtimePressureVersion`, queue-depth and
   oldest-job-age buckets, active-worker and configured batch-size buckets,
   database and embedding latency buckets, process memory/CPU pressure buckets,
-  `recoveryOutcome`, and a coarse `snapshotAgeBucket`. The daemon keeps only
-  the latest observations in memory; the wedge path never queries SQLite,
-  touches the filesystem, or starts provider work. `recoveryOutcome` is
+  `recoveryOutcome`, and a coarse `snapshotAgeBucket`. Heartbeat queue
+  observations use capped, indexed probes and never scan the full queue. The
+  wedge path reads only the latest observations, appends one bounded sanitized
+  JSONL audit line for hard-kill survivability, and never enters SQLite or
+  provider work. `recoveryOutcome` is
   `still_degraded` during an episode, `recovered` after the pressure state
   clears, and `restarted` on the first heartbeat after an abnormal prior exit.
 - **`recall.attempted` / `recall.outcome`** — the bounded retrieval-outcome

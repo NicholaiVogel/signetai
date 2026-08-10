@@ -123,6 +123,7 @@ import { up as memoryTraversalHydrationIndex } from "./114-memory-traversal-hydr
 import { up as crossAgentMessageNotifications } from "./115-cross-agent-message-notifications";
 import { up as acpDeliveryReconciliation } from "./116-acp-delivery-reconciliation";
 import { up as retireSummaryWorker } from "./117-retire-summary-worker";
+import { up as queuePressureIndices } from "./118-queue-pressure-indices";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1096,7 +1097,6 @@ export const MIGRATIONS: readonly Migration[] = [
 			],
 		},
 	},
-
 	{
 		version: 117,
 		name: "retire-summary-worker",
@@ -1107,6 +1107,11 @@ export const MIGRATIONS: readonly Migration[] = [
 				{ table: "session_transcripts", column: "content_hash" },
 			],
 		},
+	},
+	{
+		version: 118,
+		name: "queue-pressure-indices",
+		up: queuePressureIndices,
 	},
 ];
 
