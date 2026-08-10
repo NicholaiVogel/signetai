@@ -8,6 +8,7 @@
 
 import { memoriesFtsNeedsTokenizerRepair, readMemoriesFtsSql, recreateMemoriesFts } from "@signet/core";
 import { normalizeAndHashContent } from "./content-normalization";
+import type { IntegrityCheckStatus } from "./database-integrity";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { toFtsSchemaQueryDb } from "./db-accessor";
 import {
@@ -1979,22 +1980,27 @@ export function forgetDeadMemories(accessor: DbAccessor, ids: readonly string[])
 export interface IntegrityCheckResult {
 	readonly ok: boolean;
 	readonly messages: readonly string[];
+	readonly quickCheck: IntegrityCheckStatus;
+	readonly fullCheck: IntegrityCheckStatus;
+}
+
+function readIntegrityCheck(db: ReadDb, pragma: "quick_check" | "integrity_check"): IntegrityCheckStatus {
+	const key = pragma === "quick_check" ? "quick_check" : "integrity_check";
+	const rows = db.prepare(`PRAGMA ${pragma}`).all() as ReadonlyArray<Record<string, unknown>>;
+	const messages = rows.map((row) => String(row[key] ?? ""));
+	if (messages.length === 1 && messages[0] === "ok") return { ok: true, messages: [] };
+	return { ok: false, messages };
 }
 
 /**
- * Run PRAGMA integrity_check on the SQLite database.
- *
- * Returns ok=true when the check passes (single row: "ok").
- * Returns ok=false with the list of integrity violations when it fails.
+ * Run both SQLite integrity modes. quick_check is cheap and useful for
+ * broad damage; integrity_check is the authoritative result for indexes.
  */
 export function integrityCheck(accessor: DbAccessor): IntegrityCheckResult {
 	return accessor.withReadDb((db) => {
-		const rows = db.prepare("PRAGMA integrity_check").all() as ReadonlyArray<Record<string, unknown>>;
-		const messages = rows.map((r) => String(r.integrity_check ?? ""));
-		if (messages.length === 1 && messages[0] === "ok") {
-			return { ok: true, messages: [] };
-		}
-		return { ok: false, messages };
+		const quickCheck = readIntegrityCheck(db, "quick_check");
+		const fullCheck = readIntegrityCheck(db, "integrity_check");
+		return { ok: fullCheck.ok, messages: fullCheck.messages, quickCheck, fullCheck };
 	});
 }
 

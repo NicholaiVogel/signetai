@@ -17,11 +17,15 @@
  */
 
 import { reconcileAcpDeliveries } from "./cross-agent";
+import type { DatabaseIntegrityStatus } from "./database-integrity";
+import { repairTelemetryIndexes } from "./database-integrity";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { logger } from "./logger";
+import { insertHistoryEvent } from "./transactions";
 
 export interface StartupRecoveryReport {
 	readonly walCheckpointed: boolean;
+	readonly databaseIntegrity: DatabaseIntegrityStatus;
 	readonly deadJobsPurged: number;
 	readonly stagingRowsCleaned: number;
 	readonly orphanedPassesSwept: number;
@@ -64,6 +68,42 @@ function drainBatchesSync<Item>(
 export function runStartupRecovery(accessor: DbAccessor): StartupRecoveryReport {
 	const startedAt = Date.now();
 	logger.info("startup-recovery", "Running startup recovery");
+
+	const databaseIntegrity = repairTelemetryIndexes(accessor);
+	if (databaseIntegrity.state === "repaired") {
+		logger.warn("startup-recovery", "Rebuilt corrupt telemetry indexes", {
+			indexes: databaseIntegrity.rebuiltIndexes,
+			messages: databaseIntegrity.telemetryCheck.messages,
+		});
+		try {
+			accessor.withWriteTx((db) => {
+				insertHistoryEvent(db, {
+					memoryId: "system",
+					event: "none",
+					oldContent: null,
+					newContent: null,
+					changedBy: "daemon",
+					reason: "startup database integrity repair",
+					metadata: JSON.stringify({
+						repairAction: "reindex-telemetry",
+						indexes: databaseIntegrity.rebuiltIndexes,
+					}),
+					createdAt: new Date().toISOString(),
+					actorType: "daemon",
+				});
+			});
+		} catch (error) {
+			logger.warn("startup-recovery", "Telemetry index repair audit write failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	} else if (databaseIntegrity.state === "corrupt" || databaseIntegrity.state === "unavailable") {
+		logger.error("startup-recovery", "Database integrity check failed", undefined, {
+			state: databaseIntegrity.state,
+			quickCheck: databaseIntegrity.quickCheck.messages,
+			telemetryCheck: databaseIntegrity.telemetryCheck.messages,
+		});
+	}
 
 	// NOTE: WAL checkpoint intentionally omitted. An explicit
 	// PRAGMA wal_checkpoint(TRUNCATE) during startup blocks the event loop for
@@ -186,6 +226,7 @@ export function runStartupRecovery(accessor: DbAccessor): StartupRecoveryReport 
 	const durationMs = Date.now() - startedAt;
 	const report: StartupRecoveryReport = {
 		walCheckpointed: false,
+		databaseIntegrity,
 		deadJobsPurged,
 		stagingRowsCleaned,
 		orphanedPassesSwept,
@@ -193,7 +234,12 @@ export function runStartupRecovery(accessor: DbAccessor): StartupRecoveryReport 
 		durationMs,
 	};
 
-	const totalCleaned = deadJobsPurged + stagingRowsCleaned + orphanedPassesSwept + acpDeliveriesReconciled;
+	const totalCleaned =
+		databaseIntegrity.rebuiltIndexes.length +
+		deadJobsPurged +
+		stagingRowsCleaned +
+		orphanedPassesSwept +
+		acpDeliveriesReconciled;
 	if (totalCleaned > 0) {
 		logger.info("startup-recovery", "Recovery complete", { ...report });
 	} else {

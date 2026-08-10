@@ -1989,6 +1989,14 @@ async function main() {
 	// registration) would interfere with the DB write connection if allowed
 	// to run between recovery batches (#1059).
 	const startupRecovery = runStartupRecovery(getDbAccessor());
+	if (
+		startupRecovery.databaseIntegrity.state === "corrupt" ||
+		startupRecovery.databaseIntegrity.state === "unavailable"
+	) {
+		throw new Error(
+			`Database integrity check failed before workers started (${startupRecovery.databaseIntegrity.state}). Run \`GET /api/repair/integrity-check\` after resolving the database issue.`,
+		);
+	}
 
 	// Purge artifacts of sources deleted while the daemon was down (e.g.
 	// crash-loop-disabled sources). This needs the DB accessor, so it runs

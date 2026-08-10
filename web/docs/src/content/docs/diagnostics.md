@@ -227,6 +227,20 @@ Every successful repair writes an audit entry to `memory_history` with
 `event = "none"` and a `metadata` field containing the action name,
 affected count, and message.
 
+### GET /api/repair/integrity-check
+
+Runs both SQLite integrity modes and returns the existing top-level `ok` and
+`messages` fields for compatibility, plus separate `quickCheck` and
+`fullCheck` results. `quickCheck` is a broad, inexpensive check; `fullCheck`
+is authoritative for index consistency. The daemon also runs these checks at
+startup, then transactionally rebuilds the disposable telemetry indexes when
+only `telemetry_events` is corrupt. A failed repair prevents background workers
+from starting and is reported by `/health` and `/health/ready`.
+
+```bash
+curl http://localhost:3850/api/repair/integrity-check
+```
+
 ### POST /api/repair/requeue-dead
 
 Resets up to 50 dead-letter jobs back to `pending` with `attempts = 0`,

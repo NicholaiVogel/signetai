@@ -1,6 +1,7 @@
 import type { SQLQueryBindings } from "bun:sqlite";
 import { type MigrationDb, hasPendingMigrations } from "@signet/core";
 import type { Hono } from "hono";
+import { getDatabaseIntegrityStatus } from "../database-integrity";
 import { type ReadDb, type WritePressure, getDbAccessor } from "../db-accessor";
 import {
 	QUEUE_MAX_DEAD_RATE,
@@ -189,8 +190,13 @@ export function mountHealthRoutes(app: Hono): void {
 			dbWriter = accessor.getWritePressure?.() ?? null;
 		} catch {}
 
+		const databaseIntegrity = getDatabaseIntegrityStatus();
 		return c.json({
-			status: shuttingDown ? "shutting_down" : "healthy",
+			status: shuttingDown
+				? "shutting_down"
+				: databaseIntegrity.state === "corrupt" || databaseIntegrity.state === "unavailable"
+					? "degraded"
+					: "healthy",
 			uptime: process.uptime(),
 			pid: process.pid,
 			version: CURRENT_VERSION,
@@ -198,6 +204,7 @@ export function mountHealthRoutes(app: Hono): void {
 			agentsDir: AGENTS_DIR,
 			db: dbOk,
 			dbWriter,
+			databaseIntegrity,
 			shuttingDown,
 			updateAvailable: us.lastCheck?.updateAvailable ?? false,
 			pendingRestart: us.pendingRestartVersion !== null,
@@ -236,6 +243,10 @@ export function mountHealthRoutes(app: Hono): void {
 		}
 		const dbOk = dbResult !== null;
 		const migrationsOk = dbResult?.migrationsOk ?? false;
+		const databaseIntegrity = getDatabaseIntegrityStatus();
+		if (databaseIntegrity.state === "corrupt" || databaseIntegrity.state === "unavailable") {
+			reasons.push(`database integrity ${databaseIntegrity.state}`);
+		}
 		if (dbOk && !migrationsOk) {
 			reasons.push("pending migrations");
 		}
@@ -272,6 +283,7 @@ export function mountHealthRoutes(app: Hono): void {
 				checks: {
 					db: dbOk,
 					migrations: migrationsOk,
+					databaseIntegrity,
 					embedding: embedding.detail,
 					inference: inference.detail,
 					queue,
