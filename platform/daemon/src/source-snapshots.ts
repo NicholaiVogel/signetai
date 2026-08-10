@@ -509,10 +509,7 @@ function isLocalDiscordArtifact(input: {
 	}
 }
 
-function isLocalDiscordChunk(input: {
-	readonly source_id: string;
-	readonly chunk_text: string | null;
-}): boolean {
+function isLocalDiscordChunk(input: { readonly source_id: string; readonly chunk_text: string | null }): boolean {
 	if (input.source_id.includes("discord-cache://guild/@me/")) return true;
 	if (!input.chunk_text) return false;
 	return (

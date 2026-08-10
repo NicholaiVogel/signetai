@@ -22,7 +22,10 @@ function Placeholder({ title, description }: { title: string; description: strin
 export function SkillsView() {
 	return (
 		<div className="flex flex-1 min-h-0 items-center justify-center">
-			<Placeholder title="Skills" description="Installed skills render here. The mockup stages a skill list structure." />
+			<Placeholder
+				title="Skills"
+				description="Installed skills render here. The mockup stages a skill list structure."
+			/>
 		</div>
 	);
 }

@@ -160,7 +160,11 @@ export function ConnectProviderDialog({
 			<div className="cp-panel" role="dialog" aria-modal="true" aria-label={`Connect ${provider.name}`}>
 				<header className="cp-header">
 					<span className="cp-header-icon">
-						{phase.kind === "key-entry" || phase.kind === "saving" ? <KeyRound className="size-4" /> : <CheckCircle className="size-4" />}
+						{phase.kind === "key-entry" || phase.kind === "saving" ? (
+							<KeyRound className="size-4" />
+						) : (
+							<CheckCircle className="size-4" />
+						)}
 					</span>
 					<div className="min-w-0 flex-1">
 						<div className="cp-title">{provider.name}</div>
@@ -182,7 +186,12 @@ export function ConnectProviderDialog({
 								<span className="cp-dot cp-dot--on" />
 								Connected — credentials are stored and resolving.
 							</div>
-							<button type="button" className="cp-btn cp-btn--danger" disabled={disconnecting} onClick={handleDisconnect}>
+							<button
+								type="button"
+								className="cp-btn cp-btn--danger"
+								disabled={disconnecting}
+								onClick={handleDisconnect}
+							>
 								{disconnecting ? "Disconnecting…" : "Disconnect"}
 							</button>
 						</>
@@ -223,13 +232,17 @@ export function ConnectProviderDialog({
 							)}
 							{phase.deviceCode && (
 								<div className="cp-device">
-									<span className="cp-device__label">Enter this code at {hostnameOf(phase.deviceCode.verificationUri)}</span>
+									<span className="cp-device__label">
+										Enter this code at {hostnameOf(phase.deviceCode.verificationUri)}
+									</span>
 									<span className="cp-device__code">{phase.deviceCode.userCode}</span>
 								</div>
 							)}
 							{phase.prompt && phase.prompt.kind !== "select" && (
 								<div className="flex flex-col gap-1.5">
-									<label className="cp-label" htmlFor="cp-prompt">{phase.prompt.message}</label>
+									<label className="cp-label" htmlFor="cp-prompt">
+										{phase.prompt.message}
+									</label>
 									<div className="flex gap-1.5">
 										<input
 											id="cp-prompt"
@@ -242,7 +255,9 @@ export function ConnectProviderDialog({
 												if (e.key === "Enter") submitPrompt();
 											}}
 										/>
-										<button type="button" className="cp-btn cp-btn--primary" onClick={submitPrompt}>Send</button>
+										<button type="button" className="cp-btn cp-btn--primary" onClick={submitPrompt}>
+											Send
+										</button>
 									</div>
 								</div>
 							)}
@@ -250,13 +265,20 @@ export function ConnectProviderDialog({
 								<div className="flex flex-col gap-1.5">
 									<span className="cp-label">{phase.prompt.message}</span>
 									{phase.prompt.options?.map((opt) => (
-										<button key={opt.id} type="button" className="cp-btn" onClick={() => void controller.answerPrompt(opt.id)}>
+										<button
+											key={opt.id}
+											type="button"
+											className="cp-btn"
+											onClick={() => void controller.answerPrompt(opt.id)}
+										>
 											{opt.label}
 										</button>
 									))}
 								</div>
 							)}
-							<button type="button" className="cp-btn" onClick={controller.cancelOAuth}>Cancel</button>
+							<button type="button" className="cp-btn" onClick={controller.cancelOAuth}>
+								Cancel
+							</button>
 						</div>
 					)}
 
@@ -281,11 +303,21 @@ export function ConnectProviderDialog({
 											if (e.key === "Enter") void handleSaveKey();
 										}}
 									/>
-									<button type="button" className="cp-eye" aria-label={phase.reveal ? "Hide key" : "Show key"} onClick={controller.toggleReveal}>
+									<button
+										type="button"
+										className="cp-eye"
+										aria-label={phase.reveal ? "Hide key" : "Show key"}
+										onClick={controller.toggleReveal}
+									>
 										{phase.reveal ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
 									</button>
 								</div>
-								<button type="button" className="cp-btn cp-btn--primary" disabled={!phase.key.trim()} onClick={() => void handleSaveKey()}>
+								<button
+									type="button"
+									className="cp-btn cp-btn--primary"
+									disabled={!phase.key.trim()}
+									onClick={() => void handleSaveKey()}
+								>
 									Connect
 								</button>
 							</div>
@@ -316,7 +348,9 @@ export function ConnectProviderDialog({
 							<div className="cp-error">
 								<TriangleAlert className="size-3.5 shrink-0" /> {phase.message}
 							</div>
-							<button type="button" className="cp-btn" onClick={controller.reset}>Try again</button>
+							<button type="button" className="cp-btn" onClick={controller.reset}>
+								Try again
+							</button>
 						</div>
 					)}
 				</div>

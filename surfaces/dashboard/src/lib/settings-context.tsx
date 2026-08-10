@@ -23,9 +23,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 		document.body.classList.toggle("settings-open", open);
 		return () => document.body.classList.remove("settings-open");
 	}, [open]);
-	return (
-		<Ctx.Provider value={{ open, section, setOpen, setSection, toggle }}>{children}</Ctx.Provider>
-	);
+	return <Ctx.Provider value={{ open, section, setOpen, setSection, toggle }}>{children}</Ctx.Provider>;
 }
 
 export function useSettings(): SettingsCtx {

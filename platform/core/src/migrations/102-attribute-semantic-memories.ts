@@ -23,7 +23,10 @@ export function up(db: MigrationDb): void {
 		"is_deleted",
 		"extraction_status",
 	] as const;
-	if (!hasColumn(db, "entity_attributes", "memory_id") || !requiredMemoryColumns.every((column) => hasColumn(db, "memories", column))) {
+	if (
+		!hasColumn(db, "entity_attributes", "memory_id") ||
+		!requiredMemoryColumns.every((column) => hasColumn(db, "memories", column))
+	) {
 		return;
 	}
 

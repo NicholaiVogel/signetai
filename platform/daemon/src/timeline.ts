@@ -224,12 +224,8 @@ function predictorToEvents(sessionKey: string, db: ReadDb): TimelineEvent[] {
 
 export interface TimelineSources {
 	readonly db: ReadDb;
-	readonly getRecentLogs: (opts: {
-		limit?: number;
-	}) => readonly LogEntry[];
-	readonly getRecentErrors: (opts?: {
-		limit?: number;
-	}) => readonly ErrorEntry[];
+	readonly getRecentLogs: (opts: { limit?: number }) => readonly LogEntry[];
+	readonly getRecentErrors: (opts?: { limit?: number }) => readonly ErrorEntry[];
 }
 
 export function buildTimeline(sources: TimelineSources, entityId: string): Timeline {

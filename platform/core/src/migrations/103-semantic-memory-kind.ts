@@ -7,10 +7,18 @@ import type { MigrationDb } from "./index";
  * beyond the episodic-only predicate.
  */
 export function up(db: MigrationDb): void {
-	const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('memories', 'entity_attributes')").all();
+	const tables = db
+		.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('memories', 'entity_attributes')")
+		.all();
 	if (tables.length !== 2) return;
-	const memoryColumns = db.prepare("PRAGMA table_info(memories)").all().map((row) => row.name);
-	const attributeColumns = db.prepare("PRAGMA table_info(entity_attributes)").all().map((row) => row.name);
+	const memoryColumns = db
+		.prepare("PRAGMA table_info(memories)")
+		.all()
+		.map((row) => row.name);
+	const attributeColumns = db
+		.prepare("PRAGMA table_info(entity_attributes)")
+		.all()
+		.map((row) => row.name);
 	if (!memoryColumns.includes("memory_kind") || !attributeColumns.includes("memory_id")) return;
 	db.exec(`
 		UPDATE memories

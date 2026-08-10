@@ -61,7 +61,12 @@ if (resolvedAgentsDir) {
 const dreamingAgentId = process.env.SIGNET_DREAMING_AGENT_ID?.trim();
 const dreamingPassId = process.env.SIGNET_DREAMING_PASS_ID?.trim();
 const server = dreamingAgentId
-	? createDreamingMcpServer({ daemonUrl: DAEMON_URL, agentId: dreamingAgentId, passId: dreamingPassId, version: "0.1.0" })
+	? createDreamingMcpServer({
+			daemonUrl: DAEMON_URL,
+			agentId: dreamingAgentId,
+			passId: dreamingPassId,
+			version: "0.1.0",
+		})
 	: await createMcpServer({
 			daemonUrl: DAEMON_URL,
 			version: "0.1.0",

@@ -13,7 +13,11 @@ import { Switch } from "@/components/ui/switch";
 import { type AgentConfigStore, isDreamingEnabled, useAgentConfig } from "@/lib/agent-config";
 import { type InferenceCatalog, type LogEntry, api } from "@/lib/api";
 import { readEmbeddingEndpoint, writeEmbeddingEndpoint } from "@/lib/embedding-config";
-import { allowRemoteMemoryExtraction, ensureInferenceRoute, requiresRemoteMemoryConsent } from "@/lib/inference-route-config";
+import {
+	allowRemoteMemoryExtraction,
+	ensureInferenceRoute,
+	requiresRemoteMemoryConsent,
+} from "@/lib/inference-route-config";
 import {
 	ACPX_AGENTS,
 	type AccountsMap,
@@ -37,22 +41,80 @@ const NAV: { id: SettingsSection; label: string; icon: React.ReactNode }[] = [
 	{
 		id: "network",
 		label: "Network",
-		icon: <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" /><path d="M2 12h20M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20" /></svg>,
+		icon: (
+			<svg
+				viewBox="0 0 24 24"
+				width="15"
+				height="15"
+				fill="none"
+				stroke="currentColor"
+				strokeWidth={1.75}
+				strokeLinecap="round"
+				strokeLinejoin="round"
+			>
+				<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" />
+				<path d="M2 12h20M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20" />
+			</svg>
+		),
 	},
 	{
 		id: "inference",
 		label: "Inference",
-		icon: <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8" /><circle cx="12" cy="12" r="3" /></svg>,
+		icon: (
+			<svg
+				viewBox="0 0 24 24"
+				width="15"
+				height="15"
+				fill="none"
+				stroke="currentColor"
+				strokeWidth={1.75}
+				strokeLinecap="round"
+				strokeLinejoin="round"
+			>
+				<path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8" />
+				<circle cx="12" cy="12" r="3" />
+			</svg>
+		),
 	},
 	{
 		id: "logs",
 		label: "Logs",
-		icon: <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round"><path d="M14 4h7v16h-7M3 4h7v16H3M7 9h0M7 15h0" /><path d="M6 9h.01M6 15h.01" /></svg>,
+		icon: (
+			<svg
+				viewBox="0 0 24 24"
+				width="15"
+				height="15"
+				fill="none"
+				stroke="currentColor"
+				strokeWidth={1.75}
+				strokeLinecap="round"
+				strokeLinejoin="round"
+			>
+				<path d="M14 4h7v16h-7M3 4h7v16H3M7 9h0M7 15h0" />
+				<path d="M6 9h.01M6 15h.01" />
+			</svg>
+		),
 	},
 	{
 		id: "advanced",
 		label: "Advanced",
-		icon: <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h13M21 18h-1" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="19" cy="18" r="2" /></svg>,
+		icon: (
+			<svg
+				viewBox="0 0 24 24"
+				width="15"
+				height="15"
+				fill="none"
+				stroke="currentColor"
+				strokeWidth={1.75}
+				strokeLinecap="round"
+				strokeLinejoin="round"
+			>
+				<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h13M21 18h-1" />
+				<circle cx="16" cy="6" r="2" />
+				<circle cx="10" cy="12" r="2" />
+				<circle cx="19" cy="18" r="2" />
+			</svg>
+		),
 	},
 ];
 
@@ -165,7 +227,9 @@ function CtrlSelect({
 			<SelectContent className="max-h-[320px] font-mono text-[11px]">
 				<SelectItem value={NONE}>— none —</SelectItem>
 				{options.map((o) => (
-					<SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+					<SelectItem key={o.value} value={o.value}>
+						{o.label}
+					</SelectItem>
 				))}
 			</SelectContent>
 		</Select>
@@ -359,10 +423,18 @@ function InferenceSection() {
 								onClick={() => setConnecting(p)}
 								className={cn(
 									"shrink-0 rounded-[var(--radius)] border border-[oklch(1_0_0/0.16)] px-2 py-1.25 font-mono text-[9.5px] font-medium transition-colors hover:border-[oklch(1_0_0/0.3)] hover:text-foreground [html:not(.dark)_&]:border-[oklch(0_0_0/0.14)]",
-									p.connected ? "bg-[color-mix(in_oklch,var(--foreground)_6%,transparent)] text-muted-foreground" : "text-muted-foreground",
+									p.connected
+										? "bg-[color-mix(in_oklch,var(--foreground)_6%,transparent)] text-muted-foreground"
+										: "text-muted-foreground",
 								)}
 							>
-								{p.connected ? "Manage" : p.supportsOAuth && !p.supportsApiKey ? "Sign in" : p.supportsOAuth ? "Connect" : "Add key"}
+								{p.connected
+									? "Manage"
+									: p.supportsOAuth && !p.supportsApiKey
+										? "Sign in"
+										: p.supportsOAuth
+											? "Connect"
+											: "Add key"}
 							</button>
 						</div>
 					))}
@@ -370,9 +442,14 @@ function InferenceSection() {
 				{Object.keys(catalog?.modelErrors ?? {}).length > 0 && (
 					<div className="flex flex-col gap-1 px-1.5 pb-1">
 						{Object.entries(catalog!.modelErrors).map(([providerId, message]) => (
-							<div key={providerId} className="flex items-center gap-1.5 font-mono text-[10px] text-[oklch(0.82_0.15_85)]">
+							<div
+								key={providerId}
+								className="flex items-center gap-1.5 font-mono text-[10px] text-[oklch(0.82_0.15_85)]"
+							>
 								<TriangleAlert className="size-3 shrink-0" />
-								<span>{providerId}: {message}</span>
+								<span>
+									{providerId}: {message}
+								</span>
 							</div>
 						))}
 					</div>
@@ -414,16 +491,18 @@ type RouteCheckReport = {
 
 function RouteHealthPanel({ refreshKey }: { refreshKey: number }) {
 	const statusQuery = useAsync(() => api.getInferenceStatusDetailed(), { intervalMs: 60_000, deps: [refreshKey] });
-	const memoryDecisionQuery = useAsync(() => api.getInferenceDecision({ operation: "memory_extraction" }), { intervalMs: 60_000, deps: [refreshKey] });
+	const memoryDecisionQuery = useAsync(() => api.getInferenceDecision({ operation: "memory_extraction" }), {
+		intervalMs: 60_000,
+		deps: [refreshKey],
+	});
 	const [checking, setChecking] = useState(false);
 	const [report, setReport] = useState<RouteCheckReport | null>(null);
 	const status = report?.status ?? statusQuery.data?.data;
 	const statusError = report?.statusError ?? statusQuery.data?.error;
 	const issues = status?.configIssues ?? [];
-	const targets = Object.entries(status?.runtimeSnapshot?.targets ?? {}) as Array<[
-		string,
-		{ available?: boolean; unavailableReason?: string } | undefined,
-	]>;
+	const targets = Object.entries(status?.runtimeSnapshot?.targets ?? {}) as Array<
+		[string, { available?: boolean; unavailableReason?: string } | undefined]
+	>;
 
 	const checkRoutes = async () => {
 		setChecking(true);
@@ -470,7 +549,9 @@ function RouteHealthPanel({ refreshKey }: { refreshKey: number }) {
 								? "· probe passed"
 								: "· probe failed"
 					}
-				>Runtime route</GroupLabel>
+				>
+					Runtime route
+				</GroupLabel>
 				<button
 					type="button"
 					onClick={() => void checkRoutes()}
@@ -490,7 +571,10 @@ function RouteHealthPanel({ refreshKey }: { refreshKey: number }) {
 						<RouteMeta label="Targets" value={String(status.targetRefs?.length ?? 0)} />
 					</div>
 					<div className="mt-1.5 flex flex-col gap-1">
-						<RouteDecisionRow label="Memory extraction" decision={report?.memoryExtraction ?? memoryDecisionQuery.data} />
+						<RouteDecisionRow
+							label="Memory extraction"
+							decision={report?.memoryExtraction ?? memoryDecisionQuery.data}
+						/>
 						{status.workloadBindings?.aggregateRecall && (
 							<RouteDecisionRow label="Aggregate recall" decision={report?.aggregateRecall} />
 						)}
@@ -498,7 +582,13 @@ function RouteHealthPanel({ refreshKey }: { refreshKey: number }) {
 					{targets.length > 0 && (
 						<div className="mt-1.5 flex flex-wrap gap-1.5">
 							{targets.map(([ref, state]) => (
-								<span key={ref} className={cn("rounded bg-[color-mix(in_oklch,var(--foreground)_5%,transparent)] px-1.5 py-1 font-mono text-[9px]", state?.available ? "text-success" : "text-muted-foreground")}>
+								<span
+									key={ref}
+									className={cn(
+										"rounded bg-[color-mix(in_oklch,var(--foreground)_5%,transparent)] px-1.5 py-1 font-mono text-[9px]",
+										state?.available ? "text-success" : "text-muted-foreground",
+									)}
+								>
 									{state?.available ? "●" : "○"} {ref}
 								</span>
 							))}
@@ -506,12 +596,19 @@ function RouteHealthPanel({ refreshKey }: { refreshKey: number }) {
 					)}
 					{issues.length > 0 && (
 						<div className="mt-1.5 flex flex-col gap-1 rounded-[var(--radius)] bg-[oklch(0.7_0.15_85/0.08)] px-2.5 py-2 font-mono text-[9.5px] text-[oklch(0.72_0.15_85)]">
-							{issues.map((issue) => <span key={`${issue.field}:${issue.ref}`}>{issue.severity}: {issue.message}</span>)}
+							{issues.map((issue) => (
+								<span key={`${issue.field}:${issue.ref}`}>
+									{issue.severity}: {issue.message}
+								</span>
+							))}
 						</div>
 					)}
 				</>
 			) : (
-				<div className="px-2.5 pb-1 text-[11px] text-muted-foreground">{statusError ?? "Route status is unavailable. Check routes to read the daemon&apos;s effective configuration."}</div>
+				<div className="px-2.5 pb-1 text-[11px] text-muted-foreground">
+					{statusError ??
+						"Route status is unavailable. Check routes to read the daemon&apos;s effective configuration."}
+				</div>
 			)}
 		</div>
 	);
@@ -535,24 +632,36 @@ function routeBlockedBy(details: unknown): string[] {
 	return candidates.flatMap((candidate) => {
 		if (candidate == null || typeof candidate !== "object" || Array.isArray(candidate)) return [];
 		const row = candidate as Record<string, unknown>;
-		const blockedBy = Array.isArray(row.blockedBy) ? row.blockedBy.filter((reason): reason is string => typeof reason === "string") : [];
+		const blockedBy = Array.isArray(row.blockedBy)
+			? row.blockedBy.filter((reason): reason is string => typeof reason === "string")
+			: [];
 		if (blockedBy.length === 0) return [];
 		const targetRef = typeof row.targetRef === "string" ? row.targetRef : "candidate";
 		return [`${targetRef}: ${blockedBy.join(", ")}`];
 	});
 }
 
-function RouteDecisionRow({ label, decision }: { label: string; decision: Awaited<ReturnType<typeof api.getInferenceDecision>> | undefined | null }) {
+function RouteDecisionRow({
+	label,
+	decision,
+}: {
+	label: string;
+	decision: Awaited<ReturnType<typeof api.getInferenceDecision>> | undefined | null;
+}) {
 	const route = decision?.data;
 	const blockedBy = routeBlockedBy(decision?.details);
 	const value = route
 		? `${route.targetRef} · ${route.policyId}`
 		: blockedBy.length > 0
 			? `blocked: ${blockedBy.join(", ")}`
-			: decision?.error ?? "not resolved — check routes";
+			: (decision?.error ?? "not resolved — check routes");
 	return (
 		<div className="flex items-center gap-2 rounded-[var(--radius)] px-2.5 py-1.5 text-[11px]">
-			{route ? <CheckCircle className="size-3.5 shrink-0 text-success" /> : <TriangleAlert className="size-3.5 shrink-0 text-[oklch(0.75_0.14_75)]" />}
+			{route ? (
+				<CheckCircle className="size-3.5 shrink-0 text-success" />
+			) : (
+				<TriangleAlert className="size-3.5 shrink-0 text-[oklch(0.75_0.14_75)]" />
+			)}
 			<span className="font-medium">{label}</span>
 			<span className="truncate font-mono text-[9.5px] text-muted-foreground" title={value}>
 				{value}
@@ -605,7 +714,12 @@ function TargetEditor({
 
 	const kind = backendKind(executor);
 	useEffect(() => {
-		if (!remoteConsentDismissed && pendingRemote === null && targetName === "background" && requiresRemoteMemoryConsent(kind, executor, endpoint, memoryPrivacy)) {
+		if (
+			!remoteConsentDismissed &&
+			pendingRemote === null &&
+			targetName === "background" &&
+			requiresRemoteMemoryConsent(kind, executor, endpoint, memoryPrivacy)
+		) {
 			setPendingRemote({ executor, ...(endpoint ? { endpoint } : {}) });
 		}
 	}, [endpoint, executor, kind, memoryPrivacy, pendingRemote, remoteConsentDismissed, targetName]);
@@ -685,7 +799,9 @@ function TargetEditor({
 				? () => {
 						void store.reload().then(() => {
 							setRemoteConsentDismissed(false);
-							setSaveError("Could not save the remote-extraction decision. The persisted privacy gate is still active.");
+							setSaveError(
+								"Could not save the remote-extraction decision. The persisted privacy gate is still active.",
+							);
 							setPendingRemote({ executor: next, ...(remoteEndpoint ? { endpoint: remoteEndpoint } : {}) });
 						});
 					}
@@ -752,11 +868,20 @@ function TargetEditor({
 			</div>
 			{executor !== "" && kind === "acpx" && (
 				<Row title="ACPX agent" desc="The harness ACPX drives.">
-					<CtrlSelect value={acpxAgent} options={ACPX_AGENTS.map((a) => ({ value: a, label: a }))} onChange={setAcpxAgent} />
+					<CtrlSelect
+						value={acpxAgent}
+						options={ACPX_AGENTS.map((a) => ({ value: a, label: a }))}
+						onChange={setAcpxAgent}
+					/>
 				</Row>
 			)}
 			{executor !== "" && kind !== "acpx" && (
-				<Row title="Model" desc={kind === "local" ? "The model id your server exposes." : "From the pi-ai catalog — or type a custom id."}>
+				<Row
+					title="Model"
+					desc={
+						kind === "local" ? "The model id your server exposes." : "From the pi-ai catalog — or type a custom id."
+					}
+				>
 					<div className="flex w-[220px] flex-col gap-1.5">
 						{modelOptions.length > 0 && <CtrlSelect value={modelId} options={modelOptions} onChange={setModel} />}
 						<CtrlInput value={modelId} placeholder="custom model id" onChange={setModel} />
@@ -764,7 +889,10 @@ function TargetEditor({
 				</Row>
 			)}
 			{kind === "local" && (
-				<Row title="Endpoint" desc="LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434 · llama.cpp: http://localhost:8080/v1">
+				<Row
+					title="Endpoint"
+					desc="LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434 · llama.cpp: http://localhost:8080/v1"
+				>
 					<CtrlInput value={endpoint} placeholder="http://localhost:1234/v1" onChange={setEndpoint} />
 				</Row>
 			)}
@@ -776,12 +904,50 @@ function TargetEditor({
 			{pendingRemote && (
 				<div className="mt-2 rounded-[var(--radius)] border border-[oklch(0.72_0.15_85/0.3)] bg-[oklch(0.72_0.15_85/0.08)] px-3 py-2.5">
 					{saveError && <div className="mb-1 text-[11px] text-[oklch(0.72_0.15_25)]">{saveError}</div>}
-					<div className="text-[12px] font-semibold">Use {pendingRemote.executor === "acpx" ? `ACPX (${acpxAgent})` : pendingRemote.executor === "openai-compatible" ? "OpenAI-compatible endpoint" : PROVIDER_NAMES[pendingRemote.executor] ?? titleCase(pendingRemote.executor)} for memory extraction?</div>
-					<div className="mt-1 text-[11.5px] leading-snug text-muted-foreground">Selected memory sources and transcript text may be sent to this remote executor to extract durable facts.</div>
+					<div className="text-[12px] font-semibold">
+						Use{" "}
+						{pendingRemote.executor === "acpx"
+							? `ACPX (${acpxAgent})`
+							: pendingRemote.executor === "openai-compatible"
+								? "OpenAI-compatible endpoint"
+								: (PROVIDER_NAMES[pendingRemote.executor] ?? titleCase(pendingRemote.executor))}{" "}
+						for memory extraction?
+					</div>
+					<div className="mt-1 text-[11.5px] leading-snug text-muted-foreground">
+						Selected memory sources and transcript text may be sent to this remote executor to extract durable facts.
+					</div>
 					<div className="mt-2 flex flex-wrap gap-1.5">
-						<button type="button" onClick={() => { const consent = pendingRemote; applyTarget(consent.executor, true, consent.endpoint); setPendingRemote(null); }} className="rounded-[var(--radius)] bg-foreground px-2.5 py-1.5 text-[10.5px] font-medium text-background">Use remotely</button>
-						<button type="button" onClick={() => { setRemoteConsentDismissed(true); setPendingRemote(null); }} className="rounded-[var(--radius)] border border-[oklch(1_0_0/0.16)] px-2.5 py-1.5 text-[10.5px] text-muted-foreground hover:text-foreground [html:not(.dark)_&]:border-[oklch(0_0_0/0.14)]">Keep privacy gate</button>
-						<button type="button" onClick={() => { setRemoteConsentDismissed(true); setPendingRemote(null); }} className="px-2 py-1.5 text-[10.5px] text-muted-foreground hover:text-foreground">Cancel</button>
+						<button
+							type="button"
+							onClick={() => {
+								const consent = pendingRemote;
+								applyTarget(consent.executor, true, consent.endpoint);
+								setPendingRemote(null);
+							}}
+							className="rounded-[var(--radius)] bg-foreground px-2.5 py-1.5 text-[10.5px] font-medium text-background"
+						>
+							Use remotely
+						</button>
+						<button
+							type="button"
+							onClick={() => {
+								setRemoteConsentDismissed(true);
+								setPendingRemote(null);
+							}}
+							className="rounded-[var(--radius)] border border-[oklch(1_0_0/0.16)] px-2.5 py-1.5 text-[10.5px] text-muted-foreground hover:text-foreground [html:not(.dark)_&]:border-[oklch(0_0_0/0.14)]"
+						>
+							Keep privacy gate
+						</button>
+						<button
+							type="button"
+							onClick={() => {
+								setRemoteConsentDismissed(true);
+								setPendingRemote(null);
+							}}
+							className="px-2 py-1.5 text-[10.5px] text-muted-foreground hover:text-foreground"
+						>
+							Cancel
+						</button>
 					</div>
 				</div>
 			)}
@@ -794,7 +960,12 @@ function TargetEditor({
 function resolveEmbPath(agent: Record<string, unknown>): readonly string[] {
 	if (agent["embedding"] != null) return ["embedding"];
 	const memory = agent["memory"];
-	if (memory && typeof memory === "object" && !Array.isArray(memory) && (memory as Record<string, unknown>)["embeddings"] != null) {
+	if (
+		memory &&
+		typeof memory === "object" &&
+		!Array.isArray(memory) &&
+		(memory as Record<string, unknown>)["embeddings"] != null
+	) {
 		return ["memory", "embeddings"];
 	}
 	return ["embedding"];
@@ -948,7 +1119,10 @@ function TelemetrySettings({ store }: { store: AgentConfigStore }) {
 
 	return (
 		<>
-			<Row title="Anonymous telemetry" desc="Share anonymous usage and performance data to help improve Signet. No memory content or personal identity is sent.">
+			<Row
+				title="Anonymous telemetry"
+				desc="Share anonymous usage and performance data to help improve Signet. No memory content or personal identity is sent."
+			>
 				<Switch
 					checked={enabled}
 					onCheckedChange={(next: boolean) => {
@@ -967,7 +1141,8 @@ function TelemetrySettings({ store }: { store: AgentConfigStore }) {
 					<DialogHeader>
 						<DialogTitle>Are you sure?</DialogTitle>
 						<DialogDescription>
-							Turning off anonymous telemetry stops future usage and performance reports. Signet will continue working normally. You can turn telemetry back on here later; it will resume after the daemon restarts.
+							Turning off anonymous telemetry stops future usage and performance reports. Signet will continue working
+							normally. You can turn telemetry back on here later; it will resume after the daemon restarts.
 						</DialogDescription>
 					</DialogHeader>
 					<div className="rounded-[var(--radius)] border border-[oklch(0.78_0.15_85/0.32)] bg-[oklch(0.78_0.15_85/0.08)] px-3 py-2.5 text-[11.5px] leading-relaxed text-[oklch(0.82_0.15_85)]">
@@ -1048,18 +1223,56 @@ function AdvancedSection() {
 
 			<div className="sig-mcard flex flex-col gap-px">
 				<GroupLabel>Pipeline</GroupLabel>
-				<AdvToggle store={store} path={pv2("enabled")} title="Pipeline enabled" desc="Master switch. The memory pipeline does nothing when disabled." />
-				<AdvToggle store={store} path={pv2("shadowMode")} title="Shadow mode" desc="Run extraction and decisions without writing. Safe for evaluation." />
-				<AdvToggle store={store} path={pv2("mutationsFrozen")} title="Freeze mutations" desc="Emergency brake — blocks all writes even when shadow mode is off." />
-				<AdvToggle store={store} path={pv2("graphEnabled")} title="Knowledge graph" desc="Build and query a graph from extracted entity relationships." />
+				<AdvToggle
+					store={store}
+					path={pv2("enabled")}
+					title="Pipeline enabled"
+					desc="Master switch. The memory pipeline does nothing when disabled."
+				/>
+				<AdvToggle
+					store={store}
+					path={pv2("shadowMode")}
+					title="Shadow mode"
+					desc="Run extraction and decisions without writing. Safe for evaluation."
+				/>
+				<AdvToggle
+					store={store}
+					path={pv2("mutationsFrozen")}
+					title="Freeze mutations"
+					desc="Emergency brake — blocks all writes even when shadow mode is off."
+				/>
+				<AdvToggle
+					store={store}
+					path={pv2("graphEnabled")}
+					title="Knowledge graph"
+					desc="Build and query a graph from extracted entity relationships."
+				/>
 			</div>
 
 			<div className="sig-mcard flex flex-col gap-px">
 				<GroupLabel>Autonomy &amp; maintenance</GroupLabel>
-				<AdvToggle store={store} path={pv2("autonomousEnabled")} title="Autonomous operations" desc="Allow autonomous pipeline operations like maintenance and repair." />
-				<AdvToggle store={store} path={pv2("autonomousFrozen")} title="Freeze autonomous writes" desc="Block autonomous writes while still allowing autonomous reads." />
-				<AdvToggle store={store} path={pv2("allowUpdateDelete")} title="Allow update/delete" desc="Permit UPDATE/DELETE decisions on existing memories." />
-				<Row title="Maintenance mode" desc="'observe' logs diagnostics without changes; 'execute' attempts repairs. Unset defaults to execute.">
+				<AdvToggle
+					store={store}
+					path={pv2("autonomousEnabled")}
+					title="Autonomous operations"
+					desc="Allow autonomous pipeline operations like maintenance and repair."
+				/>
+				<AdvToggle
+					store={store}
+					path={pv2("autonomousFrozen")}
+					title="Freeze autonomous writes"
+					desc="Block autonomous writes while still allowing autonomous reads."
+				/>
+				<AdvToggle
+					store={store}
+					path={pv2("allowUpdateDelete")}
+					title="Allow update/delete"
+					desc="Permit UPDATE/DELETE decisions on existing memories."
+				/>
+				<Row
+					title="Maintenance mode"
+					desc="'observe' logs diagnostics without changes; 'execute' attempts repairs. Unset defaults to execute."
+				>
 					<CtrlSelect
 						value={maintenanceMode}
 						options={[
@@ -1076,37 +1289,165 @@ function AdvancedSection() {
 
 			<div className="sig-mcard flex flex-col gap-px">
 				<GroupLabel>Extraction</GroupLabel>
-				<AdvNum store={store} path={pv2("extractionTimeout")} title="Extraction timeout (ms)" desc="Deadline for the extraction LLM call." min={5000} max={300000} step={1000} />
-				<AdvNum store={store} path={pv2("minFactConfidenceForWrite")} title="Min fact confidence" desc="Facts below this threshold are dropped. Lower captures more at the cost of noise." min={0} max={1} step={0.05} />
-				<AdvToggle store={store} path={pv2("semanticContradictionEnabled")} title="Semantic contradiction check" desc="Use an LLM to detect contradictions on update proposals. Adds latency but catches subtle conflicts." />
-				<AdvNum store={store} path={pv2("semanticContradictionTimeoutMs")} title="Contradiction timeout (ms)" desc="Falls back to 'no contradiction' on timeout." min={5000} max={300000} step={1000} />
-				<AdvNum store={store} path={pv2("workerPollMs")} title="Worker poll (ms)" desc="How often the pipeline worker polls for pending jobs." min={100} max={60000} step={100} />
+				<AdvNum
+					store={store}
+					path={pv2("extractionTimeout")}
+					title="Extraction timeout (ms)"
+					desc="Deadline for the extraction LLM call."
+					min={5000}
+					max={300000}
+					step={1000}
+				/>
+				<AdvNum
+					store={store}
+					path={pv2("minFactConfidenceForWrite")}
+					title="Min fact confidence"
+					desc="Facts below this threshold are dropped. Lower captures more at the cost of noise."
+					min={0}
+					max={1}
+					step={0.05}
+				/>
+				<AdvToggle
+					store={store}
+					path={pv2("semanticContradictionEnabled")}
+					title="Semantic contradiction check"
+					desc="Use an LLM to detect contradictions on update proposals. Adds latency but catches subtle conflicts."
+				/>
+				<AdvNum
+					store={store}
+					path={pv2("semanticContradictionTimeoutMs")}
+					title="Contradiction timeout (ms)"
+					desc="Falls back to 'no contradiction' on timeout."
+					min={5000}
+					max={300000}
+					step={1000}
+				/>
+				<AdvNum
+					store={store}
+					path={pv2("workerPollMs")}
+					title="Worker poll (ms)"
+					desc="How often the pipeline worker polls for pending jobs."
+					min={100}
+					max={60000}
+					step={100}
+				/>
 			</div>
 
 			<div className="sig-mcard flex flex-col gap-px">
 				<GroupLabel>Recall</GroupLabel>
-				<AdvNum store={store} path={srch("alpha")} title="Alpha" desc="Vector weight (0–1). 0.9 is heavily semantic; 0.3 skews toward keyword matching. Default 0.7." min={0} max={1} step={0.05} />
-				<AdvNum store={store} path={srch("top_k")} title="Top K" desc="Candidates fetched from each source (BM25 and vector) before blending. Default 20." min={1} max={100} />
-				<AdvNum store={store} path={srch("min_score")} title="Min score" desc="Results below this combined-score threshold are dropped. Default 0.3." min={0} max={1} step={0.05} />
-				<AdvToggle store={store} path={srch("rehearsal_enabled")} title="Rehearsal boost" desc="Boost scores for frequently-recalled memories using access count and last-accessed time." />
-				<AdvNum store={store} path={srch("rehearsal_weight")} title="Rehearsal weight" desc="Score multiplier for the rehearsal boost. Default 0.1." min={0} max={1} step={0.05} />
-				<AdvNum store={store} path={srch("rehearsal_half_life_days")} title="Rehearsal half-life (days)" desc="Days until the rehearsal boost decays to half. Default 30." min={1} max={365} />
-				<AdvToggle store={store} path={pv2("rerankerEnabled")} title="Reranker" desc="Re-score recall candidates by full-content embedding similarity. No LLM call needed." />
-				<AdvNum store={store} path={pv2("rerankerTopN")} title="Reranker top N" desc="Number of top candidates re-scored by embedding similarity." min={1} max={100} />
-				<AdvNum store={store} path={pv2("graphBoostWeight")} title="Graph boost weight" desc="Score boost applied to graph-linked memories during search." min={0} max={1} step={0.05} />
+				<AdvNum
+					store={store}
+					path={srch("alpha")}
+					title="Alpha"
+					desc="Vector weight (0–1). 0.9 is heavily semantic; 0.3 skews toward keyword matching. Default 0.7."
+					min={0}
+					max={1}
+					step={0.05}
+				/>
+				<AdvNum
+					store={store}
+					path={srch("top_k")}
+					title="Top K"
+					desc="Candidates fetched from each source (BM25 and vector) before blending. Default 20."
+					min={1}
+					max={100}
+				/>
+				<AdvNum
+					store={store}
+					path={srch("min_score")}
+					title="Min score"
+					desc="Results below this combined-score threshold are dropped. Default 0.3."
+					min={0}
+					max={1}
+					step={0.05}
+				/>
+				<AdvToggle
+					store={store}
+					path={srch("rehearsal_enabled")}
+					title="Rehearsal boost"
+					desc="Boost scores for frequently-recalled memories using access count and last-accessed time."
+				/>
+				<AdvNum
+					store={store}
+					path={srch("rehearsal_weight")}
+					title="Rehearsal weight"
+					desc="Score multiplier for the rehearsal boost. Default 0.1."
+					min={0}
+					max={1}
+					step={0.05}
+				/>
+				<AdvNum
+					store={store}
+					path={srch("rehearsal_half_life_days")}
+					title="Rehearsal half-life (days)"
+					desc="Days until the rehearsal boost decays to half. Default 30."
+					min={1}
+					max={365}
+				/>
+				<AdvToggle
+					store={store}
+					path={pv2("rerankerEnabled")}
+					title="Reranker"
+					desc="Re-score recall candidates by full-content embedding similarity. No LLM call needed."
+				/>
+				<AdvNum
+					store={store}
+					path={pv2("rerankerTopN")}
+					title="Reranker top N"
+					desc="Number of top candidates re-scored by embedding similarity."
+					min={1}
+					max={100}
+				/>
+				<AdvNum
+					store={store}
+					path={pv2("graphBoostWeight")}
+					title="Graph boost weight"
+					desc="Score boost applied to graph-linked memories during search."
+					min={0}
+					max={1}
+					step={0.05}
+				/>
 			</div>
 
 			<div className="sig-mcard flex flex-col gap-px">
 				<GroupLabel>Dreaming</GroupLabel>
 				<DreamingToggle store={store} />
-				<AdvNum store={store} path={drm("tokenThreshold")} title="Token threshold" desc="Accumulated transcript tokens that trigger a dreaming pass. Default 100,000." min={10000} max={1000000} step={10000} />
-				<AdvToggle store={store} path={drm("backfillOnFirstRun")} title="Backfill on first run" desc="Process existing transcripts the first time dreaming is enabled." />
+				<AdvNum
+					store={store}
+					path={drm("tokenThreshold")}
+					title="Token threshold"
+					desc="Accumulated transcript tokens that trigger a dreaming pass. Default 100,000."
+					min={10000}
+					max={1000000}
+					step={10000}
+				/>
+				<AdvToggle
+					store={store}
+					path={drm("backfillOnFirstRun")}
+					title="Backfill on first run"
+					desc="Process existing transcripts the first time dreaming is enabled."
+				/>
 			</div>
 
 			<div className="sig-mcard flex flex-col gap-px">
 				<GroupLabel>Embeddings extras</GroupLabel>
-				<AdvNum store={store} path={[...embPath, "dimensions"]} title="Dimensions" desc="Vector dimensions for the active embedding model. Changing this re-embeds everything." min={64} max={4096} />
-				<AdvNum store={store} path={[...embPath, "promptSubmitTimeoutMs"]} title="Prompt-submit timeout (ms)" desc="Deadline for the recall embedding before prompt injection. Raise for slow local models that cold-load." min={1000} max={300000} step={1000} />
+				<AdvNum
+					store={store}
+					path={[...embPath, "dimensions"]}
+					title="Dimensions"
+					desc="Vector dimensions for the active embedding model. Changing this re-embeds everything."
+					min={64}
+					max={4096}
+				/>
+				<AdvNum
+					store={store}
+					path={[...embPath, "promptSubmitTimeoutMs"]}
+					title="Prompt-submit timeout (ms)"
+					desc="Deadline for the recall embedding before prompt injection. Raise for slow local models that cold-load."
+					min={1000}
+					max={300000}
+					step={1000}
+				/>
 			</div>
 		</div>
 	);
@@ -1161,7 +1502,8 @@ export function TelemetryHealthPanel() {
 						>
 							<TriangleAlert className="mt-px size-3.5 shrink-0 text-[oklch(0.72_0.18_25)]" aria-hidden="true" />
 							<span>
-								{formatTelemetryCount(health.droppedEventCount)} local telemetry event{health.droppedEventCount === 1 ? " was" : "s were"} dropped and cannot be delivered later.
+								{formatTelemetryCount(health.droppedEventCount)} local telemetry event
+								{health.droppedEventCount === 1 ? " was" : "s were"} dropped and cannot be delivered later.
 							</span>
 						</div>
 					)}
@@ -1179,9 +1521,13 @@ export function TelemetryHealthPanel() {
 					)}
 				</>
 			) : health ? (
-				<div className="font-mono text-[10px] text-muted-foreground">Telemetry collection is disabled on this daemon.</div>
+				<div className="font-mono text-[10px] text-muted-foreground">
+					Telemetry collection is disabled on this daemon.
+				</div>
 			) : (
-				<div className="font-mono text-[10px] text-muted-foreground">Collector health is unavailable from this daemon.</div>
+				<div className="font-mono text-[10px] text-muted-foreground">
+					Collector health is unavailable from this daemon.
+				</div>
 			)}
 		</div>
 	);
@@ -1266,7 +1612,11 @@ function LogsSection() {
 									className="size-1.5 rounded-full"
 									style={{
 										background:
-											l === "info" ? "oklch(0.7 0.1 220)" : l === "warn" ? "oklch(0.78 0.15 85)" : "oklch(0.72 0.19 25)",
+											l === "info"
+												? "oklch(0.7 0.1 220)"
+												: l === "warn"
+													? "oklch(0.78 0.15 85)"
+													: "oklch(0.72 0.19 25)",
 									}}
 								/>
 							)}
@@ -1294,17 +1644,25 @@ function LogsSection() {
 								className={cn(
 									"grid w-full items-baseline gap-0 border-b border-[oklch(1_0_0/0.03)] px-6 py-0.75 text-left transition-colors [html:not(.dark)_&]:border-[oklch(0_0_0/0.03)]",
 									raw ? "cursor-pointer" : "cursor-default",
-									l.level === "error" ? "hover:bg-[oklch(0.4_0.15_25/0.08)]" : l.level === "warn" ? "hover:bg-[oklch(0.5_0.15_85/0.06)]" : "hover:bg-[var(--accent-subtle)]",
+									l.level === "error"
+										? "hover:bg-[oklch(0.4_0.15_25/0.08)]"
+										: l.level === "warn"
+											? "hover:bg-[oklch(0.5_0.15_85/0.06)]"
+											: "hover:bg-[var(--accent-subtle)]",
 								)}
 								style={{ gridTemplateColumns: "84px 50px 80px 1fr" }}
 							>
-								<span className="pr-3 text-[oklch(0.5_0_0)] [html:not(.dark)_&]:text-[oklch(0.55_0_0)]">{formatLogTime(l.timestamp)}</span>
+								<span className="pr-3 text-[oklch(0.5_0_0)] [html:not(.dark)_&]:text-[oklch(0.55_0_0)]">
+									{formatLogTime(l.timestamp)}
+								</span>
 								<span
 									className={cn(
 										"pr-3 text-[10px] font-semibold",
 										l.level === "info" && "text-[oklch(0.7_0.1_220)]",
-										l.level === "warn" && "w-fit rounded bg-[oklch(0.7_0.15_85/0.12)] px-1.5 text-[oklch(0.82_0.15_85)]",
-										l.level === "error" && "w-fit rounded bg-[oklch(0.6_0.2_25/0.14)] px-1.5 text-[oklch(0.78_0.19_25)]",
+										l.level === "warn" &&
+											"w-fit rounded bg-[oklch(0.7_0.15_85/0.12)] px-1.5 text-[oklch(0.82_0.15_85)]",
+										l.level === "error" &&
+											"w-fit rounded bg-[oklch(0.6_0.2_25/0.14)] px-1.5 text-[oklch(0.78_0.19_25)]",
 										l.level === "debug" && "text-[oklch(0.55_0_0)] [html:not(.dark)_&]:text-[oklch(0.5_0_0)]",
 									)}
 								>

@@ -705,7 +705,10 @@ describe("parseAuthConfig", () => {
 			{
 				mode: "team",
 				login: {
-					password: { username: "owner", passwordHash: "pbkdf2-sha256$10000$aaaaaaaaaaa$bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+					password: {
+						username: "owner",
+						passwordHash: "pbkdf2-sha256$10000$aaaaaaaaaaa$bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					},
 					sso: { enabled: true },
 					saml: { enabled: true },
 				},

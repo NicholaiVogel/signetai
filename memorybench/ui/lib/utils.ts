@@ -9,7 +9,6 @@ export function formatDate(date: string): string {
   const diffSec = Math.floor(diffMs / 1000)
   const diffMin = Math.floor(diffSec / 60)
   const diffHour = Math.floor(diffMin / 60)
-  const diffDay = Math.floor(diffHour / 24)
 
   // Less than 1 minute
   if (diffSec < 60) {

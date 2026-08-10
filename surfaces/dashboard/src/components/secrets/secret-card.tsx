@@ -18,15 +18,7 @@ function secretIcon(name: string) {
 	return KeyRound;
 }
 
-export function SecretCard({
-	name,
-	provider,
-	onDeleted,
-}: {
-	name: string;
-	provider: string;
-	onDeleted: () => void;
-}) {
+export function SecretCard({ name, provider, onDeleted }: { name: string; provider: string; onDeleted: () => void }) {
 	const Icon = secretIcon(name);
 	const [confirming, setConfirming] = useState(false);
 	const [deleting, setDeleting] = useState(false);

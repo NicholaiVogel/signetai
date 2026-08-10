@@ -190,9 +190,7 @@ export function OnePasswordPanel({ onImported }: { onImported: () => void }) {
 					{status.connected &&
 						(vaults.length > 0 ? (
 							<div className="flex flex-col gap-1">
-								<span className="font-mono text-[9.5px] uppercase tracking-[0.08em] text-muted-foreground">
-									Vaults
-								</span>
+								<span className="font-mono text-[9.5px] uppercase tracking-[0.08em] text-muted-foreground">Vaults</span>
 								<div className="flex flex-wrap gap-1">
 									{vaults.map((vault) => {
 										const on = selected.includes(vault.id);
@@ -202,9 +200,7 @@ export function OnePasswordPanel({ onImported }: { onImported: () => void }) {
 												type="button"
 												aria-pressed={on}
 												onClick={() =>
-													setSelected((prev) =>
-														on ? prev.filter((id) => id !== vault.id) : [...prev, vault.id],
-													)
+													setSelected((prev) => (on ? prev.filter((id) => id !== vault.id) : [...prev, vault.id]))
 												}
 												className={cn(
 													"inline-flex h-6 items-center gap-1.5 rounded-[var(--radius)] border px-2 font-mono text-[10.5px] transition-colors",

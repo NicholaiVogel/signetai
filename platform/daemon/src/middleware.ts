@@ -8,13 +8,7 @@ import { cors } from "hono/cors";
 import { createAuthMiddleware, verifyApiKey } from "./auth";
 import { getDbAccessor } from "./db-accessor";
 import { logger } from "./logger";
-import {
-	analyticsCollector,
-	authConfig,
-	authSecret,
-	isAllowedOrigin,
-	shuttingDown,
-} from "./routes/state.js";
+import { analyticsCollector, authConfig, authSecret, isAllowedOrigin, shuttingDown } from "./routes/state.js";
 
 export function registerGlobalMiddleware(app: Hono): void {
 	// MW-1: CORS

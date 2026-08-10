@@ -41,11 +41,7 @@ function extractReadmeOverview(content: string): string {
 	const localFirstMatch = content.match(/Signet is a local-first[\s\S]*?without ever reading their values\./);
 	const whyMatch = content.match(/Most AI tools build memory silos\.[\s\S]*?unless you configure it to\./);
 
-	const normalizeParagraph = (text: string): string =>
-		text
-			.replace(/[<>]/g, " ")
-			.replace(/\s+/g, " ")
-			.trim();
+	const normalizeParagraph = (text: string): string => text.replace(/[<>]/g, " ").replace(/\s+/g, " ").trim();
 
 	if (localFirstMatch && whyMatch) {
 		return [

@@ -146,17 +146,18 @@ export default function GraphViewer({ currentSlug, collection, mode = "local" }:
 
 		// ─── Colors ──────────────────────────────────────────────
 		const isLocal = activeMode === "local";
-		const accentColor = getComputedStyle(document.documentElement).getPropertyValue("--color-accent").trim() || "#4d7cfe";
+		const accentColor =
+			getComputedStyle(document.documentElement).getPropertyValue("--color-accent").trim() || "#4d7cfe";
 
 		// Node colors by role
-		const COL_CURRENT = accentColor; 
-		const COL_DOC = "#8b8b94"; 
-		const COL_BLOG = "#a0a0aa"; 
-		const COL_LINK = "rgba(255,255,255,0.06)"; 
-		const COL_LINK_HIGHLIGHT = "rgba(77,124,254,0.25)"; 
+		const COL_CURRENT = accentColor;
+		const COL_DOC = "#8b8b94";
+		const COL_BLOG = "#a0a0aa";
+		const COL_LINK = "rgba(255,255,255,0.06)";
+		const COL_LINK_HIGHLIGHT = "rgba(77,124,254,0.25)";
 		const COL_LABEL = "#f0f0f2";
 		const COL_LABEL_MUTED = "#6b6b73";
-		const COL_GLOW = "rgba(77,124,254,0.08)"; 
+		const COL_GLOW = "rgba(77,124,254,0.08)";
 
 		// Build adjacency for hover highlighting
 		const adjacency = new Map<string, Set<string>>();

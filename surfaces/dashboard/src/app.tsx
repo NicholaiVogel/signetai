@@ -34,7 +34,12 @@ function Shell() {
 	return (
 		<div className="shell-stage grid h-full grid-cols-1 bg-background text-foreground md:grid-cols-[248px_1fr]">
 			{/* Sidebar — fixed on desktop, drawer on mobile */}
-			<div className={cn("flex flex-col max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:w-[248px] max-md:transition-transform", navOpen ? "max-md:translate-x-0" : "max-md:-translate-x-full")}>
+			<div
+				className={cn(
+					"flex flex-col max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:w-[248px] max-md:transition-transform",
+					navOpen ? "max-md:translate-x-0" : "max-md:-translate-x-full",
+				)}
+			>
 				<WindowChrome />
 				<Sidebar onNavigate={() => setNavOpen(false)} />
 			</div>

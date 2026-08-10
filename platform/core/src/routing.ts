@@ -818,12 +818,22 @@ export function validateRoutingReferences(config: RoutingConfig): readonly Routi
 	};
 	const missingTaskClass = (field: string, ref: string): void => {
 		if (!taskClassIds.has(ref)) {
-			issues.push({ severity: "warning", field, ref, message: `Task class "${ref}" referenced by ${field} does not exist.` });
+			issues.push({
+				severity: "warning",
+				field,
+				ref,
+				message: `Task class "${ref}" referenced by ${field} does not exist.`,
+			});
 		}
 	};
 	const missingAccount = (field: string, ref: string): void => {
 		if (!accountIds.has(ref)) {
-			issues.push({ severity: "warning", field, ref, message: `Account "${ref}" referenced by ${field} does not exist.` });
+			issues.push({
+				severity: "warning",
+				field,
+				ref,
+				message: `Account "${ref}" referenced by ${field} does not exist.`,
+			});
 		}
 	};
 

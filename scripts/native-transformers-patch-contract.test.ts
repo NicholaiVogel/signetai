@@ -29,7 +29,7 @@ const transformersWebRuntimePath = join(dirname(transformersPackageJson), "dist"
 const source = readFileSync(transformersWebRuntimePath, "utf8");
 
 const ANCHORS = [
-	"var DEFAULT_DEVICE = apis.IS_NODE_ENV ? \"cpu\" : \"wasm\";",
+	'var DEFAULT_DEVICE = apis.IS_NODE_ENV ? "cpu" : "wasm";',
 	"// ignore-modules:node:fs\nvar node_fs_default = {};",
 	"// ignore-modules:node:path\nvar node_path_default = {};",
 	"// ignore-modules:node:url\nvar node_url_default = {};",

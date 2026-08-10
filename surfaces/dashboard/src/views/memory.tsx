@@ -1,4 +1,17 @@
-import { Check, Clock3, MessageSquare, Network, Pin, Plus, Search, Trash2, UserRound, Wrench, X, type LucideIcon } from "lucide-react";
+import {
+	Check,
+	Clock3,
+	MessageSquare,
+	Network,
+	Pin,
+	Plus,
+	Search,
+	Trash2,
+	UserRound,
+	Wrench,
+	X,
+	type LucideIcon,
+} from "lucide-react";
 import { sourceLogo } from "@/components/icons";
 import { Surface } from "@/components/ui/surface";
 import { api, type EmbeddingHealthReport, type Memory } from "@/lib/api";
@@ -19,8 +32,15 @@ const TYPE_TINTS: Record<string, string> = {
  */
 function toTagArray(tags: unknown): string[] {
 	if (Array.isArray(tags))
-		return tags.filter((t): t is string => typeof t === "string").map((t) => t.trim()).filter(Boolean);
-	if (typeof tags === "string") return tags.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean);
+		return tags
+			.filter((t): t is string => typeof t === "string")
+			.map((t) => t.trim())
+			.filter(Boolean);
+	if (typeof tags === "string")
+		return tags
+			.split(/[\s,]+/)
+			.map((t) => t.trim())
+			.filter(Boolean);
 	return [];
 }
 
@@ -37,10 +57,15 @@ export function MemoryView() {
 	const [memoryType, setMemoryType] = useState<string | null>(null);
 	const [filterCatalog, setFilterCatalog] = useState<Memory[]>([]);
 	const { requestConnectSource } = useView();
-	const { data: mems, loading, refresh } = useAsync(
-		async () => q.trim() || memoryType || topics.size > 0
-			? api.searchMemories(q, 50, { type: memoryType ?? undefined, tags: [...topics] })
-			: api.getMemories({ limit: 50 }),
+	const {
+		data: mems,
+		loading,
+		refresh,
+	} = useAsync(
+		async () =>
+			q.trim() || memoryType || topics.size > 0
+				? api.searchMemories(q, 50, { type: memoryType ?? undefined, tags: [...topics] })
+				: api.getMemories({ limit: 50 }),
 		{ deps: [q, memoryType, topics] },
 	);
 	const summary = useAsync(() => api.getMemories({ limit: 1 }), { intervalMs: 30_000 }).data;
@@ -73,7 +98,12 @@ export function MemoryView() {
 				<Stat label="memories" value={summary?.stats ? summary.stats.total.toLocaleString() : "—"} />
 				<Stat label="indexed" value={coverage === null ? "—" : `${coverage}%`} />
 				<div className="flex-1" />
-				<span className={cn("flex items-center gap-1.5 text-[11px] text-muted-foreground", healthTextColor(embeddingHealth))}>
+				<span
+					className={cn(
+						"flex items-center gap-1.5 text-[11px] text-muted-foreground",
+						healthTextColor(embeddingHealth),
+					)}
+				>
 					<span className="size-1.5 rounded-full bg-current shadow-[0_0_6px_currentColor]" />
 					{embeddingHealth ? `${embeddingHealth.status} index` : "checking index"}
 				</span>
@@ -103,10 +133,10 @@ export function MemoryView() {
 					placeholder="Search memories, tags, queries…"
 					className="h-full min-w-0 flex-1 border-0 bg-transparent p-0 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
 				/>
-				{q && (
-					<span className="font-mono text-[10px] text-success">{memories.length} ranked by similarity</span>
-				)}
-				<kbd className="hidden rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground sm:inline">⌘K</kbd>
+				{q && <span className="font-mono text-[10px] text-success">{memories.length} ranked by similarity</span>}
+				<kbd className="hidden rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground sm:inline">
+					⌘K
+				</kbd>
 			</div>
 
 			<div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)] gap-4 md:grid-cols-[1fr_240px]">
@@ -114,7 +144,9 @@ export function MemoryView() {
 					{groups.map((group) => (
 						<div key={group.label ?? "search"} className="mb-2.5 last:mb-0">
 							{group.label && <GroupHeader label={group.label} count={group.memories.length} />}
-							{group.memories.map((memory) => <MemoryCard key={memory.id} memory={memory} onMutate={refresh} />)}
+							{group.memories.map((memory) => (
+								<MemoryCard key={memory.id} memory={memory} onMutate={refresh} />
+							))}
 						</div>
 					))}
 					{memories.length === 0 && (
@@ -130,18 +162,18 @@ export function MemoryView() {
 					)}
 				</div>
 
-					<div className="hidden min-h-0 flex-col gap-3.5 overflow-y-auto pr-0.5 md:flex">
-						<SideGroup label="Memory type">
-							{memoryTypes.map((chip) => (
-								<SideChip
-									key={chip.type}
-									label={typeLabel(chip.type)}
-									count={chip.count}
-									icon={typeIcon(chip.type)}
-									active={memoryType === chip.type}
-									onClick={() => setMemoryType((current) => current === chip.type ? null : chip.type)}
-								/>
-							))}
+				<div className="hidden min-h-0 flex-col gap-3.5 overflow-y-auto pr-0.5 md:flex">
+					<SideGroup label="Memory type">
+						{memoryTypes.map((chip) => (
+							<SideChip
+								key={chip.type}
+								label={typeLabel(chip.type)}
+								count={chip.count}
+								icon={typeIcon(chip.type)}
+								active={memoryType === chip.type}
+								onClick={() => setMemoryType((current) => (current === chip.type ? null : chip.type))}
+							/>
+						))}
 					</SideGroup>
 					<SideGroup label="Recurring topics">
 						<div className="flex flex-wrap gap-1.5 rounded-[var(--radius)] border border-[oklch(1_0_0/0.06)] bg-[color-mix(in_oklch,var(--foreground)_4%,transparent)] p-2">
@@ -153,7 +185,8 @@ export function MemoryView() {
 									aria-pressed={topics.has(tag)}
 									className={cn(
 										"inline-flex items-center gap-1.25 rounded-full border border-[oklch(1_0_0/0.08)] bg-[color-mix(in_oklch,var(--foreground)_5%,transparent)] px-2 py-0.75 font-mono text-[10px] text-muted-foreground transition-colors hover:border-[oklch(1_0_0/0.24)] hover:text-foreground",
-										topics.has(tag) && "border-[oklch(1_0_0/0.18)] bg-[color-mix(in_oklch,var(--foreground)_10%,transparent)] text-foreground",
+										topics.has(tag) &&
+											"border-[oklch(1_0_0/0.18)] bg-[color-mix(in_oklch,var(--foreground)_10%,transparent)] text-foreground",
 									)}
 								>
 									#{tag}
@@ -210,11 +243,26 @@ function MemoryCard({ memory, onMutate }: { memory: Memory; onMutate: () => void
 				<div className="mb-1 flex items-center gap-1.5">
 					<span className="text-[11.5px] font-semibold">{sourceLabel(kind)}</span>
 					<span className="font-mono text-[9.5px] text-muted-foreground">via {memory.who}</span>
-					{memory.type && <span className={cn("rounded px-1.5 py-px font-mono text-[9px] bg-[color-mix(in_oklch,var(--foreground)_8%,transparent)] border border-[oklch(1_0_0/0.06)]", TYPE_TINTS[memory.type] ?? "text-muted-foreground")}>{memory.type}</span>}
+					{memory.type && (
+						<span
+							className={cn(
+								"rounded px-1.5 py-px font-mono text-[9px] bg-[color-mix(in_oklch,var(--foreground)_8%,transparent)] border border-[oklch(1_0_0/0.06)]",
+								TYPE_TINTS[memory.type] ?? "text-muted-foreground",
+							)}
+						>
+							{memory.type}
+						</span>
+					)}
 				</div>
 				<p className="m-0 text-[12.5px] leading-[1.55] text-foreground">{memory.content}</p>
 				<div className="mt-2 flex flex-wrap items-center gap-2">
-					{toTagArray(memory.tags).slice(0, 4).map((tag) => <span key={tag} className="font-mono text-[9.5px] text-muted-foreground">#{tag}</span>)}
+					{toTagArray(memory.tags)
+						.slice(0, 4)
+						.map((tag) => (
+							<span key={tag} className="font-mono text-[9.5px] text-muted-foreground">
+								#{tag}
+							</span>
+						))}
 					{error && <span className="font-mono text-[9.5px] text-destructive">{error}</span>}
 					<span className="ml-auto font-mono text-[9.5px] text-muted-foreground">{timeAgo(memory.created_at)}</span>
 				</div>
@@ -281,7 +329,15 @@ function MemoryCard({ memory, onMutate }: { memory: Memory; onMutate: () => void
 }
 
 function GroupHeader({ label, count }: { label: string; count: number }) {
-	return <div className="flex items-baseline gap-2.5 px-0.5 pb-2"><span className="font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[oklch(0.58_0_0)]">{label}</span><span className="font-mono text-[10px] text-muted-foreground">{count}</span><span className="h-px flex-1 bg-[oklch(1_0_0/0.06)]" /></div>;
+	return (
+		<div className="flex items-baseline gap-2.5 px-0.5 pb-2">
+			<span className="font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[oklch(0.58_0_0)]">
+				{label}
+			</span>
+			<span className="font-mono text-[10px] text-muted-foreground">{count}</span>
+			<span className="h-px flex-1 bg-[oklch(1_0_0/0.06)]" />
+		</div>
+	);
 }
 
 function groupMemories(memories: Memory[], searching: boolean): Array<{ label: string | null; memories: Memory[] }> {
@@ -301,7 +357,10 @@ function getTopTopics(memories: Memory[]): Array<{ tag: string; count: number }>
 	for (const memory of memories) {
 		for (const tag of toTagArray(memory.tags)) counts.set(tag, (counts.get(tag) ?? 0) + 1);
 	}
-	return [...counts].map(([tag, count]) => ({ tag, count })).sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag)).slice(0, 8);
+	return [...counts]
+		.map(([tag, count]) => ({ tag, count }))
+		.sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
+		.slice(0, 8);
 }
 
 function getMemoryTypes(memories: Memory[]): Array<{ type: string; count: number }> {
@@ -411,7 +470,8 @@ function SideChip({
 			title={`${count} loaded ${label.toLowerCase()} memories`}
 			className={cn(
 				"flex items-center gap-2 rounded-[var(--radius)] border border-[oklch(1_0_0/0.06)] px-2.5 py-1.75 text-[12px] text-muted-foreground transition-colors hover:bg-[var(--accent-subtle)] hover:text-foreground",
-				active && "border-[oklch(1_0_0/0.12)] bg-[color-mix(in_oklch,var(--foreground)_9%,transparent)] text-foreground",
+				active &&
+					"border-[oklch(1_0_0/0.12)] bg-[color-mix(in_oklch,var(--foreground)_9%,transparent)] text-foreground",
 			)}
 		>
 			<Icon className="size-3.5 shrink-0 text-muted-foreground" />

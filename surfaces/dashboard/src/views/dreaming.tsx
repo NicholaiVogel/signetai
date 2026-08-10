@@ -290,17 +290,7 @@ export function DreamsView() {
 
 /* ── Header stat chip (memory-page style) ───────────────────────────────── */
 
-function Stat({
-	label,
-	value,
-	live,
-	tone,
-}: {
-	label: string;
-	value: string;
-	live?: boolean;
-	tone?: "ok" | "warn";
-}) {
+function Stat({ label, value, live, tone }: { label: string; value: string; live?: boolean; tone?: "ok" | "warn" }) {
 	return (
 		<span className="flex h-full min-w-0 shrink-0 flex-col justify-center gap-[3px]">
 			<span className="font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.08em] text-slate-500 dark:text-slate-400">

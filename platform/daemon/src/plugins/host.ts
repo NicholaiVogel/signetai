@@ -256,11 +256,7 @@ export class PluginHostV1 {
 	}
 
 	promptContributions(
-		opts: {
-			readonly target?: PluginPromptTargetV1;
-			readonly pluginId?: string;
-			readonly activeOnly?: boolean;
-		} = {},
+		opts: { readonly target?: PluginPromptTargetV1; readonly pluginId?: string; readonly activeOnly?: boolean } = {},
 	): readonly PluginPromptContributionV1[] {
 		const activeOnly = opts.activeOnly ?? true;
 		const contributions: PluginPromptContributionV1[] = [];
@@ -360,11 +356,7 @@ export class PluginHostV1 {
 }
 
 export function getDefaultPluginRegistryPath(): string {
-	return join(
-		resolveDefaultBasePath(),
-		SIGNET_PLUGIN_REGISTRY_DIR,
-		SIGNET_PLUGIN_REGISTRY_FILE,
-	);
+	return join(resolveDefaultBasePath(), SIGNET_PLUGIN_REGISTRY_DIR, SIGNET_PLUGIN_REGISTRY_FILE);
 }
 
 function resolveState(

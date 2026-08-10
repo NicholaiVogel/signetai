@@ -1856,20 +1856,20 @@ function getConstellationDreamingSummary(db: ReadDb, agentId: string): Constella
 		| undefined;
 	try {
 		state = db
-		.prepare(
-			`SELECT consecutive_failures, last_pass_at, last_pass_id, last_pass_mode
+			.prepare(
+				`SELECT consecutive_failures, last_pass_at, last_pass_id, last_pass_mode
 			 FROM dreaming_state WHERE agent_id = ?`,
-		)
-		.get(agentId) as typeof state;
+			)
+			.get(agentId) as typeof state;
 		latestPass = db
-		.prepare(
-			`SELECT id, mode, status, completed_at, mutations_applied, mutations_skipped, mutations_failed
+			.prepare(
+				`SELECT id, mode, status, completed_at, mutations_applied, mutations_skipped, mutations_failed
 			 FROM dreaming_passes
 			 WHERE agent_id = ?
 			 ORDER BY created_at DESC
 			 LIMIT 1`,
-		)
-		.get(agentId) as typeof latestPass;
+			)
+			.get(agentId) as typeof latestPass;
 	} catch {
 		// Dreaming metadata is optional until the workspace migration completes.
 		state = undefined;

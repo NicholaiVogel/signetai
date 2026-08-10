@@ -731,9 +731,13 @@ it("ignores obsolete sessionSynthesis bindings and routes internal session work 
 	expect(parsed.ok).toBe(true);
 	if (!parsed.ok) return;
 	expect("sessionSynthesis" in (parsed.value.workloads ?? {})).toBe(false);
-	const decision = resolveRoutingDecision(parsed.value, { operation: "session_synthesis" }, {
-		targets: { "memory/default": ready, "legacy/default": ready },
-	});
+	const decision = resolveRoutingDecision(
+		parsed.value,
+		{ operation: "session_synthesis" },
+		{
+			targets: { "memory/default": ready, "legacy/default": ready },
+		},
+	);
 	expect(decision.ok).toBe(true);
 	if (decision.ok) expect(decision.value.targetRef).toBe("memory/default");
 });
@@ -804,7 +808,9 @@ describe("routing reference validation (#1005)", () => {
 				targets: {
 					background: { executor: "acpx", acpx: { agent: "codex" }, models: { default: { model: "gpt" } } },
 				},
-				policies: { background: { mode: "automatic", defaultTargets: [makeRoutingTargetRef("background", "default")] } },
+				policies: {
+					background: { mode: "automatic", defaultTargets: [makeRoutingTargetRef("background", "default")] },
+				},
 				defaultPolicy: "background-acpx",
 			},
 		});
@@ -939,7 +945,10 @@ describe("routing reference validation (#1005)", () => {
 			...parsed.value,
 			policies: {
 				...parsed.value.policies,
-				auto: { ...parsed.value.policies.auto!, taskTargets: { code_reasining: [makeRoutingTargetRef("remote", "sonnet")] } },
+				auto: {
+					...parsed.value.policies.auto!,
+					taskTargets: { code_reasining: [makeRoutingTargetRef("remote", "sonnet")] },
+				},
 			},
 			agents: {
 				rose: {

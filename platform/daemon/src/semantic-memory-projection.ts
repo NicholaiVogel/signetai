@@ -40,7 +40,7 @@ export function purgeAttributeMemoryProjectionsInTx(
 		memory_id: string;
 		attribute_agent_id: string;
 		memory_agent_id: string | null;
-		}>;
+	}>;
 	const changedAt = new Date().toISOString();
 	let purged = 0;
 	for (const row of rows) {

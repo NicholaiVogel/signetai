@@ -61,15 +61,7 @@ describe("Dreaming quality report", () => {
 			 VALUES
 			 ('attr-cited', 'asp-signet', 'agent-a', 'memory-evidence', 'attribute', ?, ?, 1, 1, 'active', 'architecture', 'evidence_first', ?, ?, ?),
 			 ('attr-uncited', 'asp-signet', 'agent-a', 'memory-evidence', 'attribute', 'An untraceable claim.', 'an untraceable claim', 1, 1, 'active', 'architecture', 'untraceable', '[]', ?, ?)`,
-		).run(
-			quote,
-			quote.toLowerCase(),
-			JSON.stringify([{ memory_id: "memory-evidence", quote }]),
-			now,
-			now,
-			now,
-			now,
-		);
+		).run(quote, quote.toLowerCase(), JSON.stringify([{ memory_id: "memory-evidence", quote }]), now, now, now, now);
 
 		const report = getDreamingQualityReport(accessor, "agent-a");
 		expect(report.citationCoverage).toEqual({

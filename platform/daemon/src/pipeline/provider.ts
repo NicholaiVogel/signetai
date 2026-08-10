@@ -386,9 +386,10 @@ export function withRateLimit(provider: LlmProvider, config?: ProviderRateLimitC
  * Resolve the caller-supplied abort signal (preferring `signal` over the
  * legacy `abortSignal` alias).
  */
-function generateSignal(opts?: { readonly signal?: AbortSignal; readonly abortSignal?: AbortSignal }):
-	| AbortSignal
-	| undefined {
+function generateSignal(opts?: {
+	readonly signal?: AbortSignal;
+	readonly abortSignal?: AbortSignal;
+}): AbortSignal | undefined {
 	return opts?.signal ?? opts?.abortSignal;
 }
 

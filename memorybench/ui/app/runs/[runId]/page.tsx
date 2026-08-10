@@ -103,7 +103,7 @@ export default function RunDetailPage() {
       setRun(runData)
       setReport(reportData)
       setError(null)
-    } catch (e) {
+    } catch {
       // Silent fail on poll
     }
   }, [runId])
@@ -213,7 +213,6 @@ export default function RunDetailPage() {
   const allQuestions = Object.values(run.questions)
   // Only count questions that have been evaluated
   const evaluatedQuestions = allQuestions.filter((q) => q.phases.evaluate.status === "completed")
-  const failedQuestions = evaluatedQuestions.filter((q) => q.phases.evaluate.label === "incorrect")
   const accuracy =
     report?.summary?.accuracy ??
     (evaluatedQuestions.length > 0

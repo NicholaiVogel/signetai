@@ -535,14 +535,7 @@ export class Logger extends EventEmitter {
 	};
 
 	// Get recent logs (reads across all log files, not just current day)
-	getRecent(
-		options: {
-			limit?: number;
-			level?: LogLevel;
-			category?: LogCategory;
-			since?: Date;
-		} = {},
-	): LogEntry[] {
+	getRecent(options: { limit?: number; level?: LogLevel; category?: LogCategory; since?: Date } = {}): LogEntry[] {
 		const { limit = 100, level, category, since } = options;
 		const results: LogEntry[] = [];
 

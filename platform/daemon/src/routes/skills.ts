@@ -257,11 +257,7 @@ function inferSkillCategory(input: string): string {
 	return "Other";
 }
 
-function calculateSkillPopularity(input: {
-	installsRaw: number;
-	stars?: number;
-	verified?: boolean;
-}): number {
+function calculateSkillPopularity(input: { installsRaw: number; stars?: number; verified?: boolean }): number {
 	const stars = input.stars ?? 0;
 	const verifiedBoost = input.verified ? 5_000 : 0;
 	return input.installsRaw + stars * 200 + verifiedBoost;

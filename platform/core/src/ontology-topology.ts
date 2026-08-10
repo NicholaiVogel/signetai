@@ -5,4 +5,3 @@ export const SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES = [
 	"source_document_reference",
 	"skill",
 ] as const;
-

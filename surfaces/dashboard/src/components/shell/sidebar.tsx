@@ -150,7 +150,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 					<SignetMark className="h-[22px] w-5 shrink-0" />
 					<span className="flex flex-1 flex-col gap-px overflow-hidden leading-[1.15]">
 						<span className="truncate text-sm leading-[1.15] font-semibold tracking-tight">Signet</span>
-						<span className="truncate font-mono text-[10.5px] text-muted-foreground">Personal · {agentCount} agent{agentCount === 1 ? "" : "s"}</span>
+						<span className="truncate font-mono text-[10.5px] text-muted-foreground">
+							Personal · {agentCount} agent{agentCount === 1 ? "" : "s"}
+						</span>
 					</span>
 					<ChevronIcon className="size-[15px] shrink-0 text-muted-foreground" />
 				</button>
@@ -288,7 +290,9 @@ function AccountRow({ version }: { version?: string }) {
 			<div className="flex items-center gap-2.5">
 				<span className="flex flex-1 flex-col gap-px leading-tight">
 					<span className="truncate text-[12.5px] font-medium text-sidebar-foreground">Signet</span>
-					<span className="truncate font-mono text-[10px] text-muted-foreground">{version ? `v${version}` : "daemon running"}</span>
+					<span className="truncate font-mono text-[10px] text-muted-foreground">
+						{version ? `v${version}` : "daemon running"}
+					</span>
 				</span>
 				<span className="flex shrink-0 items-center gap-px">
 					<ModeToggle />

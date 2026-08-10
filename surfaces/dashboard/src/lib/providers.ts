@@ -116,7 +116,14 @@ export function connectableProviders(catalog: InferenceCatalog | null, accounts:
 		const connected = supportsOAuth
 			? (oauthStatus.get(id)?.connected ?? false) || isProviderConnected(accounts, id)
 			: isProviderConnected(accounts, id);
-		return { id, name: PROVIDER_NAMES[id] ?? titleCase(id), supportsOAuth, supportsApiKey, connected, isOAuth: supportsOAuth };
+		return {
+			id,
+			name: PROVIDER_NAMES[id] ?? titleCase(id),
+			supportsOAuth,
+			supportsApiKey,
+			connected,
+			isOAuth: supportsOAuth,
+		};
 	});
 }
 

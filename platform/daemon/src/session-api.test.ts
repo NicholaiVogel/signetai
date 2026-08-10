@@ -202,5 +202,4 @@ describe("session API", () => {
 		expect(transcriptRes.status).toBe(200);
 		expect(transcriptJson.content).toBe("stored transcript content");
 	});
-
 });

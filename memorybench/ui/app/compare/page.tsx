@@ -34,7 +34,7 @@ export default function ComparesPage() {
       const data = await getCompares()
       setCompares(data)
       setError(null)
-    } catch (e) {
+    } catch {
       // Silent fail on poll
     }
   }, [])

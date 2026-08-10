@@ -88,13 +88,7 @@ export function SourcesView() {
 	);
 }
 
-function ImportedDocumentsCard({
-	documents,
-	onMutate,
-}: {
-	documents: readonly SignetSource[];
-	onMutate: () => void;
-}) {
+function ImportedDocumentsCard({ documents, onMutate }: { documents: readonly SignetSource[]; onMutate: () => void }) {
 	const totals = documents.reduce(
 		(acc, source) => ({
 			artifacts: acc.artifacts + (source.stats?.artifacts ?? 0),

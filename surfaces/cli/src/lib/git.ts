@@ -56,9 +56,10 @@ export async function gitAddAndCommit(dir: string, message: string): Promise<boo
 		if (status.code !== 0 || status.stdout.trim().length === 0) return status.code === 0;
 	}
 
-	const commitArgs = protectedRemovals.length > 0
-		? ["commit", "-m", message]
-		: ["commit", "-m", message, "--", ...literalPathspecs(commitPaths)];
+	const commitArgs =
+		protectedRemovals.length > 0
+			? ["commit", "-m", message]
+			: ["commit", "-m", message, "--", ...literalPathspecs(commitPaths)];
 	return (await runGit(dir, commitArgs)).code === 0;
 }
 

@@ -1090,11 +1090,10 @@ export function stopUpdateTimer(): void {
 // Config mutation (used by route handler)
 // ---------------------------------------------------------------------------
 
-export function setUpdateConfig(patch: {
-	autoInstall?: boolean;
-	checkInterval?: number;
-	channel?: UpdateChannel;
-}): { config: UpdateConfig; persisted: boolean } {
+export function setUpdateConfig(patch: { autoInstall?: boolean; checkInterval?: number; channel?: UpdateChannel }): {
+	config: UpdateConfig;
+	persisted: boolean;
+} {
 	if (patch.autoInstall !== undefined) {
 		updateConfig.autoInstall = patch.autoInstall;
 	}

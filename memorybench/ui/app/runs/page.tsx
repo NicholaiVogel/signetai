@@ -39,7 +39,7 @@ export default function RunsPage() {
       const data = await getRuns()
       setRuns(data)
       setError(null)
-    } catch (e) {
+    } catch {
       // Silent fail on poll
     }
   }, [])

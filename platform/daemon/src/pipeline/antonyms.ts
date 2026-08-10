@@ -124,7 +124,11 @@ export function hasAntonymConflict(
 export function detectProspectiveContradictionRisk(
 	candidate: string,
 	existing: string,
-): { readonly detected: boolean; readonly lexicalOverlap: number; readonly reason: "negation_mismatch" | "antonym_conflict" | null } {
+): {
+	readonly detected: boolean;
+	readonly lexicalOverlap: number;
+	readonly reason: "negation_mismatch" | "antonym_conflict" | null;
+} {
 	const candidateTokens = tokenize(candidate);
 	const existingTokens = tokenize(existing);
 	const lexicalOverlap = overlapCount(candidateTokens, existingTokens);

@@ -433,9 +433,7 @@ export class SignetClient extends SignetClientHelpers {
 	 * }
 	 * ```
 	 */
-	async getTelemetryStats(opts?: {
-		readonly since?: string;
-	}): Promise<TelemetryStatsResponse> {
+	async getTelemetryStats(opts?: { readonly since?: string }): Promise<TelemetryStatsResponse> {
 		return this.transport.get<TelemetryStatsResponse>("/api/telemetry/stats", {
 			since: opts?.since,
 		});
@@ -450,10 +448,7 @@ export class SignetClient extends SignetClientHelpers {
 	 * const events = ndjson.split("\n").map(JSON.parse);
 	 * ```
 	 */
-	async exportTelemetry(opts?: {
-		readonly since?: string;
-		readonly limit?: number;
-	}): Promise<string> {
+	async exportTelemetry(opts?: { readonly since?: string; readonly limit?: number }): Promise<string> {
 		return this.transport.get<string>("/api/telemetry/export", {
 			since: opts?.since,
 			limit: opts?.limit,
@@ -594,9 +589,7 @@ export class SignetClient extends SignetClientHelpers {
 	 * }
 	 * ```
 	 */
-	async getEmbeddingProjection(opts?: {
-		readonly dimensions?: 2 | 3;
-	}): Promise<EmbeddingProjectionResponse> {
+	async getEmbeddingProjection(opts?: { readonly dimensions?: 2 | 3 }): Promise<EmbeddingProjectionResponse> {
 		return this.transport.get<EmbeddingProjectionResponse>("/api/embeddings/projection", {
 			dimensions: opts?.dimensions,
 		});
@@ -646,10 +639,7 @@ export class SignetClient extends SignetClientHelpers {
 	 * console.log(checkpoints.count);
 	 * ```
 	 */
-	async listCheckpoints(opts: {
-		readonly project: string;
-		readonly limit?: number;
-	}): Promise<CheckpointListResponse> {
+	async listCheckpoints(opts: { readonly project: string; readonly limit?: number }): Promise<CheckpointListResponse> {
 		return this.transport.get<CheckpointListResponse>("/api/checkpoints", {
 			project: opts.project,
 			limit: opts.limit,

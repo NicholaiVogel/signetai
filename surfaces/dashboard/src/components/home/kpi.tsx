@@ -30,17 +30,13 @@ function KpiCard({ label, value, sub, trend, ring, live }: KpiData) {
 	return (
 		<Surface className="px-3.25 py-2.75">
 			<div className="mb-1.75 flex items-center justify-between gap-2">
-				<span className="font-mono text-[9.5px] uppercase tracking-[0.08em] text-muted-foreground">
-					{label}
-				</span>
+				<span className="font-mono text-[9.5px] uppercase tracking-[0.08em] text-muted-foreground">{label}</span>
 				{ring && <Ring fraction={ring.value} />}
 				{live && (
 					<span className="size-1.75 shrink-0 rounded-full bg-success shadow-[0_0_0_2px_color-mix(in_oklch,var(--success)_22%,transparent)]" />
 				)}
 			</div>
-			<div className="font-mono text-[19px] font-medium leading-none tracking-tight text-foreground">
-				{value}
-			</div>
+			<div className="font-mono text-[19px] font-medium leading-none tracking-tight text-foreground">{value}</div>
 			{sub && (
 				<div className="mt-1 text-[10.5px] text-muted-foreground">
 					{trend && <span className="font-mono text-success">{trend}</span>} {sub}
@@ -107,7 +103,12 @@ export function ActivityHeatmap({ days }: { days: DayBucket[] }) {
 				role="img"
 				aria-label="Memory activity, last 36 weeks"
 				className="grid w-full gap-[3px]"
-				style={{ gridTemplateRows: "repeat(7, 1fr)", gridAutoFlow: "column", gridAutoColumns: "1fr", aspectRatio: "36 / 7" }}
+				style={{
+					gridTemplateRows: "repeat(7, 1fr)",
+					gridAutoFlow: "column",
+					gridAutoColumns: "1fr",
+					aspectRatio: "36 / 7",
+				}}
 			>
 				{days.map((d, i) => (
 					<div

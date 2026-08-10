@@ -742,12 +742,7 @@ export async function memoryGet(id: string, options: { daemonUrl?: string } = {}
 }
 
 export async function memoryList(
-	options: {
-		daemonUrl?: string;
-		limit?: number;
-		offset?: number;
-		type?: string;
-	} = {},
+	options: { daemonUrl?: string; limit?: number; offset?: number; type?: string } = {},
 ): Promise<{ memories: MemoryRecord[]; stats: Record<string, number> }> {
 	const daemonUrl = options.daemonUrl || DEFAULT_DAEMON_URL;
 	const params = new URLSearchParams();

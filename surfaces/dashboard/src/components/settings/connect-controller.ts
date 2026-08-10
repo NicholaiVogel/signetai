@@ -96,7 +96,11 @@ export function useConnectController(opts: ConnectControllerOptions): ConnectCon
 			});
 			loginRef.current = handle;
 			const apply = () =>
-				setPhase(prompt || url || deviceCode || progress ? { kind: "oauth-running", url, deviceCode, progress, prompt } : { kind: "oauth-running" });
+				setPhase(
+					prompt || url || deviceCode || progress
+						? { kind: "oauth-running", url, deviceCode, progress, prompt }
+						: { kind: "oauth-running" },
+				);
 			handle.onEvent((event: OAuthLoginEvent) => {
 				switch (event.type) {
 					case "auth":
@@ -210,7 +214,12 @@ export function useConnectController(opts: ConnectControllerOptions): ConnectCon
 
 	return {
 		phase,
-		singlePath: opts.supportsOAuth && !opts.supportsApiKey ? "oauth" : opts.supportsApiKey && !opts.supportsOAuth ? "key" : "choice",
+		singlePath:
+			opts.supportsOAuth && !opts.supportsApiKey
+				? "oauth"
+				: opts.supportsApiKey && !opts.supportsOAuth
+					? "key"
+					: "choice",
 		startOAuth,
 		answerPrompt,
 		cancelOAuth,

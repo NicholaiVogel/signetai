@@ -167,7 +167,7 @@ export default function CompareDetailPage() {
       setCompare(compareData)
       setReport(reportData)
       setError(null)
-    } catch (e) {
+    } catch {
       // Silent fail on poll
     }
   }, [compareId])
