@@ -48,6 +48,11 @@ const OBSERVED_MISSING_TTL_MS = 60_000;
 const REDACTED_UPSTREAM_DETAIL = "[redacted upstream detail]";
 const BACKGROUND_OPERATIONS = new Set<RoutingOperationKind>(["memory_extraction", "session_synthesis", "repair"]);
 
+function normalizeAttributionValue(value: string | undefined): string | null {
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : null;
+}
+
 export interface BackgroundInferenceQuiescence {
 	readonly activeAtStart: number;
 	readonly aborted: number;
@@ -74,6 +79,13 @@ export interface InferenceExecutionResult {
 export interface InferenceAgentExecutionResult {
 	readonly decision: RouteDecision;
 	readonly attempts: readonly InferenceExecutionAttempt[];
+	/** Privacy-safe metadata for the target that actually completed the run. */
+	readonly attribution: InferenceExecutionAttribution | null;
+}
+
+export interface InferenceExecutionAttribution {
+	readonly provider: string;
+	readonly model: string;
 }
 
 export type InferenceStreamEvent =
@@ -154,6 +166,21 @@ interface LoadedRoutingConfig {
 	readonly signature: string;
 	readonly path: string | null;
 	readonly configIssues: readonly RoutingValidationIssue[];
+}
+
+function attributionForTarget(
+	loaded: LoadedRoutingConfig,
+	targetId: string,
+	modelId: string,
+): InferenceExecutionAttribution | null {
+	const target = loaded.config.targets[targetId];
+	const model = target?.models[modelId];
+	if (!target || !model) return null;
+	const account = target.account ? loaded.config.accounts[target.account] : undefined;
+	const provider = normalizeAttributionValue(account?.providerFamily ?? target.executor);
+	const configuredModel = normalizeAttributionValue(model.model);
+	if (!provider || !configuredModel) return null;
+	return { provider: provider.toLowerCase(), model: configuredModel };
 }
 
 interface SnapshotCacheEntry {
@@ -852,7 +879,14 @@ export class InferenceRouter {
 						if (!generated.trim()) throw new Error("ACPX agent returned no completion");
 						this.clearObservedRuntimeState(loaded.value, targetRef);
 						attempts.push({ targetRef, ok: true, durationMs: Date.now() - startedAt, usage: null });
-						return { ok: true, value: { decision: decision.value, attempts } };
+						return {
+							ok: true,
+							value: {
+								decision: decision.value,
+								attempts,
+								attribution: attributionForTarget(loaded.value, parsed.value.targetId, parsed.value.modelId),
+							},
+						};
 					}
 					const session = await provider.createAgentSession(tools, { maxTokens: opts?.maxTokens });
 					const deadlineMs = opts?.timeoutMs ?? provider.agentSessionTimeoutMs;
@@ -890,7 +924,14 @@ export class InferenceRouter {
 					}
 					this.clearObservedRuntimeState(loaded.value, targetRef);
 					attempts.push({ targetRef, ok: true, durationMs: Date.now() - startedAt, usage: sessionUsage });
-					return { ok: true, value: { decision: decision.value, attempts } };
+					return {
+						ok: true,
+						value: {
+							decision: decision.value,
+							attempts,
+							attribution: attributionForTarget(loaded.value, parsed.value.targetId, parsed.value.modelId),
+						},
+					};
 				} catch (error) {
 					const message = formatExecutionError(error);
 					this.observeExecutionFailure(loaded.value, targetRef, message);

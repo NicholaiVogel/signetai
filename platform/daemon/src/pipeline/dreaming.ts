@@ -210,7 +210,16 @@ export interface DreamingAgentExecutor {
 		readonly tools: ReturnType<typeof createDreamingAgentTools>;
 		readonly timeoutMs: number;
 		readonly maxTokens: number;
-	}): Promise<{ readonly summary?: string; readonly usage?: LlmUsage | null }>;
+	}): Promise<{
+		readonly summary?: string;
+		readonly usage?: LlmUsage | null;
+		readonly attribution?: DreamingPassAttribution | null;
+	}>;
+}
+
+export interface DreamingPassAttribution {
+	readonly provider: string;
+	readonly model: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -880,6 +889,7 @@ export function recordDreamingPassTelemetry(input: {
 	readonly outcome: DreamingPassOutcome;
 	readonly outcomeCode: DreamingPassOutcomeCode;
 	readonly effects: DreamingPassEffects;
+	readonly attribution?: DreamingPassAttribution | null;
 	readonly usage: {
 		readonly inputTokens: number | null;
 		readonly outputTokens: number | null;
@@ -895,6 +905,12 @@ export function recordDreamingPassTelemetry(input: {
 			mode: input.mode,
 			outcome: input.outcome,
 			outcomeCode: input.outcomeCode,
+			...(input.attribution
+				? {
+						provider: input.attribution.provider,
+						model: input.attribution.model,
+					}
+				: {}),
 			tokensInput: input.usage?.inputTokens ?? null,
 			tokensOutput: input.usage?.outputTokens ?? null,
 			tokensCacheRead: input.usage?.cacheReadTokens ?? null,
@@ -1370,6 +1386,7 @@ export async function runDreamingAgentPass(
 			maxTokens: cfg.maxOutputTokens,
 		});
 		const summary = `${executorResult.summary?.trim() || "Agentic Dreaming pass completed"}`;
+		const attribution = executorResult.attribution ?? null;
 		// Provider-reported aggregate when the executor surfaced it (pi-backed
 		// agent sessions); otherwise fall back to the local prompt estimate so
 		// acpx-backed passes keep a meaningful total.
@@ -1459,6 +1476,7 @@ export async function runDreamingAgentPass(
 			outcome,
 			outcomeCode,
 			effects: dreamingPassEffects(effects, toolCallSequence, passStartedAtMs),
+			attribution,
 			usage,
 		});
 		recordPipelineOperation({

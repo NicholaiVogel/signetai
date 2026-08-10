@@ -67,6 +67,7 @@ describe("dreaming telemetry", () => {
 				totalCost: 0.14574042,
 				accountingProvenance: "provider_reported",
 			},
+			attribution: { provider: "openai-compatible", model: "gpt-5.4-mini" },
 		});
 		recordDreamingPassTelemetry({
 			mode: "hygiene",
@@ -98,6 +99,8 @@ describe("dreaming telemetry", () => {
 		expect(full?.properties.tokensTotal).toBe(502788);
 		expect(full?.properties.cost).toBe(0.14574042);
 		expect(full?.properties.accountingProvenance).toBe("provider_reported");
+		expect(full?.properties.provider).toBe("openai-compatible");
+		expect(full?.properties.model).toBe("gpt-5.4-mini");
 		expect(full?.properties.outcome).toBe("completed");
 		expect(full?.properties.outcomeCode).toBe("completed");
 		expect(full?.properties.artifactsConsidered).toBe(12);

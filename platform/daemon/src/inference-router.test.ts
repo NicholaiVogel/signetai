@@ -123,6 +123,7 @@ describe("InferenceRouter legacy API credentials", () => {
 			if (!result.ok) return;
 			expect(result.value.decision.targetRef).toBe("dreaming/default");
 			expect(result.value.attempts).toEqual([expect.objectContaining({ targetRef: "dreaming/default", ok: true })]);
+			expect(result.value.attribution).toEqual({ provider: "acpx", model: "gpt-5.4-mini" });
 
 			const args = readFileSync(fixture.argsPath, "utf8").trim().split("\n");
 			expect(args).toContain("--mcp-config");
@@ -145,6 +146,74 @@ describe("InferenceRouter legacy API credentials", () => {
 				]),
 			);
 			expect(existsSync(mcpConfigPath)).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("attributes a Dreaming run to the fallback target that succeeds", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "signet-router-dreaming-fallback-"));
+		const failedBin = join(dir, "failed-agent.sh");
+		const fallbackBin = join(dir, "fallback-agent.sh");
+		writeFileSync(failedBin, "#!/usr/bin/env bash\nexit 1\n");
+		writeFileSync(fallbackBin, "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'fallback agent completed\\n'\n");
+		chmodSync(failedBin, 0o755);
+		chmodSync(fallbackBin, 0o755);
+		mkdirSync(join(dir, "memory"), { recursive: true });
+		writeFileSync(
+			join(dir, "agent.yaml"),
+			`inference:
+  defaultPolicy: dreaming
+  targets:
+    primary:
+      executor: acpx
+      acpx:
+        agent: codex
+        bin: ${failedBin}
+      models:
+        default:
+          model: gpt-primary
+    fallback:
+      executor: acpx
+      acpx:
+        agent: codex
+        bin: ${fallbackBin}
+      models:
+        default:
+          model: gpt-fallback
+  policies:
+    dreaming:
+      mode: automatic
+      defaultTargets:
+        - primary/default
+      fallbackTargets:
+        - fallback/default
+  workloads:
+    memoryExtraction:
+      policy: dreaming
+`,
+		);
+		try {
+			const router = getOrCreateInferenceRouter(dir);
+			const result = await router.runAgent(
+				{ operation: "memory_extraction", promptPreview: "fallback attribution" },
+				"Use the supplied evidence and daemon tools.",
+				[],
+				{
+					acpxMcp: {
+						agentId: "agent-fallback",
+						passId: "pass-fallback",
+						daemonUrl: "http://127.0.0.1:3850",
+					},
+				},
+			);
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(result.value.attempts.map((attempt) => [attempt.targetRef, attempt.ok])).toEqual([
+				["primary/default", false],
+				["fallback/default", true],
+			]);
+			expect(result.value.attribution).toEqual({ provider: "acpx", model: "gpt-fallback" });
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

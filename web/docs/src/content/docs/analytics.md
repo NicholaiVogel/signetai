@@ -251,7 +251,8 @@ because they share the same anonymous `distinct_id`. `pipeline.embedding`
 (tokens, provider, sourceKind — memory capture / artifact index / recall /
 dreaming), and `dreaming.pass`
 (provider-reported input/output/cache tokens and cost per agentic
-pass, plus bounded outcomes and content-free artifact, durable-effect,
+pass, plus the bounded successful-target `provider` and configured `model`
+when available, outcomes and content-free artifact, durable-effect,
 tool-call, and duration counters). `dreaming.pass` never includes artifact
 names, memory text, prompts, tool arguments, source paths, or raw agent
 identities; unavailable provider usage remains null rather than inferred zero

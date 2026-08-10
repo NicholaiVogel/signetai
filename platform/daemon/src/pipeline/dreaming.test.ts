@@ -1042,6 +1042,34 @@ describe("Dreaming", () => {
 			}),
 		);
 
+		seedTranscript(db, "attributed", "Evidence for an attributed pass.", new Date(Date.now() + 60_000).toISOString());
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run() {
+					return {
+						summary: "Attributed pass",
+						attribution: { provider: "ollama", model: "gemma4" },
+					};
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental",
+		);
+		expect(telemetry.events).toContainEqual(
+			expect.objectContaining({
+				event: "dreaming.pass",
+				properties: expect.objectContaining({
+					outcome: "no-op",
+					provider: "ollama",
+					model: "gemma4",
+				}),
+			}),
+		);
+
 		// Seed evidence with a future watermark so it is unambiguously newer
 		// than the previous pass's cutoff (same-second seeds are racy).
 		seedTranscript(db, "failure", "Evidence that reaches the agent.", new Date(Date.now() + 60_000).toISOString());

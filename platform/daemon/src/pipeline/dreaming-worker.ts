@@ -239,6 +239,7 @@ export function startDreamingWorker(
 				}
 				return {
 					summary: `Dreaming agent completed through ${result.value.decision.targetRef}`,
+					attribution: result.value.attribution,
 					usage: result.value.attempts.find((attempt) => attempt.ok)?.usage ?? null,
 				};
 			},
