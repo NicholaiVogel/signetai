@@ -60,6 +60,7 @@ import { writeFileIfChangedAsync } from "./file-sync";
 import { createSignetHttpServer } from "./http-server";
 import { syncAgentWorkspaces } from "./identity-sync";
 import { type InferenceStatusSummary, getOrCreateInferenceRouter } from "./inference-router.js";
+import { fetchInternal } from "./internal-fetch";
 import {
 	type DaemonLifecycle,
 	classifyPreviousDaemonExit,
@@ -917,7 +918,7 @@ async function ingestMemoryMarkdown(filePath: string): Promise<number> {
 		}
 
 		try {
-			const response = await fetch(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
+			const response = await fetchInternal(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({

@@ -21,6 +21,7 @@ import {
 } from "../embedding-index-state";
 import type { EmbeddingRole } from "../embedding-profile";
 import { getInferenceRouterOrNull } from "../inference-router";
+import { fetchInternal } from "../internal-fetch.js";
 import { logger } from "../logger";
 import { type EmbeddingConfig, type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
 import {
@@ -2148,7 +2149,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		if (authHdr) headers.authorization = authHdr;
 		const sessionKey = c.req.header("x-signet-session-key");
 		if (sessionKey) headers["x-signet-session-key"] = sessionKey;
-		return fetch(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
+		return fetchInternal(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
@@ -2166,7 +2167,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		if (authHdr) headers.authorization = authHdr;
 		const sessionKey = c.req.header("x-signet-session-key");
 		if (sessionKey) headers["x-signet-session-key"] = sessionKey;
-		return fetch(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
+		return fetchInternal(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),

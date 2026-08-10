@@ -49,6 +49,7 @@ import {
 	writeMemoryMd,
 } from "../hooks.js";
 import { getInferenceRouterOrNull } from "../inference-router";
+import { fetchInternal } from "../internal-fetch.js";
 import { logger } from "../logger";
 import { type EmbeddingConfig, type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
 import { upsertMemoryContentSafetyInTx } from "../memory-content-safety";
@@ -871,7 +872,7 @@ function registerRemember(app: Hono): void {
 			if (auth) headers.Authorization = auth;
 			const sessionKey = c.req.header("x-signet-session-key") ?? body.sessionKey;
 			if (sessionKey) headers["x-signet-session-key"] = sessionKey;
-			return fetch(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
+			return fetchInternal(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
 				method: "POST",
 				headers,
 				body: JSON.stringify(body),

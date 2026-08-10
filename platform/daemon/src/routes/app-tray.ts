@@ -6,6 +6,7 @@ import type { AutoCardResource, AutoCardToolAction, SignetAppManifest } from "@s
 import type { Hono } from "hono";
 
 import { resolveDefaultBasePath } from "@signet/core";
+import { fetchInternal } from "../internal-fetch.js";
 import { logger } from "../logger.js";
 import { loadAppTray, loadProbeResult, probeServer, reprobeServer, storeProbeResult } from "../mcp-probe.js";
 import { isPrivateHostname } from "../url-validation.js";
@@ -499,7 +500,7 @@ async function installViaCatalog(
 	// This reuses all existing logic (config fetch, dedup, etc.) without
 	// duplicating it.
 	const port = process.env.SIGNET_PORT || "3850";
-	const res = await fetch(`http://localhost:${port}/api/marketplace/mcp/install`, {
+	const res = await fetchInternal(`http://localhost:${port}/api/marketplace/mcp/install`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({

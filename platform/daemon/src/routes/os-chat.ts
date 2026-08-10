@@ -9,6 +9,7 @@
 import type { RoutingPrivacyTier } from "@signet/core";
 import type { Hono } from "hono";
 import { getInferenceRouterOrNull } from "../inference-router.js";
+import { fetchInternal } from "../internal-fetch.js";
 import { getInteractiveLlmProviderOrNull } from "../llm.js";
 import { logger } from "../logger.js";
 import { loadProbeResult } from "../mcp-probe.js";
@@ -375,7 +376,7 @@ export function mountOsChatRoutes(app: Hono, options: OsChatRouteOptions = {}): 
 							});
 
 							// Call the tool via the marketplace /mcp/call endpoint internally
-							const callRes = await fetch(
+							const callRes = await fetchInternal(
 								`http://127.0.0.1:${process.env.SIGNET_PORT || 3850}/api/marketplace/mcp/call`,
 								{
 									method: "POST",
