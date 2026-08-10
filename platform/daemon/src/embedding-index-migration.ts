@@ -173,7 +173,11 @@ export function stagingCoverage(
 		missing,
 		wrongDimensions,
 		quarantined,
-		ready: missing === quarantined && wrongDimensions === 0 && active === staged + quarantined,
+		ready:
+			missing === quarantined &&
+			wrongDimensions === 0 &&
+			active === staged + quarantined &&
+			(active === 0 || staged > 0),
 	};
 }
 

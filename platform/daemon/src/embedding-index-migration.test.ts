@@ -55,6 +55,33 @@ describe("staging embedding coverage", () => {
 		});
 	});
 
+	it("does not promote an empty replacement when every active row is quarantined", () => {
+		const raw = new Database(":memory:");
+		raw.exec(`
+			CREATE TABLE embeddings (id TEXT, content_hash TEXT, dimensions INTEGER);
+			CREATE TABLE embeddings_staging (id TEXT, content_hash TEXT, dimensions INTEGER);
+			CREATE TABLE embedding_index_failures (
+				content_hash TEXT,
+				target_fingerprint TEXT,
+				retry_policy TEXT
+			);
+			INSERT INTO embeddings VALUES
+				('active-a', 'hash-a', 768), ('active-b', 'hash-b', 768);
+			INSERT INTO embedding_index_failures VALUES
+				('hash-a', 'target-profile', 'quarantined'),
+				('hash-b', 'target-profile', 'quarantined');
+		`);
+
+		expect(stagingCoverage(raw as unknown as ReadDb, 768, "target-profile")).toEqual({
+			active: 2,
+			staged: 0,
+			missing: 2,
+			wrongDimensions: 0,
+			quarantined: 2,
+			ready: false,
+		});
+	});
+
 	it("prunes obsolete staged rows while active writes and purges continue", async () => {
 		const raw = new Database(":memory:");
 		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
