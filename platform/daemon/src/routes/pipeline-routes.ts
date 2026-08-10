@@ -84,6 +84,7 @@ const EMPTY_QUEUE_COUNTS_SHAPE: QueueCounts = {
 	oldestAgeSec: 0,
 	oldestDeadAgeSec: 0,
 	lastError: null,
+	completeness: "exact",
 };
 
 function pipelineQueueBlock(): PipelineQueueBlock {

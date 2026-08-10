@@ -176,7 +176,7 @@ without treating retired extraction work as active.
 {
   "timestamp": "...",
   "queues": {
-    "memory":     { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null },
+    "memory":     { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null, "completeness": "exact" },
   },
   "oldestDeadSummaryJob":    { "id": "...", "harness": "...", "sessionKey": "...", "createdAt": "...", "attempts": 0, "error": null },
   "oldestDeadMemoryJob":     { "...": "..." },

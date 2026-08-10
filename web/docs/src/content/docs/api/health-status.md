@@ -212,8 +212,8 @@ silent fallback or hard-blocked extraction after boot.
   },
   "pipeline": {
     "queue": {
-      "memory": { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null },
-      "summary": { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null }
+      "memory": { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null, "completeness": "exact" },
+      "summary": { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null, "completeness": "exact" }
     }
   },
   "providerResolution": {
@@ -342,7 +342,9 @@ agent.
 ### GET /api/diagnostics/queue
 
 Per-queue counts (memory / summary), oldest-dead job
-references, and threshold metadata. Backend path uses the same shared
+references, and threshold metadata. Counts are bounded at 1,000 rows per
+status; `completeness` is `truncated` when a counter is capped and `unknown`
+when the queue schema cannot be observed. Backend path uses the same shared
 threshold constants that `GET /api/status` and `/health/ready` consume.
 
 Admin permission required.
@@ -353,8 +355,8 @@ Admin permission required.
 {
   "timestamp": "2026-07-19T00:00:00.000Z",
   "queues": {
-    "memory": { "pending": 0, "leased": 0, "completed": 1, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null },
-    "summary": { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null }
+    "memory": { "pending": 0, "leased": 0, "completed": 1, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null, "completeness": "exact" },
+    "summary": { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null, "completeness": "exact" }
   },
   "oldestDeadSummaryJob": null,
   "oldestDeadMemoryJob": { "...": "..." },

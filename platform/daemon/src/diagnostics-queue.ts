@@ -27,6 +27,8 @@ export interface QueueCounts {
 	readonly oldestDeadAgeSec: number;
 	/** Most recent non-null `error` column value across `pending`/`leased`/`dead`. */
 	readonly lastError: string | null;
+	/** Whether the returned counters describe the whole queue or a bounded observation. */
+	readonly completeness: "exact" | "truncated" | "unknown";
 }
 
 export const EMPTY_QUEUE_COUNTS: QueueCounts = {
@@ -38,7 +40,10 @@ export const EMPTY_QUEUE_COUNTS: QueueCounts = {
 	oldestAgeSec: 0,
 	oldestDeadAgeSec: 0,
 	lastError: null,
+	completeness: "exact",
 };
+
+const QUEUE_DIAGNOSTICS_COUNT_LIMIT = 1_000;
 
 export interface OldestDeadJob {
 	readonly id: string;
@@ -64,6 +69,7 @@ interface QueueCountsQueryResult {
 	readonly oldestAt: string | null;
 	readonly oldestDeadAt: string | null;
 	readonly lastError: string | null;
+	readonly completeness: "exact" | "truncated";
 }
 
 interface OldestDeadRow {
@@ -80,27 +86,64 @@ function safeQueueRows(db: ReadDb, table: string, predicate = "1 = 1"): QueueCou
 	// Reject anything that isn't obviously a queue table — never feed
 	// user-controlled table names into a literal here.
 	if (!/^[a-z][a-z0-9_]*$/i.test(table)) return undefined;
-	const lastErrorOrder = hasColumn(db, table, "updated_at")
-		? "updated_at DESC"
-		: hasColumn(db, table, "completed_at")
-			? "completed_at DESC, rowid DESC"
-			: "rowid DESC";
-	const stmt = db.prepare(`
-		SELECT
-			SUM(CASE WHEN status = 'pending'  THEN 1 ELSE 0 END) AS pending,
-			SUM(CASE WHEN status = 'leased'   THEN 1 ELSE 0 END) AS leased,
-			SUM(CASE WHEN status = 'completed'THEN 1 ELSE 0 END) AS completed,
-			SUM(CASE WHEN status = 'failed'   THEN 1 ELSE 0 END) AS failed,
-			SUM(CASE WHEN status = 'dead'     THEN 1 ELSE 0 END) AS dead,
-			MIN(CASE WHEN status IN ('pending','leased') THEN created_at END) AS oldestAt,
-			MIN(CASE WHEN status = 'dead' THEN created_at END) AS oldestDeadAt,
-			(SELECT error FROM ${table}
-				WHERE status IN ('pending','leased','dead') AND ${predicate} AND error IS NOT NULL
-				ORDER BY ${lastErrorOrder} LIMIT 1) AS lastError
-		FROM ${table}
-		WHERE ${predicate}
-	`);
-	return stmt.get() as QueueCountsQueryResult | undefined;
+	if (table !== "memory_jobs") return undefined;
+	if (!hasColumn(db, table, "updated_at") || !hasColumn(db, table, "created_at")) return undefined;
+
+	try {
+		const counts = { pending: 0, leased: 0, completed: 0, failed: 0, dead: 0 };
+		let truncated = false;
+		for (const status of Object.keys(counts) as Array<keyof typeof counts>) {
+			const rows = db
+				.prepare(
+					`SELECT status
+					 FROM ${table} INDEXED BY idx_memory_jobs_diagnostics_status_created_at
+					 WHERE status = ? AND ${predicate}
+					 LIMIT ${QUEUE_DIAGNOSTICS_COUNT_LIMIT + 1}`,
+				)
+				.all(status) as ReadonlyArray<{ readonly status: string }>;
+			if (rows.length > QUEUE_DIAGNOSTICS_COUNT_LIMIT) {
+				counts[status] = QUEUE_DIAGNOSTICS_COUNT_LIMIT;
+				truncated = true;
+			} else {
+				counts[status] = rows.length;
+			}
+		}
+
+		const oldest = db
+			.prepare(
+				`SELECT created_at AS oldestAt
+				 FROM ${table} INDEXED BY idx_memory_jobs_pressure_created_at
+				 WHERE status IN ('pending', 'leased') AND ${predicate}
+				 ORDER BY created_at ASC LIMIT 1`,
+			)
+			.get() as { readonly oldestAt?: string | null } | undefined;
+		const oldestDead = db
+			.prepare(
+				`SELECT created_at AS oldestDeadAt
+				 FROM ${table} INDEXED BY idx_memory_jobs_diagnostics_status_created_at
+				 WHERE status = 'dead' AND ${predicate}
+				 ORDER BY created_at ASC LIMIT 1`,
+			)
+			.get() as { readonly oldestDeadAt?: string | null } | undefined;
+		const lastError = db
+			.prepare(
+				`SELECT error
+				 FROM ${table} INDEXED BY idx_memory_jobs_diagnostics_error_updated_at
+				 WHERE status IN ('pending', 'leased', 'dead') AND ${predicate} AND error IS NOT NULL
+				 ORDER BY updated_at DESC LIMIT 1`,
+			)
+			.get() as { readonly error?: string | null } | undefined;
+
+		return {
+			...counts,
+			oldestAt: oldest?.oldestAt ?? null,
+			oldestDeadAt: oldestDead?.oldestDeadAt ?? null,
+			lastError: lastError?.error ?? null,
+			completeness: truncated ? "truncated" : "exact",
+		};
+	} catch {
+		return undefined;
+	}
 }
 
 function hasColumn(db: ReadDb, table: string, column: string): boolean {
@@ -131,6 +174,7 @@ function rowToCounts(row: QueueCountsQueryResult | undefined): QueueCounts {
 		oldestAgeSec: ageSec(row.oldestAt),
 		oldestDeadAgeSec: ageSec(row.oldestDeadAt),
 		lastError: row.lastError ?? null,
+		completeness: row.completeness,
 	};
 }
 
@@ -141,7 +185,11 @@ function rowToCounts(row: QueueCountsQueryResult | undefined): QueueCounts {
  * jobs); the retired `summary` source is always empty.
  */
 export function getQueueCounts(db: ReadDb, source: QueueSource): QueueCounts {
-	if (source === "memory") return rowToCounts(safeQueueRows(db, "memory_jobs", "job_type <> 'extract'"));
+	if (source === "memory") {
+		if (!tableExists(db, "memory_jobs")) return { ...EMPTY_QUEUE_COUNTS, completeness: "unknown" };
+		const row = safeQueueRows(db, "memory_jobs", "job_type <> 'extract'");
+		return row === undefined ? { ...EMPTY_QUEUE_COUNTS, completeness: "unknown" } : rowToCounts(row);
+	}
 	if (source === "summary") return EMPTY_QUEUE_COUNTS;
 	// Defensive — TS narrowing treats any unrecognized value as `never`
 	// through exhaustive union discrimination.
