@@ -1294,7 +1294,7 @@ export async function runDreamingAgentPass(
 				if (!result.ok && result.items.length === 0) failed++;
 				recordDreamingOperationEffects(accessor, scopeId, effects, result, operations, retirementCandidates);
 				retirementCandidates = new Map();
-				accessor.withWriteTx((db) => resolveRequeuedDreamingEvidenceInTx(db, scopeId, result, operations));
+				accessor.withWriteTx((db) => resolveRequeuedDreamingEvidenceInTx(db, scopeId, passId, result, operations));
 				rejectedEvidence.push(...collectRejectedDreamingEvidence(accessor, scopeId, result, operations));
 			},
 			onToolCall(trace) {

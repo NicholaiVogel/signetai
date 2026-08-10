@@ -178,6 +178,7 @@ export function recordRejectedDreamingEvidenceInTx(
 export function resolveRequeuedDreamingEvidenceInTx(
 	db: WriteDb,
 	agentId: string,
+	passId: string,
 	result: ApplyDreamingOperationsResult,
 	operations: readonly Pick<DreamingOperationRequest, "evidence">[],
 ): void {
@@ -188,6 +189,11 @@ export function resolveRequeuedDreamingEvidenceInTx(
 		 SET resolved_at = datetime('now')
 		 WHERE agent_id = ? AND source_kind = ? AND source_id = ?
 		   AND requeue_requested_at IS NOT NULL AND resolved_at IS NULL`,
+	);
+	const attentionStatement = db.prepare(
+		`UPDATE dreaming_attention
+		 SET resolved_at = datetime('now'), resolved_by_pass_id = ?
+		 WHERE agent_id = ? AND kind = 'evidence_requeue' AND subject_ref = ? AND resolved_at IS NULL`,
 	);
 	const seen = new Set<string>();
 	for (const index of indexes) {
@@ -205,6 +211,7 @@ export function resolveRequeuedDreamingEvidenceInTx(
 			if (seen.has(key)) continue;
 			seen.add(key);
 			statement.run(agentId, kind, id);
+			attentionStatement.run(passId, agentId, `${kind}:${id}`);
 		}
 	}
 }

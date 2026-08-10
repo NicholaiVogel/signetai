@@ -799,7 +799,7 @@ describe("Dreaming", () => {
 		expect(getDreamingAttention(accessor, AGENT).filter((item) => item.kind === "evidence_requeue")).toHaveLength(4);
 
 		accessor.withWriteTx((tx) =>
-			resolveRequeuedDreamingEvidenceInTx(tx, AGENT, { ok: true, items: [{ index: 0, ok: true }] }, [
+			resolveRequeuedDreamingEvidenceInTx(tx, AGENT, "repair-pass", { ok: true, items: [{ index: 0, ok: true }] }, [
 				{ evidence: [{ source_ref: "transcript:incomplete", quote: "now complete" }] },
 			]),
 		);
@@ -810,6 +810,7 @@ describe("Dreaming", () => {
 				)
 				.get(AGENT),
 		).toMatchObject({ resolvedAt: expect.any(String) });
+		expect(getDreamingAttention(accessor, AGENT).filter((item) => item.kind === "evidence_requeue")).toHaveLength(3);
 	});
 
 	it("records the repair classification under the operation's target scope when pre-apply validation fails", async () => {
