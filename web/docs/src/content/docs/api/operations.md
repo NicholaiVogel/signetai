@@ -207,10 +207,13 @@ metadata. When graph is enabled, `graph.status` is included in composite status
 so a flatlined knowledge graph cannot be hidden behind otherwise healthy
 storage and index signals. Dreaming is the sole automatic semantic writer;
 graph diagnostics report graph health without exposing a retired extractor gate.
+When `agentId` is supplied in a scoped deployment, it must match the
+authenticated agent scope; the embedded `workloads` snapshot is for that
+resolved agent.
 
 **Response** — a multi-domain report object. Domains include `queue`,
 `storage`, `index`, `provider`, `mutation`, `duplicate`, `connector`, `update`,
-`graph`, `openclaw`, and `composite`. The `composite` field looks like:
+`graph`, `openclaw`, `composite`, and `workloads`. The `composite` field looks like:
 
 ```json
 { "score": 0.95, "status": "healthy" }
@@ -231,6 +234,20 @@ session transcript row age metadata, manifest/artifact counts, pending or failed
 summary counts, missing transcript/summary artifact counts, and transcript audit
 log metadata. Agent-scoped requests do not expose legacy flat audit log counts
 because those filenames are not agent-scoped.
+
+### GET /api/diagnostics/workloads
+
+Returns bounded in-flight workload pressure for one resolved agent. The
+inference snapshot covers background routed work and Pi agent sessions; the
+MCP snapshot covers stateless Streamable HTTP requests. Counts are held in
+memory and ages are calculated from admission time, so this endpoint does not
+scan durable queue tables. `agentId` may be supplied as a query parameter or
+`x-signet-agent-id` header; scoped deployments reject requests for another
+agent.
+
+The response contains `agentId`, `inference` (`active`, `agentSessions`,
+`oldestAgeMs`, `oldestAgentSessionAgeMs`, and per-operation `byOperation`), and
+`mcp` (`inFlight` and `oldestAgeMs`).
 
 ### GET /api/diagnostics/memory-content-safety
 

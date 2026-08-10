@@ -60,6 +60,14 @@ export interface BackgroundInferenceQuiescence {
 	readonly timedOut: boolean;
 }
 
+export interface BackgroundWorkloadDiagnostics {
+	readonly active: number;
+	readonly agentSessions: number;
+	readonly oldestAgeMs: number | null;
+	readonly oldestAgentSessionAgeMs: number | null;
+	readonly byOperation: Readonly<Partial<Record<RoutingOperationKind, number>>>;
+}
+
 export interface InferenceExecutionAttempt {
 	readonly targetRef: string;
 	readonly ok: boolean;
@@ -300,7 +308,16 @@ export class InferenceRouter {
 	private providerCacheSignature: string | null = null;
 	private lastValidationSignature: string | null = null;
 	private backgroundAdmissionsOpen = true;
-	private readonly activeBackgroundExecutions = new Map<number, AbortController>();
+	private readonly activeBackgroundExecutions = new Map<
+		number,
+		{
+			readonly controller: AbortController;
+			readonly operation: RoutingOperationKind;
+			readonly agentId: string;
+			readonly kind: "inference" | "agent";
+			readonly startedAt: number;
+		}
+	>();
 	private readonly backgroundSettledWaiters = new Set<() => void>();
 	private nextBackgroundExecutionId = 1;
 
@@ -327,7 +344,7 @@ export class InferenceRouter {
 	async quiesceBackgroundInference(timeoutMs = 5_000): Promise<BackgroundInferenceQuiescence> {
 		this.backgroundAdmissionsOpen = false;
 		const activeAtStart = this.activeBackgroundExecutions.size;
-		for (const controller of this.activeBackgroundExecutions.values()) controller.abort();
+		for (const execution of this.activeBackgroundExecutions.values()) execution.controller.abort();
 		if (this.activeBackgroundExecutions.size === 0) {
 			return { activeAtStart, aborted: activeAtStart, remaining: 0, timedOut: false };
 		}
@@ -354,13 +371,43 @@ export class InferenceRouter {
 
 	private beginBackgroundExecution(
 		operation: RoutingOperationKind,
+		agentId: string | undefined,
+		kind: "inference" | "agent",
 	): { readonly id: number; readonly signal: AbortSignal } | null | undefined {
 		if (!BACKGROUND_OPERATIONS.has(operation)) return undefined;
 		if (!this.backgroundAdmissionsOpen) return null;
 		const id = this.nextBackgroundExecutionId++;
 		const controller = new AbortController();
-		this.activeBackgroundExecutions.set(id, controller);
+		this.activeBackgroundExecutions.set(id, {
+			controller,
+			operation,
+			agentId: agentId?.trim() || "default",
+			kind,
+			startedAt: Date.now(),
+		});
 		return { id, signal: controller.signal };
+	}
+
+	getBackgroundWorkloadDiagnostics(agentId = "default"): BackgroundWorkloadDiagnostics {
+		const byOperation: Partial<Record<RoutingOperationKind, number>> = {};
+		const scopedAgentId = agentId.trim() || "default";
+		let active = 0;
+		let agentSessions = 0;
+		let oldestAgeMs: number | null = null;
+		let oldestAgentSessionAgeMs: number | null = null;
+		const now = Date.now();
+		for (const execution of this.activeBackgroundExecutions.values()) {
+			if (execution.agentId !== scopedAgentId) continue;
+			active += 1;
+			byOperation[execution.operation] = (byOperation[execution.operation] ?? 0) + 1;
+			const ageMs = Math.max(0, now - execution.startedAt);
+			oldestAgeMs = oldestAgeMs === null ? ageMs : Math.max(oldestAgeMs, ageMs);
+			if (execution.kind === "agent") {
+				agentSessions += 1;
+				oldestAgentSessionAgeMs = oldestAgentSessionAgeMs === null ? ageMs : Math.max(oldestAgentSessionAgeMs, ageMs);
+			}
+		}
+		return { active, agentSessions, oldestAgeMs, oldestAgentSessionAgeMs, byOperation };
 	}
 
 	private finishBackgroundExecution(id: number | undefined): void {
@@ -796,7 +843,7 @@ export class InferenceRouter {
 			readonly abortSignal?: AbortSignal;
 		},
 	): Promise<RouterResult<InferenceExecutionResult>> {
-		const background = this.beginBackgroundExecution(request.operation);
+		const background = this.beginBackgroundExecution(request.operation, request.agentId, "inference");
 		if (background === null) {
 			return {
 				ok: false,
@@ -837,7 +884,7 @@ export class InferenceRouter {
 			};
 		},
 	): Promise<RouterResult<InferenceAgentExecutionResult>> {
-		const background = this.beginBackgroundExecution(request.operation);
+		const background = this.beginBackgroundExecution(request.operation, request.agentId, "agent");
 		if (background === null) {
 			return { ok: false, error: { code: "execution-failed", message: "Background inference is paused." } };
 		}

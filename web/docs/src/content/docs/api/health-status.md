@@ -312,6 +312,33 @@ use `GET /api/diagnostics/transcripts` for detailed artifact/audit diagnostics.
 Use `GET /api/inference/status` for the shared inference control plane status.
 
 
+### GET /api/diagnostics/workloads
+
+Returns bounded in-flight workload pressure for one resolved agent. The
+inference snapshot covers background routed work and Pi agent sessions; the
+MCP snapshot covers stateless Streamable HTTP requests. Counts are held in
+memory and ages are calculated from admission time, so this endpoint does not
+scan durable queue tables. `agentId` may be supplied as a query parameter or
+`x-signet-agent-id` header; scoped deployments reject requests for another
+agent.
+
+**Response**
+
+```json
+{
+  "agentId": "default",
+  "inference": {
+    "active": 1,
+    "agentSessions": 1,
+    "oldestAgeMs": 3200,
+    "oldestAgentSessionAgeMs": 3200,
+    "byOperation": { "memory_extraction": 1 }
+  },
+  "mcp": { "inFlight": 0, "oldestAgeMs": null }
+}
+```
+
+
 ### GET /api/diagnostics/queue
 
 Per-queue counts (memory / summary), oldest-dead job

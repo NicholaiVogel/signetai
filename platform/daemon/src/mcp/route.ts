@@ -11,6 +11,40 @@ import type { Context } from "hono";
 import type { Hono } from "hono";
 import { createMcpServer } from "./tools.js";
 
+interface ActiveMcpRequest {
+	readonly agentId: string;
+	readonly startedAt: number;
+}
+
+const activeMcpRequests = new Map<number, ActiveMcpRequest>();
+let nextMcpRequestId = 1;
+
+export interface McpWorkloadDiagnostics {
+	readonly inFlight: number;
+	readonly oldestAgeMs: number | null;
+}
+
+export function getMcpWorkloadDiagnostics(agentId = "default"): McpWorkloadDiagnostics {
+	const scopedAgentId = agentId.trim() || "default";
+	const now = Date.now();
+	let inFlight = 0;
+	let oldestAgeMs: number | null = null;
+	for (const request of activeMcpRequests.values()) {
+		if (request.agentId !== scopedAgentId) continue;
+		inFlight += 1;
+		const ageMs = Math.max(0, now - request.startedAt);
+		oldestAgeMs = oldestAgeMs === null ? ageMs : Math.max(oldestAgeMs, ageMs);
+	}
+	return { inFlight, oldestAgeMs };
+}
+
+function resolveMcpWorkloadAgentId(c: Context): string {
+	const scopedAgentId = c.get("auth")?.claims?.scope.agent?.trim();
+	if (scopedAgentId) return scopedAgentId;
+	const requestedAgentId = c.req.query("agentId") ?? c.req.header("x-signet-agent-id") ?? "default";
+	return requestedAgentId.trim() || "default";
+}
+
 export function mountMcpRoute(app: Hono): void {
 	// POST /mcp — main MCP message endpoint
 	// GET /mcp — SSE stream for server-initiated notifications
@@ -20,35 +54,43 @@ export function mountMcpRoute(app: Hono): void {
 		if (parsedBody instanceof Response) {
 			return parsedBody;
 		}
-
-		const transport = new WebStandardStreamableHTTPServerTransport({
-			sessionIdGenerator: undefined, // stateless
-			enableJsonResponse: true,
+		const requestId = nextMcpRequestId++;
+		activeMcpRequests.set(requestId, {
+			agentId: resolveMcpWorkloadAgentId(c),
+			startedAt: Date.now(),
 		});
-
-		const harness = c.req.query("harness") ?? c.req.header("x-signet-harness") ?? undefined;
-		const workspace = c.req.query("workspace") ?? c.req.header("x-signet-workspace") ?? undefined;
-		const channel = c.req.query("channel") ?? c.req.header("x-signet-channel") ?? undefined;
-
-		const server = await createMcpServer({
-			authorizationHeader: c.req.header("authorization"),
-			context: {
-				harness,
-				workspace,
-				channel,
-			},
-		});
-		await server.connect(transport);
-
+		let transport: WebStandardStreamableHTTPServerTransport | null = null;
+		let server: Awaited<ReturnType<typeof createMcpServer>> | null = null;
 		try {
-			const response = await transport.handleRequest(
-				c.req.raw,
-				parsedBody === undefined ? undefined : { parsedBody },
-			);
+			transport = new WebStandardStreamableHTTPServerTransport({
+				sessionIdGenerator: undefined, // stateless
+				enableJsonResponse: true,
+			});
+			const harness = c.req.query("harness") ?? c.req.header("x-signet-harness") ?? undefined;
+			const workspace = c.req.query("workspace") ?? c.req.header("x-signet-workspace") ?? undefined;
+			const channel = c.req.query("channel") ?? c.req.header("x-signet-channel") ?? undefined;
+
+			server = await createMcpServer({
+				authorizationHeader: c.req.header("authorization"),
+				context: {
+					harness,
+					workspace,
+					channel,
+				},
+			});
+			await server.connect(transport);
+			const response = await transport.handleRequest(c.req.raw, parsedBody === undefined ? undefined : { parsedBody });
 			return response;
 		} finally {
-			await transport.close();
-			await server.close();
+			try {
+				if (transport) await transport.close();
+			} finally {
+				try {
+					if (server) await server.close();
+				} finally {
+					activeMcpRequests.delete(requestId);
+				}
+			}
 		}
 	});
 }

@@ -784,6 +784,12 @@ describe("InferenceRouter background quiescence", () => {
 				timeoutMs: 30_000,
 			});
 			await started;
+			expect(router.getBackgroundWorkloadDiagnostics("default")).toMatchObject({
+				active: 1,
+				agentSessions: 0,
+				byOperation: { memory_extraction: 1 },
+			});
+			expect(router.getBackgroundWorkloadDiagnostics("other").active).toBe(0);
 
 			expect(await router.quiesceBackgroundInference(1_000)).toEqual({
 				activeAtStart: 1,

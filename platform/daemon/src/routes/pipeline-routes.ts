@@ -7,7 +7,10 @@ import { requirePermission, requireRateLimit } from "../auth";
 import { getDbAccessor } from "../db-accessor.js";
 import { type QueueCounts, getQueueDiagnosticsSnapshot } from "../diagnostics-queue.js";
 import { readEmbeddingUsageSummary } from "../embedding-usage";
+import { getInferenceRouterOrNull } from "../inference-router.js";
+import type { BackgroundWorkloadDiagnostics } from "../inference-router.js";
 import { getLlmProvider } from "../llm.js";
+import { getMcpWorkloadDiagnostics } from "../mcp/route.js";
 import { graphWriteCaps, loadMemoryConfig } from "../memory-config.js";
 import { listMemoryContentSafety, parseMemorySafetyReasons } from "../memory-content-safety.js";
 import {
@@ -101,6 +104,30 @@ function pipelineQueueBlock(): PipelineQueueBlock {
 			oldestDeadSummaryJob: null,
 		};
 	}
+}
+
+function workloadDiagnosticsSnapshot(agentId: string): {
+	readonly inference: BackgroundWorkloadDiagnostics;
+	readonly mcp: ReturnType<typeof getMcpWorkloadDiagnostics>;
+} {
+	const inference: BackgroundWorkloadDiagnostics = getInferenceRouterOrNull()?.getBackgroundWorkloadDiagnostics(
+		agentId,
+	) ?? {
+		active: 0,
+		agentSessions: 0,
+		oldestAgeMs: null,
+		oldestAgentSessionAgeMs: null,
+		byOperation: {},
+	};
+	return { inference, mcp: getMcpWorkloadDiagnostics(agentId) };
+}
+
+function workloadDiagnostics(c: Context): Response {
+	const requestedAgentId = c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id");
+	const scopedAgent = resolveScopedAgentId(c, requestedAgentId, resolveDaemonAgentId());
+	if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+	const agentId = resolveAgentId({ agentId: scopedAgent.agentId });
+	return c.json({ agentId, ...workloadDiagnosticsSnapshot(agentId) });
 }
 
 const pipelineAdminGuard = async (c: Context, next: () => Promise<void>): Promise<Response | undefined> => {
@@ -219,6 +246,8 @@ export function registerPipelineRoutes(app: Hono): void {
 		const agentId = resolveAgentId({ agentId: scopedAgent.agentId });
 		return c.json(getTranscriptHealthReport(getDbAccessor(), AGENTS_DIR, agentId));
 	});
+
+	app.get("/api/diagnostics/workloads", (c) => workloadDiagnostics(c));
 
 	app.get("/api/status", (c) => {
 		const config = loadMemoryConfig(AGENTS_DIR);
@@ -366,7 +395,14 @@ export function registerPipelineRoutes(app: Hono): void {
 
 	app.get("/api/diagnostics", (c) => {
 		const report = getCachedDiagnosticsReport();
-		return c.json(report);
+		const requestedAgentId = c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id");
+		const scopedAgent = resolveScopedAgentId(c, requestedAgentId, resolveDaemonAgentId());
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const agentId = resolveAgentId({ agentId: scopedAgent.agentId });
+		return c.json({
+			...report,
+			workloads: { agentId, ...workloadDiagnosticsSnapshot(agentId) },
+		});
 	});
 
 	app.get("/api/diagnostics/memory-content-safety", (c) => {
@@ -426,7 +462,7 @@ export function registerPipelineRoutes(app: Hono): void {
 		// domain route. Let each return its own response rather than a cached
 		// aggregate subobject. Any new single-segment diagnostics route must
 		// either be registered before this route or be added here.
-		if (domain === "queue" || domain === "openclaw") return next();
+		if (domain === "queue" || domain === "openclaw" || domain === "workloads") return next();
 		const report = getCachedDiagnosticsReport();
 
 		const domainData = report[domain as keyof typeof report];
