@@ -4,10 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerOAuthProviderForTests, resetOAuthStateForTests, storeOAuthCredentials } from "./inference-oauth";
 import {
+	PiAgentSessionTimeoutError,
 	getOrCreateInferenceRouter,
 	isInferenceRouterConfigPath,
+	promptPiAgentSession,
 	resetInferenceRouterForTests,
 } from "./inference-router";
+import {
+	acquireLlmConcurrencyPermit,
+	configureLlmConcurrency,
+	getLlmConcurrencyStatus,
+	withLlmConcurrency,
+} from "./pipeline/provider";
 import { invalidateSecretsCache } from "./secrets";
 
 const originalFetch = globalThis.fetch;
@@ -433,6 +441,147 @@ printf 'never reached\\n'
 			}
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("routes Pi agent sessions through the global LLM semaphore (#1333)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "signet-router-pi-concurrency-"));
+		mkdirSync(join(dir, "memory"), { recursive: true });
+		writeFileSync(
+			join(dir, "agent.yaml"),
+			`inference:
+  defaultPolicy: pi-test
+  targets:
+    pi-test:
+      executor: openai-compatible
+      endpoint: http://127.0.0.1:1234/v1
+      models:
+        default:
+          model: pi-test-model
+  policies:
+    pi-test:
+      mode: strict
+      defaultTargets:
+        - pi-test/default
+  workloads:
+    memoryExtraction:
+      policy: pi-test
+`,
+		);
+		const originalLimit = getLlmConcurrencyStatus().limit;
+		let releaseBlocker: (() => void) | undefined;
+		try {
+			configureLlmConcurrency(1);
+			let chatRequests = 0;
+			let hangChatRequests = false;
+			globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = String(input);
+				if (url.endsWith("/models")) return new Response("not found", { status: 404 });
+				chatRequests++;
+				if (hangChatRequests) {
+					const signal = input instanceof Request ? input.signal : init?.signal;
+					return new Promise<Response>((_, reject) => {
+						signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+					});
+				}
+				return openAiSseResponse("agent completed", { prompt_tokens: 3, completion_tokens: 1 });
+			}) as unknown as typeof fetch;
+
+			const blocker = withLlmConcurrency(
+				() =>
+					new Promise<void>((resolve) => {
+						releaseBlocker = resolve;
+					}),
+				5_000,
+				"test-blocker",
+			);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			const router = getOrCreateInferenceRouter(dir);
+			const run = router.runAgent(
+				{ operation: "memory_extraction", promptPreview: "pi concurrency" },
+				"Use the supplied daemon tools.",
+				[],
+				{ timeoutMs: 5_000 },
+			);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(chatRequests).toBe(0);
+
+			releaseBlocker?.();
+			await blocker;
+			const result = await run;
+			expect(result.ok).toBe(true);
+			expect(chatRequests).toBe(1);
+			expect(getLlmConcurrencyStatus().running).toBe(0);
+
+			hangChatRequests = true;
+			const timedOut = await router.runAgent(
+				{ operation: "memory_extraction", promptPreview: "pi timeout" },
+				"Use the supplied daemon tools.",
+				[],
+				{ timeoutMs: 50 },
+			);
+			expect(timedOut.ok).toBe(false);
+			expect(chatRequests).toBe(2);
+			// runAgent returns at its deadline, but the permit remains held until
+			// Pi's abort has settled the active upstream request.
+			expect(getLlmConcurrencyStatus().running).toBe(1);
+			for (let i = 0; i < 20 && getLlmConcurrencyStatus().running !== 0; i += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			expect(getLlmConcurrencyStatus().running).toBe(0);
+		} finally {
+			releaseBlocker?.();
+			configureLlmConcurrency(originalLimit);
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the Pi agent permit until timeout abort cleanup settles (#1333)", async () => {
+		const originalLimit = getLlmConcurrencyStatus().limit;
+		let settleAbort: (() => void) | undefined;
+		let settlePrompt: (() => void) | undefined;
+		try {
+			configureLlmConcurrency(1);
+			const abortSettled = new Promise<void>((resolve) => {
+				settleAbort = resolve;
+			});
+			const promptSettled = new Promise<void>((resolve) => {
+				settlePrompt = resolve;
+			});
+			let aborts = 0;
+			const session = {
+				prompt: () => promptSettled,
+				abort: () => {
+					aborts++;
+					return abortSettled.then(() => {
+						settlePrompt?.();
+					});
+				},
+				dispose: () => {},
+				getActiveToolNames: () => [],
+				getFailureMessage: () => undefined,
+				getStats: () => undefined,
+			};
+			const release = await acquireLlmConcurrencyPermit(5000, "pi-agent");
+			const timedOut = await promptPiAgentSession(session, "cancel", 20).then(
+				() => {
+					throw new Error("expected Pi agent timeout");
+				},
+				(error) => error,
+			);
+			expect(timedOut).toBeInstanceOf(PiAgentSessionTimeoutError);
+			if (!(timedOut instanceof PiAgentSessionTimeoutError)) return;
+			expect(aborts).toBe(1);
+			expect(getLlmConcurrencyStatus().running).toBe(1);
+
+			settleAbort?.();
+			await timedOut.cleanup;
+			release();
+			expect(getLlmConcurrencyStatus().running).toBe(0);
+		} finally {
+			settleAbort?.();
+			configureLlmConcurrency(originalLimit);
 		}
 	});
 

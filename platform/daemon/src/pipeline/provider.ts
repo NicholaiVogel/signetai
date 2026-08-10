@@ -391,7 +391,7 @@ function generateSignal(opts?: { readonly signal?: AbortSignal; readonly abortSi
 	return opts?.signal ?? opts?.abortSignal;
 }
 
-async function withLlmConcurrency<T>(
+export async function withLlmConcurrency<T>(
 	fn: () => Promise<T>,
 	timeoutMs?: number,
 	label?: string,
@@ -405,7 +405,7 @@ async function withLlmConcurrency<T>(
 	}
 }
 
-async function acquireLlmConcurrencyPermit(
+export async function acquireLlmConcurrencyPermit(
 	timeoutMs?: number,
 	label?: string,
 	signal?: AbortSignal,

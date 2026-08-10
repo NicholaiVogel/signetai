@@ -9,6 +9,7 @@ import {
 	mapUsage,
 	resolvePiModel,
 } from "./pi-provider";
+import { configureLlmConcurrency, getLlmConcurrencyStatus, withLlmConcurrency } from "./provider";
 
 describe("pi provider catalog models", () => {
 	test("preserves the Codex responses API and registry metadata", () => {
@@ -136,6 +137,157 @@ describe("pi provider catalog models", () => {
 			await expect(session.prompt("finish without tools")).resolves.toBeUndefined();
 		} finally {
 			session.dispose();
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test("admits normal Pi completions through the global LLM semaphore (#1333)", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalLimit = getLlmConcurrencyStatus().limit;
+		let releaseBlocker: (() => void) | undefined;
+		try {
+			configureLlmConcurrency(1);
+			const blocker = withLlmConcurrency(
+				() =>
+					new Promise<void>((resolve) => {
+						releaseBlocker = resolve;
+					}),
+				5000,
+				"test-blocker",
+			);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			let requests = 0;
+			globalThis.fetch = mock(() => {
+				requests++;
+				return Promise.resolve(
+					new Response(
+						`data: ${JSON.stringify({ choices: [{ delta: { content: "done" } }] })}\n\ndata: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+						{ status: 200, headers: { "content-type": "text/event-stream" } },
+					),
+				);
+			}) as unknown as typeof fetch;
+			const provider = createPiModelProvider({
+				executor: "openai-compatible",
+				model: "concurrency-test",
+				baseUrl: "http://127.0.0.1:1234/v1",
+			});
+			const generated = provider.generate("wait for admission", { timeoutMs: 5000 });
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			expect(requests).toBe(0);
+
+			releaseBlocker?.();
+			await blocker;
+			await expect(generated).resolves.toBe("done");
+			expect(requests).toBe(1);
+			expect(getLlmConcurrencyStatus().running).toBe(0);
+		} finally {
+			releaseBlocker?.();
+			configureLlmConcurrency(originalLimit);
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test("admits Pi streams through the global LLM semaphore until their upstream work settles (#1333)", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalLimit = getLlmConcurrencyStatus().limit;
+		let releaseBlocker: (() => void) | undefined;
+		try {
+			configureLlmConcurrency(1);
+			const blocker = withLlmConcurrency(
+				() =>
+					new Promise<void>((resolve) => {
+						releaseBlocker = resolve;
+					}),
+				5000,
+				"test-blocker",
+			);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			let requests = 0;
+			globalThis.fetch = mock(() => {
+				requests++;
+				return Promise.resolve(
+					new Response(
+						`data: ${JSON.stringify({ choices: [{ delta: { content: "streamed" } }] })}\n\ndata: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+						{ status: 200, headers: { "content-type": "text/event-stream" } },
+					),
+				);
+			}) as unknown as typeof fetch;
+			const provider = createPiModelProvider({
+				executor: "openai-compatible",
+				model: "stream-concurrency-test",
+				baseUrl: "http://127.0.0.1:1234/v1",
+			});
+			const streamWithUsage = provider.streamWithUsage;
+			if (!streamWithUsage) throw new Error("expected Pi stream support");
+			const upstream = streamWithUsage("wait for admission", { timeoutMs: 5000 });
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			expect(requests).toBe(0);
+
+			releaseBlocker?.();
+			await blocker;
+			const result = await upstream;
+			const reader = result.stream.getReader();
+			let text = "";
+			while (true) {
+				const next = await reader.read();
+				if (next.done) break;
+				if (next.value.type === "text-delta") text += next.value.text;
+			}
+			expect(text).toBe("streamed");
+			expect(requests).toBe(1);
+			expect(getLlmConcurrencyStatus().running).toBe(0);
+		} finally {
+			releaseBlocker?.();
+			configureLlmConcurrency(originalLimit);
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test("keeps the Pi stream permit through cancellation until the upstream stream settles (#1333)", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalLimit = getLlmConcurrencyStatus().limit;
+		let resolveResponse: ((response: Response) => void) | undefined;
+		try {
+			configureLlmConcurrency(1);
+			let requests = 0;
+			globalThis.fetch = mock(() => {
+				requests++;
+				return new Promise<Response>((resolve) => {
+					resolveResponse = resolve;
+				});
+			}) as unknown as typeof fetch;
+			const provider = createPiModelProvider({
+				executor: "openai-compatible",
+				model: "stream-cancel-concurrency-test",
+				baseUrl: "http://127.0.0.1:1234/v1",
+			});
+			const streamWithUsage = provider.streamWithUsage;
+			if (!streamWithUsage) throw new Error("expected Pi stream support");
+			const result = await streamWithUsage("cancel after opening", { timeoutMs: 5000 });
+			for (let i = 0; i < 20 && requests === 0; i += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			expect(requests).toBe(1);
+			expect(getLlmConcurrencyStatus().running).toBe(1);
+
+			result.cancel();
+			expect(getLlmConcurrencyStatus().running).toBe(1);
+			resolveResponse?.(
+				new Response(
+					`data: ${JSON.stringify({ choices: [{ delta: { content: "late" } }] })}\n\ndata: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				),
+			);
+			await result.stream.getReader().closed.catch(() => {});
+			for (let i = 0; i < 20 && getLlmConcurrencyStatus().running !== 0; i += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			expect(getLlmConcurrencyStatus().running).toBe(0);
+		} finally {
+			resolveResponse?.(
+				new Response("data: [DONE]\n\n", { status: 200, headers: { "content-type": "text/event-stream" } }),
+			);
+			configureLlmConcurrency(originalLimit);
 			globalThis.fetch = originalFetch;
 		}
 	});

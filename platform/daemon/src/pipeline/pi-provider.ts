@@ -29,11 +29,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AccountingProvenance, LlmGenerateResult, LlmProvider, LlmUsage } from "@signet/core";
 import { logger } from "../logger";
-import type {
-	LlmProviderCallOptions,
-	LlmProviderStreamEvent,
-	LlmProviderStreamResult,
-	StreamCapableLlmProvider,
+import {
+	type LlmProviderCallOptions,
+	type LlmProviderStreamEvent,
+	type LlmProviderStreamResult,
+	type StreamCapableLlmProvider,
+	acquireLlmConcurrencyPermit,
 } from "./provider";
 
 /** Executors that route through pi-ai. `acpx` is handled separately. */
@@ -462,19 +463,24 @@ export function createPiModelProvider(
 		const abort = callerAbort(opts, defaultTimeoutMs);
 		const t0 = Date.now();
 		try {
-			const msg = await (await modelRuntime).completeSimple(piModel, buildContext(prompt), buildOptions(opts, abort));
-			const durationMs = Date.now() - t0;
-			if (msg.stopReason === "error" || msg.stopReason === "aborted") {
-				throw toError(name, msg);
+			const release = await acquireLlmConcurrencyPermit(opts?.timeoutMs ?? defaultTimeoutMs, name, abort.signal);
+			try {
+				const msg = await (await modelRuntime).completeSimple(piModel, buildContext(prompt), buildOptions(opts, abort));
+				const durationMs = Date.now() - t0;
+				if (msg.stopReason === "error" || msg.stopReason === "aborted") {
+					throw toError(name, msg);
+				}
+				const text = extractText(msg.content);
+				return {
+					text,
+					usage: {
+						...mapUsage(msg.usage, accountingProvenance ?? "provider_reported"),
+						totalDurationMs: durationMs,
+					},
+				};
+			} finally {
+				release();
 			}
-			const text = extractText(msg.content);
-			return {
-				text,
-				usage: {
-					...mapUsage(msg.usage, accountingProvenance ?? "provider_reported"),
-					totalDurationMs: durationMs,
-				},
-			};
 		} finally {
 			abort.cleanup();
 		}
@@ -523,7 +529,22 @@ export function createPiModelProvider(
 			let fullText = "";
 			let finalUsage: LlmUsage | null = null;
 
-			const piStream = (await modelRuntime).streamSimple(piModel, buildContext(prompt), buildOptions(opts, abort));
+			const release = await acquireLlmConcurrencyPermit(opts?.timeoutMs ?? defaultTimeoutMs, name, abort.signal);
+			let released = false;
+			const releaseWhenSettled = (): void => {
+				if (released) return;
+				released = true;
+				abort.cleanup();
+				release();
+			};
+			const piStream = await (async () => {
+				try {
+					return (await modelRuntime).streamSimple(piModel, buildContext(prompt), buildOptions(opts, abort));
+				} catch (error) {
+					releaseWhenSettled();
+					throw error;
+				}
+			})();
 
 			const stream = new ReadableStream<LlmProviderStreamEvent>({
 				async start(controller) {
@@ -555,7 +576,7 @@ export function createPiModelProvider(
 						});
 						controller.error(err instanceof Error ? err : new Error(String(err)));
 					} finally {
-						abort.cleanup();
+						releaseWhenSettled();
 					}
 				},
 				cancel() {
@@ -567,7 +588,6 @@ export function createPiModelProvider(
 				stream,
 				cancel: () => {
 					abort.abort();
-					abort.cleanup();
 				},
 			};
 		},

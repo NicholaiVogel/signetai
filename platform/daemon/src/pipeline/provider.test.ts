@@ -22,6 +22,7 @@ import {
 	configureLlmConcurrency,
 	createAcpxProvider,
 	getLlmConcurrencyStatus,
+	withLlmConcurrency,
 } from "./provider";
 
 // ---------------------------------------------------------------------------
@@ -1109,6 +1110,26 @@ describe("LlmConcurrencySemaphore", () => {
 		sem.release();
 		sem.release();
 		expect(sem.running).toBe(0);
+	});
+
+	it("withLlmConcurrency releases the permit when guarded work fails", async () => {
+		const originalLimit = getLlmConcurrencyStatus().limit;
+		configureLlmConcurrency(1);
+		try {
+			await expect(
+				withLlmConcurrency(
+					async () => {
+						throw new Error("agent session failed");
+					},
+					100,
+					"pi-agent",
+				),
+			).rejects.toThrow("agent session failed");
+			expect(getLlmConcurrencyStatus().running).toBe(0);
+			expect(await withLlmConcurrency(async () => "next", 100, "pi-agent")).toBe("next");
+		} finally {
+			configureLlmConcurrency(originalLimit);
+		}
 	});
 
 	it("rejects fractional SIGNET_MAX_LLM_CONCURRENCY", () => {

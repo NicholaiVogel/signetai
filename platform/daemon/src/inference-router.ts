@@ -31,12 +31,13 @@ import { type ResolvedInferenceCredential, createRoutingProvider } from "./infer
 import { logger } from "./logger";
 import { loadMemoryConfig } from "./memory-config";
 import { createDreamingAcpxMcpConfig } from "./pipeline/acpx-dreaming-mcp";
-import { isPiAgentSessionProvider, mapSessionStatsToUsage } from "./pipeline/pi-provider";
+import { type PiAgentSession, isPiAgentSessionProvider, mapSessionStatsToUsage } from "./pipeline/pi-provider";
 import {
 	type AcpxHooksMode,
 	type LlmProviderStreamEvent,
 	type LlmProviderStreamResult,
 	type StreamCapableLlmProvider,
+	acquireLlmConcurrencyPermit,
 	generateWithTracking,
 } from "./pipeline/provider";
 import { getSecret } from "./secrets";
@@ -126,6 +127,50 @@ export interface InferenceStreamResult {
 	readonly decision: RouteDecision;
 	readonly stream: ReadableStream<InferenceStreamEvent>;
 	cancel(reason?: string): void;
+}
+
+export class PiAgentSessionTimeoutError extends Error {
+	readonly cleanup: Promise<void>;
+
+	constructor(deadlineMs: number, cleanup: Promise<void>) {
+		super(`Agent session exceeded the ${deadlineMs}ms deadline`);
+		this.name = "PiAgentSessionTimeoutError";
+		this.cleanup = cleanup;
+	}
+}
+
+/**
+ * Race a Pi agent prompt against its deadline. A timeout returns immediately,
+ * but carries the cancellation-settlement promise so the caller can retain its
+ * concurrency permit until the upstream work has actually stopped.
+ */
+export async function promptPiAgentSession(session: PiAgentSession, prompt: string, deadlineMs: number): Promise<void> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let aborting: Promise<void> | undefined;
+	const abort = (): Promise<void> => {
+		aborting ??= Promise.resolve().then(() => session.abort());
+		return aborting;
+	};
+	const promptResult = session.prompt(prompt);
+	const cleanup = (): Promise<void> =>
+		Promise.all([
+			promptResult.then(
+				() => undefined,
+				() => undefined,
+			),
+			abort().catch(() => {}),
+		]).then(() => undefined);
+	try {
+		if (deadlineMs <= 0) {
+			throw new PiAgentSessionTimeoutError(deadlineMs, cleanup());
+		}
+		const timedOut = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new PiAgentSessionTimeoutError(deadlineMs, cleanup())), deadlineMs);
+		});
+		await Promise.race([promptResult, timedOut]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
 }
 
 export interface InferenceAccountSummary {
@@ -1014,26 +1059,38 @@ export class InferenceRouter {
 							},
 						};
 					}
-					const session = await provider.createAgentSession(tools, { maxTokens: opts?.maxTokens });
 					const deadlineMs = opts?.timeoutMs ?? provider.agentSessionTimeoutMs;
-					let timer: ReturnType<typeof setTimeout> | null = null;
-					// The deadline must stop the router from waiting on a session
-					// whose agent loop ignores (or never sees) the abort signal:
-					// race the prompt against the deadline so runAgent returns and
-					// disposes the session either way. Without the race, a stuck
-					// loop hangs runAgent — and the Dreaming pass with it — past
-					// every deadline (#1168).
-					const timedOut = new Promise<never>((_, reject) => {
-						if (deadlineMs > 0) {
-							timer = setTimeout(() => {
-								void session.abort();
-								reject(new Error(`Agent session exceeded the ${deadlineMs}ms deadline`));
-							}, deadlineMs);
-						}
-					});
+					const deadline = deadlineMs > 0 ? performance.now() + deadlineMs : undefined;
 					let sessionUsage: LlmUsage | null = null;
+					const release = await acquireLlmConcurrencyPermit(deadlineMs > 0 ? deadlineMs : undefined, "pi-agent");
+					let session: PiAgentSession | undefined;
+					let releaseDeferred = false;
 					try {
-						await Promise.race([session.prompt(prompt), timedOut]);
+						session = await provider.createAgentSession(tools, { maxTokens: opts?.maxTokens });
+						// AgentSession owns an internal model loop, so acquire the
+						// process-wide permit before initialization and hold it until
+						// the whole session is disposed. This prevents tool-driven
+						// Pi turns from multiplying concurrency outside the canonical
+						// provider boundary, including cancellation cleanup.
+						const remainingMs = deadline === undefined ? deadlineMs : deadline - performance.now();
+						if (remainingMs <= 0) {
+							throw new Error(`Agent session exceeded the ${deadlineMs}ms deadline`);
+						}
+						try {
+							await promptPiAgentSession(session, prompt, remainingMs);
+						} catch (error) {
+							if (error instanceof PiAgentSessionTimeoutError) {
+								releaseDeferred = true;
+								void error.cleanup.finally(() => {
+									try {
+										session?.dispose();
+									} finally {
+										release();
+									}
+								});
+							}
+							throw error;
+						}
 						const failure = session.getFailureMessage();
 						if (failure) throw new Error(failure);
 						// Read the session aggregate before dispose() tears the
@@ -1045,8 +1102,13 @@ export class InferenceRouter {
 							provider.accountingProvenance ?? "unavailable",
 						);
 					} finally {
-						if (timer) clearTimeout(timer);
-						session.dispose();
+						if (!releaseDeferred) {
+							try {
+								session?.dispose();
+							} finally {
+								release();
+							}
+						}
 					}
 					this.clearObservedRuntimeState(loaded.value, targetRef);
 					attempts.push({ targetRef, ok: true, durationMs: Date.now() - startedAt, usage: sessionUsage });
