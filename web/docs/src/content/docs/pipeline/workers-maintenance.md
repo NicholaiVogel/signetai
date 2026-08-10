@@ -50,7 +50,13 @@ The document worker processes `document_ingest` jobs from the same
 `memory_jobs` table. It runs as a fixed-interval polling loop,
 defaulting to 10,000 ms between ticks.
 
-A document ingest job carries a `document_id` rather than a `memory_id`.
+The worker processes at most two documents concurrently across all
+`startDocumentWorker()` instances in the daemon. Admission is checked before
+leasing a `memory_jobs` row, so URL fetch, chunking, embedding, and indexing
+cannot outrun the shared budget. A failed operation releases its slot before
+retry handling runs, and the durable lease/recovery path remains responsible
+for jobs interrupted by shutdown or process failure.
+
 The referenced row in the `documents` table carries the source content and
 type. Two source types are supported: `url` (content fetched via HTTP) and
 anything else (content read from `raw_content`). URL fetch is bounded by

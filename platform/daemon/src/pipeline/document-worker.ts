@@ -9,6 +9,7 @@
  * calls inside write locks.
  */
 
+import { type ConcurrencyAdmission, createConcurrencyAdmission } from "../concurrency-admission";
 import { normalizeAndHashContent } from "../content-normalization";
 import type { DbAccessor, WriteDb } from "../db-accessor";
 import { syncVecInsert, vectorToBlob } from "../db-helpers";
@@ -32,8 +33,15 @@ export interface DocumentWorkerHandle {
 	readonly running: boolean;
 }
 
+/** Keep URL, chunking, and embedding work bounded before leasing another job. */
+export const DOCUMENT_WORK_MAX_IN_FLIGHT = 2;
+
+const sharedDocumentAdmission = createConcurrencyAdmission(DOCUMENT_WORK_MAX_IN_FLIGHT);
+
 export interface DocumentWorkerDeps {
 	readonly accessor: DbAccessor;
+	/** Shared by all document workers in a daemon; injectable for isolated tests. */
+	readonly admission?: ConcurrencyAdmission;
 	readonly embeddingCfg: EmbeddingConfig;
 	readonly fetchEmbedding: (
 		text: string,
@@ -551,6 +559,7 @@ async function processDocument(
 export function startDocumentWorker(deps: DocumentWorkerDeps): DocumentWorkerHandle {
 	let running = true;
 	let timer: ReturnType<typeof setInterval> | null = null;
+	const admission = deps.admission ?? sharedDocumentAdmission;
 	const operations = new Map<
 		string,
 		{ readonly startedAtMs: number; readonly firstLeaseAtMs: number; readonly state: MutableDocumentOperation }
@@ -624,54 +633,59 @@ export function startDocumentWorker(deps: DocumentWorkerDeps): DocumentWorkerHan
 	async function tick(): Promise<void> {
 		if (!running) return;
 		if (isSystemPressureHigh()) return;
-
-		const leasedAt = Date.now();
-		const job = deps.accessor.withWriteTx((db) => leaseDocumentJob(db, deps.pipelineCfg.worker.maxRetries));
-
-		if (!job) return;
-		const operation = operations.get(job.id) ?? {
-			startedAtMs: leasedAt,
-			firstLeaseAtMs: leasedAt,
-			state: { accepted: 0, skipped: 0, failed: 0, cancelled: false, operationClass: "indexing" },
-		};
-		operations.set(job.id, operation);
+		if (!admission.acquire()) return;
 
 		try {
-			await processDocument(deps, job, operation.state);
-			const status = terminalStatus(job.id);
-			if (status === "completed" || status === "dead") {
-				emitOperation(job, operation);
-				operations.delete(job.id);
-			}
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			logger.warn("document-worker", "Job failed", {
-				jobId: job.id,
-				documentId: job.document_id,
-				error: msg,
-			});
+			const leasedAt = Date.now();
+			const job = deps.accessor.withWriteTx((db) => leaseDocumentJob(db, deps.pipelineCfg.worker.maxRetries));
 
-			deps.accessor.withWriteTx((db) => {
-				if (job.document_id && isDocumentDeleted(db, job.document_id)) {
-					completeJob(db, job.id);
-					operation.state.skipped++;
-					operation.state.cancelled = true;
-					return;
+			if (!job) return;
+			const operation = operations.get(job.id) ?? {
+				startedAtMs: leasedAt,
+				firstLeaseAtMs: leasedAt,
+				state: { accepted: 0, skipped: 0, failed: 0, cancelled: false, operationClass: "indexing" },
+			};
+			operations.set(job.id, operation);
+
+			try {
+				await processDocument(deps, job, operation.state);
+				const status = terminalStatus(job.id);
+				if (status === "completed" || status === "dead") {
+					emitOperation(job, operation);
+					operations.delete(job.id);
 				}
-				failJob(db, job.id, msg, job.attempts, job.max_attempts);
-				if (job.document_id) {
-					updateDocumentStatus(db, job.document_id, "failed", msg);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				logger.warn("document-worker", "Job failed", {
+					jobId: job.id,
+					documentId: job.document_id,
+					error: msg,
+				});
+
+				deps.accessor.withWriteTx((db) => {
+					if (job.document_id && isDocumentDeleted(db, job.document_id)) {
+						completeJob(db, job.id);
+						operation.state.skipped++;
+						operation.state.cancelled = true;
+						return;
+					}
+					failJob(db, job.id, msg, job.attempts, job.max_attempts);
+					if (job.document_id) {
+						updateDocumentStatus(db, job.document_id, "failed", msg);
+					}
+				});
+				operation.state.causeFamily ??= normalizePipelineCause(err);
+				const status = terminalStatus(job.id);
+				if (status === "dead") {
+					operation.state.failed++;
 				}
-			});
-			operation.state.causeFamily ??= normalizePipelineCause(err);
-			const status = terminalStatus(job.id);
-			if (status === "dead") {
-				operation.state.failed++;
+				if (status === "dead" || status === "completed") {
+					emitOperation(job, operation);
+					operations.delete(job.id);
+				}
 			}
-			if (status === "dead" || status === "completed") {
-				emitOperation(job, operation);
-				operations.delete(job.id);
-			}
+		} finally {
+			admission.release();
 		}
 	}
 
