@@ -105,12 +105,18 @@ describe("dreaming worker agent scope", () => {
 			`INSERT INTO session_transcripts (session_key, content, harness, agent_id, created_at, updated_at)
 			 VALUES ('transcript-agent', 'agent transcript', 'pi', ?, ?, ?)`,
 		).run("transcript-agent", now, now);
+		db.prepare(
+			`INSERT INTO dreaming_evidence_exclusions
+			 (agent_id, source_kind, source_id, reason, pass_id)
+			 VALUES ('quarantine-agent', 'transcript', 'repaired-later', 'semantic_operation_rejected', 'pass-1')`,
+		).run();
 
 		expect(getDreamingWorkerAgentIds(accessor, "default")).toEqual([
 			"artifact-agent",
 			"default",
 			"memory-agent",
 			"noam",
+			"quarantine-agent",
 			"state-agent",
 			"summary-agent",
 			"transcript-agent",

@@ -25,6 +25,7 @@ import { up as crossAgentMessageNotifications } from "./115-cross-agent-message-
 import { up as acpDeliveryReconciliation } from "./116-acp-delivery-reconciliation";
 import { up as retireSummaryWorker } from "./117-retire-summary-worker";
 import { up as telemetryVersionObservation } from "./119-telemetry-version-observation";
+import { up as dreamingEvidenceRetry } from "./122-dreaming-evidence-retry";
 import { MIGRATIONS, hasPendingMigrations, runMigrations } from "./index";
 
 function createFreshDb(): Database {
@@ -2192,5 +2193,33 @@ describe("migration 121: telemetry delivery health", () => {
 		expect(state.window_started_at).toEqual(expect.any(String));
 		expect(state.success_count).toBe(0);
 		expect(state.failure_count).toBe(0);
+	});
+});
+
+describe("migration 122: Dreaming evidence retry", () => {
+	test("adds repair state to an existing exclusion table idempotently", () => {
+		const db = createFreshDb();
+		db.exec(`
+			CREATE TABLE dreaming_evidence_exclusions (
+				agent_id TEXT NOT NULL,
+				source_kind TEXT NOT NULL,
+				source_id TEXT NOT NULL,
+				reason TEXT NOT NULL,
+				pass_id TEXT NOT NULL,
+				excluded_at TEXT NOT NULL,
+				requeue_requested_at TEXT,
+				resolved_at TEXT,
+				PRIMARY KEY (agent_id, source_kind, source_id)
+			);
+		`);
+		dreamingEvidenceRetry(db);
+		dreamingEvidenceRetry(db);
+
+		const columns = db.query("PRAGMA table_info(dreaming_evidence_exclusions)").all() as Array<{ name: string }>;
+		expect(columns.map((column) => column.name)).toEqual(
+			expect.arrayContaining(["failure_class", "source_fingerprint", "retry_count", "last_requeued_at"]),
+		);
+		expect(db.prepare("SELECT retry_count, failure_class FROM dreaming_evidence_exclusions").all()).toEqual([]);
+		db.close();
 	});
 });

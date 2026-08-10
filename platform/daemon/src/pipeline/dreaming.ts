@@ -53,6 +53,13 @@ import {
 	nextDreamingEvidenceFragment,
 	renderDreamingEvidence,
 } from "./dreaming-evidence";
+import {
+	type RejectedDreamingEvidence,
+	autoRequeueRepairedDreamingEvidence,
+	collectRejectedDreamingEvidence,
+	recordRejectedDreamingEvidenceInTx,
+	resolveRequeuedDreamingEvidenceInTx,
+} from "./dreaming-evidence-retry";
 import type { ApplyDreamingOperationsResult, DreamingOperationRequest } from "./dreaming-operations";
 import {
 	readDreamingRunbook,
@@ -183,6 +190,10 @@ export interface DreamingEvidenceExclusion {
 	readonly sourceKind: EpisodicSourceRecord["kind"];
 	readonly sourceId: string;
 	readonly reason: string;
+	readonly failureClass: string;
+	readonly sourceFingerprint: string | null;
+	readonly retryCount: number;
+	readonly lastRequeuedAt: string | null;
 	readonly passId: string;
 	readonly excludedAt: string;
 	readonly requeueRequestedAt: string | null;
@@ -204,47 +215,6 @@ export interface DreamingAgentExecutor {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readNonEmptyString(value: unknown): string | null {
-	return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-/**
- * Keep evidence cited by an agent operation that the daemon rejects. The
- * agentic calls preserve this audit/requeue trail even when citation
- * validation fails before the operation service can return per-item results.
- */
-function rejectedAgentEvidence(
-	result: ApplyDreamingOperationsResult,
-	operations: readonly Pick<DreamingOperationRequest, "evidence">[],
-	sources: readonly EpisodicSourceRecord[],
-): readonly EpisodicSourceRecord[] {
-	const rejectedIndexes = new Set<number>(result.items.filter((item) => !item.ok).map((item) => item.index));
-	const rejectedOperations =
-		rejectedIndexes.size > 0
-			? operations.filter((_operation, index) => rejectedIndexes.has(index))
-			: result.ok
-				? []
-				: operations;
-	const references = new Set<string>();
-	for (const operation of rejectedOperations) {
-		for (const evidence of operation.evidence ?? []) {
-			if (!isRecord(evidence)) continue;
-			const sourceRef = readNonEmptyString(evidence.source_ref);
-			if (sourceRef) references.add(sourceRef);
-		}
-	}
-	return sources.filter((source) => references.has(`${source.kind}:${source.id}`));
-}
-
-/** Recover cited sources when tool-schema validation rejects an operation before the apply seam runs. */
-function operationEvidenceFromToolInput(input: unknown): readonly Pick<DreamingOperationRequest, "evidence">[] {
-	if (!isRecord(input) || !Array.isArray(input.operations)) return [];
-	return input.operations.flatMap((operation) => {
-		if (!isRecord(operation) || !Array.isArray(operation.evidence)) return [];
-		return [{ evidence: operation.evidence }];
-	});
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +517,8 @@ export function getDreamingEvidenceExclusions(
 			db
 				.prepare(
 					`SELECT source_kind AS sourceKind, source_id AS sourceId, reason,
+				        failure_class AS failureClass, source_fingerprint AS sourceFingerprint,
+				        retry_count AS retryCount, last_requeued_at AS lastRequeuedAt,
 				        pass_id AS passId, excluded_at AS excludedAt,
 				        requeue_requested_at AS requeueRequestedAt, resolved_at AS resolvedAt
 				 FROM dreaming_evidence_exclusions
@@ -581,37 +553,6 @@ export function requestDreamingEvidenceRequeue(
 		});
 		return true;
 	});
-}
-
-function recordDreamingEvidenceExclusionsInTx(
-	db: WriteDb,
-	agentId: string,
-	passId: string,
-	sources: readonly EpisodicSourceRecord[],
-	reason: string,
-): void {
-	const statement = db.prepare(
-		`INSERT INTO dreaming_evidence_exclusions
-		 (agent_id, source_kind, source_id, reason, pass_id, excluded_at, requeue_requested_at, resolved_at)
-			 VALUES (?, ?, ?, ?, ?, datetime('now'), NULL, NULL)
-		 ON CONFLICT(agent_id, source_kind, source_id) DO UPDATE SET
-		   reason = excluded.reason,
-		   pass_id = excluded.pass_id,
-		   excluded_at = excluded.excluded_at,
-		   requeue_requested_at = NULL,
-		   resolved_at = NULL`,
-	);
-	for (const source of sources) statement.run(agentId, source.kind, source.id, reason, passId);
-}
-
-function resolveRequeuedEvidenceInTx(db: WriteDb, agentId: string, sources: readonly EpisodicSourceRecord[]): void {
-	const statement = db.prepare(
-		`UPDATE dreaming_evidence_exclusions
-		 SET resolved_at = datetime('now')
-		 WHERE agent_id = ? AND source_kind = ? AND source_id = ?
-		   AND requeue_requested_at IS NOT NULL AND resolved_at IS NULL`,
-	);
-	for (const source of sources) statement.run(agentId, source.kind, source.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,7 +1273,7 @@ export async function runDreamingAgentPass(
 
 		let applyCallbackReported = false;
 		let retirementCandidates: DreamingRetirementCandidates = new Map();
-		const rejectedEvidence: EpisodicSourceRecord[] = [];
+		const rejectedEvidence: RejectedDreamingEvidence[] = [];
 		// The newest captured_at each scope's search_evidence surfaced this
 		// pass; the pass-end watermark may advance only to it (#1149).
 		const surfacedWatermarkByScope = new Map<string, string>();
@@ -1353,7 +1294,8 @@ export async function runDreamingAgentPass(
 				if (!result.ok && result.items.length === 0) failed++;
 				recordDreamingOperationEffects(accessor, scopeId, effects, result, operations, retirementCandidates);
 				retirementCandidates = new Map();
-				rejectedEvidence.push(...rejectedAgentEvidence(result, operations, []));
+				accessor.withWriteTx((db) => resolveRequeuedDreamingEvidenceInTx(db, scopeId, result, operations));
+				rejectedEvidence.push(...collectRejectedDreamingEvidence(accessor, scopeId, result, operations));
 			},
 			onToolCall(trace) {
 				recordDreamingToolCall(accessor, agentId, passId, ++toolCallSequence, trace);
@@ -1389,9 +1331,17 @@ export async function runDreamingAgentPass(
 				}
 				if (trace.tool === "apply_ontology_ops") {
 					if (!trace.output.ok && !applyCallbackReported) {
-						rejectedEvidence.push(
-							...rejectedAgentEvidence({ ok: false, items: [] }, operationEvidenceFromToolInput(trace.input), []),
-						);
+						const input = isRecord(trace.input) ? trace.input : null;
+						const operations = input?.operations;
+						if (Array.isArray(operations)) {
+							const evidenceOperations = operations.flatMap((operation) => {
+								if (!isRecord(operation)) return [];
+								return [{ evidence: Array.isArray(operation.evidence) ? operation.evidence : [] }];
+							});
+							rejectedEvidence.push(
+								...collectRejectedDreamingEvidence(accessor, agentId, { ok: false, items: [] }, evidenceOperations),
+							);
+						}
 						failed++;
 					}
 					applyCallbackReported = false;
@@ -1465,7 +1415,7 @@ export async function runDreamingAgentPass(
 				summary,
 				passId,
 			);
-			recordDreamingEvidenceExclusionsInTx(db, agentId, passId, rejectedEvidence, "semantic_operation_rejected");
+			recordRejectedDreamingEvidenceInTx(db, passId, rejectedEvidence);
 			// The evidence queue resets to the pass watermark for EVERY scope
 			// the pass consumed evidence for: the next pass's backlog counts
 			// only sources captured after the surfaced frontier. A hygiene

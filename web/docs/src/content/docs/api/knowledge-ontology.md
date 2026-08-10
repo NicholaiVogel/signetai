@@ -400,6 +400,8 @@ episodic evidence. Requires `admin` permission.
       "sourceKind": "artifact",
       "sourceId": "sources/notebook/large-export.md",
       "reason": "semantic_operation_rejected",
+      "failureClass": "quote_mismatch",
+      "retryCount": 0,
       "passId": "pass-uuid",
       "excludedAt": "2026-04-01 12:00:00",
       "requeueRequestedAt": null,
@@ -424,6 +426,16 @@ not modify or discard the underlying episodic evidence. Current Dreaming passes
 record `semantic_operation_rejected` when the daemon rejects an agent's cited
 semantic operation. Oversized immutable evidence is instead resumed at a safe
 boundary across passes and is not quarantined.
+
+Transient exclusions are classified as `incomplete_transcript`,
+`source_projection`, `scope_mismatch`, or `quote_mismatch`. The worker compares
+the current canonical source fingerprint with the quarantined fingerprint and
+automatically requests a bounded retry when a repair is visible. Automatic
+retries use the repair cooldown and hourly budget, allow at most three attempts
+per exclusion, and mint the same scoped `evidence_requeue` attention as an
+explicit request. An unchanged source, an unknown failure, or a source outside
+the agent scope remains quarantined. The exclusion row stays auditable until a
+subsequent accepted citation resolves it.
 
 An attention item is selected with the next scoped pass and rendered as
 non-evidentiary context. It resolves when the pass applies a hygiene operation

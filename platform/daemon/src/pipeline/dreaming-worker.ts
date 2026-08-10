@@ -26,6 +26,7 @@ import {
 	shouldTriggerDreaming,
 } from "./dreaming";
 import { getDreamingAttentionInDb } from "./dreaming-attention";
+import { type DreamingEvidenceRetryPolicy, autoRequeueRepairedDreamingEvidence } from "./dreaming-evidence-retry";
 
 /** Thrown when a trigger is attempted while a pass is already in-flight. */
 export class AlreadyRunningError extends Error {
@@ -68,6 +69,8 @@ export interface DreamingWorkerOptions {
 		readonly daemonUrl: string;
 		readonly authorizationTokenForAgent?: (agentId: string) => string | undefined;
 	};
+	/** Repair-aware automatic evidence requeue policy. */
+	readonly evidenceRetry?: DreamingEvidenceRetryPolicy;
 }
 
 const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 min
@@ -108,6 +111,8 @@ export function getDreamingWorkerAgentIds(accessor: DbAccessor, defaultAgentId: 
 				 SELECT DISTINCT agent_id AS id FROM session_transcripts
 				 UNION ALL
 				 SELECT DISTINCT agent_id AS id FROM dreaming_attention WHERE resolved_at IS NULL
+				 UNION ALL
+				 SELECT DISTINCT agent_id AS id FROM dreaming_evidence_exclusions WHERE resolved_at IS NULL
 				 UNION ALL
 				 SELECT DISTINCT agent_id AS id FROM entities`,
 			)
@@ -183,6 +188,11 @@ export function startDreamingWorker(
 	const getAgentScopes = createAgentScopeSnapshot(AGENT_SCOPE_SNAPSHOT_REFRESH_MS, () =>
 		getDreamingWorkerAgentIds(accessor, defaultAgentId),
 	);
+	const evidenceRetry: DreamingEvidenceRetryPolicy = options.evidenceRetry ?? {
+		cooldownMs: 60_000,
+		hourlyBudget: 50,
+		maxAttempts: 3,
+	};
 	const executorForAgent = (agentId: string): DreamingAgentExecutor => {
 		const factory = options.executorFactory;
 		if (factory) return factory(agentId);
@@ -301,6 +311,13 @@ export function startDreamingWorker(
 		// sweep runs one pass when any scope has attention or a backlog; the
 		// pass itself addresses scopes via the per-call agentId on its tools.
 		const scopes = getAgentScopes();
+		const autoRequeued = autoRequeueRepairedDreamingEvidence(accessor, evidenceRetry);
+		if (autoRequeued > 0) {
+			logger.info("dreaming-worker", "Automatically requeued repaired Dreaming evidence", {
+				affected: autoRequeued,
+				budget: evidenceRetry.hourlyBudget,
+			});
+		}
 		let triggered = false;
 		for (const scopeId of scopes) {
 			if (stopped || active) return;

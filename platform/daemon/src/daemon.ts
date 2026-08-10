@@ -221,7 +221,11 @@ import { registerSecretRoutes } from "./routes/secrets-routes.js";
 import { registerSessionRoutes } from "./routes/session-routes.js";
 import { mountSkillAnalyticsRoutes } from "./routes/skill-analytics.js";
 import { mountSkillsRoutes, setFetchEmbedding } from "./routes/skills.js";
-import { cleanupSourceDeletionTombstones, registerSourcesRoutes, stopSourceIndexJobs } from "./routes/sources-routes.js";
+import {
+	cleanupSourceDeletionTombstones,
+	registerSourcesRoutes,
+	stopSourceIndexJobs,
+} from "./routes/sources-routes.js";
 import { registerTelemetryRoutes } from "./routes/telemetry-routes.js";
 import { checkEmbeddingProvider } from "./routes/utils.js";
 import { mountWidgetRoutes } from "./routes/widget.js";
@@ -1631,6 +1635,11 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 										Math.max(900, Math.ceil(memoryCfg.dreaming.timeout / 1000) + 60),
 									)
 								: undefined,
+					},
+					evidenceRetry: {
+						cooldownMs: memoryCfg.pipelineV2.repair.requeueCooldownMs,
+						hourlyBudget: memoryCfg.pipelineV2.repair.requeueHourlyBudget,
+						maxAttempts: 3,
 					},
 				},
 				graphWriteCaps(memoryCfg),
