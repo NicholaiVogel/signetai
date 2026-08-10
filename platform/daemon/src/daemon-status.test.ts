@@ -85,6 +85,35 @@ describe("daemon status contract", () => {
 		).toBe(true);
 	});
 
+	it("reports unknown queue completeness when the status read fails", async () => {
+		const { getDbAccessor } = await import("./db-accessor");
+		const { pipelineQueueBlock } = await import("./routes/pipeline-routes");
+		const accessor = getDbAccessor();
+		const originalWithReadDb = accessor.withReadDb;
+		accessor.withReadDb = () => {
+			throw new Error("synthetic queue read failure");
+		};
+
+		try {
+			const queue = pipelineQueueBlock();
+			expect(queue.memory).toEqual({
+				pending: 0,
+				leased: 0,
+				completed: 0,
+				failed: 0,
+				dead: 0,
+				oldestAgeSec: 0,
+				oldestDeadAgeSec: 0,
+				lastError: null,
+				completeness: "unknown",
+			});
+			expect(queue.summary.completeness).toBe("unknown");
+			expect(queue.oldestDeadSummaryJob).toBeNull();
+		} finally {
+			accessor.withReadDb = originalWithReadDb;
+		}
+	});
+
 	it("exposes providerResolution.extraction runtime fields on /api/status", async () => {
 		const res = await app.request("http://localhost/api/status");
 		expect(res.status).toBe(200);
