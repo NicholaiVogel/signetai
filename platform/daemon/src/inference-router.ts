@@ -299,6 +299,8 @@ function buildPromptFromMessages(messages: ReadonlyArray<{ readonly role: string
 export class InferenceRouter {
 	private configCache: RouterResult<LoadedRoutingConfig> | null = null;
 	private configLoad: Promise<RouterResult<LoadedRoutingConfig>> | null = null;
+	// Coalesce explicit refreshes without letting one join a non-refresh load.
+	private configLoadForced = false;
 	private configGeneration = 0;
 	private snapshotCache: SnapshotCacheEntry | null = null;
 	private readonly snapshotFlights = new Map<string, Promise<RoutingRuntimeSnapshot>>();
@@ -428,6 +430,7 @@ export class InferenceRouter {
 		this.configGeneration += 1;
 		this.configCache = null;
 		this.configLoad = null;
+		this.configLoadForced = false;
 		this.providerCacheSignature = null;
 		this.lastValidationSignature = null;
 		this.providerCache.clear();
@@ -437,6 +440,7 @@ export class InferenceRouter {
 	}
 
 	private async loadConfig(forceReload = false): Promise<RouterResult<LoadedRoutingConfig>> {
+		if (forceReload && this.configLoad && this.configLoadForced) return this.configLoad;
 		if (forceReload) this.invalidateConfig();
 		if (this.configCache) return this.configCache;
 		if (this.configLoad) return this.configLoad;
@@ -448,9 +452,12 @@ export class InferenceRouter {
 			return result;
 		});
 		const tracked = pending.finally(() => {
-			if (this.configLoad === tracked) this.configLoad = null;
+			if (this.configLoad !== tracked) return;
+			this.configLoad = null;
+			this.configLoadForced = false;
 		});
 		this.configLoad = tracked;
+		this.configLoadForced = forceReload;
 		return tracked;
 	}
 

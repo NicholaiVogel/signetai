@@ -465,7 +465,7 @@ printf 'never reached\\n'
 		}
 	});
 
-	it("single-flights concurrent runtime snapshot probes and cleans up failed flights (#1329)", async () => {
+	it("coalesces async config refreshes and cleans up runtime probe flights (#1327, #1329)", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "signet-router-snapshot-flight-"));
 		try {
 			mkdirSync(join(dir, "memory"), { recursive: true });
@@ -509,6 +509,9 @@ printf 'never reached\\n'
 			}) as unknown as typeof fetch;
 
 			const router = getOrCreateInferenceRouter(dir);
+			// Force refreshes must share the async config load as well as the
+			// runtime probe. Otherwise the second load clears the first snapshot
+			// flight and both callers wait on independent probes.
 			const first = router.status(true);
 			const second = router.status(true);
 			await probeStarted;
@@ -520,6 +523,7 @@ printf 'never reached\\n'
 			expect(results[0]?.ok).toBe(true);
 			expect(results[1]?.ok).toBe(true);
 			if (!results[0]?.ok || !results[1]?.ok) return;
+			expect(results[0].value.runtimeSnapshot).toBe(results[1].value.runtimeSnapshot);
 			expect(results[0].value.runtimeSnapshot.targets["local/default"]?.available).toBe(true);
 			expect(results[1].value.runtimeSnapshot.targets["local/default"]?.available).toBe(true);
 
