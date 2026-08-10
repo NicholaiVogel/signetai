@@ -1,3 +1,5 @@
+import { readFile, stat } from "node:fs/promises";
+import { basename } from "node:path";
 import { addImportedSource, loadSourcesConfig, markSourceIndexed, removeSource } from "@signet/core";
 import type { Hono } from "hono";
 import { resolveDaemonAgentId } from "../agent-id";
@@ -8,8 +10,10 @@ import {
 	IMPORT_MAX_FILE_BYTES,
 	normalizeImportedFile,
 } from "../import-normalizer";
+import { markImportedSourceUnsupported } from "../imported-source-lifecycle";
 import { logger } from "../logger";
 import { indexExternalMemoryArtifact } from "../memory-lineage";
+import { enqueueDreamingAttentionInTx } from "../pipeline/dreaming-attention";
 import { indexSourceArtifactStructure } from "../source-artifact-graph";
 import { purgeSourceOwnedRows } from "../source-purge";
 
@@ -44,19 +48,48 @@ export function registerImportRoutes(app: Hono): void {
 				return c.json({ error: `Import batch exceeds the ${IMPORT_MAX_BATCH_BYTES} byte limit` }, 413);
 			return c.json({ error: "Expected a multipart form with files" }, 400);
 		}
-		const entries = form.getAll("files").filter((entry): entry is File => entry instanceof File);
-		if (entries.length === 0) return c.json({ error: "At least one file is required" }, 400);
-		if (entries.length > IMPORT_MAX_FILES)
+		const uploadedEntries = form.getAll("files").filter((entry): entry is File => entry instanceof File);
+		const pathEntries = form
+			.getAll("paths")
+			.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+		if (pathEntries.length > 0 && !isLoopbackRequest(c.req.raw))
+			return c.json({ error: "Filesystem path imports are only available on a local daemon" }, 400);
+		if (uploadedEntries.length + pathEntries.length === 0)
+			return c.json({ error: "At least one file is required" }, 400);
+		if (uploadedEntries.length + pathEntries.length > IMPORT_MAX_FILES)
 			return c.json({ error: `Import accepts at most ${IMPORT_MAX_FILES} files` }, 413);
 
 		const duplicateModeValue = form.get("duplicateMode");
 		const duplicateMode =
 			duplicateModeValue === "replace" || duplicateModeValue === "reimport" ? duplicateModeValue : "skip";
+		const statuses: ImportFileStatus[] = [];
+		const pathFiles: File[] = [];
+		for (const path of pathEntries) {
+			try {
+				const fileStat = await stat(path);
+				if (!fileStat.isFile()) throw new Error("path is not a file");
+				if (fileStat.size > IMPORT_MAX_FILE_BYTES) {
+					statuses.push({
+						fileName: basename(path),
+						status: "failed",
+						error: `File exceeds the ${IMPORT_MAX_FILE_BYTES} byte limit`,
+					});
+					continue;
+				}
+				pathFiles.push(new File([new Uint8Array(await readFile(path))], basename(path)));
+			} catch (error) {
+				statuses.push({
+					fileName: basename(path),
+					status: "failed",
+					error: error instanceof Error ? error.message : "Could not read file",
+				});
+			}
+		}
+		const entries = [...uploadedEntries, ...pathFiles];
 		const totalBytes = entries.reduce((total, file) => total + file.size, 0);
 		if (totalBytes > IMPORT_MAX_BATCH_BYTES)
 			return c.json({ error: `Import batch exceeds the ${IMPORT_MAX_BATCH_BYTES} byte limit` }, 413);
 
-		const statuses: ImportFileStatus[] = [];
 		let imported = 0;
 		for (const file of entries) {
 			if (file.size > IMPORT_MAX_FILE_BYTES) {
@@ -101,11 +134,13 @@ export function registerImportRoutes(app: Hono): void {
 
 			try {
 				const sourcePath = `imports/${added.source.id}/${normalized.value.fileName}`;
+				const sourceKind = `source_import_${normalized.value.format}`;
 				const now = new Date().toISOString();
+				const agentId = resolveDaemonAgentId();
 				indexExternalMemoryArtifact({
-					agentId: resolveDaemonAgentId(),
+					agentId,
 					sourcePath,
-					sourceKind: "import",
+					sourceKind: normalized.value.format === "json" ? "source_import_json_projection" : sourceKind,
 					harness: "dashboard-import",
 					content: normalized.value.content,
 					sourceMtimeMs: Date.now(),
@@ -115,18 +150,63 @@ export function registerImportRoutes(app: Hono): void {
 					sourceExternalId: normalized.value.contentHash,
 					sourceMeta: normalized.value.sourceMeta,
 				});
+				if (normalized.value.format === "json") {
+					indexExternalMemoryArtifact({
+						agentId,
+						sourcePath: `${sourcePath}#canonical`,
+						sourceKind: "source_import_json_canonical",
+						harness: "dashboard-import",
+						content: normalized.value.content,
+						sourceMtimeMs: Date.now(),
+						capturedAt: now,
+						sourceId: added.source.id,
+						sourceRoot: normalized.value.fileName,
+						sourceExternalId: normalized.value.contentHash,
+						sourceMeta: { ...normalized.value.sourceMeta, representation: "structured-json-canonical" },
+					});
+				}
 				indexSourceArtifactStructure({
-					agentId: resolveDaemonAgentId(),
+					agentId,
 					sourceId: added.source.id,
-					sourceKind: "import",
+					sourceKind,
 					sourceRoot: normalized.value.fileName,
 					sourcePath,
 					displayName: normalized.value.fileName,
 					content: normalized.value.content,
 				});
+				for (const chunk of normalized.value.searchChunks) {
+					const rowStart = typeof chunk.sourceMeta.rowStart === "number" ? chunk.sourceMeta.rowStart : 0;
+					const rowEnd = typeof chunk.sourceMeta.rowEnd === "number" ? chunk.sourceMeta.rowEnd : rowStart;
+					indexExternalMemoryArtifact({
+						agentId,
+						sourcePath: `${sourcePath}#rows-${rowStart}-${rowEnd}`,
+						sourceKind: "source_import_csv_chunk",
+						harness: "dashboard-import",
+						content: chunk.content,
+						sourceMtimeMs: Date.now(),
+						capturedAt: now,
+						sourceId: added.source.id,
+						sourceRoot: normalized.value.fileName,
+						sourceExternalId: normalized.value.contentHash,
+						sourceMeta: { ...normalized.value.sourceMeta, ...chunk.sourceMeta },
+					});
+				}
+				getDbAccessor().withWriteTx((db) => {
+					enqueueDreamingAttentionInTx(db, {
+						agentId,
+						kind: "hygiene",
+						subjectRef: `source:${added.source.id}`,
+						details: { sourceId: added.source.id, sourceKind, reason: "import-completed" },
+						priority: 40,
+					});
+				});
 				if (replacedSource !== undefined) {
 					try {
-						purgeSourceOwnedRows({ sourceId: replacedSource.id, agentId: resolveDaemonAgentId() });
+						markImportedSourceUnsupported({
+							sourceId: replacedSource.id,
+							agentId: resolveDaemonAgentId(),
+							reason: "imported source replaced",
+						});
 					} catch (cleanupError) {
 						logger.warn("documents", "Replaced dashboard import purge failed", {
 							sourceId: replacedSource.id,
@@ -172,6 +252,11 @@ export function registerImportRoutes(app: Hono): void {
 		const failed = statuses.filter((status) => status.status === "failed").length;
 		return c.json({ imported, failed, files: statuses }, failed > 0 ? 207 : 201);
 	});
+}
+
+function isLoopbackRequest(request: Request): boolean {
+	const hostname = new URL(request.url).hostname;
+	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
 }
 
 function hasIndexedSource(sourceId: string, agentId: string): boolean {

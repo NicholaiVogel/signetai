@@ -180,16 +180,29 @@ Import one or more files as durable, read-only source artifacts. The request is
 `replace` or `reimport`.
 
 The dashboard importer accepts text, Markdown, JSON, HTML, CSV, and document
-formats supported by AnyDoc (`doc`, `docx`, `odt`, `rtf`, `pdf`, `ppt`, `pptx`,
-`odp`, `epub`, `xls`, `xlsx`, and `ods`). JSON remains a structured JSON
-projection; CSV remains one table artifact with row metadata; document formats
-are converted to a Markdown projection. Raw upload bytes are not retained by
-the importer.
+formats supported by AnyDoc (`doc`, `docx`, `docm`, `odt`, `rtf`, `pdf`, `ppt`,
+`pptx`, `ppsx`, `odp`, `epub`, `xls`, `xlsx`, `xlsm`, and `ods`). JSON is stored
+as both a structured canonical artifact and a searchable projection. CSV keeps
+one table artifact and adds bounded searchable row-range chunks with row-range
+provenance. Document formats are converted to a Markdown projection. Raw upload
+bytes are not retained by the importer.
+
+A local desktop daemon may also receive repeated `paths` fields instead of
+`files`; it reads those paths directly only for loopback requests. Remote
+clients must upload file bytes through `files`, so a desktop path is never
+interpreted by a remote daemon.
+
+Imported artifacts are available immediately through source-backed recall, with
+`source_id` and `source_path` pointing back to the imported source. Import
+completion queues a hygiene Dreaming attention for asynchronous semantic
+processing. Removing or replacing an imported source removes its searchable
+artifacts, preserves derived provenance rows, records an `unsupported`
+lifecycle marker, and queues another hygiene review rather than silently
+deleting derived ontology.
 
 The default safety bounds are 25 files per request, 25 MiB per file, and 100
 MiB per batch. Each file returns an individual result so a mixed batch can
-partially succeed. A successful import is indexed immediately for source-backed
-recall; semantic Dreaming remains asynchronous.
+partially succeed.
 
 **Response**
 
@@ -206,6 +219,20 @@ recall; semantic Dreaming remains asynchronous.
       "duplicate": false
     }
   ]
+}
+```
+
+### POST /api/sources/pick-files
+
+Open the native multi-file picker on a local desktop daemon. This endpoint is
+loopback-only and returns filesystem paths for a subsequent `paths`-based import.
+A remote client must upload bytes through `POST /api/sources/import` instead.
+
+**Response**
+
+```json
+{
+  "paths": ["/home/user/Downloads/export.json"]
 }
 ```
 

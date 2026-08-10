@@ -129,6 +129,7 @@ import { up as sourceLifecycleTelemetry } from "./120-source-lifecycle-telemetry
 import { up as telemetryDeliveryHealth } from "./121-telemetry-delivery-health";
 import { up as dreamingEvidenceRetry } from "./122-dreaming-evidence-retry";
 import { up as embeddingIndexFailures } from "./123-embedding-index-failures";
+import { up as importedDerivedLifecycle } from "./124-import-derived-lifecycle";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1162,6 +1163,14 @@ export const MIGRATIONS: readonly Migration[] = [
 		name: "embedding-index-failures",
 		up: embeddingIndexFailures,
 		artifacts: { tables: ["embedding_index_failures"] },
+	},
+	{
+		version: 124,
+		name: "import-derived-lifecycle",
+		up: importedDerivedLifecycle,
+		artifacts: {
+			tables: ["imported_source_lifecycle"],
+		},
 	},
 ];
 

@@ -710,10 +710,12 @@ export const api = {
 	importSources: async (
 		files: readonly File[],
 		duplicateMode: "skip" | "replace" | "reimport" = "skip",
+		paths: readonly string[] = [],
 	): Promise<{ ok: boolean; data?: ImportSourcesResponse; error?: string }> => {
 		try {
 			const form = new FormData();
 			for (const file of files) form.append("files", file, file.name);
+			for (const path of paths) form.append("paths", path);
 			form.set("duplicateMode", duplicateMode);
 			const res = await fetch(`${API_BASE}/api/sources/import`, {
 				method: "POST",
@@ -722,6 +724,21 @@ export const api = {
 			});
 			const data = (await res.json().catch(() => null)) as (ImportSourcesResponse & { error?: string }) | null;
 			return { ok: res.ok || res.status === 207, data: data ?? undefined, error: data?.error };
+		} catch {
+			return { ok: false, error: "daemon unreachable" };
+		}
+	},
+	/** POST /api/sources/pick-files — native multi-file picker for a local desktop daemon. */
+	pickFiles: async (): Promise<{ ok: boolean; paths?: string[]; unavailable?: boolean; error?: string }> => {
+		try {
+			const res = await fetch(`${API_BASE}/api/sources/pick-files`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", ...authHeaders() },
+				body: JSON.stringify({ title: "Choose files to import" }),
+			});
+			const body = (await res.json().catch(() => null)) as { paths?: string[]; error?: string } | null;
+			if (res.status === 501) return { ok: false, unavailable: true, error: body?.error };
+			return res.ok && Array.isArray(body?.paths) ? { ok: true, paths: body.paths } : { ok: false, error: body?.error };
 		} catch {
 			return { ok: false, error: "daemon unreachable" };
 		}

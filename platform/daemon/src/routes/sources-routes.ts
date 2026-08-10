@@ -191,6 +191,20 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 		return c.json({ path: result.path });
 	});
 
+	app.post("/api/sources/pick-files", async (c) => {
+		if (!isLoopbackRequest(c.req.raw)) return c.json({ error: "Native file picking is local-only" }, 400);
+		let body: PickDirectoryBody = {};
+		try {
+			body = (await c.req.json().catch(() => ({}))) as PickDirectoryBody;
+		} catch {
+			body = {};
+		}
+
+		const result = await pickFiles(body.title ?? "Choose files");
+		if (result.ok === false) return c.json({ error: result.error }, 501);
+		return c.json({ paths: result.paths });
+	});
+
 	app.post("/api/sources/obsidian", async (c) => {
 		let body: AddObsidianSourceBody = {};
 		try {
@@ -1130,6 +1144,73 @@ function countRow(row: unknown): number {
 	return typeof row === "object" && row !== null && "n" in row && typeof (row as { n?: unknown }).n === "number"
 		? (row as { n: number }).n
 		: 0;
+}
+
+async function pickFiles(title: string): Promise<{ ok: true; paths: string[] } | { ok: false; error: string }> {
+	const trimmedTitle = title.trim() || "Choose files";
+	const errors: string[] = [];
+
+	for (const candidate of filePickerCommands(trimmedTitle)) {
+		try {
+			const { stdout } = await execFileAsync(candidate.command, candidate.args, { timeout: 120_000 });
+			const paths = stdout
+				.split(/\r?\n|\|/)
+				.map((path) => path.trim())
+				.filter((path) => path.length > 0);
+			if (paths.length > 0) return { ok: true, paths };
+		} catch (err) {
+			errors.push(`${candidate.command}: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	return {
+		ok: false,
+		error: `No native file picker is available for this daemon environment. Tried: ${errors.join("; ")}`,
+	};
+}
+
+function isLoopbackRequest(request: Request): boolean {
+	const hostname = new URL(request.url).hostname;
+	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
+}
+
+function filePickerCommands(title: string): Array<{ command: string; args: string[] }> {
+	if (process.env.SIGNET_FILE_PICKER) {
+		return [{ command: process.env.SIGNET_FILE_PICKER, args: [] }];
+	}
+
+	if (process.platform === "darwin") {
+		return [
+			{
+				command: "osascript",
+				args: [
+					"-e",
+					`set picked to choose file with prompt ${JSON.stringify(title)} with multiple selections allowed\nset output to ""\nrepeat with itemRef in picked\nset output to output & POSIX path of itemRef & linefeed\nend repeat\nreturn output`,
+				],
+			},
+		];
+	}
+
+	if (process.platform === "win32") {
+		return [
+			{
+				command: "powershell.exe",
+				args: [
+					"-NoProfile",
+					"-Command",
+					`Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Multiselect = $true; $d.Title = ${JSON.stringify(title)}; if ($d.ShowDialog() -eq 'OK') { $d.FileNames -join [Environment]::NewLine }`,
+				],
+			},
+		];
+	}
+
+	return [
+		{ command: "zenity", args: ["--file-selection", "--multiple", "--separator=|", "--title", title] },
+		{
+			command: "kdialog",
+			args: ["--getopenfilename", homedir(), "*", "--multiple", "--separate-output", "--title", title],
+		},
+	];
 }
 
 async function pickDirectory(title: string): Promise<{ ok: true; path: string } | { ok: false; error: string }> {

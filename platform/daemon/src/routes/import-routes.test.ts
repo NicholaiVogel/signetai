@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSourcesConfig } from "@signet/core";
 import { Hono } from "hono";
-import { closeDbAccessor, initDbAccessor } from "../db-accessor";
+import { closeDbAccessor, getDbAccessor, initDbAccessor } from "../db-accessor";
 import { IMPORT_MAX_BATCH_BYTES } from "../import-normalizer";
 import { registerImportRoutes } from "./import-routes";
 
@@ -65,6 +65,51 @@ describe("import routes", () => {
 		expect(body.files[0]?.status).toBe("imported");
 		expect(loadSourcesConfig(dir).sources[0]?.kind).toBe("import");
 		expect(loadSourcesConfig(dir).sources[0]?.providerSettings?.format).toBe("json");
+		const artifacts = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare("SELECT source_kind, source_path, source_meta_json FROM memory_artifacts ORDER BY source_path")
+					.all() as Array<{ source_kind: string; source_path: string; source_meta_json: string }>,
+		);
+		expect(artifacts.map((row) => row.source_kind).sort()).toEqual(
+			["source_import_json_canonical", "source_import_json_projection"].sort(),
+		);
+		const canonical = artifacts.find((row) => row.source_kind === "source_import_json_canonical");
+		expect(JSON.parse(canonical?.source_meta_json ?? "{}")).toMatchObject({
+			representation: "structured-json-canonical",
+		});
+		const attention = getDbAccessor().withReadDb(
+			(db) =>
+				db.prepare("SELECT subject_ref, kind FROM dreaming_attention").all() as Array<{
+					subject_ref: string;
+					kind: string;
+				}>,
+		);
+		expect(attention).toContainEqual({ subject_ref: `source:${body.files[0]?.sourceId}`, kind: "hygiene" });
+	});
+
+	it("imports a selected local filesystem path and rejects remote path acquisition", async () => {
+		const path = join(dir, "selected.json");
+		writeFileSync(path, '{"selected":true}');
+		const localForm = new FormData();
+		localForm.append("paths", path);
+		const localResponse = await app().request("http://localhost/api/sources/import", {
+			method: "POST",
+			body: localForm,
+		});
+		expect(localResponse.status).toBe(201);
+		expect((await localResponse.json()).imported).toBe(1);
+
+		const remoteForm = new FormData();
+		remoteForm.append("paths", path);
+		const remoteResponse = await app().request("https://remote.example/api/sources/import", {
+			method: "POST",
+			body: remoteForm,
+		});
+		expect(remoteResponse.status).toBe(400);
+		expect(await remoteResponse.json()).toEqual({
+			error: "Filesystem path imports are only available on a local daemon",
+		});
 	});
 
 	it("reports duplicates without creating a second source", async () => {
@@ -76,8 +121,24 @@ describe("import routes", () => {
 		});
 
 		expect(first.status).toBe(201);
+		const chunks = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare("SELECT source_kind, source_meta_json FROM memory_artifacts WHERE source_kind = ?")
+					.all("source_import_csv_chunk") as Array<{ source_kind: string; source_meta_json: string }>,
+		);
+		expect(chunks).toHaveLength(1);
+		expect(JSON.parse(chunks[0]?.source_meta_json ?? "{}")).toMatchObject({
+			representation: "table-row-range",
+			rowStart: 1,
+			rowEnd: 1,
+		});
 		expect(second.status).toBe(201);
-		const body = (await second.json()) as { imported: number; failed: number; files: Array<{ status: string }> };
+		const body = (await second.json()) as {
+			imported: number;
+			failed: number;
+			files: Array<{ fileName: string; status: string; sourceId: string }>;
+		};
 		expect(body).toEqual({
 			imported: 0,
 			failed: 0,
@@ -120,12 +181,33 @@ describe("import routes", () => {
 		});
 
 		expect(first.status).toBe(201);
+		const firstBody = (await first.json()) as { files: Array<{ sourceId: string }> };
 		expect(second.status).toBe(201);
 		expect(await second.json()).toMatchObject({
 			imported: 1,
 			failed: 0,
 			files: [{ fileName: "new-name.csv", status: "imported", duplicate: true }],
 		});
+		const lifecycle = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare("SELECT status, reason FROM imported_source_lifecycle WHERE source_id = ?")
+					.all(firstBody.files[0]?.sourceId) as Array<{
+					status: string;
+					reason: string;
+				}>,
+		);
+		expect(lifecycle).toEqual([{ status: "unsupported", reason: "imported source replaced" }]);
+		expect(
+			getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare("SELECT COUNT(*) AS count FROM memory_artifacts WHERE source_id = ?")
+						.get(firstBody.files[0]?.sourceId) as {
+						count: number;
+					},
+			).count,
+		).toBe(0);
 		expect(loadSourcesConfig(dir).sources).toMatchObject([
 			{ kind: "import", providerSettings: { fileName: "new-name.csv" } },
 		]);

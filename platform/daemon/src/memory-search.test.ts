@@ -463,6 +463,42 @@ describe("hybridRecall", () => {
 		});
 	});
 
+	it("recalls imported source artifacts through the source-backed fallback", async () => {
+		indexExternalMemoryArtifact({
+			agentId: "default",
+			sourcePath: "imports/source-csv/contacts.csv#rows-1-1",
+			sourceKind: "source_import_csv_chunk",
+			harness: "dashboard-import",
+			content: "name,email\nAda,ada@example.com\n",
+			sourceMtimeMs: Date.now(),
+			sourceId: "source-csv",
+			sourceRoot: "contacts.csv",
+			sourceExternalId: "csv-hash",
+			sourceMeta: { representation: "table-row-range", rowStart: 1, rowEnd: 1 },
+		});
+
+		const result = await hybridRecall(
+			{
+				query: "ada@example.com",
+				keywordQuery: "ada@example.com",
+				limit: 3,
+				agentId: "default",
+				readPolicy: "isolated",
+				sourceOnly: true,
+			},
+			testCfg(),
+			async () => null,
+		);
+
+		expect(result.results[0]).toMatchObject({
+			source: "source_import",
+			type: "source_import_csv_chunk",
+			source_id: "source-csv",
+			source_path: "imports/source-csv/contacts.csv#rows-1-1",
+		});
+		expect(result.results[0]?.content).toContain("Ada");
+	});
+
 	it("skips source chunk vector fallback for project-scoped recall", async () => {
 		const now = new Date().toISOString();
 		const vec = unitVector();

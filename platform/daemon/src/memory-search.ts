@@ -885,10 +885,14 @@ function nativeArtifactRecallContent(hit: NativeArtifactRecallHit): string {
 	if (hit.harness === "obsidian") {
 		return `[Obsidian vault note: ${hit.sourcePath}]\n${hit.content}`;
 	}
+	if (hit.sourceKind.startsWith("source_import_")) {
+		return `[Imported source: ${hit.sourcePath}]\n${hit.content}`;
+	}
 	return `[Native ${hit.harness ?? "harness"} memory: ${hit.sourcePath}]\n${hit.content}`;
 }
 
 function nativeArtifactRecallSource(hit: NativeArtifactRecallHit): string {
+	if (hit.sourceKind.startsWith("source_import_")) return "source_import";
 	return hit.harness === "obsidian" ? "source_obsidian" : "native_memory";
 }
 
@@ -2306,7 +2310,8 @@ export async function hybridRecall(
 				nativeHits.slice(0, fallbackLimit).map((hit): RecallResult => {
 					const content = nativeArtifactRecallContent(hit);
 					const truncated = content.length > recallTruncate;
-					const sourceId = nativeArtifactPublicId(hit);
+					const sourceId =
+						hit.sourceKind.startsWith("source_import_") && hit.sourceId ? hit.sourceId : nativeArtifactPublicId(hit);
 					if (hit.sourceId)
 						lifecycleSourceResults.set(`native-artifact:${hit.rowid}`, {
 							source: nativeArtifactRecallSource(hit),

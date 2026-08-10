@@ -1,12 +1,12 @@
 import type { SignetSourceEntry, SignetSourceKind, SourceFailureState } from "@signet/core";
 import { discordSourceProvider } from "./discord-source-provider";
 import { githubSourceProvider } from "./github-source-provider";
+import { markImportedSourceUnsupported } from "./imported-source-lifecycle";
 import {
 	type NativeMemorySource,
 	obsidianNativeMemorySource,
 	purgeNativeMemorySourceArtifacts,
 } from "./native-memory-sources";
-import { purgeSourceOwnedRows } from "./source-purge";
 
 export interface SourceProviderProgressEvent {
 	readonly scanned: number;
@@ -51,7 +51,11 @@ export const obsidianSourceProvider: SourceProviderAdapter = {
 
 export const importedSourceProvider: SourceProviderAdapter = {
 	kind: "import",
-	purge: (source, agentId) => purgeSourceOwnedRows({ sourceId: source.id, agentId }),
+	purge: (source, agentId) =>
+		markImportedSourceUnsupported({
+			sourceId: source.id,
+			agentId: agentId ?? "default",
+		}).artifacts,
 };
 
 export function registerSourceProvider(provider: SourceProviderAdapter): void {
