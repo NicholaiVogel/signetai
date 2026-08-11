@@ -1090,6 +1090,40 @@ describe("migration framework", () => {
 		).toBe(1);
 	});
 
+	test("migration 129 keeps structural jobs and its marker when the cancellation audit aborts", () => {
+		db = createFreshDb();
+		runMigrations(db);
+
+		db.prepare(
+			`INSERT INTO memory_jobs
+			 (id, memory_id, job_type, status, payload, attempts, max_attempts, created_at, updated_at)
+			 VALUES ('structural-pending', 'memory-pending', 'structural_classify', 'pending', NULL, 0, 3, ?, ?)`,
+		).run("2026-03-28T10:00:00.000Z", "2026-03-28T10:00:00.000Z");
+		db.prepare("DELETE FROM schema_migrations WHERE version = 129").run();
+		db.exec(`
+			CREATE TRIGGER reject_structural_cancellation_audit
+			BEFORE INSERT ON job_cancellations
+			WHEN new.actor = 'migration:129'
+			BEGIN
+				SELECT RAISE(ABORT, 'audit fault');
+			END;
+		`);
+
+		expect(() => runMigrations(db)).toThrow("audit fault");
+		expect(
+			db.query<{ status: string }, []>("SELECT status FROM memory_jobs WHERE id = 'structural-pending'").get()?.status,
+		).toBe("pending");
+		expect(
+			db
+				.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM job_cancellations WHERE actor = 'migration:129'")
+				.get()?.count,
+		).toBe(0);
+		expect(
+			db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 129").get()
+				?.count,
+		).toBe(0);
+	});
+
 	test("migration 048 treats source_ref=session_key as session-scoped lane", () => {
 		db = createFreshDb();
 		db.exec(`

@@ -24,7 +24,10 @@ export function up(db: MigrationDb): void {
 		throw new Error("job_cancellations table missing; cannot retire structural jobs without an audit trail");
 	}
 
-	db.exec(`
+	// Execute the audit through a prepared statement. bun:sqlite's multi-statement
+	// exec can continue after an INSERT trigger aborts; this throws before the
+	// cancellation statement and lets the runner's savepoint restore all state.
+	db.prepare(`
 		INSERT INTO job_cancellations (
 			id, source_table, source_id, status_before, payload_json,
 			reason, actor, actor_type, request_id, created_at
@@ -59,7 +62,9 @@ export function up(db: MigrationDb): void {
 		FROM memory_jobs
 		WHERE job_type IN ('structural_classify', 'structural_dependency')
 		  AND status IN ('pending', 'leased');
+	`).run();
 
+	db.exec(`
 		UPDATE memory_jobs
 		SET status = 'cancelled', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE job_type IN ('structural_classify', 'structural_dependency')
