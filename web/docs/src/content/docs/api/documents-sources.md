@@ -300,6 +300,8 @@ chunk embeddings to its own database.
 }
 ```
 
+<a id="post-api-sources-discord"></a>
+
 ### POST /api/sources/discord
 
 Add or update a Discord source and queue a shared source index job. REST and
