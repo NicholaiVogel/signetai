@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { DreamingConfig } from "@signet/core";
 import { runMigrations } from "../../../core/src/migrations";
-import type { DbAccessor } from "../db-accessor";
+import type { DbAccessor, ReadDb } from "../db-accessor";
 import { type TelemetryCollector, type TelemetryEvent, setActiveTelemetry } from "../telemetry";
 import {
 	DREAMING_AGENT_PROMPT,
@@ -33,6 +33,7 @@ import {
 	getDreamingAttentionSnapshots,
 	resolveDreamingAttentionInTx,
 } from "./dreaming-attention";
+import { pendingDreamingEvidenceContinuations } from "./dreaming-evidence-consumption";
 import {
 	autoRequeueRepairedDreamingEvidence,
 	collectRejectedDreamingEvidence,
@@ -640,6 +641,79 @@ describe("Dreaming", () => {
 		expect(refs.every((ref) => ref?.startsWith("transcript:prior-partial-"))).toBe(true);
 		expect(refs).not.toContain("transcript:newer-partial-00");
 	}, 15_000);
+
+	it("keeps continuation selection SQL-bounded while skipping stale revisions (#1434)", () => {
+		const capturedAt = "2026-08-11T00:00:00.000Z";
+		const stalePassId = "stale-partial-pass";
+		const priorPassId = "prior-partial-pass";
+		const newerPassId = "newer-partial-pass";
+		accessor.withWriteTx((tx) => {
+			for (const passId of [stalePassId, priorPassId, newerPassId]) {
+				tx.prepare(
+					"INSERT INTO dreaming_passes (id, agent_id, mode, status) VALUES (?, ?, 'incremental-content', 'completed')",
+				).run(passId, AGENT);
+			}
+			const insertConsumption = tx.prepare(
+				`INSERT INTO dreaming_evidence_consumption
+				 (agent_id, source_kind, source_id, source_captured_at, source_entry_id, source_revision,
+				  delivered_offset, source_length, pass_id, updated_at)
+				 VALUES (?, 'transcript', ?, ?, '', ?, 10, 100, ?, ?)`,
+			);
+			for (let index = 0; index < 200; index += 1) {
+				insertConsumption.run(AGENT, `stale-partial-${index}`, capturedAt, capturedAt, stalePassId, capturedAt);
+			}
+			for (let index = 0; index < 30; index += 1) {
+				const id = `prior-partial-${index.toString().padStart(2, "0")}`;
+				seedTranscript(db, id, "x".repeat(100), capturedAt);
+				insertConsumption.run(AGENT, id, capturedAt, capturedAt, priorPassId, capturedAt);
+			}
+			for (let index = 0; index < 20; index += 1) {
+				const id = `newer-partial-${index.toString().padStart(2, "0")}`;
+				seedTranscript(db, id, "x".repeat(100), capturedAt);
+				insertConsumption.run(AGENT, id, capturedAt, capturedAt, newerPassId, capturedAt);
+			}
+		});
+
+		const continuationQueries: string[] = [];
+		const continuationArgs: unknown[][] = [];
+		const tracedDb = {
+			prepare(sql: string) {
+				const statement = db.prepare(sql);
+				if (!sql.includes("FROM dreaming_evidence_consumption dec")) return statement;
+				continuationQueries.push(sql);
+				return new Proxy(statement, {
+					get(target, property, receiver) {
+						const value = Reflect.get(target, property, receiver);
+						if (property === "all") {
+							return (...args: unknown[]) => {
+								continuationArgs.push(args);
+								return Reflect.apply(target.all, target, args);
+							};
+						}
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+				});
+			},
+		} as unknown as ReadDb;
+		const first = pendingDreamingEvidenceContinuations(tracedDb, AGENT, 20);
+		expect(continuationQueries).toHaveLength(1);
+		expect(continuationQueries[0]).toContain("LIMIT ?");
+		expect(continuationArgs).toEqual([[AGENT, null, null, 20]]);
+		expect(first.map((source) => source.id)).toEqual(
+			Array.from({ length: 20 }, (_, index) => `prior-partial-${index.toString().padStart(2, "0")}`),
+		);
+
+		accessor.withWriteTx((tx) => {
+			tx.prepare(
+				"UPDATE dreaming_evidence_consumption SET delivered_offset = source_length WHERE pass_id = ? AND source_id < ?",
+			).run(priorPassId, "prior-partial-20");
+		});
+		const second = pendingDreamingEvidenceContinuations(db as unknown as ReadDb, AGENT, 20);
+		expect(second.map((source) => source.id)).toEqual([
+			...Array.from({ length: 10 }, (_, index) => `prior-partial-${(index + 20).toString().padStart(2, "0")}`),
+			...Array.from({ length: 10 }, (_, index) => `newer-partial-${index.toString().padStart(2, "0")}`),
+		]);
+	});
 
 	it("indexes continuation lookup by agent and pass (#1430)", () => {
 		const plan = db

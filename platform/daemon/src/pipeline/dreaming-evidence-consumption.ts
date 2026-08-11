@@ -18,6 +18,15 @@ function tableExists(db: ReadDb, table: string): boolean {
 	return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) != null;
 }
 
+function tableHasColumn(db: ReadDb, table: string, column: string): boolean {
+	try {
+		const rows = db.prepare(`PRAGMA table_info(${table})`).all() as ReadonlyArray<Record<string, unknown>>;
+		return rows.some((row) => row.name === column);
+	} catch {
+		return false;
+	}
+}
+
 function record(value: unknown): Record<string, unknown> | null {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 		? (value as Record<string, unknown>)
@@ -220,6 +229,9 @@ export function pendingDreamingEvidenceContinuations(
 ): readonly EpisodicSourceRecord[] {
 	if (!tableExists(db, "dreaming_evidence_consumption")) return [];
 	const boundedLimit = Math.min(Math.max(Math.floor(limit), 1), 50);
+	const transcriptUpdatedAt = tableHasColumn(db, "session_transcripts", "updated_at") ? "st.updated_at" : "NULL";
+	const transcriptCompletedAt = tableHasColumn(db, "session_transcripts", "completed_at") ? "st.completed_at" : "NULL";
+	const transcriptRevision = `COALESCE(${transcriptCompletedAt}, ${transcriptUpdatedAt}, st.created_at)`;
 	const rows = db
 		.prepare(
 			`SELECT dec.source_kind AS kind, dec.source_id AS id, dec.source_captured_at AS capturedAt,
@@ -229,28 +241,63 @@ export function pendingDreamingEvidenceContinuations(
 			 WHERE dec.agent_id = ?
 			   AND dec.delivered_offset > 0 AND dec.delivered_offset < dec.source_length
 			   AND (? IS NULL OR dec.source_kind = ?)
-			 ORDER BY pass.rowid ASC, dec.source_kind ASC, dec.source_id ASC, dec.source_captured_at ASC`,
+			   AND (
+			     (dec.source_kind = 'memory' AND EXISTS (
+			       SELECT 1 FROM memories m
+			       WHERE m.agent_id = dec.agent_id AND m.id = dec.source_id
+			         AND m.memory_kind = 'episodic' AND COALESCE(m.is_deleted, 0) = 0
+			         AND m.visibility != 'archived' AND m.scope IS NULL
+			         AND COALESCE(m.type, '') != 'session_summary'
+			         AND dec.source_captured_at = m.created_at AND dec.source_entry_id = ''
+			         AND dec.source_revision = m.created_at
+			     ))
+			     OR (dec.source_kind = 'artifact' AND EXISTS (
+			       SELECT 1 FROM memory_artifacts ma
+			       WHERE ma.agent_id = dec.agent_id AND ma.source_path = dec.source_id
+			         AND COALESCE(ma.is_deleted, 0) = 0 AND length(ma.content) > 0
+			         AND dec.source_captured_at = ma.captured_at
+			         AND dec.source_entry_id = COALESCE(ma.source_id, '')
+			         AND dec.source_revision = CASE
+			           WHEN ma.source_sha256 IS NULL OR ma.source_sha256 = '' THEN ma.captured_at
+			           ELSE ma.source_sha256
+			         END
+			     ))
+			     OR (dec.source_kind = 'transcript' AND EXISTS (
+			       SELECT 1 FROM session_transcripts st
+			       WHERE st.agent_id = dec.agent_id AND st.session_key = dec.source_id
+			         AND dec.source_captured_at = ${transcriptRevision}
+			         AND dec.source_entry_id = '' AND dec.source_revision = ${transcriptRevision}
+			     ))
+			     OR (dec.source_kind = 'summary' AND EXISTS (
+			       SELECT 1 FROM session_summaries ss
+			       WHERE ss.agent_id = dec.agent_id AND ss.id = dec.source_id
+			         AND ss.depth = 0
+			         AND COALESCE(ss.source_type, 'summary') IN ('summary', 'compaction', 'checkpoint')
+			         AND dec.source_captured_at = ss.latest_at
+			         AND dec.source_entry_id = '' AND dec.source_revision = ss.latest_at
+			     ))
+			   )
+			 ORDER BY pass.rowid ASC, dec.source_kind ASC, dec.source_id ASC, dec.source_captured_at ASC
+			 LIMIT ?`,
 		)
-		.all(agentId, kind ?? null, kind ?? null) as Array<{
+		.all(agentId, kind ?? null, kind ?? null, boundedLimit) as Array<{
 		kind: EpisodicSourceKind;
 		id: string;
 		capturedAt: string;
 		sourceEntryId: string;
 		sourceRevision: string;
 	}>;
-	return rows
-		.flatMap((row) => {
-			const source = readEpisodicSource(db, { agentId, from: `${row.kind}:${row.id}` });
-			if (
-				source === null ||
-				source.capturedAt !== row.capturedAt ||
-				sourceIdentity(source) !== row.sourceEntryId ||
-				sourceRevision(source) !== row.sourceRevision
-			)
-				return [];
-			return [source];
-		})
-		.slice(0, boundedLimit);
+	return rows.flatMap((row) => {
+		const source = readEpisodicSource(db, { agentId, from: `${row.kind}:${row.id}` });
+		if (
+			source === null ||
+			source.capturedAt !== row.capturedAt ||
+			sourceIdentity(source) !== row.sourceEntryId ||
+			sourceRevision(source) !== row.sourceRevision
+		)
+			return [];
+		return [source];
+	});
 }
 
 /** Narrow truthful completion query for one configured source. */
