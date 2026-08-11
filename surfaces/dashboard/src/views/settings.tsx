@@ -1161,7 +1161,7 @@ export function TelemetryHealthPanel() {
 						>
 							<TriangleAlert className="mt-px size-3.5 shrink-0 text-[oklch(0.72_0.18_25)]" aria-hidden="true" />
 							<span>
-								{formatTelemetryCount(health.droppedEventCount)} local collector event{health.droppedEventCount === 1 ? " was" : "s were"} dropped after the persisted queue reached capacity. This data cannot be delivered later.
+								{formatTelemetryCount(health.droppedEventCount)} local telemetry event{health.droppedEventCount === 1 ? " was" : "s were"} dropped and cannot be delivered later.
 							</span>
 						</div>
 					)}

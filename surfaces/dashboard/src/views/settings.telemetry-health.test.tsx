@@ -27,6 +27,7 @@ function health(overrides: Partial<Extract<TelemetryHealthResponse, { enabled: t
 	};
 }
 
+const originalFetch = globalThis.fetch;
 let response: TelemetryHealthResponse | "failed" = health();
 
 beforeAll(() => {
@@ -45,7 +46,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-	globalThis.fetch = undefined as unknown as typeof fetch;
+	globalThis.fetch = originalFetch;
 });
 
 async function mountPanel(): Promise<{ readonly container: HTMLDivElement; readonly unmount: () => Promise<void> }> {
@@ -81,7 +82,7 @@ describe("telemetry health panel", () => {
 		await panel.unmount();
 	});
 
-	test("warns that queued-capacity drops are cumulative local data loss", async () => {
+	test("warns about cumulative local telemetry data loss without naming a cause", async () => {
 		response = health({
 			status: "degraded",
 			queuedUnsentEventCount: 19_974,
@@ -90,10 +91,8 @@ describe("telemetry health panel", () => {
 		});
 		const panel = await mountPanel();
 		const warning = panel.container.querySelector('[role="alert"]');
-		expect(warning?.textContent).toContain(
-			"2,654 local collector events were dropped after the persisted queue reached capacity.",
-		);
-		expect(warning?.textContent).toContain("This data cannot be delivered later.");
+		expect(warning?.textContent).toContain("2,654 local telemetry events were dropped and cannot be delivered later.");
+		expect(warning?.textContent).not.toContain("persisted queue reached capacity");
 		expect(panel.container.textContent).toContain("19,974");
 		expect(panel.container.textContent).toContain("18h ago");
 		expect(panel.container.textContent).toContain("Delivery is degraded. The oldest queued event is 18h ago.");
