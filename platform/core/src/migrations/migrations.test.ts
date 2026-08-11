@@ -978,6 +978,118 @@ describe("migration framework", () => {
 		expect(indexColumns.map((column) => column.name)).toEqual(["agent_id", "completed_at"]);
 	});
 
+	test("migration 129 retires only legacy pending and leased structural jobs with an audit trail", () => {
+		db = createFreshDb();
+		runMigrations(db);
+
+		const insert = db.prepare(
+			`INSERT INTO memory_jobs
+			 (id, memory_id, job_type, status, payload, attempts, max_attempts, leased_at, error, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		);
+		const createdAt = "2026-03-28T10:00:00.000Z";
+		insert.run(
+			"structural-pending",
+			"memory-pending",
+			"structural_classify",
+			"pending",
+			'{"entity_id":"entity-a"}',
+			0,
+			3,
+			null,
+			"Unable to connect",
+			createdAt,
+			createdAt,
+		);
+		insert.run(
+			"structural-leased",
+			"memory-leased",
+			"structural_dependency",
+			"leased",
+			'{"entity_id":"entity-b"}',
+			2,
+			3,
+			"2026-03-28T10:05:00.000Z",
+			null,
+			createdAt,
+			createdAt,
+		);
+		insert.run(
+			"structural-completed",
+			"memory-completed",
+			"structural_classify",
+			"completed",
+			null,
+			1,
+			3,
+			null,
+			null,
+			createdAt,
+			createdAt,
+		);
+		insert.run(
+			"structural-dead",
+			"memory-dead",
+			"structural_dependency",
+			"dead",
+			null,
+			3,
+			3,
+			null,
+			"legacy failure",
+			createdAt,
+			createdAt,
+		);
+		insert.run("active-extract", "memory-extract", "extract", "pending", null, 0, 3, null, null, createdAt, createdAt);
+
+		// Simulate an upgrade from the immediately preceding schema version.
+		db.prepare("DELETE FROM schema_migrations WHERE version = 129").run();
+		runMigrations(db);
+
+		const statuses = db
+			.query<{ id: string; status: string; attempts: number }, []>(
+				"SELECT id, status, attempts FROM memory_jobs ORDER BY id",
+			)
+			.all();
+		expect(statuses).toEqual([
+			{ id: "active-extract", status: "pending", attempts: 0 },
+			{ id: "structural-completed", status: "completed", attempts: 1 },
+			{ id: "structural-dead", status: "dead", attempts: 3 },
+			{ id: "structural-leased", status: "cancelled", attempts: 2 },
+			{ id: "structural-pending", status: "cancelled", attempts: 0 },
+		]);
+
+		const audits = db
+			.query<{ source_id: string; status_before: string; payload_json: string; reason: string; actor: string }, []>(
+				"SELECT source_id, status_before, payload_json, reason, actor FROM job_cancellations WHERE actor = 'migration:129' ORDER BY source_id",
+			)
+			.all();
+		expect(audits.map((audit) => ({ source_id: audit.source_id, status_before: audit.status_before }))).toEqual([
+			{ source_id: "structural-leased", status_before: "leased" },
+			{ source_id: "structural-pending", status_before: "pending" },
+		]);
+		const pendingAudit = audits.find((audit) => audit.source_id === "structural-pending");
+		expect(pendingAudit?.reason).toBe("retired structural queue after Dreaming cutover");
+		expect(JSON.parse(pendingAudit?.payload_json ?? "{}")).toMatchObject({
+			id: "structural-pending",
+			job_type: "structural_classify",
+			status: "pending",
+			error: "Unable to connect",
+		});
+
+		const auditCount = audits.length;
+		runMigrations(db);
+		expect(
+			db
+				.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM job_cancellations WHERE actor = 'migration:129'")
+				.get()?.count,
+		).toBe(auditCount);
+		expect(
+			db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 129").get()
+				?.count,
+		).toBe(1);
+	});
+
 	test("migration 048 treats source_ref=session_key as session-scoped lane", () => {
 		db = createFreshDb();
 		db.exec(`
