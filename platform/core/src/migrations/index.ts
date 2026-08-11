@@ -134,6 +134,7 @@ import { up as memoryContentSafety } from "./125-memory-content-safety";
 import { up as dreamingSurprisalAttention } from "./126-dreaming-surprisal-attention";
 import { up as ontologyContradictions } from "./127-ontology-contradictions";
 import { up as boundedQueueDiagnostics } from "./128-bounded-queue-diagnostics";
+import { up as dreamingEvidenceConsumption } from "./129-dreaming-evidence-consumption";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1198,6 +1199,12 @@ export const MIGRATIONS: readonly Migration[] = [
 		version: 128,
 		name: "bounded-queue-diagnostics",
 		up: boundedQueueDiagnostics,
+	},
+	{
+		version: 129,
+		name: "dreaming-evidence-consumption",
+		up: dreamingEvidenceConsumption,
+		artifacts: { tables: ["dreaming_evidence_consumption"] },
 	},
 ];
 

@@ -48,6 +48,11 @@ describe("imported source lifecycle", () => {
 		});
 		getDbAccessor().withWriteTx((db) => {
 			db.prepare(
+				`INSERT INTO dreaming_evidence_consumption
+				 (agent_id, source_kind, source_id, source_captured_at, source_entry_id, source_revision, delivered_offset, source_length, pass_id, updated_at)
+				 VALUES (?, 'artifact', 'imports/source-import-1/notes.json', '2026-08-11T00:00:00.000Z', ?, 'hash-1', 20, 20, 'pass-1', '2026-08-11T00:00:00.000Z')`,
+			).run(agentId, sourceId);
+			db.prepare(
 				`INSERT INTO derived_memory_sources
 				 (derived_memory_id, source_kind, source_id, source_path, agent_id, created_at)
 				 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -136,6 +141,16 @@ describe("imported source lifecycle", () => {
 			getDbAccessor().withReadDb(
 				(db) =>
 					db.prepare("SELECT COUNT(*) AS count FROM memory_artifacts WHERE source_id = ?").get(sourceId) as {
+						count: number;
+					},
+			).count,
+		).toBe(0);
+		expect(
+			getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_consumption WHERE source_entry_id = ?")
+						.get(sourceId) as {
 						count: number;
 					},
 			).count,

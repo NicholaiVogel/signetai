@@ -28,6 +28,7 @@ import {
 	resolveEmbeddingBridgeOptions,
 	startNativeMemoryBridge,
 } from "../native-memory-sources";
+import { sourceHasEligibleUnconsumedEvidence } from "../pipeline/dreaming-evidence-consumption";
 import {
 	type SourceIndexJob,
 	beginSourceIndexJob,
@@ -735,6 +736,8 @@ interface SourceStats {
 	readonly artifacts: number;
 	readonly chunks: number;
 	readonly indexed: number;
+	/** Whether canonical visible source evidence still has an eligible undelivered fragment. */
+	readonly hasEligibleUnconsumedEvidence: boolean;
 }
 
 interface SourceHealth {
@@ -818,10 +821,15 @@ function sourceStats(source: SignetSourceEntry, agentId: string): SourceStats {
 						`${chunkPrefix}\uffff`,
 					),
 			);
-			return { artifacts, chunks, indexed: artifacts };
+			return {
+				artifacts,
+				chunks,
+				indexed: artifacts,
+				hasEligibleUnconsumedEvidence: sourceHasEligibleUnconsumedEvidence(db, agentId, source.id),
+			};
 		});
 	} catch {
-		return { artifacts: 0, chunks: 0, indexed: 0 };
+		return { artifacts: 0, chunks: 0, indexed: 0, hasEligibleUnconsumedEvidence: false };
 	}
 }
 
