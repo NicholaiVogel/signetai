@@ -1,22 +1,25 @@
 ---
 title: "Configuration"
-description: "Complete configuration reference for Signet."
+description: "Operator configuration for a Signet workspace and daemon."
 ---
 
-Complete configuration reference for Signet.
+Signet reads workspace configuration from `agent.yaml`. Start with `signet setup`, keep credentials in [Secrets](/secrets/), and restart the daemon after an operational change:
 
-Complete reference for all Signet configuration options. For initial setup,
-see [Quickstart](/quickstart/). For the [Daemon](/daemon/) runtime, see [Architecture](/architecture/).
+```bash
+signet daemon restart
+signet daemon status --json
+```
+
+The running daemon is the authority for operational state. Use [Diagnostics](/diagnostics/) and `/health/ready` to verify a change rather than assuming a YAML edit was applied.
 
 ## In this section
 
-- [Workspace and identity](/configuration/workspace-identity/)
-  Configure the Signet workspace, agent identity, and primary agent.yaml fields.
-- [Inference and routing](/configuration/inference-routing/)
-  Configure inference accounts, targets, policies, workloads, and agent routes.
-- [Pipeline configuration](/configuration/pipeline/)
-  Configure extraction, synthesis, graph, search, continuity, and pipeline workers.
-- [Security and lifecycle](/configuration/security-lifecycle/)
-  Configure authentication, retention, hooks, and environment variables.
-- [Files and integrations](/configuration/files-integrations/)
-  Configure identity files, storage, harnesses, and Git integration.
+- [Workspace and identity](/configuration/workspace-identity/): workspace selection, identity files, embeddings, and safe configuration shape.
+- [Inference and routing](/configuration/inference-routing/): canonical targets, policies, workloads, and routes.
+- [Pipeline configuration](/configuration/pipeline/): runtime controls, maintenance, documents, continuity, and telemetry.
+- [Security and lifecycle](/configuration/security-lifecycle/): authentication, lifecycle behavior, and environment overrides.
+- [Files and integrations](/configuration/files-integrations/): managed workspace files, local state, harnesses, and source control.
+
+## Operator rule
+
+Do not restore retired configuration blocks from old examples. In particular, `memory.synthesis` is rejected by the current loader. Keep model selection in the canonical inference routing configuration, and use the current daemon error or [Upgrading](/upgrading/) when an older workspace no longer loads.

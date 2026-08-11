@@ -1,48 +1,11 @@
 ---
 title: "Self-Hosting"
-description: "Self-hosting the Signet daemon."
+description: "Run Signet with the first-party Docker deployment and secure the daemon boundary."
 ---
 
-The Signet [Daemon](/daemon/) is a Hono HTTP server that runs as a background service,
-providing [Memory](/memory/) storage, search, and the web [Dashboard](/dashboard/). By default it
-binds to `localhost:3850` and requires no [authentication](/auth/). This document
-covers everything needed to run it persistently, expose it to a team, and
-keep it healthy in production.
+Use the first-party Docker deployment when you need a persistent, self-hosted Signet daemon. It includes the daemon, Caddy reverse proxy, persistent volumes, health checks, and a team-auth bootstrap.
 
-
-## Overview
-
-The daemon process is a single Bun-targeted binary at
-`platform/daemon/dist/daemon.js`. It owns two things: the SQLite database
-at `$SIGNET_WORKSPACE/memory/memories.db` and the config directory at `$SIGNET_WORKSPACE/`.
-Everything else — file watching, the memory pipeline, the dashboard —
-runs inside that one process.
-
-Environment variables control the network address:
-
-- `SIGNET_HOST` — daemon host for local calls and default bind address (default: `127.0.0.1`)
-- `SIGNET_BIND` — explicit bind address override (default: `SIGNET_HOST`)
-- `SIGNET_PORT` — port to listen on (default: `3850`)
-- `SIGNET_PATH` — override the data directory (default: `$SIGNET_WORKSPACE/`)
-- `SIGNET_LOG_FILE` — optional explicit daemon log file path
-- `SIGNET_SQLITE_PATH` — macOS explicit override for a custom `libsqlite3.dylib`
-
-Bun is a hard requirement. The daemon uses `bun:sqlite` directly and will
-refuse to start under Node.
-
-On macOS, `SIGNET_SQLITE_PATH` is authoritative when set. If it points
-at a missing file, Signet refuses fallback so the misconfiguration is
-obvious. If it is unset, Signet checks
-`$SIGNET_WORKSPACE/libsqlite3.dylib`, where the workspace resolves from
-`SIGNET_PATH`, then `~/.config/signet/workspace.json`, then the default
-`~/.agents`, and then standard Homebrew SQLite paths so `sqlite-vec`
-can load before the first Bun connection opens.
-
-
-## Docker Compose (first-party)
-
-Signet now ships a first-party Docker stack in `deploy/docker/` for
-self-hosted daemon deployments:
+## Docker Compose quick start
 
 ```bash
 cd deploy/docker
@@ -50,503 +13,81 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-This stack includes:
+The stack stores the Signet workspace in the `signet_data` volume at `/data/agents` in the container and publishes Caddy on ports 80 and 443 by default. Open the health endpoint locally:
 
-- `signet` service (daemon runtime)
-- `caddy` reverse proxy (TLS-capable, SSE-safe)
-- named Docker volumes for persistent workspace and proxy state
+```bash
+curl -fsS http://localhost/health
+```
 
-The container entrypoint creates `$SIGNET_WORKSPACE/agent.yaml` with
-`auth.mode: team` on first start when no config exists. To generate an
-initial admin token from the auth secret, run:
+The supplied compose configuration binds the daemon inside the stack and Caddy is the published entry point. Do not publish port 3850 directly unless you have an explicit private-network design and matching authentication.
+
+## First admin credential
+
+The container entrypoint initializes `auth.mode: team` on first run when no configuration exists. Mint an initial admin token inside the running service:
 
 ```bash
 docker compose exec signet \
   bun /app/deploy/docker/scripts/create-token.mjs --role admin --sub bootstrap
 ```
 
-The command prints a bearer token to stdout. Store it securely and use it
-for admin API calls (for example `/api/auth/token` to mint scoped
-operator/agent tokens).
+The token is printed once. Store it in an approved secret manager, then create narrowly scoped keys or tokens for real clients. See [Authentication](/auth/) and [Remote Harness Connectors](/remote-connectors/).
 
-By default, Compose publishes Caddy on ports 80/443. Override
-`SIGNET_HTTP_PORT` and `SIGNET_HTTPS_PORT` in `.env` when those ports are
-already occupied.
+## Configure the proxy
 
-
-## Running as a Service
-
-The easiest path is the CLI:
-
-```bash
-signet daemon install   # installs and starts the service
-signet daemon uninstall # stops and removes it
-```
-
-The install command detects the platform and writes the appropriate service
-definition, then starts it. Under the hood, it generates the unit file from
-the actual runtime path (`which bun`) and the installed daemon path, so the
-service file always reflects the current installation.
-
-### systemd (Linux)
-
-The CLI writes a user-level unit file to
-`~/.config/systemd/user/signet.service` with `Restart=on-failure` and
-`RestartSec=5`. The unit looks like this:
-
-```ini
-[Unit]
-Description=Signet Daemon
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/bun /path/to/daemon.js
-Environment=SIGNET_PORT=3850
-Environment=SIGNET_PATH=/home/you/.agents
-WorkingDirectory=/home/you/.agents
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:/home/you/.agents/.daemon/logs/daemon.out.log
-StandardError=append:/home/you/.agents/.daemon/logs/daemon.err.log
-
-[Install]
-WantedBy=default.target
-```
-
-To manage it manually after installation:
-
-```bash
-systemctl --user status signet.service
-systemctl --user restart signet.service
-journalctl --user -u signet.service -f
-```
-
-For the service to survive logout on headless servers, you need lingering
-enabled for your user:
-
-```bash
-loginctl enable-linger $USER
-```
-
-### launchd (macOS)
-
-The CLI writes a plist to
-`~/Library/LaunchAgents/ai.signet.daemon.plist` with `KeepAlive` and
-`RunAtLoad` set to true, so it starts at login and restarts on crash.
-Stdout and stderr go to `$SIGNET_WORKSPACE/.daemon/logs/`.
-
-```bash
-launchctl list ai.signet.daemon   # check status
-launchctl unload ~/Library/LaunchAgents/ai.signet.daemon.plist
-launchctl load ~/Library/LaunchAgents/ai.signet.daemon.plist
-```
-
-The generated plist hard-codes the Bun path as `/opt/homebrew/bin/bun` for
-Apple Silicon. If Bun is installed elsewhere, either re-run
-`signet daemon install` after updating `PATH`, or edit the plist manually.
-
-
-## Team Mode Deployment
-
-By default the daemon runs in `local` mode: no authentication, no rate
-limiting, localhost only. For shared deployments you switch to `team` mode,
-which requires a bearer token on every request.
-
-Add an `auth` block to `$SIGNET_WORKSPACE/agent.yaml`:
-
-```yaml
-auth:
-  mode: team
-```
-
-Then restart the daemon. On first start with a non-local mode, the daemon
-generates a 32-byte HMAC secret at `$SIGNET_WORKSPACE/.daemon/auth-secret` with
-permissions `0600`. All tokens are signed against this secret. Rotating the
-secret invalidates all existing tokens.
-
-### Generating tokens
-
-Tokens are created via the API. In `team` mode you need an existing admin
-token to create more; on first setup, you can temporarily switch to
-`hybrid` mode (which grants full access from localhost without a token) to
-bootstrap.
-
-```bash
-curl -s -X POST http://localhost:3850/api/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{
-    "role": "agent",
-    "sub": "ci-runner",
-    "ttlSeconds": 2592000
-  }'
-```
-
-The response contains a `token` field. Distribute this string to the
-consumer. All subsequent requests must include it as a bearer token:
-
-```
-Authorization: Bearer <token>
-```
-
-Tokens carry a `sub` (subject identifier), a `role`, a `scope`, and an
-expiry. The token format is `{base64url(claims)}.{base64url(hmac-sha256)}`
-— no external JWT library, no key infrastructure needed beyond the secret
-file.
-
-### Roles and permissions
-
-Four roles are supported. Each grants a fixed set of permissions:
-
-| Role       | Permissions |
-|------------|-------------|
-| `admin`    | all, including token creation and admin operations |
-| `operator` | remember, recall, modify, forget, recover, documents, connectors, diagnostics, analytics |
-| `agent`    | remember, recall, modify, forget, recover, documents |
-| `readonly` | recall only |
-
-Scope restrictions can narrow a token further. A token scoped to
-`project: acme` will be rejected when accessing memories tagged to a
-different project. Admin tokens bypass all scope checks.
-
-```bash
-# Scoped token for a specific agent
-curl -s -X POST http://localhost:3850/api/auth/token \
-  -H "Authorization: Bearer <admin-token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "role": "agent",
-    "sub": "claude-code:acme",
-    "scope": { "project": "acme" },
-    "ttlSeconds": 86400
-  }'
-```
-
-Default token TTL is 7 days. Session tokens (issued by hook endpoints) are
-24 hours. Both are configurable in `agent.yaml`:
-
-```yaml
-auth:
-  mode: team
-  defaultTokenTtlSeconds: 604800   # 7 days
-  sessionTokenTtlSeconds: 86400    # 24 hours
-```
-
-### Rate limits
-
-In `team` and `hybrid` modes, destructive operations are rate-limited per
-actor (the token's `sub` field) using an in-memory sliding window. Defaults:
-
-| Operation    | Window | Max requests |
-|--------------|--------|--------------|
-| `forget`     | 60s    | 30           |
-| `modify`     | 60s    | 60           |
-| `batchForget`| 60s    | 5            |
-| `forceDelete`| 60s    | 3            |
-| `admin`      | 60s    | 10           |
-| `inferenceExplain` | 60s | 120        |
-| `inferenceExecute` | 60s | 20         |
-| `inferenceGateway` | 60s | 30         |
-| `recallLlm`  | 60s    | 60           |
-
-These can be overridden in `agent.yaml`:
-
-```yaml
-auth:
-  mode: team
-  rateLimits:
-    forget:
-      windowMs: 60000
-      max: 10
-```
-
-Rate limit state is in-memory and resets on daemon restart.
-
-
-## Hybrid Mode
-
-`hybrid` mode gives you the convenience of `local` mode for local tooling
-while requiring tokens from remote clients. Requests arriving with a
-TCP peer address of `127.0.0.1`, `::1`, or `::ffff:127.0.0.1` bypass
-authentication entirely and receive full admin-equivalent access. All
-other clients must present a valid bearer token.
-
-```yaml
-auth:
-  mode: hybrid
-```
-
-This is a practical default for development machines where you want the
-local dashboard and CLI to work without tokens, but also want to call the
-daemon from CI pipelines or remote agents. The localhost bypass is checked
-against the actual socket peer address, not the `Host` header. For
-anything exposed to untrusted networks, use `team` mode with a reverse
-proxy.
-
-
-## Network Configuration
-
-The daemon is HTTP-only. TLS must be terminated upstream.
-
-To bind to all interfaces (required when using a reverse proxy on the same
-host, or when hosting on a VM):
-
-```bash
-SIGNET_HOST=0.0.0.0 SIGNET_PORT=3850 bun daemon.js
-```
-
-Or set it in the systemd unit:
-
-```ini
-Environment=SIGNET_HOST=0.0.0.0
-Environment=SIGNET_PORT=3850
-```
-
-Never expose port 3850 directly to the internet in `local` or `hybrid`
-mode. Use `team` mode plus a reverse proxy that terminates TLS.
-
-
-## Reverse Proxy
-
-### nginx
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name signet.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/signet.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/signet.example.com/privkey.pem;
-
-    location / {
-        proxy_pass         http://127.0.0.1:3850;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Real-IP $remote_addr;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
-
-        # SSE support
-        proxy_buffering    off;
-        proxy_read_timeout 3600s;
-    }
-}
-```
-
-### Caddy
+Set these values in `deploy/docker/.env` before production use:
 
 ```text
-signet.example.com {
-    reverse_proxy localhost:3850 {
-        flush_interval -1
-    }
-}
+SIGNET_DOMAIN=signet.example.com
+SIGNET_IMAGE_TAG=latest
+SIGNET_HTTP_PORT=80
+SIGNET_HTTPS_PORT=443
 ```
 
-Caddy handles TLS automatically via Let's Encrypt. The `flush_interval -1`
-directive is needed for the `/sse` endpoint to stream events correctly
-without buffering.
+Caddy terminates TLS for a real public domain. Keep `auth.mode: team` for a public or shared deployment. `hybrid` is for trusted local workflows and should not be used as the only boundary behind a reverse proxy.
 
-In both cases, set `auth.mode: team` in `agent.yaml` before exposing the
-daemon. Hybrid mode's localhost bypass does not apply when the request
-arrives through a proxy — the `Host` header will be the public hostname,
-not `localhost`.
+Provider credentials are optional compose environment values. Prefer the Signet secret store and `$secret:NAME` configuration references for durable operator configuration; do not commit a populated `.env` file.
 
-
-## Backup and Restore
-
-All persistent state lives in two places:
-
-- `$SIGNET_WORKSPACE/memory/memories.db` — the SQLite database
-- `$SIGNET_WORKSPACE/` — config files, secrets, skills
-
-The database runs in WAL mode, which makes it safe to copy while the
-daemon is running. A simple backup:
+## Health and operations
 
 ```bash
-cp $SIGNET_WORKSPACE/memory/memories.db /backup/memories-$(date +%Y%m%d).db
+docker compose ps
+docker compose logs -f signet
+curl -fsS http://localhost/health
 ```
 
-For a full backup including config and the auth secret:
+For deeper readiness and diagnostics, authenticate as needed and use the daemon endpoints documented in [Daemon](/daemon/) and [Diagnostics](/diagnostics/).
+
+## Backup and upgrade
+
+Back up the named workspace volume before a major version change. The Docker deployment keeps configuration, the database, and daemon state under `/data/agents`.
 
 ```bash
-rsync -a $SIGNET_WORKSPACE/ /backup/agents-$(date +%Y%m%d)/
+# Pull the configured image tag and recreate services
+docker compose pull
+docker compose up -d
 ```
 
-The auth secret lives at `$SIGNET_WORKSPACE/.daemon/auth-secret` (binary, 32
-bytes, mode `0600`). Back it up with your config. Losing it invalidates all
-issued tokens.
+Follow the release-specific checks in [Upgrading](/upgrading/) and confirm readiness after restart. Do not discard the volume to work around a migration error.
 
-To restore, stop the daemon, copy the files back, and restart:
+## Host-managed deployments
+
+A host service manager can run the daemon directly, but it must provide a stable runtime, one writer per workspace, explicit `SIGNET_PATH`, explicit bind behavior, and restart-safe health checks. The CLI lifecycle commands are:
 
 ```bash
-systemctl --user stop signet.service
-rsync -a /backup/agents-20260101/ $SIGNET_WORKSPACE/
-systemctl --user start signet.service
+signet daemon start
+signet daemon stop
+signet daemon restart
+signet daemon status --json
 ```
 
-For scheduled backups, a daily cron that copies the database and rotates
-old copies is sufficient. Incremental WAL checkpoints happen automatically
-during normal operation.
+Use a service supervisor you already operate rather than copying an outdated unit file. Verify `/health/live` and `/health/ready` after every deployment.
 
+## Security checklist
 
-## Monitoring
+- Bind to loopback by default. Use `network.mode: tailscale` or an explicit `SIGNET_BIND` only for a trusted network design.
+- Use `auth.mode: team` for shared, proxied, or public access.
+- Use one named API key per connector or automation client, then revoke it when the client is retired.
+- Keep the workspace volume, `.daemon/`, and `.secrets/` private and backed up.
+- Do not put raw tokens, passwords, or provider keys in source control, issue trackers, or screenshots.
 
-### Health check
-
-```
-GET /health
-```
-
-Returns HTTP 200 with JSON `{ status: "healthy", uptime: <seconds>, pid: <int> }`.
-Use this for load balancer health checks and uptime monitors. It has no
-authentication requirement regardless of auth mode.
-
-### Diagnostics
-
-```
-GET /api/diagnostics
-```
-
-Returns a scored health report covering database integrity, FTS consistency,
-embedding provider status, memory pipeline state, and mutation health.
-Requires the `diagnostics` permission (available to `admin` and `operator`
-roles).
-
-### Analytics
-
-```
-GET /api/analytics/usage    # request counts by route and method
-GET /api/analytics/errors   # pipeline errors, filterable by stage
-GET /api/analytics/latency  # p50/p95/p99 latency histograms
-GET /api/analytics/logs     # recent structured log entries
-```
-
-All analytics endpoints require the `analytics` permission. Data is
-collected in-memory and resets on daemon restart. For durable metrics,
-scrape these endpoints on a schedule and push to your monitoring stack.
-
-A quick check to confirm the daemon is healthy and the pipeline is running:
-
-```bash
-curl -s http://localhost:3850/health | jq .
-curl -s http://localhost:3850/api/diagnostics | jq '.score'
-```
-
-
-## Troubleshooting
-
-### Daemon won't start
-
-Check whether the port is already in use:
-
-```bash
-ss -tlnp | grep 3850
-lsof -i :3850
-```
-
-If another process holds the port, either stop it or change `SIGNET_PORT`.
-If the daemon starts then immediately exits, check the log file:
-
-```bash
-tail -50 $SIGNET_WORKSPACE/.daemon/logs/daemon.out.log
-tail -50 $SIGNET_WORKSPACE/.daemon/logs/daemon.err.log
-```
-
-The most common cause is Bun not being found. The systemd unit and launchd
-plist hard-code the Bun path detected at install time. If Bun was moved or
-reinstalled, re-run `signet daemon install` to regenerate the service file.
-
-### Auth issues
-
-If requests return `401 authentication required`, confirm the auth mode:
-
-```bash
-curl -s http://localhost:3850/api/auth/status | jq .mode
-```
-
-If the mode is `team` or `hybrid`, the request needs a valid bearer token.
-Tokens expire — check the `exp` field by base64-decoding the first segment
-of the token:
-
-```bash
-TOKEN="<your-token>"
-echo "${TOKEN%%.*}" | base64 -d 2>/dev/null | jq .exp
-```
-
-Compare the epoch value against `date +%s`. If expired, generate a new
-token. If you've lost all admin tokens, temporarily set `auth.mode: local`
-in `agent.yaml`, restart the daemon, generate a new admin token, then
-switch back to `team` mode.
-
-### Pipeline not processing
-
-First check whether extraction is intentionally disabled:
-
-```yaml
-memory:
-  pipelineV2:
-    enabled: false
-    extraction:
-      provider: none
-```
-
-If `provider: none` is set, or `enabled: false`, the pipeline staying
-idle is expected. This is the recommended configuration for VPS installs
-that should not make background LLM calls.
-
-If extraction is enabled and using Ollama, confirm the server is
-running and the model is pulled:
-
-```bash
-curl -s http://localhost:11434/api/tags | jq '.models[].name'
-```
-
-The recommended local model is `nemotron-3-nano:4b`. `qwen3:4b` is deprecated — Nemotron's superior reasoning produces better extraction quality and `qwen3:4b` will be removed in a future update. If neither is listed:
-
-```bash
-ollama pull qwen3:4b
-# or
-ollama pull nemotron-3-nano:4b
-```
-
-If Ollama is running but the pipeline is still idle, check whether it is
-enabled in `agent.yaml`:
-
-```yaml
-memory:
-  pipelineV2:
-    enabled: true
-```
-
-`shadowMode: true` means the pipeline extracts but does not write to the
-database — useful for testing, but memories will not persist. Set it to
-`false` for production operation.
-
-Cost warning: the intended extraction setups are Claude Code on Haiku,
-Codex CLI on gpt-5.4-mini with a Pro/Max subscription, or local Ollama.
-Remote API extraction can create extreme fees quickly if left running in
-the background.
-
-### High memory usage
-
-If the daemon process grows unboundedly, retention is likely not running or
-the embedding index has accumulated too many orphaned entries. Check
-diagnostics:
-
-```bash
-curl -s http://localhost:3850/api/diagnostics | jq '{score, memory, mutation}'
-```
-
-A low score in the `memory` domain often means retention sweeps have
-stopped. Restarting the daemon triggers a fresh sweep on startup. If the
-issue persists, check for stale job leases in the pipeline queue — the
-`GET /api/diagnostics` response includes queue depth and lease counts.
-
-For embeddings specifically: each memory stores a vector, and deleted
-memories leave tombstones until the next retention run. If tombstone count
-is high, trigger a repair manually:
-
-```bash
-curl -s -X POST http://localhost:3850/api/repair/requeue-dead-jobs \
-  -H "Authorization: Bearer <admin-token>"
-```
+Related: [Daemon](/daemon/), [Authentication](/auth/), [Remote Harness Connectors](/remote-connectors/), [Diagnostics](/diagnostics/).

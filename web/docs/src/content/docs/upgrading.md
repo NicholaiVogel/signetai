@@ -1,139 +1,66 @@
 ---
 title: "Upgrading"
-description: "Signet documentation: Upgrading."
+description: "Update Signet, preserve workspace state, and verify the running daemon."
 ---
 
-**Breaking change.** This release replaces Signet's hand-rolled inference
-providers with two backends: **Pi** (`@earendil-works/pi-ai`) for every direct
-API call, and **ACPX** for harness subprocess calls. Existing installs **must
-verify their background pipeline still functions after updating.**
+Upgrade the installed Signet distribution through the daemon-aware update commands when they are available:
 
-If you are upgrading from a release before this change, read this entire page.
-
-## What changed
-
-Before this release, Signet shipped six hand-rolled LLM providers in a
-4,000-line `provider.ts`: Claude Code (subprocess), OpenCode (HTTP server),
-Codex (subprocess), a generic command-line provider, and direct HTTP for
-Anthropic / OpenAI-compatible / Ollama / llama.cpp / OpenRouter.
-
-After this release there are exactly **two backends** behind the same
-`LlmProvider` interface:
-
-- **Pi** (`pi-ai`) — every direct API call: Anthropic, OpenAI (incl. Codex),
-  Google, Bedrock, Mistral, Azure, Cloudflare, Copilot, OpenRouter, and all
-  OpenAI-compatible local servers (LM Studio, Ollama, llama.cpp).
-- **ACPX** — the retained harness-subprocess backend, now a bundled dependency
-  (`acpx@0.12.0`) and a first-class peer endpoint in the routing registry. It
-  drives Claude Code, Codex, OpenCode, Gemini, and the rest of the ACP agent
-  family, plus a `--agent <binary>` escape hatch for custom harnesses.
-
-The following routing executors have been **removed** and will now fail with a
-structured error pointing at this page:
-
-| Removed executor | Replace with |
-|---|---|
-| `claude-code` | `acpx` (agent: `claude`), or `anthropic` for direct API |
-| `codex` | `acpx` (agent: `codex`), or `openrouter`/`openai-compatible` for direct API |
-| `opencode` | `acpx` (agent: `opencode`), or an OpenAI-compatible direct target |
-| `command` | `acpx` with `--agent <binary>`, or re-implement as an OpenAI-compatible target |
-| `anthropic` | unchanged (now Pi-backed; same config) |
-| `openrouter` | unchanged (now Pi-backed) |
-| `ollama` | unchanged (now Pi-backed via OpenAI-compatible) |
-| `llama-cpp` | unchanged (now Pi-backed via OpenAI-compatible) |
-| `openai-compatible` | unchanged (now Pi-backed) |
-
-`memory.pipelineV2.extraction.provider: command` is also retired. Configure a
-canonical `inference.workloads.memoryExtraction` target instead; the daemon
-will reject the retired command configuration rather than silently falling
-back to another provider.
-
-## Memory pipeline routing migration
-
-On startup, the config migrator advances eligible `agent.yaml` files through
-`configVersion: 9`. It removes the obsolete `memory.synthesis` and
-`memory.pipelineV2.synthesis` blocks and removes provider/model/endpoint fields
-that can be migrated safely. It also removes retired extraction-writer settings
-left behind by older migrations. Version 9 repairs workspaces that were already
-stamped `configVersion: 8` before those cleanups were added. The migration is
-atomic and idempotent.
-
-If a legacy provider cannot be mapped to a supported inference executor, its
-routing fields are preserved and the strict loader stops with an actionable
-`is retired` error. Configure an `inference.targets` entry and bind it to
-`inference.workloads.memoryExtraction`; do not delete the fields by hand before
-reading the error, because they identify what needs reconfiguration.
-
-The old provider-safety API and rollback route are removed. Config writes now
-save YAML directly, subject to the normal guarded-file permission checks.
-
-## Action required after updating
-
-1. **Check the daemon log on first start.** If your `agent.yaml` references a
-   removed executor, the daemon logs a structured error naming the target and
-   the executor to replace. Background extraction/synthesis will not run until
-   you fix it.
-2. **Reconfigure the target.** In nearly every case the replacement is a
-   one-line edit: change `executor: claude-code` to `executor: acpx` (and add
-   `acpx: { agent: claude }`), or `executor: codex` to `executor: acpx`
-   (with `acpx: { agent: codex }`). Direct-API targets (`anthropic`,
-   `openrouter`, `ollama`, `llama-cpp`, `openai-compatible`) keep working as-is
-   — only the underlying engine changed.
-3. **Verify a background call.** Trigger a Dreaming pass or session summary
-   (`signet memory ingest ...`, or send a session through the pipeline) and
-   confirm it completes.
-4. **Verify aggregate recall** if you use it: `signet recall "<query>" --aggregate`.
-   It now flows through pi-ai; latency is unchanged (verified at ~200–500ms for
-   synthesis-sized calls on a local model).
-
-## Behavioral changes to expect
-
-These are intentional consequences of the cutover, not bugs:
-
-- **OpenRouter reasoning controls.** The `{ enabled, maxTokens }` reasoning
-  block is now translated by pi-ai into its own `{ effort }` abstraction
-  (omitted entirely when reasoning is disabled) rather than forwarded verbatim.
-  pi-ai owns the reasoning wire format now.
-- **Keyless local servers** (LM Studio, Ollama, llama.cpp) receive a placeholder
-  `Authorization` header. pi-ai's credential resolver requires a non-empty API
-  key; local servers ignore it. No real credential is sent.
-- **Availability probes.** Each target now does a `/models` reachability check
-  so the router can skip unreachable targets before attempting a real call
-  (this also makes fallback attribution correct).
-
-## ACPX as a harness replacement
-
-ACPX is bundled with the daemon (no separate install, no `npx` fetch). It
-replaces the removed harness subprocess providers. Verified to drive each:
-
-- `acpx claude` — replaces `executor: claude-code`
-- `acpx codex` — replaces `executor: codex`
-- `acpx opencode` — replaces `executor: opencode`
-- `acpx --agent <binary>` — replaces `executor: command`
-
-Configure it as a routing target:
-
-```yaml
-inference:
-  targets:
-    claude-harness:
-      executor: acpx
-      acpx:
-        agent: claude        # or codex, opencode, gemini, ...
-      models:
-        default:
-          model: claude-sonnet-4
+```bash
+signet update check
+signet update install
+signet update status
+signet update channel
 ```
 
-## daemon-rs removed
+An installed update can require a daemon restart before it is active:
 
-The experimental Rust daemon rewrite (`platform/daemon-rs`) and its shadow
-proxy, CLI runtime switch (`SIGNET_DAEMON_RUNTIME`), and route-parity harness
-have been removed. The TypeScript/Bun daemon is the sole runtime. Rust
-accelerators (`@signet/native`) are unaffected.
+```bash
+signet daemon restart
+signet daemon status --json
+curl -fsS http://127.0.0.1:3850/health/ready
+```
 
-## Need help
+## Before updating
 
-If a background pipeline operation does not resume after updating, run
-`signet doctor` and check the daemon log for the structured "folded executor"
-error — it names the exact target and executor to change.
+1. Record the installed version and daemon status.
+2. Back up the private workspace state using your approved encrypted backup process.
+3. Preserve `agent.yaml` before correcting a configuration migration error.
+4. Do not delete the database, auth secret, or secret store to force an upgrade through.
+
+For the first-party Docker deployment, pull the configured image and recreate the services:
+
+```bash
+cd deploy/docker
+docker compose pull
+docker compose up -d
+```
+
+See [Self-Hosting](/self-hosting/) for the persistent volume and initial auth boundary.
+
+## Configuration migration
+
+Current configuration uses the workspace `agent.yaml`, with canonical inference routing for model selection. `memory.synthesis` is retired and rejected by the loader. If an old workspace fails to start after an update:
+
+1. Preserve the exact daemon error.
+2. Make the smallest source-backed change to the named configuration key.
+3. Restart the daemon.
+4. Verify status, readiness, and the affected workflow.
+
+Do not revive removed provider or synthesis configuration just because an old guide mentions it. Use [Inference and routing](/configuration/inference-routing/) for current target and workload bindings.
+
+## After updating
+
+```bash
+signet daemon status --json
+curl -fsS http://127.0.0.1:3850/health/live
+curl -fsS http://127.0.0.1:3850/health/ready
+curl -fsS http://127.0.0.1:3850/api/diagnostics
+```
+
+Then test the feature you depend on: a bounded recall, a provider route, a remote connector authentication check, or a scheduled task dry run. A green version command does not prove the daemon's workspace, migration, inference route, or connector are healthy.
+
+## Rollback and incident handling
+
+If a release fails after a verified backup, stop the daemon, preserve logs and the workspace, and follow the deployment mechanism's rollback procedure. Restore private state only from a known-good backup. File deletion is not a migration strategy.
+
+Related: [Daemon](/daemon/), [Diagnostics](/diagnostics/), [Configuration](/configuration/).

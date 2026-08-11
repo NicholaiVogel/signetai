@@ -1,281 +1,82 @@
 ---
 title: "Scheduled Tasks"
-description: "Schedule recurring agent prompts via cron-based daemon tasks."
+description: "Schedule recurring local harness prompts through the daemon."
 ---
 
-Schedule recurring agent prompts that the Signet [Daemon](/daemon/) executes
-automatically via Claude Code or OpenCode [CLI](/cli/).
+Scheduled tasks are daemon-owned cron jobs. A task stores a prompt, cron expression, harness, optional working directory, and optional skill settings; the daemon starts the configured local harness when it becomes due.
 
-## Overview
+## Create a task
 
-Scheduled tasks let you automate recurring agent workflows — PR
-reviews, code linting, status summaries, dependency checks, etc.
-The daemon evaluates cron expressions and spawns CLI processes on
-schedule.
-
-Source code: `platform/daemon/src/scheduler/`
-
-## Creating Tasks
-
-### Via Dashboard
-
-1. Open the Signet [Dashboard](/dashboard/) (http://localhost:3850)
-2. Navigate to the **Tasks** tab
-3. Click **+ New Task**
-4. Fill in the form:
-   - **Name**: descriptive label (e.g. "Review open PRs")
-   - **Prompt**: what the agent should do
-   - **Harness**: Claude Code or OpenCode
-   - **Schedule**: pick a preset or enter a custom cron expression
-   - **Working Directory**: optional project path for context
-5. Click **Create Task**
-
-### Via API
+Use the Dashboard Tasks surface or `POST /api/tasks`:
 
 ```bash
-curl -X POST http://localhost:3850/api/tasks \
+curl -X POST http://127.0.0.1:3850/api/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Daily PR review",
-    "prompt": "Review all open pull requests and summarize findings",
+    "name": "Daily repository check",
+    "prompt": "Run the repository health check and report only actionable failures.",
     "cronExpression": "0 9 * * *",
-    "harness": "claude-code",
-    "workingDirectory": "/home/user/my-project"
+    "harness": "codex",
+    "workingDirectory": "/home/user/project"
   }'
 ```
 
-Required fields: `name`, `prompt`, `cronExpression`, `harness`.
+Required fields are `name`, `prompt`, `cronExpression`, and `harness`. Current task harnesses are `claude-code`, `codex`, and `opencode`.
 
-Optional fields: `workingDirectory`.
+Cron expressions use five fields: `minute hour day-of-month month day-of-week`.
 
-Supported harness values: `claude-code`, `opencode`.
+## Execution behavior
 
-## Cron Expressions
+- The scheduler polls for due tasks every 15 seconds.
+- It runs at most three tasks concurrently.
+- Each run receives an id and records captured output and terminal status.
+- Default runtime limit is 10 minutes.
+- Output is bounded to 1,048,576 characters.
+- A task already running is not started again.
+- On daemon startup, pending and running task records are marked failed with `daemon_restart` so they cannot block the next run.
 
-Standard 5-field cron syntax: `minute hour day-of-month month day-of-week`
+The spawned commands are intentionally non-interactive:
 
-### Presets
+| Harness     | Invocation shape                                    |
+| ----------- | --------------------------------------------------- |
+| Claude Code | `claude --dangerously-skip-permissions -p <prompt>` |
+| Codex       | `codex exec --skip-git-repo-check --json <prompt>`  |
+| OpenCode    | `opencode run --format json <prompt>`               |
 
-The dashboard offers these built-in presets (defined in
-`platform/daemon/src/scheduler/cron.ts`):
+The daemon verifies the harness binary is on `PATH`, removes `CLAUDECODE`, and sets `SIGNET_NO_HOOKS=1` for the child to prevent recursive hook activity. On timeout it sends termination and makes a second termination attempt five seconds later. Do not rely on task runs to clean up external work started by a prompt.
 
-| Preset | Expression |
-|--------|-----------|
-| Every 15 min | `*/15 * * * *` |
-| Hourly | `0 * * * *` |
-| Daily 9am | `0 9 * * *` |
-| Weekly Mon 9am | `0 9 * * 1` |
-
-Custom expressions are validated before saving using `cron-parser`.
-The `validateCron()` function returns `true` for valid expressions
-and `false` otherwise — invalid expressions are rejected at creation
-time.
-
-## Execution Model
-
-- The daemon polls every 15 seconds for due tasks
-- Maximum 3 concurrent task processes
-- Each run gets a unique UUID and captures stdout/stderr
-- Output is capped at 1 MB per stream (1,048,576 characters)
-- Default timeout: 10 minutes per task
-- Tasks that are already running are skipped (no double-execution)
-- On daemon restart, any in-progress runs are marked as failed
-
-### Process Commands
-
-The `spawnTask()` function in `platform/daemon/src/scheduler/spawn.ts`
-builds the CLI command based on the harness:
-
-- **Claude Code**: `claude --dangerously-skip-permissions -p "<prompt>"`
-- **OpenCode**: `opencode run --format json "<prompt>"`
-
-Before spawning, the function checks that the CLI binary exists on
-PATH via `Bun.which()`. If the binary isn't found, the run fails
-immediately with a `"CLI binary not found on PATH"` error.
-
-### Environment Isolation
-
-Spawned processes inherit the daemon's environment with two modifications:
-
-- `CLAUDECODE` is stripped to avoid nested-session detection
-- `SIGNET_NO_HOOKS` is set to `"1"` to prevent hook loops (Signet harness
-  integrations treat the spawned agent as a sterile background process)
-
-### Timeout Behavior
-
-When a task exceeds its timeout:
-
-1. `SIGTERM` is sent to the process
-2. After 5 additional seconds, `SIGKILL` is sent if still alive
-3. The run is recorded with `timedOut: true` and an error message
-
-### Startup Recovery
-
-When the daemon starts, the scheduler marks all `pending` and `running`
-task runs as `failed` with error `"daemon_restart"`. This prevents
-orphaned runs from blocking future executions.
-
-## Task Streaming
-
-The daemon provides real-time output streaming for running tasks via
-Server-Sent Events (SSE).
-
-### Endpoint
-
-```
-GET /api/tasks/:id/stream
-```
-
-Returns an SSE stream with the following event types:
-
-### Event Types
-
-**`connected`** — Sent immediately on connection.
-
-```json
-{
-  "type": "connected",
-  "taskId": "abc-123",
-  "timestamp": "2026-03-01T10:00:00.000Z"
-}
-```
-
-**`run-started`** — A new run has begun. Also sent as a replay if a
-run is already in progress when the client connects.
-
-```json
-{
-  "type": "run-started",
-  "taskId": "abc-123",
-  "runId": "def-456",
-  "startedAt": "2026-03-01T10:00:01.000Z",
-  "timestamp": "2026-03-01T10:00:01.000Z"
-}
-```
-
-**`run-output`** — A chunk of stdout or stderr from the running process.
-
-```json
-{
-  "type": "run-output",
-  "taskId": "abc-123",
-  "runId": "def-456",
-  "stream": "stdout",
-  "chunk": "Analyzing pull requests...\n",
-  "timestamp": "2026-03-01T10:00:05.000Z"
-}
-```
-
-**`run-completed`** — The run has finished.
-
-```json
-{
-  "type": "run-completed",
-  "taskId": "abc-123",
-  "runId": "def-456",
-  "status": "completed",
-  "completedAt": "2026-03-01T10:05:00.000Z",
-  "exitCode": 0,
-  "error": null,
-  "timestamp": "2026-03-01T10:05:00.000Z"
-}
-```
-
-### Replay on Connect
-
-When a client connects while a task is already running, the stream
-replays the current run state: a `run-started` event followed by
-buffered stdout/stderr chunks (up to 200,000 characters per stream).
-This lets late-joining clients catch up without missing output.
-
-### Buffer Management
-
-The in-memory buffer retains the most recent 200,000 characters per
-stream (stdout and stderr independently). When the buffer exceeds this
-limit, the oldest chunks are trimmed from the front. The buffer is
-cleared when a run completes.
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/tasks` | GET | List all tasks with last run status |
-| `/api/tasks` | POST | Create a new task |
-| `/api/tasks/:id` | GET | Get task details + recent runs |
-| `/api/tasks/:id` | PATCH | Update task fields (name, prompt, cron, enabled, etc.) |
-| `/api/tasks/:id` | DELETE | Delete a task and its run history |
-| `/api/tasks/:id/run` | POST | Trigger immediate execution |
-| `/api/tasks/:id/runs` | GET | Paginated run history (`?limit=&offset=`) |
-| `/api/tasks/:id/stream` | GET | SSE stream of real-time task output |
-
-## Managing Tasks
-
-### Enable/Disable
-
-Toggle the switch on any task card in the dashboard, or via API:
+## Observe and operate
 
 ```bash
-curl -X PATCH http://localhost:3850/api/tasks/<id> \
+# List tasks
+curl -fsS http://127.0.0.1:3850/api/tasks
+
+# Inspect a task and recent runs
+curl -fsS http://127.0.0.1:3850/api/tasks/<id>
+
+# Trigger a run now
+curl -fsS -X POST http://127.0.0.1:3850/api/tasks/<id>/run
+
+# Disable a task
+curl -fsS -X PATCH http://127.0.0.1:3850/api/tasks/<id> \
   -H "Content-Type: application/json" \
-  -d '{"enabled": false}'
+  -d '{"enabled":false}'
 ```
 
-### Manual Run
+`GET /api/tasks/:id/stream` provides an SSE stream for the currently running task. `GET /api/tasks/:id/runs` returns run history with pagination.
 
-Trigger a task immediately without waiting for the next scheduled
-time. Click "Run Now" in the task detail panel or:
+## Security and safety
 
-```bash
-curl -X POST http://localhost:3850/api/tasks/<id>/run
-```
+Tasks run with the daemon's operating-system permissions. Claude Code tasks use its non-interactive permission bypass. Treat the prompt, working directory, installed harness, and daemon environment as part of the execution boundary.
 
-### Viewing Run History
-
-Click any task card in the dashboard to see its run history with
-stdout/stderr output. Or via API:
-
-```bash
-curl http://localhost:3850/api/tasks/<id>/runs?limit=20&offset=0
-```
-
-## Error Handling and Retry
-
-Tasks do **not** automatically retry on failure. Each run is a
-one-shot execution. If a run fails:
-
-1. The run status is set to `"failed"`
-2. The `error` field captures the reason (timeout, non-zero exit, spawn error)
-3. The task's `next_run_at` is still advanced to the next cron tick
-4. The task remains enabled and will execute again at the next scheduled time
-
-A run is considered failed when:
-- The process exits with a non-zero exit code
-- The `error` field on the `SpawnResult` is non-null (binary not found, spawn error)
-- The process times out
-
-Successful runs have `status: "completed"` and `exitCode: 0`.
-
-## Security
-
-Claude Code runs with `--dangerously-skip-permissions`, meaning
-tasks execute without user approval gates. The dashboard displays
-a warning when creating Claude Code tasks.
-
-Only schedule tasks you trust. The daemon runs them with the same
-permissions as the daemon process itself.
+Use an explicit working directory, a narrow prompt, and a named task. Do not schedule commands that require secrets in prompts or expect a human approval dialog. Prefer a connector, secret-managed service account, or an operator-run workflow for privileged external actions.
 
 ## Troubleshooting
 
-**Task not running?**
-- Check that the daemon is running (`signet status`)
-- Verify the CLI binary is on PATH (`which claude` or `which opencode`)
-- Check the task is enabled in the dashboard
+1. Check `signet daemon status --json` and task `enabled` state.
+2. Check the exact harness binary is on the daemon's `PATH`.
+3. Inspect the task's most recent run output and error.
+4. Confirm the working directory exists and the daemon user can access it.
+5. Verify the cron expression against the intended machine timezone.
 
-**Task failing?**
-- Open the task detail to view stdout/stderr from the last run
-- Check for timeout issues (default 10 minutes)
-- Verify the working directory exists and is accessible
-
-**Daemon restart clears running tasks?**
-- This is expected — in-progress runs are marked as failed on restart
-- The task will be picked up again at the next scheduled time
+Related: [Daemon](/daemon/), [Diagnostics](/diagnostics/), [Secrets](/secrets/).
