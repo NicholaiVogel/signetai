@@ -420,6 +420,116 @@ describe("ontology proposals", () => {
 		expect(getOntologyProposal(getDbAccessor(), pending.id, "ant")?.status).toBe("pending");
 	});
 
+	it("rejects a deduped claim apply whose evidence source disappeared after creation", () => {
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memories
+				 (id, content, type, agent_id, visibility, memory_kind, created_at, updated_at)
+				 VALUES
+				 ('dedupe-live', 'Live dedupe evidence.', 'fact', 'ant', 'global', 'episodic', ?, ?),
+				 ('dedupe-gone', 'Evidence that will disappear.', 'fact', 'ant', 'global', 'episodic', ?, ?)`,
+			).run(
+				"2026-08-04T00:00:00.000Z",
+				"2026-08-04T00:00:00.000Z",
+				"2026-08-04T00:00:00.000Z",
+				"2026-08-04T00:00:00.000Z",
+			);
+		});
+		const payload = {
+			entity: "Dedupe Provenance",
+			entity_type: "project",
+			aspect: "evidence",
+			claim_key: "dedupe_slot",
+			value: "Deduped applies must still revalidate their evidence.",
+		};
+
+		const first = applyOntologyOperation(getDbAccessor(), {
+			agentId: "ant",
+			actor: "test",
+			operation: "set_claim_value",
+			payload,
+			evidence: [{ source_ref: "memory:dedupe-live" }],
+		});
+		expect(first.proposal.status).toBe("applied");
+		expect(first.result?.attributeId).toBeTypeOf("string");
+
+		const pending = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "set_claim_value",
+			payload,
+			evidence: [{ source_ref: "memory:dedupe-gone" }],
+		});
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare("UPDATE memories SET is_deleted = 1 WHERE id = ? AND agent_id = ?").run("dedupe-gone", "ant");
+		});
+
+		const before = getDbAccessor().withReadDb((db) => {
+			const attributeCount = (
+				db.prepare("SELECT COUNT(*) AS c FROM entity_attributes WHERE agent_id = ?").get("ant") as { c: number }
+			).c;
+			const derivedCount = (
+				db.prepare("SELECT COUNT(*) AS c FROM memories WHERE agent_id = ? AND memory_kind = 'derived'").get("ant") as {
+					c: number;
+				}
+			).c;
+			return { attributeCount, derivedCount };
+		});
+
+		// The dedupe early-return used to apply without revalidating evidence.
+		expect(() => applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: pending.id, actor: "test" })).toThrow(
+			new OntologyProposalError("Evidence source_ref was not found: memory:dedupe-gone", 409),
+		);
+
+		const after = getDbAccessor().withReadDb((db) => {
+			const attributeCount = (
+				db.prepare("SELECT COUNT(*) AS c FROM entity_attributes WHERE agent_id = ?").get("ant") as { c: number }
+			).c;
+			const derivedCount = (
+				db.prepare("SELECT COUNT(*) AS c FROM memories WHERE agent_id = ? AND memory_kind = 'derived'").get("ant") as {
+					c: number;
+				}
+			).c;
+			return { attributeCount, derivedCount };
+		});
+		expect(after).toEqual(before);
+		expect(getOntologyProposal(getDbAccessor(), pending.id, "ant")?.status).toBe("pending");
+	});
+
+	it("rejects a non-materializing apply whose evidence source disappeared after creation", () => {
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memories
+				 (id, content, type, agent_id, visibility, memory_kind, created_at, updated_at)
+				 VALUES ('entity-gone', 'Entity evidence that will disappear.', 'fact', 'ant', 'global', 'episodic', ?, ?)`,
+			).run("2026-08-04T00:00:00.000Z", "2026-08-04T00:00:00.000Z");
+		});
+
+		const pending = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "create_entity",
+			payload: { name: "Orphaned Evidence Entity", entity_type: "concept" },
+			evidence: [{ source_ref: "memory:entity-gone" }],
+		});
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare("UPDATE memories SET is_deleted = 1 WHERE id = ? AND agent_id = ?").run("entity-gone", "ant");
+		});
+
+		// create_entity never materializes attribute memory, so apply-time
+		// revalidation has to happen at the shared seam, not the materializer.
+		expect(() => applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: pending.id, actor: "test" })).toThrow(
+			new OntologyProposalError("Evidence source_ref was not found: memory:entity-gone", 409),
+		);
+		expect(
+			getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare("SELECT COUNT(*) AS c FROM entities WHERE agent_id = ? AND name = ?")
+						.get("ant", "Orphaned Evidence Entity") as { c: number },
+			),
+		).toEqual({ c: 0 });
+		expect(getOntologyProposal(getDbAccessor(), pending.id, "ant")?.status).toBe("pending");
+	});
+
 	it("rejects generic entity labels before creating ontology entities", () => {
 		expect(() =>
 			applyOntologyOperation(getDbAccessor(), {

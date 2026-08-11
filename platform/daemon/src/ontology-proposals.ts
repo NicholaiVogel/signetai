@@ -2208,6 +2208,11 @@ function applyOperation(
 	writeCaps?: GraphWriteCaps,
 ): Readonly<Record<string, unknown>> {
 	try {
+		// Revalidate strict source_ref evidence at the common apply seam, not
+		// just inside materializeAttributeMemoryInTx: a pending proposal whose
+		// evidence source disappears after creation must fail closed here,
+		// before any handler mutation or dedupe early-return can apply it.
+		validateProposalEvidenceSourcesInTx(db, proposal.agent_id, proposalAuditEvidence(proposal));
 		const payload = parseJsonRecord(proposal.payload);
 		if (proposal.operation === "create_entity") return applyCreateEntity(db, proposal.agent_id, proposal, payload);
 		if (proposal.operation === "rename_entity") return applyRenameEntity(db, proposal.agent_id, proposal, payload);
