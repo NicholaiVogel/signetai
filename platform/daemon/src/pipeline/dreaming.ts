@@ -286,6 +286,8 @@ export interface DreamingPassAttribution {
 	readonly locality: "local" | "remote" | "unknown";
 }
 
+const DREAMING_WORKLOAD_CLASS = "memory_extraction";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -980,6 +982,7 @@ export function recordDreamingPassTelemetry(input: {
 	try {
 		getActiveTelemetry()?.record("dreaming.pass", {
 			mode: input.mode,
+			workloadClass: DREAMING_WORKLOAD_CLASS,
 			outcome: input.outcome,
 			outcomeCode: input.outcomeCode,
 			...(input.attribution

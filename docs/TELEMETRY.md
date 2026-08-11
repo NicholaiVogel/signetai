@@ -91,7 +91,7 @@ paths, or user identity.
 | `recall.outcome` | result and delivery boundary for a recall attempt | `surface`, `resultState` (`empty` / `non_empty` / `truncated` / `error`), `deliveryState` (`returned` / `injected` / `consumed` / `not_delivered`), `results`, optional `reason` (`skipped_low_signal`) |
 | `source.lifecycle` | bounded source connect, index, readiness, first-recall, and recurring freshness milestones | `phase`, fixed `sourceClass`, bounded outcomes/counts/buckets |
 | `pipeline.error` | categorized extraction, decision, or embedding failure | `stage`, `code` only; no message or stack content |
-| `dreaming.pass` | every terminal agentic dreaming pass, including no-op, failed, and cancelled passes | `mode`, `outcome`, `outcomeCode`, bounded successful-target `executor`, underlying `provider`, `model`, and `locality` when available. ACPX uses only known remote harness providers or the `unknown` sentinel, never an arbitrary configured agent string; `tokensInput`, `tokensOutput`, `tokensCacheRead`, `tokensCacheWrite`, `tokensTotal`, `cost`, `accountingProvenance`, `artifactsConsidered`, `memoriesCreated`, `memoriesUpdated`, `memoriesSuperseded`, `memoriesRetired`, `claimsChanged`, `relationshipsChanged`, `provenanceLinksChanged`, `toolCalls`, `durationMs` |
+| `dreaming.pass` | every terminal agentic dreaming pass, including no-op, failed, and cancelled passes | `mode`, fixed routed `workloadClass` (`memory_extraction`), `outcome`, `outcomeCode`, bounded successful-target `executor`, underlying `provider`, `model`, and `locality` when available. ACPX uses only known remote harness providers or the `unknown` sentinel, never an arbitrary configured agent string; `tokensInput`, `tokensOutput`, `tokensCacheRead`, `tokensCacheWrite`, `tokensTotal`, `cost`, `accountingProvenance`, optional request-level `cacheAccountingAvailable`, `cacheRequests`, `cacheHits`, `cacheMisses`, `cacheUnknown`, `cacheWrites`, `artifactsConsidered`, `memoriesCreated`, `memoriesUpdated`, `memoriesSuperseded`, `memoriesRetired`, `claimsChanged`, `relationshipsChanged`, `provenanceLinksChanged`, `toolCalls`, `durationMs` |
 | `pipeline.operation` | one bounded summary for a logical indexing, capture, recall, dreaming, extraction, or other operation | `operationClass`, `outcome`, `accepted`, `skipped`, `retried`, `failed`, duration/queue-age buckets, optional `causeFamily` |
 | `inference.route` | inference control-plane routing decision | `surface`, `agentId`, `operation`, `taskClass`, `policyId`, `selectedTarget`, `candidateCount`, `blockedCount`, `allowedCount`, `privacy`, `durationMs`, `success`, `errorCode` |
 | `inference.execute` / `inference.stream` | per-execution outcome | `surface`, `agentId`, `operation`, `taskClass`, `policyId`, `selectedTarget`, `finalTarget`, `attemptPath`, `failedTargets`, `attemptCount`, `failedCount`, `fallbackCount`, `privacy`, `durationMs`, `inputTokens`, `outputTokens`, `success`, `cancelled`, `errorCode` |
@@ -215,9 +215,17 @@ Notes on individual events:
   `durationMs` is the bounded wall-clock pass duration. When the routed run
   succeeds, `provider` is the normalized provider family and `model` is the
   configured model ID for the target that actually completed the pass,
-  including a fallback target. These fields are omitted when no successful
+  including a fallback target. `workloadClass` is the fixed routed operation
+  class `memory_extraction`. These fields are omitted when no successful
   target metadata is available. They never contain target refs, account IDs or
-  labels, endpoints, credential refs, agent identities, or content.
+  labels, endpoints, credential refs, agent identities, or content. Request
+  cache accounting is available only when the provider reports a finite
+  `cacheRead` or `cacheWrite` field for at least one assistant response. A
+  provider that omits both fields remains unavailable, rather than reporting a
+  zeroed cache summary. Reported zero read/write values are unknown requests,
+  not misses. `/api/telemetry/stats` aggregates available request counters and
+  coverage by provider, model, mode, and workload class. Its hit-rate
+  denominator is `cacheHits + cacheMisses`; unknown requests are excluded.
 - **`recall.performed`** — emitted at the shared `hybridRecall` boundary with
   counts and timing only. Aggregate recall can emit one event for the main
   search and additional events for decomposed subqueries. It measures search

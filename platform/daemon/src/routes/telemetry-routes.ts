@@ -41,6 +41,8 @@ interface DreamingCacheAccountingTotals {
 	cacheAccountingUnavailablePasses: number;
 }
 
+type DreamingCacheAccountingDimension = "provider" | "model" | "workloadClass";
+
 export function emptyDreamingCacheAccounting(): DreamingCacheAccountingTotals {
 	return {
 		cacheRequests: 0,
@@ -64,10 +66,36 @@ export function addDreamingCacheAccounting(
 ): void {
 	if (properties.cacheAccountingAvailable === true) totals.cacheAccountingAvailablePasses++;
 	else if (properties.cacheAccountingAvailable === false) totals.cacheAccountingUnavailablePasses++;
+	if (properties.cacheAccountingAvailable !== true) return;
 	for (const key of ["cacheRequests", "cacheHits", "cacheMisses", "cacheUnknown", "cacheWrites"] as const) {
 		const value = numberProperty(properties, key);
 		if (value !== null) totals[key] += value;
 	}
+}
+
+export function addDreamingCacheAccountingByDimension(
+	totalsByDimension: Map<string, DreamingCacheAccountingTotals>,
+	properties: Readonly<Record<string, unknown>>,
+	dimension: DreamingCacheAccountingDimension,
+): void {
+	const rawValue = properties[dimension];
+	const value = typeof rawValue === "string" && rawValue.length > 0 ? rawValue : "unknown";
+	const totals = totalsByDimension.get(value) ?? emptyDreamingCacheAccounting();
+	addDreamingCacheAccounting(totals, properties);
+	totalsByDimension.set(value, totals);
+}
+
+function dreamingCacheAccountingDimensionRows(
+	totalsByDimension: ReadonlyMap<string, DreamingCacheAccountingTotals>,
+	dimension: DreamingCacheAccountingDimension,
+): Array<Record<string, string | number | null>> {
+	return [...totalsByDimension.entries()]
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([value, totals]) => ({
+			[dimension]: value,
+			...totals,
+			hitRate: dreamingCacheHitRate(totals),
+		}));
 }
 
 export function emptyAccountingCoverage(): AccountingCoverage {
@@ -339,6 +367,9 @@ export function registerTelemetryRoutes(app: Hono): void {
 		let dreamingCacheRead = 0;
 		let dreamingCacheWrite = 0;
 		const dreamingCacheAccounting = emptyDreamingCacheAccounting();
+		const dreamingCacheAccountingByProvider = new Map<string, DreamingCacheAccountingTotals>();
+		const dreamingCacheAccountingByModel = new Map<string, DreamingCacheAccountingTotals>();
+		const dreamingCacheAccountingByWorkloadClass = new Map<string, DreamingCacheAccountingTotals>();
 		let dreamingCost = 0;
 		let dreamingArtifacts = 0;
 		let dreamingMemoriesCreated = 0;
@@ -442,6 +473,9 @@ export function registerTelemetryRoutes(app: Hono): void {
 				if (typeof e.properties.tokensCacheWrite === "number") dreamingCacheWrite += e.properties.tokensCacheWrite;
 				if (typeof e.properties.cost === "number") dreamingCost += e.properties.cost;
 				addDreamingCacheAccounting(dreamingCacheAccounting, e.properties);
+				addDreamingCacheAccountingByDimension(dreamingCacheAccountingByProvider, e.properties, "provider");
+				addDreamingCacheAccountingByDimension(dreamingCacheAccountingByModel, e.properties, "model");
+				addDreamingCacheAccountingByDimension(dreamingCacheAccountingByWorkloadClass, e.properties, "workloadClass");
 				addAccountingCoverage(
 					dreamingCoverage,
 					e.properties.accountingProvenance,
@@ -493,13 +527,7 @@ export function registerTelemetryRoutes(app: Hono): void {
 				byMode.tokensInput += effectNumberProperty("tokensInput");
 				byMode.tokensOutput += effectNumberProperty("tokensOutput");
 				byMode.cost += effectNumberProperty("cost");
-				byMode.cacheRequests += effectNumberProperty("cacheRequests");
-				byMode.cacheHits += effectNumberProperty("cacheHits");
-				byMode.cacheMisses += effectNumberProperty("cacheMisses");
-				byMode.cacheUnknown += effectNumberProperty("cacheUnknown");
-				byMode.cacheWrites += effectNumberProperty("cacheWrites");
-				if (e.properties.cacheAccountingAvailable === true) byMode.cacheAccountingAvailablePasses++;
-				if (e.properties.cacheAccountingAvailable === false) byMode.cacheAccountingUnavailablePasses++;
+				addDreamingCacheAccounting(byMode, e.properties);
 				byMode.artifactsConsidered += effectNumberProperty("artifactsConsidered");
 				byMode.memoriesCreated += effectNumberProperty("memoriesCreated");
 				byMode.memoriesUpdated += effectNumberProperty("memoriesUpdated");
@@ -661,6 +689,12 @@ export function registerTelemetryRoutes(app: Hono): void {
 				cacheAccounting: {
 					...dreamingCacheAccounting,
 					hitRate: dreamingCacheHitRate(dreamingCacheAccounting),
+					byProvider: dreamingCacheAccountingDimensionRows(dreamingCacheAccountingByProvider, "provider"),
+					byModel: dreamingCacheAccountingDimensionRows(dreamingCacheAccountingByModel, "model"),
+					byWorkloadClass: dreamingCacheAccountingDimensionRows(
+						dreamingCacheAccountingByWorkloadClass,
+						"workloadClass",
+					),
 				},
 				cost: dreamingCost,
 				coverage: dreamingCoverage,

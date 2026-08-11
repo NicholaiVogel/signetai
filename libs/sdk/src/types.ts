@@ -494,6 +494,23 @@ export interface TelemetryStatsDisabledResponse {
 	readonly enabled: false;
 }
 
+export interface DreamingCacheAccountingTotals {
+	readonly cacheRequests: number;
+	readonly cacheHits: number;
+	readonly cacheMisses: number;
+	readonly cacheUnknown: number;
+	readonly cacheWrites: number;
+	readonly cacheAccountingAvailablePasses: number;
+	readonly cacheAccountingUnavailablePasses: number;
+	readonly hitRate: number | null;
+}
+
+export interface DreamingCacheAccounting extends DreamingCacheAccountingTotals {
+	readonly byProvider: readonly (DreamingCacheAccountingTotals & { readonly provider: string })[];
+	readonly byModel: readonly (DreamingCacheAccountingTotals & { readonly model: string })[];
+	readonly byWorkloadClass: readonly (DreamingCacheAccountingTotals & { readonly workloadClass: string })[];
+}
+
 export interface TelemetryStatsEnabledResponse {
 	readonly enabled: true;
 	readonly totalEvents: number;
@@ -524,6 +541,7 @@ export interface TelemetryStatsEnabledResponse {
 		readonly tokensOutput: number;
 		readonly tokensCacheRead: number;
 		readonly tokensCacheWrite: number;
+		readonly cacheAccounting: DreamingCacheAccounting;
 		readonly cost: number;
 		readonly coverage: AccountingCoverage;
 		readonly artifactsConsidered: number;
@@ -544,6 +562,14 @@ export interface TelemetryStatsEnabledResponse {
 			readonly tokensInput: number;
 			readonly tokensOutput: number;
 			readonly cost: number;
+			readonly cacheRequests: number;
+			readonly cacheHits: number;
+			readonly cacheMisses: number;
+			readonly cacheUnknown: number;
+			readonly cacheWrites: number;
+			readonly cacheAccountingAvailablePasses: number;
+			readonly cacheAccountingUnavailablePasses: number;
+			readonly hitRate: number | null;
 			readonly artifactsConsidered: number;
 			readonly memoriesCreated: number;
 			readonly memoriesUpdated: number;

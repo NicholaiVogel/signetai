@@ -306,7 +306,13 @@ function nonNegativeFinite(value: number | null | undefined): number {
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-export function summarizeCacheRequests(usages: readonly Usage[]): LlmCacheRequestAccounting {
+function hasCacheRequestAccounting(usage: Usage): boolean {
+	return [usage.cacheRead, usage.cacheWrite].some((value) => typeof value === "number" && Number.isFinite(value));
+}
+
+export function summarizeCacheRequests(usages: readonly Usage[]): LlmCacheRequestAccounting | null {
+	if (!usages.some(hasCacheRequestAccounting)) return null;
+
 	let hits = 0;
 	let misses = 0;
 	let unknown = 0;

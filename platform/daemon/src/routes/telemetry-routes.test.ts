@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	addAccountingCoverage,
 	addDreamingCacheAccounting,
+	addDreamingCacheAccountingByDimension,
 	dreamingCacheHitRate,
 	emptyAccountingCoverage,
 	emptyDreamingCacheAccounting,
@@ -70,5 +71,52 @@ describe("dreaming cache accounting", () => {
 
 	test("returns no rate when provider cache semantics are unavailable", () => {
 		expect(dreamingCacheHitRate(emptyDreamingCacheAccounting())).toBeNull();
+	});
+
+	test("does not aggregate counters from unavailable cache accounting", () => {
+		const totals = emptyDreamingCacheAccounting();
+		addDreamingCacheAccounting(totals, {
+			cacheAccountingAvailable: false,
+			cacheRequests: 4,
+			cacheHits: 4,
+			cacheMisses: 0,
+			cacheUnknown: 0,
+			cacheWrites: 0,
+		});
+
+		expect(totals).toEqual({
+			cacheRequests: 0,
+			cacheHits: 0,
+			cacheMisses: 0,
+			cacheUnknown: 0,
+			cacheWrites: 0,
+			cacheAccountingAvailablePasses: 0,
+			cacheAccountingUnavailablePasses: 1,
+		});
+	});
+
+	test("aggregates cache accounting by provider, model, and workload class", () => {
+		const properties = {
+			cacheAccountingAvailable: true,
+			cacheRequests: 2,
+			cacheHits: 1,
+			cacheMisses: 1,
+			cacheUnknown: 0,
+			cacheWrites: 1,
+			provider: "anthropic",
+			model: "claude-test",
+			workloadClass: "memory_extraction",
+		};
+		const providers = new Map<string, ReturnType<typeof emptyDreamingCacheAccounting>>();
+		const models = new Map<string, ReturnType<typeof emptyDreamingCacheAccounting>>();
+		const workloadClasses = new Map<string, ReturnType<typeof emptyDreamingCacheAccounting>>();
+
+		addDreamingCacheAccountingByDimension(providers, properties, "provider");
+		addDreamingCacheAccountingByDimension(models, properties, "model");
+		addDreamingCacheAccountingByDimension(workloadClasses, properties, "workloadClass");
+
+		expect(providers.get("anthropic")).toMatchObject({ cacheRequests: 2, cacheHits: 1, cacheMisses: 1 });
+		expect(models.get("claude-test")).toMatchObject({ cacheRequests: 2, cacheHits: 1, cacheMisses: 1 });
+		expect(workloadClasses.get("memory_extraction")).toMatchObject({ cacheRequests: 2, cacheHits: 1, cacheMisses: 1 });
 	});
 });

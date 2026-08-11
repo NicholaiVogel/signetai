@@ -274,6 +274,25 @@ Aggregated telemetry statistics since daemon start or since a given timestamp.
     "tokensOutput": 24000,
     "tokensCacheRead": 60000,
     "tokensCacheWrite": 0,
+    "cacheAccounting": {
+      "cacheRequests": 12,
+      "cacheHits": 6,
+      "cacheMisses": 2,
+      "cacheUnknown": 4,
+      "cacheWrites": 2,
+      "cacheAccountingAvailablePasses": 8,
+      "cacheAccountingUnavailablePasses": 4,
+      "hitRate": 0.75,
+      "byProvider": [
+        { "provider": "anthropic", "cacheRequests": 12, "cacheHits": 6, "cacheMisses": 2, "cacheUnknown": 4, "cacheWrites": 2, "cacheAccountingAvailablePasses": 8, "cacheAccountingUnavailablePasses": 0, "hitRate": 0.75 }
+      ],
+      "byModel": [
+        { "model": "claude-test", "cacheRequests": 12, "cacheHits": 6, "cacheMisses": 2, "cacheUnknown": 4, "cacheWrites": 2, "cacheAccountingAvailablePasses": 8, "cacheAccountingUnavailablePasses": 0, "hitRate": 0.75 }
+      ],
+      "byWorkloadClass": [
+        { "workloadClass": "memory_extraction", "cacheRequests": 12, "cacheHits": 6, "cacheMisses": 2, "cacheUnknown": 4, "cacheWrites": 2, "cacheAccountingAvailablePasses": 8, "cacheAccountingUnavailablePasses": 0, "hitRate": 0.75 }
+      ]
+    },
     "cost": 0.45,
     "artifactsConsidered": 36,
     "memoriesCreated": 8,
@@ -300,6 +319,14 @@ Aggregated telemetry statistics since daemon start or since a given timestamp.
         "tokensInput": 180000,
         "tokensOutput": 24000,
         "cost": 0.45,
+        "cacheRequests": 12,
+        "cacheHits": 6,
+        "cacheMisses": 2,
+        "cacheUnknown": 4,
+        "cacheWrites": 2,
+        "cacheAccountingAvailablePasses": 8,
+        "cacheAccountingUnavailablePasses": 4,
+        "hitRate": 0.75,
         "artifactsConsidered": 36,
         "memoriesCreated": 8,
         "memoriesUpdated": 0,
@@ -384,6 +411,15 @@ Each `llm`, `embedding`, `dreaming`, and `sessions` object also contains a
 contains `calls`, `tokens`, and `cost` totals. The `mixed` bucket is used for
 session summaries that combine more than one accounting provenance; it is not
 missing accounting.
+
+`dreaming.cacheAccounting` contains request-level counters only for passes where
+an inference provider reported cache fields. `cacheAccountingUnavailablePasses`
+counts passes without that provider coverage; their counters are not inferred as
+zero. A reported zero cache read/write value is an unknown request, not a miss.
+`hitRate` is `cacheHits / (cacheHits + cacheMisses)`, so unknown requests are
+outside the denominator. `byProvider`, `byModel`, and `byWorkloadClass` use the
+same totals and availability fields; `byMode` exposes the same cache totals for
+each Dreaming mode.
 
 Embedding `cost` values are USD. The `sessions` block is a derived view over
 matching usage events and should not be added to event-level cost totals. The

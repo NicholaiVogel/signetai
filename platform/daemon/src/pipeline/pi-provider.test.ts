@@ -83,13 +83,19 @@ describe("pi provider catalog models", () => {
 		).toEqual({ requests: 3, hits: 1, misses: 1, unknown: 1, writes: 1 });
 	});
 
-	test("does not label missing remote usage as provider-reported zero tokens", () => {
+	test("does not report request cache accounting when a provider omits cache fields", () => {
 		const mapped = mapUsage({} as Usage, "provider_reported");
 		expect(mapped).toMatchObject({
 			totalTokens: null,
 			totalCost: null,
 			accountingProvenance: "unavailable",
 		});
+		expect(mapped.cacheRequests).toBeNull();
+	});
+
+	test("keeps provider-reported zero cache fields as an unknown request", () => {
+		const mapped = mapUsage({ cacheRead: 0, cacheWrite: 0 } as Usage, "provider_reported");
+
 		expect(mapped.cacheRequests).toEqual({ requests: 1, hits: 0, misses: 0, unknown: 1, writes: 0 });
 	});
 

@@ -104,6 +104,7 @@ describe("dreaming telemetry", () => {
 		expect(full?.properties.tokensCacheWrite).toBe(5000);
 		expect(full?.properties.tokensTotal).toBe(502788);
 		expect(full?.properties.cost).toBe(0.14574042);
+		expect(full?.properties.workloadClass).toBe("memory_extraction");
 		expect(full?.properties.accountingProvenance).toBe("provider_reported");
 	expect(full?.properties.executor).toBe("acpx");
 	expect(full?.properties.provider).toBe("codex");
@@ -130,6 +131,7 @@ describe("dreaming telemetry", () => {
 		const bare = passes.find((e) => e.properties.mode === "hygiene");
 		expect(bare?.properties.tokensInput).toBeNull();
 		expect(bare?.properties.cost).toBeNull();
+		expect(bare?.properties.workloadClass).toBe("memory_extraction");
 		expect(bare?.properties.cacheAccountingAvailable).toBe(false);
 		expect(bare?.properties.cacheRequests).toBeNull();
 		expect(bare?.properties.cacheHits).toBeNull();
