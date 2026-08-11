@@ -22,6 +22,32 @@ Use Sources when you want Signet to recall from:
 
 A source hit is marked as source-backed recall, not as a native saved memory. Obsidian recall results include a canonical `source_path` so agents and tools can inspect the original file directly.
 
+## Use the Dashboard
+
+Open the [Dashboard](/dashboard/) and select **Sources**. The current Sources surface starts with **Connect a source** for Obsidian, GitHub, or Discord, and **Import files** for durable, read-only file imports. Connected-source cards show artifact, chunk, and indexed counts plus source health; they also support re-indexing, snapshot download, and removal.
+
+The Dashboard dialog deliberately collects the basic fields only:
+
+| Kind | Required dashboard input | Optional input |
+|---|---|---|
+| Obsidian | Absolute vault path | Display name |
+| GitHub | `owner/repo` or `owner/*` | Display name and token secret reference |
+| Discord | Guild ID and bot-token secret reference | Display name |
+
+For an Obsidian vault, **Browse** asks the local daemon to open a folder picker. The desktop shell can use its native picker; browser/dev mode may need a pasted absolute path when no native picker is available.
+
+The Dashboard does not expose Discord mode selectors, channel filters, cache paths, or Gateway-tail controls. Use the CLI or the [Discord source API](/api/documents-sources/#post-api-sources-discord) for those advanced settings. Store tokens in Signet Secrets or another secret reference; do not place raw tokens in source configuration.
+
+### Import files
+
+Choose **Import files**, select one or more files, choose how duplicates should be handled, then select **Import & index**. The importer accepts text, Markdown, JSON, HTML, CSV, and AnyDoc-supported document formats: `doc`, `docx`, `docm`, `odt`, `rtf`, `pdf`, `ppt`, `pptx`, `ppsx`, `odp`, `epub`, `xls`, `xlsx`, `xlsm`, and `ods`.
+
+The current bounds are 25 files per batch, 25 MiB per file, and 100 MiB per batch. Results are reported per file, so a malformed or unsupported file does not hide successful imports from the same batch. Choose **Skip duplicate** to keep the existing import, **Replace and re-index** to replace it and queue indexing again, or **Import as a new source** to retain a second source for the same content.
+
+In a desktop-local session, **Choose from desktop** can return local paths to a loopback daemon. Remote clients must upload file bytes; a remote daemon never treats a path string as permission to read the client’s filesystem.
+
+> TODO: add dark-mode screenshots for the Connect a source and Import files dialogs after capture against a controlled, non-private daemon fixture. This worktree has no such fixture, so no mock or private-path imagery is published here.
+
 ## Discord v1
 
 Discord Sources v1 indexes bot-accessible guild context through Discord REST API v10 and local Discord Desktop cache artifacts:

@@ -3,11 +3,7 @@ title: "Connectors"
 description: "Platform-specific connector framework."
 ---
 
-Connectors let Signet pull content from external sources — local
-filesystems, documentation repos, cloud drives — and ingest that
-content into the memory store as searchable [Documents](/documents/). Each connector
-follows a consistent register-sync-health lifecycle managed through
-the [Daemon](/daemon/)'s [HTTP API](/api/).
+Connectors are the daemon’s API-level framework for synchronizing provider resources into the document pipeline. They are distinct from the Dashboard **Sources** workflow: use [Sources](/sources/) to connect an Obsidian vault, GitHub repository, or Discord guild from the current Dashboard, or to import files as durable source-backed artifacts.
 
 This page covers document-source connectors. If you want to install a harness
 adapter on another machine and point it at a remote Signet daemon, see

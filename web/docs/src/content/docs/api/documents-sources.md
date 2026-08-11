@@ -16,8 +16,9 @@ All document endpoints require `documents` permission.
 ### POST /api/documents
 
 Submit a document for ingestion. The document is queued and processed
-asynchronously. Returns `201` on success, or the existing document's ID and
-status if a duplicate URL is detected.
+asynchronously. A new request returns `201` with the queued document and job
+IDs. A duplicate URL returns the existing document's ID and its real current
+status when it is already active in the same agent and project scope.
 
 **Request body**
 
@@ -28,7 +29,7 @@ status if a duplicate URL is detected.
   "title": "My Document",
   "content_type": "text/plain",
   "connector_id": null,
-  "metadata": { "author": "nicholai" }
+  "metadata": { "author": "example" }
 }
 ```
 
@@ -48,13 +49,13 @@ required for `text`. `url` is required for `url`.
 **Response**
 
 ```json
-{ "id": "uuid", "status": "queued" }
+{ "id": "uuid", "status": "queued", "jobId": "memory-job-uuid" }
 ```
 
 Or if deduplicated:
 
 ```json
-{ "id": "existing-uuid", "status": "processing", "deduplicated": true }
+{ "id": "existing-uuid", "status": "chunking", "deduplicated": true }
 ```
 
 ### GET /api/documents
@@ -65,7 +66,7 @@ List all documents with optional status filter.
 
 | Parameter | Description                              |
 |-----------|------------------------------------------|
-| `status`  | Filter by status (`queued`, `processing`, `done`, `failed`, `deleted`) |
+| `status`  | Filter by lifecycle status (`queued`, `extracting`, `chunking`, `embedding`, `indexing`, `done`, `failed`, `deleted`) |
 | `limit`   | Page size (default: 50, max: 500)        |
 | `offset`  | Pagination offset (default: 0)           |
 
@@ -100,7 +101,7 @@ List the memory records derived from this document, ordered by chunk index.
     {
       "id": "memory-uuid",
       "content": "Chunk text...",
-      "type": "fact",
+      "type": "document_chunk",
       "created_at": "2026-02-21T10:00:00.000Z",
       "chunk_index": 0
     }
@@ -111,8 +112,11 @@ List the memory records derived from this document, ordered by chunk index.
 
 ### DELETE /api/documents/:id
 
-Soft-delete a document and all its derived memory records. Memories linked to
-the document are soft-deleted one at a time with audit history.
+Soft-delete a document and its unshared derived memory records. The document is
+marked `deleted` and any pending document-ingest job is completed. A linked
+memory is soft-deleted with audit history only when no other non-deleted
+document still references it; shared memories remain available to their other
+documents.
 
 **Query parameters**
 
@@ -125,6 +129,9 @@ the document are soft-deleted one at a time with audit history.
 ```json
 { "deleted": true, "memoriesRemoved": 12 }
 ```
+
+`memoriesRemoved` is the number of memories actually soft-deleted, not the
+number of chunk links on the document.
 
 
 ## Sources

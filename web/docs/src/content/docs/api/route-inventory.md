@@ -51,6 +51,7 @@ silently disappear from the API reference.
 | GET | `/api/synthesis/status` | platform/daemon/src/routes/hooks-routes.ts |
 | GET | `/api/sources` | platform/daemon/src/routes/sources-routes.ts |
 | POST | `/api/sources/pick-directory` | platform/daemon/src/routes/sources-routes.ts |
+| POST | `/api/sources/pick-files` | platform/daemon/src/routes/sources-routes.ts (loopback-only; returns local paths for a subsequent paths-based import) |
 | POST | `/api/sources/obsidian` | platform/daemon/src/routes/sources-routes.ts |
 | POST | `/api/sources/discord` | platform/daemon/src/routes/sources-routes.ts |
 | POST | `/api/sources/import` | platform/daemon/src/routes/import-routes.ts |
@@ -161,9 +162,11 @@ the limit is the daemon-wide client/process budget.
 
 ### GET /
 
-Serves the SvelteKit dashboard as a single-page application. Static files are
-served from the built dashboard directory. Any path without a file extension
-falls back to `index.html` for client-side routing.
+Serves the React/Vite dashboard as a generic single-page application. Static
+assets are served from the built dashboard directory or, when available, the
+packaged embedded dashboard assets. The dashboard handler passes `/api/*`,
+`/health`, and `/sse` through; remaining paths without a file extension fall
+back to `index.html` for client-side routing.
 
 If the dashboard build is not found, a minimal HTML fallback page is served
 with links to key API endpoints.
