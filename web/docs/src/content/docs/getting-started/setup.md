@@ -1,129 +1,55 @@
 ---
 title: "Set up Signet"
-description: "Run the setup wizard and understand the workspace it creates."
+description: "Understand the current setup wizard, identity presets, and workspace boundaries."
 ---
 
-## Setup Wizard
-
-The wizard asks a series of questions:
-
-**1. Agent name**
-
-Pick a name for your agent — this appears in harness prompts and the
-dashboard.
-
-**2. Harnesses**
-
-Select which AI platforms you use. Signet will configure integrations
-for each:
-
-- Claude Code — hooks + CLAUDE.md sync
-- OpenCode — plugin + AGENTS.md sync
-- OpenClaw — adapter-openclaw hooks
-- Codex — wrapper install + session hooks
-
-**3. Agent description**
-
-Add a short description of your agent. This is used in generated identity
-metadata and dashboard summaries.
-
-**4. Core plugins**
-
-Signet Secrets stores reusable credentials outside chat, memory, logs, and
-source files. It connects to Signet's encrypted local store and compatible
-1Password references, then exposes value-safe CLI, MCP, and SDK helpers plus
-command injection with output redaction. This is safer than pasting API keys
-into prompts because agents can list secret names and run commands with
-injected values without reading the raw secrets.
-
-**5. Optional code retrieval**
-
-GraphIQ can index active projects into each project's local `.graphiq/`
-directory and expose generic code retrieval tools through Signet. Use it when
-you want fast symbol search, structural context, constants, and blast-radius
-analysis alongside Signet memory retrieval.
-
-After setup, index a project with:
+## Run setup
 
 ```bash
-signet index ~/signet/signetai
+signet setup
 ```
 
-That path becomes the active code project for GraphIQ-backed MCP tools until
-another `signet index <path>` command changes it.
+The wizard is interactive by default. If a workspace already exists, it detects and reconfigures that installation. For a new workspace, it can also offer a GitHub import instead of creating a fresh one.
 
-**6. Deployment context**
+## What the wizard asks
 
-Choose where Signet is running (`local`, `vps`, `server`). Setup uses
-this to show guidance before extraction provider selection.
+The exact branches depend on your answers, but a fresh interactive setup follows this order:
 
-**7. Embedding provider**
+1. **Identity mode**: let Signet manage identity files or turn identity management off.
+2. **Identity preset**: when managed identity is selected, choose Minimal, Hermes, OpenClaw, or Custom.
+3. **Agent name** and then selected **harnesses**. OpenClaw adds an opt-in workspace patch and a plugin-or-legacy integration choice when its configuration is detected.
+4. **Description** and optional core plugins: Signet Secrets and GraphIQ.
+5. **Daemon hosting**: local-only, local with Tailscale/network access, or a remote daemon URL. This is the interactive hosting question. `--deployment-type` is not prompted here.
+6. **Embedding search**: built-in, Ollama, OpenAI, or no embeddings, followed by model/search choices when applicable.
+7. **Background inference**, including provider connection or a choice to disable it. The wizard warns that remote APIs can incur usage costs. It can optionally use a distinct provider for aggregate recall.
+8. Optional advanced search and memory settings, Dreaming, Git history, named-agent roster entries, and an Obsidian source.
+9. A rendered plan and final confirmation before files are written.
 
-Embeddings power semantic (meaning-based) memory search. Choose:
+For unattended systems, use [the non-interactive setup reference](/cli/getting-started/#signet-setup) rather than trying to feed answers to the wizard.
 
-- **Built-in** (recommended) — no extra setup required.
-- **Ollama** — runs locally, free, no API key needed.
-  Setup checks your binary, service, and model, and guides install/pull
-  when needed.
-- **OpenAI** — uses the OpenAI embeddings API. Requires `OPENAI_API_KEY`.
-- **Skip** — memory still works via keyword search, just no semantic search.
+## Identity modes and presets
 
-**8. Embedding model**
+Identity management controls Signet-owned prompt files. It does not change the memory database or recall features.
 
-For Ollama, `nomic-embed-text` is a good default. Setup can pull it for
-you (with confirmation), or you can do it manually:
+- **Off**: Signet does not create, inject, or sync managed identity files. Your harness-native instructions remain authoritative.
+- **Minimal**: normal startup loads `AGENTS.md`; `DREAMING.md` is available only to Dreaming sessions.
+- **Hermes**: uses `SOUL.md` as primary identity alongside `AGENTS.md` project context.
+- **OpenClaw**: uses the richer AGENTS, SOUL, IDENTITY, USER, and MEMORY identity stack plus special-session prompts.
+- **Custom**: starts from Minimal and lets you choose startup files explicitly.
+
+Do not copy a fixed workspace tree into a deployment guide. Setup creates `agent.yaml`, the memory database, and only the identity files selected by the chosen mode and preset. Selected harnesses may create or update their own integration files outside the workspace.
+
+## What setup does after approval
+
+For a local daemon, setup initializes `memory/memories.db`, configures the selected harnesses, starts the daemon, and can warm the built-in embedding model. It reports the files actually created and offers to open the dashboard. With `--remote-url`, it records the remote daemon endpoint instead of starting a local process.
+
+If Git is enabled, setup initializes or uses the workspace repository and commits the initial state when it can. If OpenClaw is linked to the workspace, setup requires an origin remote, a new local snapshot, or an explicit non-interactive bypass before it completes.
+
+## Check the result
 
 ```bash
-ollama pull nomic-embed-text
+signet status
+signet dashboard
 ```
 
-**9. Search balance**
-
-The `alpha` setting controls how much weight goes to semantic vs. keyword
-search. 0.7 (70% semantic, 30% keyword) works well for most people.
-
-**9. Git & auto-commit**
-
-The wizard can initialize a git repo in `$SIGNET_WORKSPACE/` so every change to
-your agent files is automatically versioned.
-
-Setup also clones a managed Signet source checkout into
-`$SIGNET_WORKSPACE/signetai/`. Future `signet update` and `signet sync`
-operations fetch the latest upstream changes, but they only auto-pull when that
-checkout is clean and still sitting on the default branch. If you are hacking on
-the internals locally, Signet fetches and leaves your changes alone.
-
-After the wizard completes, the [Daemon](/daemon/) starts automatically and the
-[Dashboard](/dashboard/) opens at `http://localhost:3850`.
-
----
-
-## What Gets Created
-
-```
-$SIGNET_WORKSPACE/
-├── agent.yaml           # Your config & manifest
-├── AGENTS.md            # Agent identity & instructions
-├── SOUL.md              # Personality & tone
-├── MEMORY.md            # Generated working memory (starts empty)
-├── memory/
-│   ├── memories.db      # SQLite memory database
-│   └── scripts/         # Optional batch tools (memory.py)
-├── signetai/            # Managed local Signet source checkout for debugging
-├── skills/
-│   ├── remember/        # Built-in: /remember command
-│   └── recall/          # Built-in: /recall command
-└── .daemon/
-    ├── plugins/         # Bundled core plugin registry
-    └── logs/            # Daemon logs
-```
-
-If you selected Claude Code:
-- `~/.claude/CLAUDE.md` — auto-synced from AGENTS.md
-- `~/.claude/settings.json` — hooks for session start/end
-
-If you selected OpenCode:
-- `~/.config/opencode/AGENTS.md` — auto-synced
-- `~/.config/opencode/plugins/signet.mjs` — bundled plugin with remember/recall tools
-
----
+Use `signet setup` again to reconfigure an existing installation. Use [CLI environment and exit codes](/cli/environment/) before changing workspace variables or running the daemon under service tooling.

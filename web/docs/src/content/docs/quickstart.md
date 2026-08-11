@@ -1,94 +1,61 @@
 ---
 title: "Quickstart"
-description: "Install Signet, connect a harness, and give your agent persistent memory."
+description: "Install Signet, create a workspace, and use memory in your first session."
 ---
 
-Install Signet, connect a harness, and give your agent memory that survives the session.
+This tutorial takes a local installation from zero to a working memory command. It uses the interactive setup route; use the reference pages when you need a managed or remote deployment.
 
-<figure class="quickstart-dashboard">
-  <img
-    src="/dashboard-home-16x9.png"
-    alt="Signet Dashboard showing memory, ontology, agent, source, activity, and review data"
-    width="1920"
-    height="1080"
-    loading="eager"
-    decoding="async"
-  />
-</figure>
+## 1. Install Signet
 
-## Why Signet
+On macOS or Linux, install the native binary:
 
-An agent's memory records your projects, relationships, habits, preferences, decisions, and constraints. Together, this is your pattern of life.
+```bash
+curl -fsSL https://signetai.sh/install.sh | bash
+signet --help
+```
 
-Memory storage and retrieval are becoming commodity capabilities. Ownership is not. Whoever owns the memory owns the record of your pattern-of-life behavior. They can also control whether your agents keep working when you change models, tools, or vendors.
+Windows users should install the package wrapper instead:
 
-For agents deployed at scale, memory is infrastructure. Keep it outside the model and the harness. Keep it in a system that you can inspect, move, and operate.
+```bash
+npm install -g signetai
+```
 
-Signet stores this state in a local-first workspace that you control. The same memory can support multiple models, harnesses, and agents without locking the accumulated context inside one platform.
+See [Install](/getting-started/install/) for package-manager alternatives and non-interactive setup.
 
-## Dreaming
+## 2. Create a workspace
 
-Dreaming turns new evidence into useful semantic knowledge. It reads episodic records, compares them with the current semantic state, and applies audited ontology operations.
+```bash
+signet setup
+```
 
-Dreaming can use local inference or a provider that you configure. You control the provider and model. Dreaming does not replace the source evidence. It derives semantic state from it.
+For a new workspace, setup asks how Signet should manage identity, then asks for an identity preset when managed identity is enabled. It asks for an agent name, harnesses, optional core plugins, how the daemon should run (local, Tailscale, or remote), embeddings, background inference, and optional advanced settings before showing the plan for confirmation.
 
-Read [Memory lifecycle and Dreaming](/memory/#dreaming) for the full processing model.
+The default Minimal identity preset keeps normal startup context small. Setup creates `AGENTS.md` for that startup context and `DREAMING.md` for Dreaming sessions. Other presets create a different set of identity files; do not assume that every workspace has `SOUL.md`, `USER.md`, `MEMORY.md`, or a hooks directory. See [Set up Signet](/getting-started/setup/) for the preset and workspace details.
 
-## The semantic ontology
+Setup initializes the database and starts a local daemon unless you selected a remote daemon. It can then open the dashboard.
 
-The semantic ontology is Signet's current model of people, projects, systems, tools, decisions, constraints, and relationships.
+## 3. Check the installation
 
-It organizes knowledge as entities, aspects, groups, and claims. Claims are scoped, versioned, and auditable. This structure lets Signet follow relevant relationships without treating memory as a flat list of text fragments.
+```bash
+signet status
+signet dashboard
+```
 
-The Dashboard shows this ontology as a navigable graph. Read [Knowledge architecture](/knowledge-architecture/) for the data model and retrieval role.
+`signet dashboard` opens the local dashboard and starts the local daemon when necessary. If setup points the workspace at a remote daemon, the CLI uses that configured daemon URL instead.
 
-## Episodic
+## 4. Save and recall a memory
 
-Episodic memory is the source record. It includes transcripts, summaries, explicit memories, notes, documents, and connected source artifacts.
+```bash
+signet remember "Use Bun for this project" --tags project,tooling
+signet recall "Which package manager should this project use?"
+```
 
-Signet stores these records as immutable evidence with source information. Dreaming can derive new semantic knowledge from them, but it does not rewrite what happened.
+Use `--critical` with `signet remember` to pin a memory. Recall combines the available keyword and embedding search paths; setup can run without embeddings if you prefer.
 
-Read [Memory lifecycle](/memory/#memory-lifecycle) for the write path.
+## Next steps
 
-## Semantic
-
-Semantic memory is the current operational view of the episodic record. It includes entities, aspects, claims, relationships, keywords, and embeddings.
-
-Dreaming maintains this layer through audited operations. Each claim can keep its evidence and version history. This makes the semantic state useful and repairable.
-
-Read [Knowledge architecture](/knowledge-architecture/#source-truth-and-current-truth) for the boundary between evidence and current truth.
-
-## Query
-
-At query time, Signet selects a bounded set of context for the current task. It combines keyword search, vector similarity, semantic ontology traversal, source evidence, recency, and feedback.
-
-Signet checks agent and project scope before it reads candidate content. It then ranks and shapes the permitted evidence. If an optional search stage fails, recall falls back to simpler channels instead of failing the full request.
-
-Read [Hybrid recall](/memory/#hybrid-recall) for the retrieval path and [Recall API](/api/memory/recall-search/) for the request surface.
-
-## Sources
-
-Signet can index local documents, URLs, Obsidian vaults, Discord servers, and GitHub repositories. Source artifacts stay separate from semantic claims, so you can inspect where the knowledge came from.
-
-Read [Sources](/sources/) for supported connectors and source behavior.
-
-## Safety
-
-- Raw evidence is stored before LLM processing starts.
-- Pinned memories cannot be changed by Dreaming.
-- Deletes are recoverable and recorded in the audit history.
-- Memory reads and writes follow agent scope.
-- Secrets stay encrypted and outside model context.
-
-Automatic destructive changes remain conservative. Use explicit repair operations when the semantic state is wrong.
-
-## Continuity
-
-The same agent state can work across Claude Code, OpenCode, OpenClaw, Codex, and Hermes Agent. You can change the model or harness without resetting the agent's memory.
-
-## Start
-
-- [Install](/getting-started/install/): Install the Signet binary.
-- [Set up Signet](/getting-started/setup/): Create the workspace and connect a harness.
-- [Your first session](/getting-started/first-session/): Use memory, secrets, skills, and the Dashboard.
-- [Operate your installation](/getting-started/operate/): Run, secure, update, and troubleshoot Signet.
+- [Set up Signet](/getting-started/setup/): identity presets, hosting, harnesses, and setup plans.
+- [Your first session](/getting-started/first-session/): memory, secrets, skills, and daemon commands.
+- [Operate your installation](/getting-started/operate/): updates, logs, workspace changes, and troubleshooting.
+- [Authentication](/auth/): team and remote-daemon authentication.
+- [CLI reference](/cli/): command reference and automation environment contracts.

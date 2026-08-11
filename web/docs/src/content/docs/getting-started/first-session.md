@@ -1,150 +1,74 @@
 ---
 title: "Your first session"
-description: "Use memory, secrets, skills, and the dashboard in a first Signet session."
+description: "Save and retrieve memory, manage secrets and skills, and inspect the local daemon."
 ---
 
-## What Signet Does
+After setup, Signet can store explicit memories, retrieve scoped context, run selected harness integrations, and expose a local dashboard. Background inference and Dreaming are optional; choosing `none` during setup leaves explicit memory commands available.
 
-Once running, Signet gives you a persistent agent identity that works
-across all your AI tools. The core features:
-
-- **[Memory pipeline](/pipeline/)** — conversations are processed automatically by
-  Pipeline V2, which extracts meaningful facts and decisions using a
-  configured extraction backend. The safe intended setups are Claude
-  Code on Haiku, Codex on gpt-5.4-mini, or local Ollama with at least
-  `qwen3:4b`. Set the extraction provider to `none` if you want Signet
-  without background extraction. Memories accumulate over time and are
-  recalled in future sessions.
-- **Hybrid search** — recall combines semantic and keyword search so
-  you find relevant memories even when phrasing varies.
-- **Connectors** — platform adapters for Claude Code, OpenCode, and
-  OpenClaw keep your agent config in sync across tools.
-- **Analytics** — the dashboard tracks memory growth, session activity,
-  and pipeline health over time.
-- **Document ingest** — feed local files or URLs into the memory pipeline
-  to give your agent persistent knowledge about a codebase, spec, or doc.
-- **Diagnostics** — built-in health checks and pipeline status endpoints
-  help you spot issues fast.
-- **SDK** — embed Signet into your own apps via `@signet/sdk`.
-- **Secrets** — API keys stored encrypted at rest, never exposed to agents
-  directly.
-- **Skills** — installable instruction packages that extend agent behavior.
-- **Auth** — token-based access control for local, team, and hybrid
-  deployments. See [Auth](/auth/) for details.
-
----
-
-## Basic Usage
-
-### Check status
+## Check status and open the dashboard
 
 ```bash
 signet status
-```
-
-Shows daemon state, file health, and memory count.
-
-### Open the dashboard
-
-```bash
 signet dashboard
 ```
 
-Opens `http://localhost:3850` in your browser. From here you can edit
-your agent config, browse memories, view analytics, and manage skills.
-You can also reach it directly in your browser any time the daemon is
-running.
+`signet dashboard` starts the configured local daemon if needed. It opens the dashboard in your browser; a workspace configured with `daemon.url` uses that remote daemon instead.
 
-### Save a memory
-
-Use the CLI or `/remember` command in any connected harness:
+## Save a memory
 
 ```bash
-# CLI
-signet remember "nicholai prefers bun over npm"
-signet remember "critical memory" --critical
-signet remember "tagged memory" -t project,signet
-
-# In harness
-/remember nicholai prefers bun over npm
-/remember critical: never commit secrets to git
-/remember [project,signet]: daemon runs on port 3850
+signet remember "Use Bun for this project"
+signet remember "Never commit credentials" --critical
+signet remember "The dashboard work is in progress" --tags project,dashboard
 ```
 
-The `critical:` prefix or `--critical` flag pins a memory so it never
-decays. The `[tag1,tag2]:` prefix or `-t` flag adds searchable tags.
+`--critical` pins a memory. `--tags` accepts comma-separated tags. Use `--agent <name>` only when you intentionally need to associate the write with a named agent.
 
-You can also let the pipeline do this automatically — at the end of a
-session, Pipeline V2 reads the conversation and extracts memories on its
-own. Manual `/remember` is for things you want to ensure are captured.
+Connected harnesses may also expose their own remember command or tool. Use the integration documentation for the exact harness surface instead of assuming a slash command exists everywhere.
 
-### Search memories
+## Recall memory
 
 ```bash
-# CLI
-signet recall "coding preferences"
-signet recall "signet" --type decision -l 5
-
-# In harness
-/recall coding preferences
-/recall signet architecture
-/recall what did we decide about authentication
+signet recall "What package manager does this project use?"
+signet recall "architecture decisions" --type decision --limit 5
 ```
 
-### View daemon logs
+Recall supports query, type, tag, agent, time, importance, and score filters. See [Memory and search commands](/cli/memory-search/) for the full reference.
+
+## Store secrets without placing values in prompts
 
 ```bash
-signet daemon logs
+signet secret put OPENAI_API_KEY
+signet secret list
+signet secret delete OPENAI_API_KEY
+```
+
+The CLI prompts for a secret value rather than echoing it. Treat secret names as less sensitive than values, but do not put values in shell history, source files, screenshots, or documentation.
+
+## Inspect the daemon
+
+```bash
+signet daemon status
 signet daemon logs -n 100
-```
-
-### Stop/start the daemon
-
-```bash
-signet daemon stop
-signet daemon start
 signet daemon restart
 ```
 
----
+Use `signet daemon start` and `signet daemon stop` for explicit lifecycle control. See [Operate your installation](/getting-started/operate/) for update and troubleshooting steps.
 
-## Managing Secrets
-
-Store API keys and other sensitive values encrypted at rest:
+## Use skills
 
 ```bash
-# Add a secret (value is never echoed)
-signet secret put OPENAI_API_KEY
-
-# List stored secrets (names only)
-signet secret list
-
-# Remove a secret
-signet secret delete GITHUB_TOKEN
-```
-
-Secrets are encrypted with libsodium using a machine-bound key. Agents
-never see secret values directly.
-
----
-
-## Managing Skills
-
-Skills are packaged instructions in `$SIGNET_WORKSPACE/skills/`. They extend
-what your agent can do.
-
-```bash
-# See what's installed
 signet skill list
-
-# Search the skills.sh registry
 signet skill search browser
-
-# Install a skill
 signet skill install browser-use
-
-# Remove a skill
-signet skill remove weather
+signet skill remove browser-use
 ```
 
----
+Skills are instruction packages. Read their source and any required configuration before enabling a skill that can take external actions.
+
+## Next steps
+
+- [Authentication](/auth/) for team or remote access.
+- [Sources](/sources/) for files, repositories, URLs, and connected source evidence.
+- [Memory lifecycle](/memory/) for retention, recall, and Dreaming.
+- [CLI reference](/cli/) for automation and command details.

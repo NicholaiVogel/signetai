@@ -1,29 +1,19 @@
 ---
 title: "CLI Reference"
-description: "Complete reference for all Signet CLI commands."
+description: "Reference pages for the Signet command-line interface."
 ---
 
-Complete reference for all Signet CLI commands.
+Use `signet --help` for the commands in your installed release. The pages in this section explain the stable operator workflows rather than reproducing every help line.
 
-Complete reference for all Signet CLI commands. For the [Daemon](/daemon/)
-HTTP API, see [Api](/api/). For initial setup walkthrough, see [Quickstart](/quickstart/).
-
-> Path note: `$SIGNET_WORKSPACE` means your active Signet workspace path.
-> Default is `~/.agents`, configurable via `signet workspace set <path>`.
-
----
+> Workspace note: Signet resolves the workspace differently by surface today. Read [CLI environment and exit codes](/cli/environment/#workspace-resolution) before running the daemon, a connector, and the CLI against a custom workspace.
 
 ## In this section
 
-- [Install and configure](/cli/getting-started/)
-  Install Signet and use the setup, configure, desktop, index, and GraphIQ commands.
-- [Memory and search commands](/cli/memory-search/)
-  Use remember, recall, and session search from the Signet CLI.
-- [Runtime operations](/cli/operations/)
-  Inspect status, open the dashboard, route inference, manage the daemon, update, and bypass hooks.
-- [Data and portability commands](/cli/data-portability/)
-  Export, import, migrate, and embed Signet data.
-- [Integrations and security commands](/cli/integrations-security/)
-  Manage sync, secrets, skills, Git, API keys, connectors, and hooks.
-- [CLI environment and exit codes](/cli/environment/)
-  Environment variables and exit-code contracts for automation.
+- [Install and configure](/cli/getting-started/): installation, setup, workspace selection, and GraphIQ.
+- [Memory and search commands](/cli/memory-search/): remember, recall, and session search.
+- [Runtime operations](/cli/operations/): status, dashboard, daemon, updates, routing, and bypass.
+- [Data and portability commands](/cli/data-portability/): export, import, migrations, and embedding coverage.
+- [Integrations and security commands](/cli/integrations-security/): connectors, secrets, skills, hooks, and API keys.
+- [CLI environment and exit codes](/cli/environment/): variables, workspace resolution, and script contracts.
+
+For a first local install, start with [Quickstart](/quickstart/). For a shared daemon, start with [Authentication](/auth/) before issuing credentials to remote clients.
