@@ -528,6 +528,71 @@ describe("Dreaming", () => {
 		expect(shouldTriggerDreaming(accessor, cfg, AGENT, now)).toBe(false);
 	});
 
+	it("pins a capped frontier ahead of newer evidence on its next pass (#1430)", async () => {
+		const now = Date.now();
+		const cfg = defaultCfg({ tokenThreshold: 100_000, backfillOnFirstRun: false });
+		seedTranscript(db, "partial-frontier", "x".repeat(5_000), new Date(now).toISOString());
+		const run = async () =>
+			runDreamingAgentPass(
+				accessor,
+				{
+					async run(input) {
+						const search = input.tools.find((tool) => tool.name === "search_evidence");
+						if (!search) throw new Error("Missing search_evidence");
+						await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
+						return { summary: "Delivered current evidence page" };
+					},
+				},
+				cfg,
+				"/tmp",
+				AGENT,
+				[AGENT],
+				"incremental-content",
+			);
+
+		const first = await run();
+		for (let index = 0; index < 20; index += 1) {
+			seedTranscript(
+				db,
+				`newer-${index}`,
+				"New evidence that would fill the ordinary newest-first page.",
+				new Date(now + (index + 1) * 1_000).toISOString(),
+			);
+		}
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, now + 21_000)).toBe(true);
+
+		const second = await run();
+		const delivery = getDreamingToolCalls(accessor, AGENT, second.passId).find(
+			(call) => call.toolName === "search_evidence",
+		);
+		expect(delivery?.output).toMatchObject({
+			items: [expect.objectContaining({ sourceRef: "transcript:partial-frontier", contentOffset: 2_000 })],
+		});
+		expect(
+			db
+				.prepare(
+					"SELECT pass_id AS passId, delivered_offset AS offset FROM dreaming_evidence_consumption WHERE source_id = ?",
+				)
+				.get("partial-frontier"),
+		).toEqual({ passId: second.passId, offset: 4_000 });
+		// The progression moved to the second pass, so the final page remains a
+		// bounded continuation rather than falling behind the newer evidence.
+		expect(second.passId).not.toBe(first.passId);
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, now + 21_000)).toBe(true);
+	}, 15_000);
+
+	it("indexes continuation lookup by agent and pass (#1430)", () => {
+		const plan = db
+			.prepare(
+				`EXPLAIN QUERY PLAN SELECT 1 FROM dreaming_evidence_consumption
+				 WHERE agent_id = ? AND pass_id = ?
+				   AND delivered_offset > 0 AND delivered_offset < source_length
+				 LIMIT 1`,
+			)
+			.all(AGENT, "partial-content-pass") as Array<{ detail: string }>;
+		expect(plan.map((row) => row.detail).join("\n")).toContain("idx_dreaming_evidence_consumption_continuation");
+	});
+
 	it("runs a low-volume episodic backlog once its maximum wait elapses", () => {
 		const now = Date.now();
 		seedSummary(db, "trickle", "small episodic source", 10);

@@ -29,7 +29,7 @@ import { detectProspectiveContradictionRisk } from "./antonyms";
 import { getDreamingAttentionAcrossScopes, getDreamingAttentionScoped } from "./dreaming-attention";
 import { nextDreamingEvidenceFragment, renderDreamingEvidence } from "./dreaming-evidence";
 import type { DreamingAgentEvidence } from "./dreaming-evidence";
-import { deliveredOffsetForSource } from "./dreaming-evidence-consumption";
+import { deliveredOffsetForSource, pendingDreamingEvidenceContinuations } from "./dreaming-evidence-consumption";
 import { DREAMING_ONTOLOGY_OPERATION_SCHEMA } from "./dreaming-operation-contract";
 import {
 	type ApplyDreamingOperationsResult,
@@ -535,15 +535,19 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 					// and resumes each source at its persisted delivered offset.
 					const scanFirst = query === undefined && since === undefined && before === undefined;
 					const effectiveSince = scanFirst ? undefined : (since ?? readEvidenceWatermark(db, scopeId) ?? undefined);
-					const sources = searchEpisodicSources(db, {
-						agentId: scopeId,
-						query: query ?? "",
-						since: effectiveSince,
-						before,
-						kind,
-						excludeDelivered: scanFirst,
-						limit,
-					});
+					const continuations = scanFirst ? pendingDreamingEvidenceContinuations(db, scopeId, limit ?? 20, kind) : [];
+					const sources =
+						continuations.length > 0
+							? continuations
+							: searchEpisodicSources(db, {
+									agentId: scopeId,
+									query: query ?? "",
+									since: effectiveSince,
+									before,
+									kind,
+									excludeDelivered: scanFirst,
+									limit,
+								});
 					const items = scanFirst
 						? sources.flatMap((source) => {
 								const fragment = projectEvidenceFragment(

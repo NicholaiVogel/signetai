@@ -20,5 +20,7 @@ export function up(db: MigrationDb): void {
 			ON dreaming_evidence_consumption(agent_id, source_entry_id, source_kind, source_revision);
 		CREATE INDEX IF NOT EXISTS idx_dreaming_evidence_consumption_pending
 			ON dreaming_evidence_consumption(agent_id, source_kind, source_id, source_captured_at, source_revision, delivered_offset, source_length);
+		CREATE INDEX IF NOT EXISTS idx_dreaming_evidence_consumption_continuation
+			ON dreaming_evidence_consumption(agent_id, pass_id, delivered_offset, source_length);
 	`);
 }
