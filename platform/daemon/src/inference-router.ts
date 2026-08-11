@@ -144,7 +144,11 @@ export class PiAgentSessionTimeoutError extends Error {
  * but carries the cancellation-settlement promise so the caller can retain its
  * concurrency permit until the upstream work has actually stopped.
  */
-export async function promptPiAgentSession(session: PiAgentSession, prompt: string, deadlineMs: number): Promise<void> {
+export async function promptPiAgentSession(
+	session: PiAgentSession,
+	prompt: string,
+	deadlineMs: number | undefined,
+): Promise<void> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let aborting: Promise<void> | undefined;
 	const abort = (): Promise<void> => {
@@ -161,6 +165,10 @@ export async function promptPiAgentSession(session: PiAgentSession, prompt: stri
 			abort().catch(() => {}),
 		]).then(() => undefined);
 	try {
+		if (deadlineMs === undefined) {
+			await promptResult;
+			return;
+		}
 		if (deadlineMs <= 0) {
 			throw new PiAgentSessionTimeoutError(deadlineMs, cleanup());
 		}
@@ -1072,8 +1080,8 @@ export class InferenceRouter {
 						// the whole session is disposed. This prevents tool-driven
 						// Pi turns from multiplying concurrency outside the canonical
 						// provider boundary, including cancellation cleanup.
-						const remainingMs = deadline === undefined ? deadlineMs : deadline - performance.now();
-						if (remainingMs <= 0) {
+						const remainingMs = deadline === undefined ? undefined : deadline - performance.now();
+						if (remainingMs !== undefined && remainingMs <= 0) {
 							throw new Error(`Agent session exceeded the ${deadlineMs}ms deadline`);
 						}
 						try {

@@ -537,6 +537,51 @@ printf 'never reached\\n'
 		}
 	});
 
+	it("allows a Pi agent session with timeoutMs: 0 to complete without a deadline (#1416)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "signet-router-pi-no-deadline-"));
+		mkdirSync(join(dir, "memory"), { recursive: true });
+		writeFileSync(
+			join(dir, "agent.yaml"),
+			`inference:
+  defaultPolicy: pi-test
+  targets:
+    pi-test:
+      executor: openai-compatible
+      endpoint: http://127.0.0.1:1234/v1
+      models:
+        default:
+          model: pi-test-model
+  policies:
+    pi-test:
+      mode: strict
+      defaultTargets:
+        - pi-test/default
+  workloads:
+    memoryExtraction:
+      policy: pi-test
+`,
+		);
+		let chatRequests = 0;
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			if (String(input).endsWith("/models")) return new Response("not found", { status: 404 });
+			chatRequests++;
+			return openAiSseResponse("agent completed", { prompt_tokens: 3, completion_tokens: 1 });
+		}) as unknown as typeof fetch;
+		try {
+			const router = getOrCreateInferenceRouter(dir);
+			const result = await router.runAgent(
+				{ operation: "memory_extraction", promptPreview: "zero timeout" },
+				"Use the supplied daemon tools.",
+				[],
+				{ timeoutMs: 0 },
+			);
+			expect(result.ok).toBe(true);
+			expect(chatRequests).toBe(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps the Pi agent permit until timeout abort cleanup settles (#1333)", async () => {
 		const originalLimit = getLlmConcurrencyStatus().limit;
 		let settleAbort: (() => void) | undefined;
