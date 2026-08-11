@@ -113,6 +113,28 @@ describe("globToRegex", () => {
 		}
 	});
 
+	test("filesystem reads tiny files with huge configured size caps", async () => {
+		const root = mkdtempSync(join(tmpdir(), "signet-fs-connector-"));
+		try {
+			const path = join(root, "tiny.md");
+			writeFileSync(path, "tiny");
+
+			const files = await discoverFiles({
+				rootPath: root,
+				patterns: ["**/*.md"],
+				ignorePatterns: [],
+				maxFileSize: Number.MAX_SAFE_INTEGER,
+			});
+
+			expect(files).toHaveLength(1);
+			const file = files[0];
+			if (!file) throw new Error("expected tiny file metadata");
+			expect(await readFileContent(file, Number.MAX_SAFE_INTEGER)).toBe("tiny");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	test("*.md does not match .env", () => {
 		expect(matchGlob("**/*.md", ".env")).toBe(false);
 	});

@@ -194,17 +194,17 @@ export async function readFileContent(file: DiscoveredFile, maxFileSize: number)
 			const fileStat = await handle.stat();
 			if (!fileStat.isFile() || fileStat.size > maxFileSize) return null;
 
-			const maxBytes = Math.floor(maxFileSize);
-			const buffer = Buffer.alloc(maxBytes + 1);
+			const buffer = Buffer.alloc(fileStat.size);
 			let bytesRead = 0;
-			while (bytesRead < buffer.length) {
-				const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+			while (bytesRead < fileStat.size) {
+				const result = await handle.read(buffer, bytesRead, fileStat.size - bytesRead, bytesRead);
 				bytesRead += result.bytesRead;
 				if (result.bytesRead === 0) break;
 			}
 
-			if (bytesRead > maxFileSize) return null;
-			return buffer.subarray(0, bytesRead).toString("utf-8");
+			const finalStat = await handle.stat();
+			if (!finalStat.isFile() || finalStat.size !== fileStat.size || bytesRead !== fileStat.size) return null;
+			return buffer.toString("utf-8");
 		} finally {
 			await handle.close();
 		}
