@@ -13,6 +13,7 @@ import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { requireDependencyReason } from "./dependency-history";
 import { linkDerivedMemorySourcesInTx, markDerivedMemoriesStaleForSourceInTx } from "./derived-memory-provenance";
 import { classifyEntityQuality } from "./entity-quality";
+import { resolveStrictEpisodicSourceRef } from "./episodic-sources";
 import {
 	reconcileOntologyContradictionsInTx,
 	recordOntologyContradictionsForAttributeInTx,
@@ -549,7 +550,10 @@ function proposalAuditEvidence(proposal: ProposalRow): readonly unknown[] {
  * memory lineage instead keys on the immutable record named by source_ref, so
  * corrections to that record can invalidate every dependent semantic row.
  */
-function derivedMemorySourcesForProposal(proposal: ProposalRow): readonly {
+function derivedMemorySourcesForProposalInTx(
+	db: WriteDb,
+	proposal: ProposalRow,
+): readonly {
 	readonly sourceKind: string;
 	readonly sourceId: string;
 	readonly sourcePath: string | null;
@@ -557,14 +561,26 @@ function derivedMemorySourcesForProposal(proposal: ProposalRow): readonly {
 	const sources: Array<{ sourceKind: string; sourceId: string; sourcePath: string | null }> = [];
 	for (const ref of proposalEvidenceRefs(toProposal(proposal))) {
 		if (typeof ref.reference !== "object" || ref.reference === null || Array.isArray(ref.reference)) continue;
-		const sourceRef = readString(ref.reference as Readonly<Record<string, unknown>>, "source_ref");
-		if (sourceRef === null) continue;
-		const separator = sourceRef.indexOf(":");
-		if (separator <= 0 || separator === sourceRef.length - 1) continue;
-		const sourceKind = sourceRef.slice(0, separator);
-		const sourceId = sourceRef.slice(separator + 1);
-		if (!(["memory", "artifact", "transcript", "summary"] as const).includes(sourceKind as "memory")) continue;
-		sources.push({ sourceKind, sourceId, sourcePath: ref.sourcePath });
+		const evidence = ref.reference as Readonly<Record<string, unknown>>;
+		if (!("source_ref" in evidence)) continue;
+		const resolved = resolveStrictEpisodicSourceRef(db, {
+			agentId: proposal.agent_id,
+			sourceRef: evidence.source_ref,
+		});
+		if (resolved.status !== "resolved") {
+			if (resolved.status === "invalid") {
+				throw new OntologyProposalError("Evidence source_ref must name a canonical episodic source", 409);
+			}
+			if (resolved.status === "cross_agent") {
+				throw new OntologyProposalError("Evidence source_ref crosses the authorized agent scope", 409);
+			}
+			throw new OntologyProposalError(`Evidence source_ref was not found: ${resolved.sourceRef}`, 409);
+		}
+		sources.push({
+			sourceKind: resolved.source.kind,
+			sourceId: resolved.source.id,
+			sourcePath: resolved.source.sourcePath,
+		});
 	}
 	return sources;
 }
@@ -882,7 +898,7 @@ function materializeAttributeMemoryInTx(
 	linkDerivedMemorySourcesInTx(db, {
 		derivedMemoryId: input.attributeId,
 		agentId: input.agentId,
-		sources: derivedMemorySourcesForProposal(input.proposal),
+		sources: derivedMemorySourcesForProposalInTx(db, input.proposal),
 		createdAt: now(),
 	});
 	return input.attributeId;

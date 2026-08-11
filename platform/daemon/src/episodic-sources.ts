@@ -75,6 +75,10 @@ export interface ReadEpisodicSourceOptions {
 	readonly from: string;
 }
 
+export type StrictEpisodicSourceRefResolution =
+	| { readonly status: "resolved"; readonly source: EpisodicSourceRecord }
+	| { readonly status: "invalid" | "not_found" | "cross_agent"; readonly sourceRef: string };
+
 const SOURCE_KIND_RANK: Readonly<Record<EpisodicSourceKind, number>> = {
 	memory: 0,
 	artifact: 1,
@@ -682,6 +686,35 @@ export function readEpisodicSource(db: ReadDb, options: ReadEpisodicSourceOption
 		readEpisodicTranscript(db, options.agentId, from) ??
 		readEpisodicSummary(db, options.agentId, from)
 	);
+}
+
+/**
+ * Resolve a canonical immutable source_ref for a proposal write. Unlike the
+ * permissive reader above, this accepts only one explicit episodic kind and
+ * never guesses across stores. Callers can therefore reject a fabricated or
+ * cross-agent reference before persisting derived-memory provenance.
+ */
+export function resolveStrictEpisodicSourceRef(
+	db: ReadDb,
+	params: { readonly agentId: string; readonly sourceRef: unknown },
+): StrictEpisodicSourceRefResolution {
+	if (typeof params.sourceRef !== "string") return { status: "invalid", sourceRef: "" };
+	const sourceRef = params.sourceRef.trim();
+	const separator = sourceRef.indexOf(":");
+	if (separator <= 0 || separator === sourceRef.length - 1) return { status: "invalid", sourceRef };
+	const kind = sourceRef.slice(0, separator);
+	const id = sourceRef.slice(separator + 1).trim();
+	if (!(["memory", "artifact", "transcript", "summary"] as const).includes(kind as EpisodicSourceKind) || !id) {
+		return { status: "invalid", sourceRef };
+	}
+	const canonicalRef = `${kind}:${id}`;
+	const source = readEpisodicSource(db, { agentId: params.agentId, from: canonicalRef });
+	if (source !== null) return { status: "resolved", source };
+	const owners = findEpisodicSourceAgentIds(db, canonicalRef);
+	if (owners.some((agentId) => agentId !== params.agentId)) {
+		return { status: "cross_agent", sourceRef: canonicalRef };
+	}
+	return { status: "not_found", sourceRef: canonicalRef };
 }
 
 /** Find scopes that own a resolvable source without exposing their contents. */

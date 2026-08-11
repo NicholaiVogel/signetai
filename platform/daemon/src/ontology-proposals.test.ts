@@ -179,6 +179,13 @@ describe("ontology proposals", () => {
 	});
 
 	it("records canonical episodic lineage and stales aggregate snapshots when a claim changes", () => {
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memories
+				 (id, content, type, agent_id, visibility, memory_kind, created_at, updated_at)
+				 VALUES ('episodic-source', 'Signet is a local-first memory system.', 'fact', 'ant', 'global', 'episodic', ?, ?)`,
+			).run("2026-08-04T00:00:00.000Z", "2026-08-04T00:00:00.000Z");
+		});
 		const initial = applyOntologyOperation(getDbAccessor(), {
 			agentId: "ant",
 			actor: "test",
@@ -270,6 +277,95 @@ describe("ontology proposals", () => {
 				db.prepare("SELECT stale_at FROM memories WHERE id = ? AND agent_id = ?").get("aggregate-snapshot", "ant"),
 			),
 		).toMatchObject({ stale_at: expect.any(String) });
+	});
+
+	it("rejects invalid proposal source_refs before creating semantic memory provenance (#1343)", () => {
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memories
+				 (id, content, type, agent_id, visibility, memory_kind, created_at, updated_at)
+				 VALUES
+				 ('valid-source', 'Valid same-scope evidence.', 'fact', 'ant', 'global', 'episodic', ?, ?),
+				 ('other-source', 'Other agent evidence.', 'fact', 'other', 'global', 'episodic', ?, ?)`,
+			).run(
+				"2026-08-04T00:00:00.000Z",
+				"2026-08-04T00:00:00.000Z",
+				"2026-08-04T00:00:00.000Z",
+				"2026-08-04T00:00:00.000Z",
+			);
+		});
+		const payload = (claimKey: string) => ({
+			entity: "Strict Provenance",
+			entity_type: "project",
+			aspect: "evidence",
+			claim_key: claimKey,
+			value: "Source resolution must precede semantic memory materialization.",
+		});
+		const counts = () =>
+			getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare(
+							`SELECT
+							 (SELECT COUNT(*) FROM entity_attributes WHERE agent_id = 'ant') AS attributes,
+							 (SELECT COUNT(*) FROM memories WHERE agent_id = 'ant' AND memory_kind = 'derived') AS derived,
+							 (SELECT COUNT(*) FROM derived_memory_sources WHERE agent_id = 'ant') AS links`,
+						)
+						.get() as { attributes: number; derived: number; links: number },
+			);
+
+		const valid = applyOntologyOperation(getDbAccessor(), {
+			agentId: "ant",
+			actor: "test",
+			operation: "set_claim_value",
+			payload: payload("valid"),
+			evidence: [{ source_ref: "memory:valid-source" }],
+		});
+		expect(valid.result?.memoryId).toBe(valid.result?.attributeId);
+		expect(
+			getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare("SELECT source_kind, source_id FROM derived_memory_sources WHERE derived_memory_id = ?")
+						.get(valid.result?.memoryId) as { source_kind: string; source_id: string } | undefined,
+			),
+		).toEqual({ source_kind: "memory", source_id: "valid-source" });
+
+		const beforeRejectedApply = counts();
+		expect(() =>
+			applyOntologyOperation(getDbAccessor(), {
+				agentId: "ant",
+				actor: "test",
+				operation: "set_claim_value",
+				payload: payload("missing"),
+				evidence: [{ source_ref: "memory:missing-source" }],
+			}),
+		).toThrow(new OntologyProposalError("Evidence source_ref was not found: memory:missing-source", 409));
+		expect(counts()).toEqual(beforeRejectedApply);
+
+		expect(() =>
+			applyOntologyOperation(getDbAccessor(), {
+				agentId: "ant",
+				actor: "test",
+				operation: "set_claim_value",
+				payload: payload("blank"),
+				evidence: [{ source_ref: "memory:" }],
+			}),
+		).toThrow(new OntologyProposalError("Evidence source_ref must name a canonical episodic source", 409));
+		expect(counts()).toEqual(beforeRejectedApply);
+
+		const crossScope = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "set_claim_value",
+			payload: payload("cross_scope"),
+			evidence: [{ source_ref: "memory:other-source" }],
+		});
+		const beforePendingApply = counts();
+		expect(() => applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: crossScope.id, actor: "test" })).toThrow(
+			new OntologyProposalError("Evidence source_ref crosses the authorized agent scope", 409),
+		);
+		expect(counts()).toEqual(beforePendingApply);
+		expect(getOntologyProposal(getDbAccessor(), crossScope.id, "ant")?.status).toBe("pending");
 	});
 
 	it("rejects generic entity labels before creating ontology entities", () => {
