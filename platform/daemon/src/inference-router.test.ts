@@ -3,7 +3,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerOAuthProviderForTests, resetOAuthStateForTests, storeOAuthCredentials } from "./inference-oauth";
-import { getOrCreateInferenceRouter, resetInferenceRouterForTests } from "./inference-router";
+import {
+	getOrCreateInferenceRouter,
+	isInferenceRouterConfigPath,
+	resetInferenceRouterForTests,
+} from "./inference-router";
 import { invalidateSecretsCache } from "./secrets";
 
 const originalFetch = globalThis.fetch;
@@ -130,6 +134,64 @@ afterEach(() => {
 });
 
 describe("InferenceRouter config caching", () => {
+	it("does not invalidate on nested agents or unrelated root config changes (#1409)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "signet-router-watcher-config-"));
+		try {
+			mkdirSync(join(dir, "agents", "worker"), { recursive: true });
+			writeFileSync(
+				join(dir, "agent.yaml"),
+				`inference:
+  defaultPolicy: local
+  targets:
+    local:
+      executor: openai-compatible
+      endpoint: http://127.0.0.1:1234/v1
+      models:
+        default:
+          model: local-model
+  policies:
+    local:
+      mode: automatic
+      defaultTargets:
+        - local/default
+  workloads:
+    interactive:
+      policy: local
+`,
+			);
+
+			let probeCount = 0;
+			globalThis.fetch = mock((input: string | URL | Request) => {
+				if (String(input).endsWith("/models")) probeCount += 1;
+				return Promise.resolve(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+			}) as unknown as typeof fetch;
+
+			const router = getOrCreateInferenceRouter(dir);
+			expect((await router.status()).ok).toBe(true);
+			expect(probeCount).toBe(1);
+
+			const nestedAgentConfig = join(dir, "agents", "worker", "agent.yaml");
+			const unrelatedRootConfig = join(dir, "config.yaml");
+			writeFileSync(nestedAgentConfig, "inference:\n  enabled: false\n");
+			writeFileSync(unrelatedRootConfig, "memory:\n  pipelineV2:\n    enabled: false\n");
+			for (const path of [nestedAgentConfig, unrelatedRootConfig]) {
+				expect(isInferenceRouterConfigPath(dir, path)).toBe(false);
+				if (isInferenceRouterConfigPath(dir, path)) router.invalidateConfig();
+				expect((await router.status()).ok).toBe(true);
+			}
+			expect(probeCount).toBe(1);
+
+			const routerConfig = join(dir, "agent.yaml");
+			writeFileSync(routerConfig, readFileSync(routerConfig, "utf-8").replace("local-model", "reloaded-model"));
+			expect(isInferenceRouterConfigPath(dir, routerConfig)).toBe(true);
+			if (isInferenceRouterConfigPath(dir, routerConfig)) router.invalidateConfig();
+			expect((await router.status()).ok).toBe(true);
+			expect(probeCount).toBe(2);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("reuses the cached config until explicit invalidation", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "signet-router-config-cache-"));
 		try {

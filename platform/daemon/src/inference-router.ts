@@ -1,5 +1,5 @@
 import { readFile as readFileAsync, stat as statAsync } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, normalize, resolve } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type {
 	AcpxModelSelection,
@@ -208,6 +208,16 @@ function normalizePromptPreview(prompt: string): string {
 
 function inferenceConfigPaths(agentsDir: string): readonly string[] {
 	return [join(agentsDir, "agent.yaml"), join(agentsDir, "AGENT.yaml")];
+}
+
+function resolveForComparison(path: string): string {
+	return normalize(isAbsolute(path) ? path : resolve(path));
+}
+
+/** True only for the root config files read by this router. */
+export function isInferenceRouterConfigPath(agentsDir: string, path: string): boolean {
+	const changedPath = resolveForComparison(path);
+	return inferenceConfigPaths(agentsDir).some((candidate) => resolveForComparison(candidate) === changedPath);
 }
 
 function defaultAgentIdForConfig(config: RoutingConfig): string {

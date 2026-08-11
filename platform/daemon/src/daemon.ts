@@ -59,7 +59,11 @@ import { initFeatureFlags } from "./feature-flags";
 import { writeFileIfChangedAsync } from "./file-sync";
 import { createSignetHttpServer } from "./http-server";
 import { syncAgentWorkspaces } from "./identity-sync";
-import { type InferenceStatusSummary, getOrCreateInferenceRouter } from "./inference-router.js";
+import {
+	type InferenceStatusSummary,
+	getOrCreateInferenceRouter,
+	isInferenceRouterConfigPath,
+} from "./inference-router.js";
 import { fetchInternal } from "./internal-fetch";
 import {
 	type DaemonLifecycle,
@@ -1128,10 +1132,8 @@ function stopAcpDeliveryReconciliation(): void {
 	acpDeliveryReconciliationTimer = null;
 }
 
-const INFERENCE_ROUTER_CONFIG_FILES = new Set(["agent.yaml", "AGENT.yaml", "config.yaml"]);
-
 function invalidateInferenceConfigForPath(path: string): void {
-	if (!INFERENCE_ROUTER_CONFIG_FILES.has(basename(path))) return;
+	if (!isInferenceRouterConfigPath(AGENTS_DIR, path)) return;
 	getOrCreateInferenceRouter(AGENTS_DIR).invalidateConfig();
 }
 
