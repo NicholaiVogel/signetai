@@ -581,6 +581,66 @@ describe("Dreaming", () => {
 		expect(shouldTriggerDreaming(accessor, cfg, AGENT, now + 21_000)).toBe(true);
 	}, 15_000);
 
+	it("rotates every capped partial frontier before revisiting a newer subset (#1430)", async () => {
+		// Regression for #1434: when 50 source revisions were partial and a
+		// 20-source page advanced, selecting only last_pass_id made the other
+		// 30 older rows unreachable. The scan must choose an unadvanced prior
+		// subset even while the newer partial rows still exist.
+		const capturedAt = "2026-08-11T00:00:00.000Z";
+		const priorPassId = "prior-partial-pass";
+		const newerPassId = "newer-partial-pass";
+		accessor.withWriteTx((tx) => {
+			tx.prepare(
+				"INSERT INTO dreaming_passes (id, agent_id, mode, status) VALUES (?, ?, 'incremental-content', 'completed')",
+			).run(priorPassId, AGENT);
+			tx.prepare(
+				"INSERT INTO dreaming_passes (id, agent_id, mode, status) VALUES (?, ?, 'incremental-content', 'completed')",
+			).run(newerPassId, AGENT);
+			tx.prepare("INSERT INTO dreaming_state (agent_id, last_pass_at, last_pass_id) VALUES (?, ?, ?)").run(
+				AGENT,
+				capturedAt,
+				newerPassId,
+			);
+			const insertConsumption = tx.prepare(
+				`INSERT INTO dreaming_evidence_consumption
+				 (agent_id, source_kind, source_id, source_captured_at, source_entry_id, source_revision,
+				  delivered_offset, source_length, pass_id, updated_at)
+				 VALUES (?, 'transcript', ?, ?, '', ?, 10, 100, ?, ?)`,
+			);
+			for (let index = 0; index < 50; index += 1) {
+				const id = `${index < 20 ? "newer" : "prior"}-partial-${index.toString().padStart(2, "0")}`;
+				seedTranscript(db, id, "x".repeat(100), capturedAt);
+				insertConsumption.run(AGENT, id, capturedAt, capturedAt, index < 20 ? newerPassId : priorPassId, capturedAt);
+			}
+		});
+
+		const result = await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const search = input.tools.find((tool) => tool.name === "search_evidence");
+					if (!search) throw new Error("Missing search_evidence");
+					await search.execute("call", { agentId: AGENT, limit: 20 }, undefined, undefined, {} as never);
+					return { summary: "Rotated capped evidence frontiers" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental-content",
+		);
+		const delivery = getDreamingToolCalls(accessor, AGENT, result.passId).find(
+			(call) => call.toolName === "search_evidence",
+		);
+		const refs = ((delivery?.output as { items?: Array<{ sourceRef?: string }> } | undefined)?.items ?? []).map(
+			(item) => item.sourceRef,
+		);
+		expect(refs).toHaveLength(20);
+		expect(refs.every((ref) => ref?.startsWith("transcript:prior-partial-"))).toBe(true);
+		expect(refs).not.toContain("transcript:newer-partial-00");
+	}, 15_000);
+
 	it("indexes continuation lookup by agent and pass (#1430)", () => {
 		const plan = db
 			.prepare(

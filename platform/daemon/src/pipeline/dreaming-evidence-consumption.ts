@@ -206,10 +206,11 @@ export function hasDreamingEvidenceContinuation(db: ReadDb, agentId: string, pas
 }
 
 /**
- * Keep the frontier that made the last successful bounded delivery ahead of
- * newer evidence. A scan-first pass receives these sources before consulting
- * the ordinary newest-first queue, so a busy stream cannot strand an older
- * partial revision below its next page.
+ * Return a bounded fair slice of every incomplete current revision. Earlier
+ * delivery passes go first, so advancing one capped subset cannot strand the
+ * rest of an older subset behind the most recent pass. A scan-first pass
+ * receives these sources before consulting the ordinary newest-first queue,
+ * so a busy stream cannot strand partial evidence below its next page.
  */
 export function pendingDreamingEvidenceContinuations(
 	db: ReadDb,
@@ -223,32 +224,33 @@ export function pendingDreamingEvidenceContinuations(
 		.prepare(
 			`SELECT dec.source_kind AS kind, dec.source_id AS id, dec.source_captured_at AS capturedAt,
 			        dec.source_entry_id AS sourceEntryId, dec.source_revision AS sourceRevision
-			 FROM dreaming_state state
-			 INNER JOIN dreaming_evidence_consumption dec
-			   ON dec.agent_id = state.agent_id AND dec.pass_id = state.last_pass_id
-			 WHERE state.agent_id = ?
+			 FROM dreaming_evidence_consumption dec
+			 INNER JOIN dreaming_passes pass ON pass.id = dec.pass_id AND pass.agent_id = dec.agent_id
+			 WHERE dec.agent_id = ?
 			   AND dec.delivered_offset > 0 AND dec.delivered_offset < dec.source_length
 			   AND (? IS NULL OR dec.source_kind = ?)
-			 LIMIT ?`,
+			 ORDER BY pass.rowid ASC, dec.source_kind ASC, dec.source_id ASC, dec.source_captured_at ASC`,
 		)
-		.all(agentId, kind ?? null, kind ?? null, boundedLimit) as Array<{
+		.all(agentId, kind ?? null, kind ?? null) as Array<{
 		kind: EpisodicSourceKind;
 		id: string;
 		capturedAt: string;
 		sourceEntryId: string;
 		sourceRevision: string;
 	}>;
-	return rows.flatMap((row) => {
-		const source = readEpisodicSource(db, { agentId, from: `${row.kind}:${row.id}` });
-		if (
-			source === null ||
-			source.capturedAt !== row.capturedAt ||
-			sourceIdentity(source) !== row.sourceEntryId ||
-			sourceRevision(source) !== row.sourceRevision
-		)
-			return [];
-		return [source];
-	});
+	return rows
+		.flatMap((row) => {
+			const source = readEpisodicSource(db, { agentId, from: `${row.kind}:${row.id}` });
+			if (
+				source === null ||
+				source.capturedAt !== row.capturedAt ||
+				sourceIdentity(source) !== row.sourceEntryId ||
+				sourceRevision(source) !== row.sourceRevision
+			)
+				return [];
+			return [source];
+		})
+		.slice(0, boundedLimit);
 }
 
 /** Narrow truthful completion query for one configured source. */
