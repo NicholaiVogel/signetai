@@ -185,14 +185,47 @@ export function deliveredOffsetForSource(db: ReadDb, agentId: string, source: Ep
 	return Math.max(0, row?.deliveredOffset ?? 0);
 }
 
+/**
+ * A completed content pass made bounded progress and left one of its delivered
+ * source revisions incomplete. The worker uses this only to schedule the next
+ * regular sweep: a later no-progress pass has a different id, so it cannot
+ * create a self-sustaining retry loop.
+ */
+export function hasDreamingEvidenceContinuation(db: ReadDb, agentId: string, passId: string | null): boolean {
+	if (!passId || !tableExists(db, "dreaming_evidence_consumption")) return false;
+	return (
+		db
+			.prepare(
+				`SELECT 1 FROM dreaming_evidence_consumption
+				 WHERE agent_id = ? AND pass_id = ?
+				   AND delivered_offset > 0 AND delivered_offset < source_length
+				 LIMIT 1`,
+			)
+			.get(agentId, passId) != null
+	);
+}
+
 /** Narrow truthful completion query for one configured source. */
-export function sourceHasEligibleUnconsumedEvidence(db: ReadDb, agentId: string, sourceEntryId: string): boolean {
+export function sourceHasEligibleUnconsumedEvidence(
+	db: ReadDb,
+	agentId: string,
+	sourceEntryId: string,
+	legacyObsidianRoot?: string,
+): boolean {
 	if (!tableExists(db, "dreaming_evidence_consumption")) return true;
+	const legacyRootPrefix = legacyObsidianRoot?.replace(/\\/g, "/").replace(/\/$/, "");
 	const rows = db
 		.prepare(
 			`SELECT ma.source_path FROM memory_artifacts ma
-			 WHERE ma.agent_id = ? AND ma.source_id = ? AND COALESCE(ma.is_deleted, 0) = 0
+			 WHERE ma.agent_id = ? AND COALESCE(ma.is_deleted, 0) = 0
 			   AND length(ma.content) > 0
+			   AND (
+			     ma.source_id = ?
+			     OR (
+			       ? IS NOT NULL AND ma.harness = 'obsidian' AND ma.source_id IS NULL
+			       AND ma.source_path >= ? AND ma.source_path < ?
+			     )
+			   )
 			   AND (ma.source_sha256 IS NULL OR ma.source_sha256 = ''
 			        OR (ma.agent_id, ma.source_path) = (
 			          SELECT ma2.agent_id, ma2.source_path FROM memory_artifacts ma2
@@ -204,7 +237,13 @@ export function sourceHasEligibleUnconsumedEvidence(db: ReadDb, agentId: string,
 			        ))
 			 ORDER BY ma.source_path ASC`,
 		)
-		.all(agentId, sourceEntryId) as Array<{ source_path: string }>;
+		.all(
+			agentId,
+			sourceEntryId,
+			legacyRootPrefix ?? null,
+			legacyRootPrefix ?? "",
+			`${legacyRootPrefix ?? ""}/\uffff`,
+		) as Array<{ source_path: string }>;
 	return rows.some((row) => {
 		const source = readEpisodicSource(db, { agentId, from: `artifact:${row.source_path}` });
 		return source !== null && deliveredOffsetForSource(db, agentId, source) < renderDreamingEvidence(source).length;

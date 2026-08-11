@@ -829,7 +829,12 @@ function sourceStats(source: SignetSourceEntry, agentId: string): SourceStats {
 				artifacts,
 				chunks,
 				indexed: artifacts,
-				hasEligibleUnconsumedEvidence: sourceHasEligibleUnconsumedEvidence(db, agentId, source.id),
+				hasEligibleUnconsumedEvidence: sourceHasEligibleUnconsumedEvidence(
+					db,
+					agentId,
+					source.id,
+					source.kind === "obsidian" ? source.root : undefined,
+				),
 			};
 		});
 	} catch {

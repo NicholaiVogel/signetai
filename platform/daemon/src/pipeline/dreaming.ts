@@ -58,7 +58,11 @@ import {
 	nextDreamingEvidenceFragment,
 	renderDreamingEvidence,
 } from "./dreaming-evidence";
-import { deliveredOffsetForSource, recordDreamingEvidenceConsumptionInTx } from "./dreaming-evidence-consumption";
+import {
+	deliveredOffsetForSource,
+	hasDreamingEvidenceContinuation,
+	recordDreamingEvidenceConsumptionInTx,
+} from "./dreaming-evidence-consumption";
 import {
 	type RejectedDreamingEvidence,
 	autoRequeueRepairedDreamingEvidence,
@@ -1844,7 +1848,8 @@ export function shouldTriggerDreaming(
 	// First run only backfills actual episodic evidence, except for explicit
 	// scoped attention that has been queued for a Dreaming review.
 	if (cfg.backfillOnFirstRun && state.lastPassAt === null) return episodicTokens > 0 || hasAttention;
-	if (hasAttention || episodicTokens >= cfg.tokenThreshold) return true;
+	const hasContinuation = accessor.withReadDb((db) => hasDreamingEvidenceContinuation(db, agentId, state.lastPassId));
+	if (hasAttention || episodicTokens >= cfg.tokenThreshold || hasContinuation) return true;
 
 	// A low-volume stream must not wait indefinitely for the batch ceiling.
 	// This is deliberately a maximum wait rather than an unconditional cron:

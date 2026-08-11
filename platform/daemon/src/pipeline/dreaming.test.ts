@@ -483,6 +483,51 @@ describe("Dreaming", () => {
 		expect(isDreamingHaltActive(accessor, AGENT)).toBe(true);
 	});
 
+	it("schedules a near-term continuation only after the latest capped content delivery (#1430)", () => {
+		const now = Date.now();
+		const capturedAt = new Date(now).toISOString();
+		const passId = "partial-content-pass";
+		seedTranscript(db, "continuation-transcript", "x".repeat(5_000), capturedAt);
+		accessor.withWriteTx((tx) => {
+			tx.prepare(
+				`INSERT INTO dreaming_state (agent_id, last_pass_at, last_pass_id, last_pass_mode)
+				 VALUES (?, ?, ?, 'incremental-content')`,
+			).run(AGENT, capturedAt, passId);
+			tx.prepare(
+				`INSERT INTO dreaming_evidence_consumption
+				 (agent_id, source_kind, source_id, source_captured_at, source_entry_id, source_revision,
+				  delivered_offset, source_length, pass_id, updated_at)
+				 VALUES (?, 'transcript', 'continuation-transcript', ?, '', ?, 2_000, 5_000, ?, ?)`,
+			).run(AGENT, capturedAt, capturedAt, passId, capturedAt);
+		});
+		const cfg = defaultCfg({ tokenThreshold: 100_000, backfillOnFirstRun: false });
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, now)).toBe(true);
+
+		// A subsequent no-progress pass gets a new id. It may be retried later
+		// through the normal threshold/interval policy, but it cannot spin here.
+		accessor.withWriteTx((tx) => {
+			tx.prepare("UPDATE dreaming_state SET last_pass_id = ? WHERE agent_id = ?").run("no-progress-pass", AGENT);
+		});
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, now)).toBe(false);
+
+		// Completion clears the continuation even when it was the latest pass.
+		accessor.withWriteTx((tx) => {
+			tx.prepare("UPDATE dreaming_state SET last_pass_id = ? WHERE agent_id = ?").run(passId, AGENT);
+			tx.prepare("UPDATE dreaming_evidence_consumption SET delivered_offset = source_length WHERE pass_id = ?").run(
+				passId,
+			);
+		});
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, now)).toBe(false);
+
+		// Scheduler failure backoff gates a partial continuation like every other
+		// automatic pass. It cannot bypass error recovery or the failure halt.
+		accessor.withWriteTx((tx) => {
+			tx.prepare("UPDATE dreaming_evidence_consumption SET delivered_offset = 2_000 WHERE pass_id = ?").run(passId);
+		});
+		recordDreamingFailure(accessor, AGENT);
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, now)).toBe(false);
+	});
+
 	it("runs a low-volume episodic backlog once its maximum wait elapses", () => {
 		const now = Date.now();
 		seedSummary(db, "trickle", "small episodic source", 10);

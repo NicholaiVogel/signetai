@@ -581,7 +581,7 @@ describe("Sources routes", () => {
 			artifacts: 1,
 			chunks: 1,
 			indexed: 1,
-			hasEligibleUnconsumedEvidence: false,
+			hasEligibleUnconsumedEvidence: true,
 		});
 		expect(body.sources[0]?.health).toMatchObject({
 			status: "healthy",
