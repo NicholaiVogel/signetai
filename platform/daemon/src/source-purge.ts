@@ -38,7 +38,9 @@ export function purgeSourceOwnedRows(input: PurgeSourceOwnedRowsInput): number {
 			id: string;
 		}>;
 		const embeddingIds = embeddingRows.map((row) => row.id);
-		syncVecDeleteByEmbeddingIds(db, embeddingIds);
+		if (!syncVecDeleteByEmbeddingIds(db, embeddingIds)) {
+			throw new Error("failed to reconcile vec_embeddings before source purge");
+		}
 		let purged = embeddingIds.length;
 		if (embeddingIds.length > 0) {
 			const stmt = db.prepare("DELETE FROM embeddings WHERE id = ?");

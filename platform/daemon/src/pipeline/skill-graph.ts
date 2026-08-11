@@ -304,10 +304,14 @@ export async function installSkillNode(
 				.all(entityId) as Array<{ id: string }>;
 
 			if (oldEmbs.length > 0) {
-				syncVecDeleteByEmbeddingIds(
-					db,
-					oldEmbs.map((e) => e.id),
-				);
+				if (
+					!syncVecDeleteByEmbeddingIds(
+						db,
+						oldEmbs.map((e) => e.id),
+					)
+				) {
+					throw new Error("failed to reconcile vec_embeddings before replacing skill embedding");
+				}
 				db.prepare(`DELETE FROM embeddings WHERE source_type = 'skill' AND source_id = ?`).run(entityId);
 			}
 
@@ -377,10 +381,14 @@ export function uninstallSkillNode(input: SkillUninstallInput, accessor: DbAcces
 			.all(entityId) as Array<{ id: string }>;
 
 		if (embRows.length > 0) {
-			syncVecDeleteByEmbeddingIds(
-				db,
-				embRows.map((e) => e.id),
-			);
+			if (
+				!syncVecDeleteByEmbeddingIds(
+					db,
+					embRows.map((e) => e.id),
+				)
+			) {
+				throw new Error("failed to reconcile vec_embeddings before uninstalling skill");
+			}
 			db.prepare(`DELETE FROM embeddings WHERE source_type = 'skill' AND source_id = ?`).run(entityId);
 		}
 

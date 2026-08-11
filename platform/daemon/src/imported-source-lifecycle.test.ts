@@ -226,4 +226,91 @@ describe("imported source lifecycle", () => {
 			),
 		).toEqual({ kind: "hygiene", subject_ref: `source:${sourceId}` });
 	});
+
+	it("keeps imported evidence and canonical embeddings retryable when vec cleanup fails", () => {
+		const sourceId = "source-import-vec-failure";
+		const agentId = "lifecycle-test-agent";
+		const otherAgentId = "other-agent";
+		const now = new Date().toISOString();
+		indexExternalMemoryArtifact({
+			agentId,
+			sourcePath: "imports/source-import-vec-failure/notes.json",
+			sourceKind: "source_import_json_projection",
+			harness: "dashboard-import",
+			content: "Retryable imported evidence",
+			sourceMtimeMs: Date.now(),
+			sourceId,
+			sourceRoot: "notes.json",
+			sourceExternalId: "hash-vec-failure",
+			sourceMeta: { representation: "structured-json-projection" },
+		});
+		getDbAccessor().withWriteTx((db) => {
+			// Replace the migration's virtual table with a regular test double so a
+			// trigger can inject a derived-index delete failure deterministically.
+			db.exec("DROP TABLE vec_embeddings");
+			db.exec("CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL)");
+			db.prepare(
+				`INSERT INTO embeddings
+				 (id, content_hash, vector, dimensions, source_type, source_id, chunk_text, created_at, agent_id)
+				 VALUES (?, ?, ?, 3, 'source_chunk', ?, ?, ?, ?)`,
+			).run(
+				"embedding-owned",
+				"hash-owned",
+				Buffer.from(new Float32Array([1, 2, 3]).buffer),
+				`${sourceId}:notes.json#1`,
+				"owned",
+				now,
+				agentId,
+			);
+			db.prepare(
+				`INSERT INTO embeddings
+				 (id, content_hash, vector, dimensions, source_type, source_id, chunk_text, created_at, agent_id)
+				 VALUES (?, ?, ?, 3, 'source_chunk', ?, ?, ?, ?)`,
+			).run(
+				"embedding-other",
+				"hash-other",
+				Buffer.from(new Float32Array([4, 5, 6]).buffer),
+				`${sourceId}:other.json#1`,
+				"other",
+				now,
+				otherAgentId,
+			);
+			db.prepare("INSERT INTO vec_embeddings (id, embedding) VALUES (?, ?)").run(
+				"embedding-owned",
+				Buffer.from(new Float32Array([1, 2, 3]).buffer),
+			);
+			db.prepare("INSERT INTO vec_embeddings (id, embedding) VALUES (?, ?)").run(
+				"embedding-other",
+				Buffer.from(new Float32Array([4, 5, 6]).buffer),
+			);
+			db.exec(
+				"CREATE TRIGGER reject_vec_delete BEFORE DELETE ON vec_embeddings BEGIN SELECT RAISE(ABORT, 'injected vec delete failure'); END",
+			);
+		});
+
+		expect(() => markImportedSourceUnsupported({ sourceId, agentId })).toThrow(
+			"failed to reconcile vec_embeddings before imported-source cleanup",
+		);
+
+		const afterFailure = getDbAccessor().withReadDb((db) => ({
+			artifact: db
+				.prepare("SELECT source_id FROM memory_artifacts WHERE source_id = ? AND agent_id = ?")
+				.get(sourceId, agentId),
+			ownedEmbedding: db.prepare("SELECT id FROM embeddings WHERE id = ?").get("embedding-owned"),
+			ownedVector: db.prepare("SELECT id FROM vec_embeddings WHERE id = ?").get("embedding-owned"),
+			lifecycle: db
+				.prepare("SELECT id FROM imported_source_lifecycle WHERE source_id = ? AND agent_id = ?")
+				.get(sourceId, agentId),
+			otherEmbedding: db
+				.prepare("SELECT id FROM embeddings WHERE id = ? AND agent_id = ?")
+				.get("embedding-other", otherAgentId),
+			otherVector: db.prepare("SELECT id FROM vec_embeddings WHERE id = ?").get("embedding-other"),
+		}));
+		expect(afterFailure.artifact).toEqual({ source_id: sourceId });
+		expect(afterFailure.ownedEmbedding).toEqual({ id: "embedding-owned" });
+		expect(afterFailure.ownedVector).toEqual({ id: "embedding-owned" });
+		expect(afterFailure.lifecycle).toBeNull();
+		expect(afterFailure.otherEmbedding).toEqual({ id: "embedding-other" });
+		expect(afterFailure.otherVector).toEqual({ id: "embedding-other" });
+	});
 });

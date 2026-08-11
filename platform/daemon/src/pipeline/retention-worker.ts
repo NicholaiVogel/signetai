@@ -369,20 +369,21 @@ export function runRetentionSweepOnce(
 	const completedJobCutoff = new Date(now - normalizedCfg.completedJobRetentionMs).toISOString();
 	const deadJobCutoff = new Date(now - normalizedCfg.deadJobRetentionMs).toISOString();
 
-	// Step 1: graph links for expired tombstones + entity decrement
-	const graphResult = accessor.withWriteTx((db) => purgeGraphLinks(db, tombstoneCutoff, normalizedCfg.batchLimit));
-	const graphLinksPurged = graphResult.mentionsPurged;
-	const entitiesOrphaned = graphResult.entitiesOrphaned;
+	// A retention batch has dependent graph, vector, canonical, and archival
+	// writes. Keep them together so a vec failure cannot commit irreversible
+	// provenance cleanup while leaving the canonical embedding retryable.
+	const retentionResult = accessor.withWriteTx((db) => {
+		const graph = purgeGraphLinks(db, tombstoneCutoff, normalizedCfg.batchLimit);
+		const embeddingsPurged = purgeEmbeddings(db, tombstoneCutoff, normalizedCfg.batchLimit);
+		const tombstonesPurged = purgeTombstones(db, tombstoneCutoff, normalizedCfg.batchLimit);
+		return { ...graph, embeddingsPurged, tombstonesPurged };
+	});
+	const graphLinksPurged = retentionResult.mentionsPurged;
+	const entitiesOrphaned = retentionResult.entitiesOrphaned;
+	const embeddingsPurged = retentionResult.embeddingsPurged;
+	const tombstonesPurged = retentionResult.tombstonesPurged;
 
-	if (entitiesOrphaned > 0) {
-		invalidateTraversalCache();
-	}
-
-	// Step 2: embeddings for expired tombstones
-	const embeddingsPurged = accessor.withWriteTx((db) => purgeEmbeddings(db, tombstoneCutoff, normalizedCfg.batchLimit));
-
-	// Step 3: hard-delete tombstoned rows (FTS cleanup via memories_ad trigger)
-	const tombstonesPurged = accessor.withWriteTx((db) => purgeTombstones(db, tombstoneCutoff, normalizedCfg.batchLimit));
+	if (entitiesOrphaned > 0) invalidateTraversalCache();
 
 	// Step 4: old history events
 	const historyPurged = accessor.withWriteTx((db) => purgeHistory(db, historyCutoff, normalizedCfg.batchLimit));

@@ -321,17 +321,35 @@ describe("retention worker", () => {
 		).run("emb-survivor", "hash-survivor", vectorToBlob([4, 5, 6]), 3, "mem-survivor", "survivor", now, "agent-b");
 		db.prepare("INSERT INTO vec_embeddings (id, embedding) VALUES (?, ?)").run("emb-expired", vectorToBlob([1, 2, 3]));
 		db.prepare("INSERT INTO vec_embeddings (id, embedding) VALUES (?, ?)").run("emb-survivor", vectorToBlob([4, 5, 6]));
+		db.prepare(
+			`INSERT INTO entities (id, agent_id, name, canonical_name, entity_type, mentions, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+		).run("entity-expired", "agent-a", "Expired", "expired", "concept", now, now);
+		db.prepare("INSERT INTO memory_entity_mentions (memory_id, entity_id) VALUES (?, ?)").run(
+			"mem-expired",
+			"entity-expired",
+		);
 
 		const failingAccessor = makeAccessor(db, failVectorDeleteOnce(db));
 		const failingHandle = startRetentionWorker(failingAccessor, testRetentionConfig());
 		expect(() => failingHandle.sweep()).toThrow("failed to reconcile vec_embeddings");
 		failingHandle.stop();
 
-		// The failed derived-index step rolls back its transaction and prevents
-		// both canonical embedding and tombstone deletion from becoming partial.
+		// The failed derived-index step rolls back graph/provenance cleanup,
+		// canonical deletion, tombstoning, and cold archival as one retryable unit.
 		expect(db.prepare("SELECT id FROM memories WHERE id = ?").get("mem-expired")).toBeTruthy();
 		expect(db.prepare("SELECT id FROM embeddings WHERE id = ?").get("emb-expired")).toBeTruthy();
 		expect(db.prepare("SELECT id FROM vec_embeddings WHERE id = ?").get("emb-expired")).toBeTruthy();
+		expect(
+			db.prepare("SELECT memory_id, entity_id FROM memory_entity_mentions WHERE memory_id = ?").get("mem-expired"),
+		).toEqual({
+			memory_id: "mem-expired",
+			entity_id: "entity-expired",
+		});
+		expect(db.prepare("SELECT id, mentions FROM entities WHERE id = ?").get("entity-expired")).toEqual({
+			id: "entity-expired",
+			mentions: 1,
+		});
 		expect(db.prepare("SELECT memory_id FROM memories_cold WHERE memory_id = ?").get("mem-expired")).toBeNull();
 
 		const retryHandle = startRetentionWorker(failingAccessor, testRetentionConfig());
@@ -346,6 +364,10 @@ describe("retention worker", () => {
 		expect(db.prepare("SELECT id FROM memories WHERE id = ?").get("mem-expired")).toBeNull();
 		expect(db.prepare("SELECT id FROM embeddings WHERE id = ?").get("emb-expired")).toBeNull();
 		expect(db.prepare("SELECT id FROM vec_embeddings WHERE id = ?").get("emb-expired")).toBeNull();
+		expect(
+			db.prepare("SELECT memory_id FROM memory_entity_mentions WHERE memory_id = ?").get("mem-expired"),
+		).toBeNull();
+		expect(db.prepare("SELECT id FROM entities WHERE id = ?").get("entity-expired")).toBeNull();
 		expect(db.prepare("SELECT id, agent_id FROM memories WHERE id = ?").get("mem-survivor")).toEqual({
 			id: "mem-survivor",
 			agent_id: "agent-b",

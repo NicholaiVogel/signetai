@@ -290,7 +290,9 @@ function purgeImportScopeChunks(db: Database, sourceId: string, agentId: string,
 		chunk_text: string | null;
 	}>;
 	const ids = rows.filter((row) => includeLocalDiscord || !isLocalDiscordChunk(row)).map((row) => row.id);
-	syncVecDeleteByEmbeddingIds(db as WriteDb, ids);
+	if (!syncVecDeleteByEmbeddingIds(db as WriteDb, ids)) {
+		throw new Error("failed to reconcile vec_embeddings before source snapshot replacement");
+	}
 	const stmt = db.prepare("DELETE FROM embeddings WHERE id = ?");
 	for (const id of ids) stmt.run(id);
 }

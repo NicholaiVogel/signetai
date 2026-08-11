@@ -64,7 +64,9 @@ export function markImportedSourceUnsupported(
 			)
 			.all(agentId, SOURCE_CHUNK_SOURCE_TYPE, prefix, `${prefix}\uffff`) as Array<{ id: string }>;
 		const embeddingIds = embeddingRows.map((row) => row.id);
-		syncVecDeleteByEmbeddingIds(db, embeddingIds);
+		if (!syncVecDeleteByEmbeddingIds(db, embeddingIds)) {
+			throw new Error("failed to reconcile vec_embeddings before imported-source cleanup");
+		}
 		if (embeddingIds.length > 0) {
 			const stmt = db.prepare("DELETE FROM embeddings WHERE id = ?");
 			for (const id of embeddingIds) stmt.run(id);

@@ -281,7 +281,9 @@ export async function indexObsidianSourceEmbeddings(
 					| { content_hash: string }
 					| undefined;
 				if (existingForId && existingForId.content_hash !== contentHash) {
-					syncVecDeleteByEmbeddingIds(db, [embId]);
+					if (!syncVecDeleteByEmbeddingIds(db, [embId])) {
+						throw new Error("failed to reconcile vec_embeddings before replacing source embedding");
+					}
 					db.prepare("DELETE FROM embeddings WHERE id = ?").run(embId);
 				}
 				db.prepare(
@@ -349,7 +351,9 @@ export async function indexObsidianSourceEmbeddings(
 			.filter((row) => row.source_type === LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE || !currentHashes.has(row.content_hash))
 			.map((row) => row.id);
 		if (staleIds.length > 0) {
-			syncVecDeleteByEmbeddingIds(db, staleIds);
+			if (!syncVecDeleteByEmbeddingIds(db, staleIds)) {
+				throw new Error("failed to reconcile vec_embeddings before removing stale source embeddings");
+			}
 			const stmt = db.prepare("DELETE FROM embeddings WHERE id = ?");
 			for (const id of staleIds) stmt.run(id);
 		}
@@ -386,20 +390,27 @@ function purgeEmbeddingsBySourceIdPrefix(prefix: string, agentId?: string): numb
 	return getDbAccessor().withWriteTx((db) => {
 		const agentWhere = agentId ? " AND agent_id = ?" : "";
 		const upper = prefixUpperBound(prefix);
-		const ids: string[] = [];
 		let changes = 0;
 		for (const sourceType of OBSIDIAN_CHUNK_SOURCE_TYPES) {
 			const args = agentId ? [sourceType, prefix, upper, agentId] : [sourceType, prefix, upper];
 			const rows = db
 				.prepare(`SELECT id FROM embeddings WHERE source_type = ? AND source_id >= ? AND source_id < ?${agentWhere}`)
 				.all(...args) as Array<{ id: string }>;
-			ids.push(...rows.map((row) => row.id));
+			// Derived vectors must be removed before their canonical embedding rows.
+			// Throwing rolls back the whole source purge and leaves it retryable.
+			if (
+				!syncVecDeleteByEmbeddingIds(
+					db,
+					rows.map((row) => row.id),
+				)
+			) {
+				throw new Error("failed to reconcile vec_embeddings before purging source embeddings");
+			}
 			const result = db
 				.prepare(`DELETE FROM embeddings WHERE source_type = ? AND source_id >= ? AND source_id < ?${agentWhere}`)
 				.run(...args);
 			changes += result.changes;
 		}
-		syncVecDeleteByEmbeddingIds(db, ids);
 		return changes;
 	});
 }
