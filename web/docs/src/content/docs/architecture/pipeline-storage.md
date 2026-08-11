@@ -1,510 +1,358 @@
 ---
 title: "Pipeline and storage"
-description: "Pipeline, queue, graph, document, and database architecture."
+description: "How Signet preserves evidence, runs Dreaming, indexes documents, and stores retrieval projections."
 ---
 
-## Pipeline V2
+Signet separates canonical evidence from the derived structures used for
+retrieval and maintenance.
 
-The memory pipeline lives at `platform/daemon/src/pipeline/`. It
-processes memories asynchronously through a job queue, using an LLM
-for extraction and a second LLM pass for decision-making. The key
-architectural constraint is the transaction boundary rule: no LLM
-calls inside write locks. Embeddings and LLM completions are always
-fetched before `withWriteTx` is entered.
+Conversation transcripts, memory rows, imported documents, and canonical
+Markdown artifacts are evidence. Embeddings, FTS indexes, graph projections,
+content-safety decisions, and `MEMORY.md` are derived or rebuildable surfaces.
+Semantic changes must retain provenance back to the evidence that justified
+them.
 
-**Extraction stage** (`extraction.ts`): given raw memory content,
-prompts the LLM to return a JSON object with `facts` and `entities`
-arrays. Facts carry a type (`fact`, `preference`, `decision`,
-`procedural`, `semantic`) and a confidence score. Entities carry
-source, relationship, target, and confidence. Output is strictly
-validated — malformed fields produce warnings but do not fail the
-job. Input is capped at 12,000 characters; facts are capped at 20
-per call, entities at 50. The extractor strips `<think>` blocks from
-chain-of-thought models (qwen3, etc.) before parsing.
+The main runtime pieces are:
 
-**Decision stage** (`decision.ts`): for each extracted fact, a
-focused hybrid search retrieves up to 5 candidate memories. If no
-candidates exist, the system proposes an `add` action immediately.
-Otherwise it sends a second LLM prompt with the fact and candidates
-and parses an action (`add`, `update`, `delete`, `none`) with a
-target memory ID and confidence. `update` and `delete` decisions must
-reference a valid candidate ID or they are rejected. Decision results
-are called "shadow decisions" because they are always proposals first.
+- the session and source paths, which capture evidence;
+- Dreaming, which performs bounded semantic consolidation through audited
+  operations;
+- non-semantic pipeline workers for document indexing, retention, maintenance,
+  synthesis, and prospective hints;
+- SQLite tables and indexes, which provide durable state and retrieval speed.
 
-**Controlled writes** (`worker.ts`, `applyPhaseCWrites`): when
-`enabled && !shadowMode && !mutationsFrozen`, the worker enters
-controlled-write mode. For each `add` proposal, the worker checks
-confidence against `minFactConfidenceForWrite`, normalizes and hashes
-the content, checks for an existing memory with the same hash, and
-inserts via `txIngestEnvelope`. `update` and `delete` proposals are
-blocked unless `autonomous.allowUpdateDelete` is true. When enabled,
-updates go through `txModifyMemory`, deletes go through `txForgetMemory`,
-and the previous target state is archived to the cold tier first. Pinned
-memories are not deleted without force. Contradiction detection can still
-block high-risk update proposals and record them for review.
+No provider call runs inside a SQLite write transaction. Providers, embeddings,
+URL fetches, and agent execution happen before the transaction that applies the
+result.
 
-**Inline entity linking** (`inline-entity-linker.ts`): runs
-synchronously at write time inside `withWriteTx`, before any async
-pipeline work. It extracts candidate proper nouns from memory
-content and links the memory to entities that already exist for the same
-`agent_id` by writing `memory_entity_mentions` rows. It does not create
-entities, aspects, attributes, or dependency edges from raw text. Structured
-remember payloads, explicit user/agent actions, and reviewed repair passes
-own semantic graph authorship. The async pipeline still runs later for
-extraction, decisions, and optional graph persistence.
+## Semantic processing: Dreaming
 
-**Hints worker** (`prospective-index.ts`): generates hypothetical
-future queries ("hints") for each memory at write time. For each new
-memory, it prompts the LLM for diverse questions a user might ask
-when the fact would be helpful. Hints are indexed in `memories_fts`
-so search can match memories by anticipated cue — bridging the
-semantic gap between stored facts and natural-language queries.
-Gated on `hints.enabled` in pipeline config.
+Dreaming is the semantic writer. It replaced the former Pipeline V2 extraction,
+decision, and autonomous graph-writing workers. The `memory.pipelineV2`
+configuration namespace remains because it still owns non-semantic workers and
+retrieval features; enabling it does not restore the retired extraction runtime.
 
-**Graph persistence** happens in a separate transaction after fact
-writes complete. A failure here is non-fatal — it logs a warning and
-does not revert the extracted memories.
+The daemon's Dreaming worker periodically checks all known agent scopes. A pass
+runs only when there is pending attention or enough episodic evidence to justify
+the inference cost. Scheduled sweeps defer while the system is under queue or
+resource pressure, and failed passes use bounded backoff.
 
-**Lossless transcripts**: Signet stores the cleaned conversation transcript as
-JSONL under `$SIGNET_WORKSPACE/memory/{harness}/transcripts/transcript.jsonl`
-and keeps `session_transcripts` (migration 040) as a compatibility/indexing
-surface alongside extracted memories. Tool calls, tool outputs, and thinking
-traces are kept out of this memory surface so retrieval and summarization
-operate on the human/agent exchange. Raw auditable traces may still be written
-to daemon logs outside the memory lineage. The recall endpoint's `expand: true`
-flag joins transcript content back into search results via `source_id`.
+A pass:
 
-**Shadow mode**: when `shadowMode = true`, all proposals are logged
-to `memory_history` under the `pipeline-shadow` actor but no
-memories are written. This lets operators observe what the pipeline
-would do before enabling writes.
+1. selects scoped evidence from completed transcripts, memory artifacts,
+   summaries, memories, and pending Dreaming attention;
+2. builds an evidence window and a runbook for the selected pass mode;
+3. runs one bounded agent through the configured inference workload;
+4. lets the agent search evidence and inspect or create attention records through
+   the Dreaming tool surface;
+5. applies the agent's ontology and memory operations through the daemon-owned
+   `applyDreamingOperations` seam;
+6. records the pass, tool calls, usage, mutations, failures, and evidence
+   exclusions for later inspection.
 
-**Configuration flags**:
+The apply seam is deliberately narrower than a general database API. Content
+operations must cite exact quotes from scoped episodic evidence. Hygiene archive
+and merge operations must cite an `attention:<id>` record whose target matches
+the operation. The applicator enforces agent scope, provenance, operation
+schemas, and write caps before entering its write transactions.
 
-| Flag | Effect |
-|------|--------|
-| `enabled` | Master pipeline switch |
-| `shadowMode` | Extract and propose, never write |
-| `mutationsFrozen` | Reads only; pipeline stays quiet |
-| `graph.enabled` | Enable graph reads, traversal, and recall boosting |
-| `autonomous.enabled` | Allow scheduled maintenance and repair |
-| `autonomous.frozen` | Hard stop on autonomous maintenance actions |
-| `hints.enabled` | Run prospective hint generation at write time |
-| `autonomous.maintenanceMode` | `observe` or `execute` for maintenance worker |
+Dreaming supports combined and focused pass modes:
 
----
+- `incremental` and `compact` cover the normal full runbook;
+- `incremental-hygiene` handles bounded structural cleanup;
+- `incremental-content` handles evidence-linked content work.
 
-## Job Queue
+The default Dreaming configuration uses a 100,000-token episodic threshold, a
+six-hour maximum interval, a 20-minute pass timeout, and a 128,000-token input
+budget. These are configuration defaults, not guarantees that every pass will
+consume those limits.
 
-The job queue is backed by the `memory_jobs` table. This makes it
-durable — jobs survive daemon restarts. The queue supports two job
-types: `extract` (memory pipeline) and `document_ingest` (document
-worker). Both types use the same lease/complete/fail mechanics.
+### What Pipeline V2 still owns
 
-A job's lifecycle is: `pending` → `leased` → `completed` or
-`failed` → (on max retries) `dead`.
+Pipeline V2 still provides configuration and supporting workers for:
 
-**Enqueue**: callers insert a row with `status = 'pending'`, `attempts
-= 0`, and a `max_attempts` (default 3). Duplicate jobs for the same
-target (same memory_id + job_type with pending/leased status) are
-silently dropped.
+- document ingest;
+- retention and queue maintenance;
+- `MEMORY.md` and related projection work;
+- prospective hint indexing;
+- graph-aware retrieval, traversal, reranking, and dampening;
+- embedding tracking and migration;
+- operational repair and diagnostics.
 
-**Lease**: the worker calls `leaseJob` inside `withWriteTx`. It
-selects the oldest pending job with `attempts < max_attempts`, then
-updates `status = 'leased'`, increments `attempts`, and records
-`leased_at`. This is atomic — no two workers can lease the same job.
+The following are retired and must not be described or configured as active
+semantic stages:
 
-**Failure and retry**: on error, the worker calls `failJob`. If
-`attempts < max_attempts`, the job goes back to `pending`. On the
-final attempt it transitions to `dead` (dead-letter state).
+- the old `extraction.ts` fact/entity extraction contract;
+- the per-fact `decision.ts` stage;
+- `applyPhaseCWrites` and the old controlled-write worker;
+- the old inline LLM graph extraction and `txPersistEntities` path;
+- the old summary worker as the session-end delivery mechanism.
 
-**Backoff**: the worker uses exponential backoff on consecutive
-failures. The delay is `min(BASE_DELAY * 2^n, MAX_DELAY)` plus up
-to 500ms of jitter. The base delay is 1 second; the cap is 30 seconds.
+The config loader rejects legacy extraction provider/model/command settings and
+old write-gate or durability settings rather than silently selecting a fallback.
 
-**Stale lease reaper**: a separate `setInterval` (every 60 seconds)
-calls `reapStaleLeases`, which resets `leased` jobs whose `leased_at`
-is older than `leaseTimeoutMs` back to `pending`. This handles the
-case where a worker crashes mid-job without completing or failing it.
+### Remember-time entity linking
 
-**Dead-letter**: jobs with `status = 'dead'` stay in the table until
-the retention worker purges them (default: 30 days after `failed_at`).
-The repair action `requeueDeadJobs` can reset them to `pending` with
-`attempts = 0` to force a retry.
+The normal remember path may extract candidate proper nouns and attach the new
+memory to entities that already exist for the same `agent_id`. This writes
+`memory_entity_mentions` rows only. It does not create entities, aspects,
+attributes, or dependency edges from raw text. Semantic graph authorship belongs
+to structured writes, explicit user or agent operations, Dreaming, and reviewed
+repair passes.
 
----
+### Prospective hints
 
-## Knowledge Graph
+When `memory.pipelineV2.hints.enabled` is enabled, the hints worker generates
+hypothetical future queries for memories and indexes them in `memories_fts`.
+Hints are retrieval aids, not semantic graph assertions. Their generation is
+performed outside write locks; the resulting index update is applied separately.
 
-The knowledge graph stores entities and relations extracted from
-memories. It is an augmentation layer — search still works without it,
-and graph persistence errors never revert fact extraction.
+## Session transcripts and lineage
 
-**Tables**: `entities` stores named entities with a `canonical_name`
-(lowercased, for lookups), a `mentions` count, and an optional
-embedding. `relations` stores typed edges between entity pairs with
-a `strength`, a `mentions` count (incremented on each re-extraction),
-and a `confidence`. `memory_entity_mentions` is a junction table
-linking memories to the entities they mention, with optional
-`mention_text` and `confidence` provenance fields.
+As hooks run, Signet writes a canonical retained conversation transcript as
+JSONL under:
 
-**Graph extraction**: semantic graph authorship flows through the audited
-ontology apply path. The retired `txPersistEntities` / inline LLM extraction
-chain (`extractFactsAndEntities`) was removed under the Dreaming cutover
-(#946); the only retained write closure is `txDecrementEntityMentions`, used
-by the retention worker to decrement mention counts and delete orphaned
-entities (plus dangling relations) after a memory purge. Entities and
-relations are still upserted by canonical name and (source, target, type)
-triplet respectively by the retained audited writers; mention links are
-stored in `memory_entity_mentions`.
+```text
+$SIGNET_WORKSPACE/memory/{harness}/transcripts/transcript.jsonl
+```
 
-**Traversal-primary search** (`memory-search.ts`,
-`graph-traversal.ts`): when `traversal.primary` is enabled (the
-default when both `graph.enabled` and `traversal.enabled` are true),
-graph traversal is the primary candidate-building path. It resolves
-focal entities from query tokens, traverses the knowledge graph through
-aspects, attributes, and dependency hops, and produces a scored
-candidate pool blended with cosine similarity (70% cosine, 30%
-structural importance). Flat FTS5/vector search fills remaining
-slots — at least 40% of the result budget is reserved for flat
-candidates so hub entities cannot exclude keyword/vector matches
-entirely. After merging, structured evidence shaping keeps lexical,
-semantic, prospective hint, and traversal evidence as separate channels.
-Traversal-only candidates are capped below directly anchored evidence,
-while exact prospective hints can rescue memories whose stored text uses
-a specific instance rather than the user's query class. When traversal
-is disabled or the graph has no matching entities, the system falls back
-to the legacy path: flat BM25 + vector search with optional graph boost
-(`getGraphBoostIds`). This improves the quality of the pool the rest of
-the system ranks; it is not, by itself, the whole Signet thesis.
+The path is normalized by harness name. The transcript artifact contains the
+conversation turns needed for memory use. Raw tool traces may remain in daemon
+logs for audit, but are not silently treated as semantic evidence in the same
+projection.
 
-**Post-fusion dampening** (`dampening.ts`): three corrections run
-after fusion scoring but before the final sort/return. (1) *Gravity*
-penalizes high-cosine results that share zero query-term overlap
-with the actual content (0.5x). (2) *Hub* penalizes results whose
-linked entities are all in the top-10% by degree (P90 threshold,
-0.7x). (3) *Resolution* boosts constraints, decisions, and
-date-anchored memories (1.2x). All three stages are independently
-toggleable via `DampeningConfig`.
+`session_transcripts` is the canonical database index for retained transcripts.
+Session-end, recovery, and TTL paths mark rows complete directly. They do not
+create a summary job or wait for a summary worker. Completed transcript rows are
+the direct episodic input for the Dreaming content pass.
 
-**Recall surface parity**: explicit recall entry points should route through
-the same daemon recall implementation whenever possible. Current daemon HTTP
-recall, search aliases, hook recall, and MCP memory search call `hybridRecall`,
-so they receive the same structured evidence shaping behavior. Prompt-submit is
-intentionally not an explicit recall surface: it listens for known ontology
-entities or active aliases, uses that entity match as the search scope, and
-injects compact current-view attributes only when scoped attribute relevance
-clears the configured confidence gate. Any future recall surface, including CLI
-shortcuts, SDK helpers, desktop UI search,
-connector-specific recall, must either call the
-daemon recall API or implement the same evidence-channel contract. Do not add a
-separate recall path that bypasses lexical, semantic, prospective hint, and
-traversal evidence shaping.
+The table includes `session_key`, `content`, `harness`, `project`, `agent_id`,
+`created_at`, `updated_at`, `completed_at`, and `content_hash`. Reads and writes
+are agent-scoped.
 
-**Graph boost fallback** (`graph-search.ts`): `getGraphBoostIds`
-is the legacy graph-augmented search path, used when traversal is
-disabled. It tokenizes the query, resolves matching entities by
-`canonical_name LIKE ?` (ordered by `mentions DESC`, limit 20),
-then expands one hop through `relations` in both directions (limit
-50 neighbors). Finally it collects all `memory_id` values from
-`memory_entity_mentions` for the expanded entity set (limit 200).
-The result is a set of IDs whose scores are boosted. Any error
-returns an empty set — the graph never degrades core search.
+The memory recall endpoint supports `expand: true`. When requested, session
+keys associated with recalled results are batch-looked up in
+`session_transcripts`, and bounded transcript content is joined into the
+response. This preserves context that may not have become a separate memory
+row without creating a second hidden recall path.
 
-**Entity communities** (`community-detection.ts`): the Louvain
-algorithm clusters entities into functional neighborhoods based on
-`entity_dependencies` edge weights. Results are persisted to the
-`entity_communities` table and `entities.community_id` is updated.
-Community structure provides quality signals (fragmented, moderate,
-strong) and enables community-scoped retrieval.
+Canonical Markdown artifacts under `$SIGNET_WORKSPACE/memory/` remain the
+lineage surface for transcript, summary, and compaction history. `MEMORY.md` is
+a rebuildable projection over durable memory rows, temporal state, and the
+canonical artifact ledger. Before retained content enters prompt-facing
+projections, the versioned content-safety policy must mark it eligible.
 
-**Retention and orphaning**: when memories are tombstoned past their
-retention window, the retention worker purges `memory_entity_mentions`
-rows for those memories, decrements `entities.mentions`, and removes
-entities whose mention count reaches zero (orphan collection).
+## Job queue
 
----
+`memory_jobs` is a durable SQLite queue. Jobs survive daemon restarts and carry
+an explicit `job_type`, payload, retry counters, lease timestamps, completion
+state, and error information.
 
-## Document Ingest
+The active document-ingest lifecycle is:
 
-The document worker handles URL fetches and raw content ingestion.
-It follows the same `memory_jobs` queue as the extraction worker,
-using job type `document_ingest`.
+```text
+pending -> leased -> completed
+                   \-> pending (retry)
+                   \-> dead (max attempts)
+```
 
-**Lifecycle**: a document row starts at `status = 'queued'` when
-registered. The worker transitions it through `extracting` → `chunking`
-→ `embedding` → `indexing` → `done`. Each transition is a separate
-`withWriteTx` call so the current status is always visible without
-holding a write lock during I/O.
+A document worker leases only `document_ingest` jobs. Leasing is performed in a
+write transaction: the oldest eligible pending job is selected, marked leased,
+and its attempt count is incremented atomically. URL fetching, chunking, and
+embedding happen outside that transaction. A stale-lease recovery path returns
+interrupted jobs to a processable state, and terminal jobs are retained until
+maintenance or retention policy removes them.
 
-**URL fetch**: if `source_type = 'url'`, the worker calls `fetchUrlContent`
-with a configurable byte limit. The fetched title is written back to
-the document row if not already set.
+The old `extract` job type may still exist in historical databases and repair
+fixtures, but the semantic extraction worker that consumed it is retired. The
+queue is generic rather than limited to the two-worker model described by the
+old documentation. Current diagnostics deliberately exclude retired
+extraction rows from their bounded queue indexes.
 
-**Chunking**: `chunkText` splits content into overlapping fixed-size
-chunks. The chunk size and overlap are configurable via
-`documentChunkSize` and `documentChunkOverlap`. Each chunk becomes
-a memory row of type `document_chunk` with `importance = 0.3`.
+Queue repair actions can requeue dead jobs, release stale leases, cancel
+obsolete work, and prune terminal history. These actions are scoped, rate
+limited, and dry-run by default at their diagnostic HTTP surface.
 
-**Embedding and deduplication**: the embedding call happens outside
-the write lock. Each chunk is normalized and hashed; if an identical
-hash already exists as a memory linked to the same document, the
-chunk is skipped. Embeddings are stored in the `embeddings` table
-keyed by content hash.
+## Document ingest
 
-**Linking**: each chunk memory is linked to its source document via
-`document_memories(document_id, memory_id, chunk_index)`.
+Document ingest handles URLs, raw content, and configured source connectors. A
+document row moves through visible processing states:
 
-**Failure**: on error the document status is set to `failed` with an
-error message. The job follows standard retry logic — up to
-`max_attempts` tries before going `dead`.
+```text
+queued -> extracting -> chunking -> embedding -> indexing -> done
+                                                        \-> failed
+```
 
----
+Here, `extracting` means obtaining or preparing document content. It is not the
+retired semantic fact-extraction stage.
+
+For a URL source, the worker fetches content with the configured byte limit and
+stores a fetched title when one is not already present. Raw content is split
+into overlapping chunks using the configured `chunkSize` and `chunkOverlap`.
+Each accepted chunk becomes a `document_chunk` memory and is linked to its
+source through `document_memories(document_id, memory_id, chunk_index)`.
+
+Embedding calls happen before the write transaction. Chunks are normalized and
+hashed; an identical chunk already linked to the same document is skipped.
+Canonical vectors are stored in `embeddings`, with the sqlite-vec table serving
+as a derived ANN mirror when the extension is available.
+
+A failed document updates the document row with an error and follows the same
+retry budget as its queue job. Deleting a document while work is in flight
+cancels the remaining operation instead of recreating source-owned rows.
+
+## Knowledge graph and retrieval
+
+The graph is an augmentation and structured-retrieval layer. Core episodic
+recall remains available when graph traversal is disabled or has no matching
+entities.
+
+The graph-related storage includes:
+
+- `entities`, with canonical names and scoped identity;
+- `entity_aspects` and `entity_attributes`, which store structured knowledge;
+- `entity_dependencies`, which stores structural links used by ontology
+  traversal;
+- `relations` and `memory_entity_mentions`, retained for semantic relation and
+  mention projections;
+- ontology proposal, provenance, attention, contradiction, and Dreaming pass
+  tables that record how graph state was inspected or changed.
+
+Semantic graph writes do not come from an unconstrained LLM extraction trigger.
+Structured remember payloads, explicit mutations, Dreaming's audited apply seam,
+and reviewed repair paths are the writers. Retention removes orphaned mention
+and graph rows when a tombstoned memory is permanently purged.
+
+When graph traversal is enabled, `hybridRecall` resolves focal entities from the
+query, traverses aspects, attributes, and dependency hops, and blends that
+candidate pool with flat lexical and vector retrieval. Flat FTS5/vector
+candidates retain a reserved share of the result budget so a highly connected
+entity cannot displace every direct match. Evidence channels remain separate:
+lexical, semantic, prospective-hint, and traversal evidence are shaped before
+final ranking.
+
+When traversal is disabled or produces no match, recall falls back to flat BM25
+and vector retrieval with the legacy graph boost available as an optional
+augmentation. Post-fusion dampening can independently apply gravity, hub, and
+resolution corrections before the final sort.
+
+All explicit recall surfaces should use the same daemon recall implementation or
+preserve this evidence-channel contract. Hook recall, HTTP recall, search
+aliases, and MCP memory search share `hybridRecall`. Prompt-submit context is a
+deliberately narrower ontology/entity lookup, not an independent general recall
+implementation.
 
 ## Database Schema
 
-SQLite with WAL mode. Migrations are numbered sequentially under
-`platform/core/src/migrations/`. Each migration is idempotent — safe
-to re-run against an existing database. Schema version is tracked in
-`schema_migrations`. The latest migration is `125-memory-content-safety.ts`.
-
-**schema_migrations**
-
-Tracks applied migration versions with checksum and timestamp. A
-separate `schema_migrations_audit` table records duration per run.
-
-**conversations**
-
-Session-scoped records from harness hooks. Fields: `session_id`,
-`harness`, `started_at`, `ended_at`, `summary`, `topics`, `decisions`,
-`vector_clock`, `version`, `manual_override`. Indexed on `session_id`
-and `harness`.
-
-**memories**
-
-The central table. Core fields: `id` (UUID), `type`, `category`,
-`content`, `confidence`, `importance`, `source_id`, `source_type`,
-`tags` (JSON array), `who`, `why`, `project`.
-
-Pipeline v2 additions: `content_hash` (SHA-256 of normalized content),
-`normalized_content`, `is_deleted` (soft delete flag), `deleted_at`,
-`extraction_status` (`none`, `pending`, `completed`, `failed`),
-`embedding_model`, `extraction_model`, `update_count`.
-
-Access tracking: `last_accessed`, `access_count`, `pinned`.
-
-A unique partial index enforces `content_hash` uniqueness among
-non-deleted memories:
-
-```sql
-CREATE UNIQUE INDEX idx_memories_content_hash_unique
-    ON memories(content_hash)
-    WHERE content_hash IS NOT NULL AND is_deleted = 0
-```
-
-**memory_content_safety**
-
-An agent-scoped derived ledger records the versioned content-safety decision
-for memories, artifacts, transcripts, summaries, and source chunks. It stores
-`status`, `context_eligible`, `reasons_json`, `policy_version`, and
-`scanned_at`; it never replaces the raw evidence rows. Prompt-facing readers
-must re-scan the exact projection and require a clean ledger decision.
-
-**embeddings**
-
-Stores raw embedding vectors as BLOBs. Keyed by `content_hash`
-(unique). Fields: `vector` (BLOB), `dimensions`, `source_type`,
-`source_id`, `chunk_text`. The `vec_embeddings` virtual table
-(sqlite-vec `vec0`) provides ANN search when the extension is loaded.
-
-**memories_fts**
-
-FTS5 external content table backed by `memories`, created with the
-`unicode61` tokenizer to avoid overly aggressive stemming on recall
-queries. Three triggers (`memories_ai`, `memories_ad`, `memories_au`)
-keep the index in sync with inserts, deletes, and updates. Queried with
-BM25 scoring via `bm25(memories_fts)`.
-
-**memory_jobs**
-
-Durable job queue. Fields: `job_type`, `status` (`pending`, `leased`,
-`completed`, `failed`, `dead`), `payload`, `result`, `attempts`,
-`max_attempts`, `leased_at`, `completed_at`, `failed_at`, `error`,
-`document_id` (for document_ingest jobs). Indexed on `status`,
-`memory_id`, `completed_at` (partial, status=completed), and
-`failed_at` (partial, status=dead).
-
-**memory_history**
-
-Immutable audit trail. Fields: `memory_id`, `event` (`created`,
-`updated`, `deleted`, `recovered`, `none`), `old_content`,
-`new_content`, `changed_by`, `reason`, `metadata` (JSON), `actor_type`
-(`operator`, `agent`, `daemon`), `session_id`, `request_id`. The
-pipeline writes shadow proposals here as `event = 'none'` with a JSON
-`metadata` blob containing the full proposal.
-
-**entities**
-
-Knowledge graph nodes. Fields: `name`, `entity_type`, `description`,
-`canonical_name` (lowercased for lookup), `mentions` (denormalized
-count), `embedding` (BLOB, optional). Indexed on `canonical_name`.
-
-**relations**
-
-Knowledge graph edges. Fields: `source_entity_id`, `target_entity_id`,
-`relation_type`, `strength`, `mentions`, `confidence`, `metadata`,
-`updated_at`. Unique on (source, target, type). Indexed on source,
-target, and a composite (source, type) for outgoing edge traversal.
-
-**memory_entity_mentions**
-
-Junction table linking memories to entities. Composite primary key
-`(memory_id, entity_id)`. Additional fields: `mention_text`,
-`confidence`, `created_at`. Indexed on `entity_id` for inbound
-traversal during graph boost.
-
-**documents**
-
-Documents queued for ingest. Fields: `source_url`, `source_type`,
-`content_type`, `content_hash`, `title`, `raw_content`, `status`
-(`queued`, `extracting`, `chunking`, `embedding`, `indexing`, `done`,
-`failed`), `error`, `connector_id`, `chunk_count`, `memory_count`,
-`metadata_json`, `completed_at`. Indexed on `status`, `source_url`,
-`connector_id`, and `content_hash`.
-
-**document_memories**
-
-Links documents to the memory chunks generated from them. Composite
-primary key `(document_id, memory_id)`. Includes `chunk_index` for
-ordering.
-
-**connectors**
-
-External data source registrations. Fields: `provider`, `display_name`,
-`config_json` (full config as JSON), `cursor_json` (incremental sync
-state), `status` (`idle`, `syncing`, `error`), `last_sync_at`,
-`last_error`. Indexed on `provider`.
-
-**summary_jobs**
-
-Historical session-summary queue retained for migration and provenance
-compatibility. Fields include `session_key`, `session_id`, `trigger`,
-`captured_at`, `started_at`, `ended_at`, `harness`, `status`, `error`, and
-`created_at`. Migration 117 promotes non-empty legacy transcript payloads into
-`session_transcripts` before draining this table. New session-end delivery does
-not create summary jobs; completed canonical transcripts are projected directly
-into Dreaming.
-
-**memory_artifacts**
-
-Derived DB index over canonical markdown history. Fields include
-`agent_id`, `source_path`, `source_sha256`, `source_kind`,
-`session_id`, `session_key`, `session_token`, `project`, `harness`,
-timing fields, `manifest_path`, `memory_sentence`,
-`memory_sentence_quality`, `content`, and `updated_at`. This table is
-rebuildable from markdown artifacts and powers rolling ledger reads.
-
-**memory_artifact_tombstones**
-
-Privacy-removal guardrail for canonical artifact sessions. Fields:
-`agent_id`, `session_token`, `removed_at`, `reason`, `removed_paths`.
-Re-index honors tombstones so deleted canonical history does not
-reappear.
-
-**session_transcripts** (migration 040)
-
-Lossless session transcript storage. Fields: `session_key` (PK),
-`content` (cleaned conversation transcript), `harness`, `project`,
-`agent_id`, `created_at`. The transcript keeps only user/assistant
-conversation turns for memory use. Raw tool traces may be retained in
-daemon logs for audit. The recall endpoint supports `expand: true` to
-join transcript content back into results via `source_id`, preserving
-facts that extraction may drop. Indexed on `project` and `created_at`.
-
-**memory_search_telemetry** (migration 066)
-
-Local-only recall QA ledger created only when
-`memory.pipelineV2.telemetry.memorySearchQaEnabled` is enabled. Fields:
-`id`, `created_at`, `route`, `agent_id`, `session_key`, `project`,
-`query`, `keyword_query`, `filters_json`, `method`, `result_count`,
-`top_score`, `no_hits`, `duration_ms`, `timings_json`, `results_json`,
-and `sources_json`. This table intentionally stores recall query text
-and recalled result snapshots, so it is treated as sensitive memory
-content: list/export routes require `analytics` permission and enforce
-the authenticated token's agent/project scope before serialization.
-Rows stay local and are retained until explicitly pruned or the local
-SQLite database is removed; they are never sent through anonymous
-telemetry event sinks.
-
-**umap_cache**
-
-UMAP projection cache. Fields: `id`, `dimensions`, `embedding_count`,
-`result_json` (full projection as JSON), `cached_at`. One row per
-dimension value. Invalidated and replaced whenever the embedding count
-changes.
-
-**tokens**
-
-(Planned) Persistent token store for team mode token management.
-Currently tokens are issued and verified against the in-memory secret;
-revocation requires a daemon restart to rotate the secret.
-
-**skill_meta** (migration 018)
-
-Procedural memory metadata for installed skills. Fields: `skill_name`,
-`decay_rate`, `use_count`, `role_classification`, `filesystem_path`.
-Supports retention decay and role-based skill prioritization.
-
-**entity_aspects** (migration 019)
-
-Knowledge architecture: conceptual domains per entity. Fields:
-`entity_id`, `aspect_name`, `description`, `confidence`. Organizes
-entity knowledge into thematic clusters for structured retrieval.
-
-**predictor_comparisons** (migration 020)
-
-Predictive scorer: session comparison pairs used for preference
-learning. Fields: `session_id`, `memory_a_id`, `memory_b_id`,
-`preferred`, `confidence`, `created_at`.
-
-**entity_attributes** (migration 021)
-
-Knowledge architecture: facts and constraints under aspects. Fields:
-`aspect_id`, `entity_id`, `attribute_key`, `attribute_value`,
-`confidence`, `source_memory_id`. Stores structured facts about entity
-aspects.
-
-**entity_dependencies** (migration 022)
-
-Knowledge architecture: structural edges between entities distinct from
-semantic `relations`. Fields: `source_entity_id`, `target_entity_id`,
-`dependency_type`, `strength`, `metadata`. Models build-time or
-logical dependency graphs.
-
-**predictor_training_pairs** (migration 023)
-
-Predictive scorer: labeled training data for the preference model.
-Fields: `session_id`, `memory_id`, `feature_vector` (BLOB), `label`,
-`created_at`. Used for incremental model updates.
-
-**agent_feedback** (migration 024)
-
-Storage for the `memory_feedback` MCP tool. Fields: `memory_id`,
-`session_id`, `feedback_type` (`positive`, `negative`, `correction`),
-`correction_text`, `actor`, `created_at`. Records agent-provided
-feedback for memory quality improvement.
-
-**task_meta** (migration 025)
-
-Knowledge architecture: task-specific entity metadata. Fields:
-`entity_id`, `task_type`, `priority`, `status`, `due_at`,
-`context_json`. Extends entities with actionable task properties.
-
-**entity_pinning** (migration 026)
-
-KA-6: user-driven entity weight overrides. Fields: `entity_id`,
-`pin_type` (`pin` or `suppress`), `weight_override`, `reason`,
-`created_at`. Allows users to amplify or suppress specific entities
-in graph-augmented search results.
-
----
+Signet uses SQLite in WAL mode. Migrations are numbered sequentially under
+`platform/core/src/migrations/`, run in order, and recorded in
+`schema_migrations` with checksum and timing data in
+`schema_migrations_audit`. The latest migration is `128-bounded-queue-diagnostics.ts`.
+
+### Evidence and semantic state
+
+**`memories`** is the central durable memory table. It stores content, type,
+source identity, agent/project scope, confidence, importance, tags, timestamps,
+provenance fields, and lifecycle state. Pipeline-era columns such as
+`content_hash`, `normalized_content`, `is_deleted`, `deleted_at`,
+`extraction_status`, embedding/extraction model metadata, and update counters
+remain part of the schema for compatibility and lifecycle management. A scoped
+partial uniqueness rule prevents duplicate non-deleted content hashes.
+
+**`memory_history`** is the immutable audit trail for memory lifecycle events,
+including created, updated, deleted, recovered, and proposal/observation events.
+It stores old and new content where applicable, the actor, reason, metadata,
+session, and request identifiers.
+
+**`memory_content_safety`** is an agent-scoped derived ledger for content-safety
+decisions over memories, artifacts, transcripts, summaries, and source chunks.
+It stores the decision status, prompt eligibility, reasons, policy version, and
+scan time. It never replaces or rewrites the underlying evidence.
+
+**`session_transcripts`** stores the canonical retained conversation index. Its
+current lifecycle fields include completion and content-hash metadata, in
+addition to session, harness, project, agent, content, and timestamps.
+
+**`memory_artifacts`** indexes canonical Markdown history, including source path,
+content hash, artifact kind, session identity, project, harness, timing, and
+memory-sentence metadata. It is rebuildable from the Markdown artifacts.
+
+**`memory_artifact_tombstones`** prevents removed canonical artifact sessions
+from being reintroduced during re-indexing.
+
+**`session_summaries`** and **`summary_jobs`** are historical/provenance surfaces.
+The summary queue is retained for migration compatibility; new session-end
+transcript delivery does not enqueue summary work. Legacy payloads are promoted
+into `session_transcripts` during migration where possible.
+
+### Retrieval projections
+
+**`embeddings`** stores canonical embedding vectors and their content/source
+metadata. **`vec_embeddings`** is the sqlite-vec ANN mirror and is rebuildable.
+
+**`memories_fts`** is an FTS5 external-content index over memory text and
+prospective hints. Its triggers keep it synchronized with the canonical memory
+rows.
+
+**`memory_search_telemetry`** is an opt-in, local-only recall QA ledger. It may
+contain query text and result snapshots, so routes that expose it enforce
+analytics permission and agent/project scope. It is not sent through anonymous
+telemetry sinks.
+
+**`umap_cache`** stores replaceable embedding projections keyed by embedding
+count and dimension.
+
+### Queue, documents, and sources
+
+**`memory_jobs`** stores durable work items, including job type, status, payload,
+result, retry counters, lease and terminal timestamps, errors, and document
+identity where applicable. Retired extraction rows are preserved as historical
+state but excluded from current bounded queue diagnostics.
+
+**`documents`** stores source URL/type, content metadata and hash, raw content,
+visible processing status, errors, connector identity, chunk/memory counts, and
+completion metadata.
+
+**`document_memories`** links source documents to generated chunk memories and
+preserves chunk ordering.
+
+**`connectors`** stores external source registrations, provider configuration,
+incremental cursor state, status, and synchronization errors. Connector data is
+scoped and its indexed rows remain purgeable when a source is disconnected.
+
+### Dreaming and ontology control plane
+
+The Dreaming subsystem persists its own state rather than hiding it in logs:
+
+- `dreaming_state` stores per-agent cursor, failure, and last-pass state;
+- `dreaming_passes` stores mode, status, usage, mutation counts, summaries, and
+  errors;
+- `dreaming_attention` stores bounded hygiene, review, evidence-retry, and
+  surprisal work;
+- `dreaming_tool_calls` stores the ordered tool-call trace for a pass;
+- `dreaming_evidence_exclusions` records evidence rejected or deferred by a
+  pass, including retry state;
+- `dreaming_runbook` and evidence-window columns preserve the pass context used
+  for later inspection;
+- `ontology_proposals` and related provenance tables preserve structured
+  mutation proposals and their application state;
+- `ontology_contradictions` stores scoped contradiction observations as
+  evidence-backed derived records rather than replacing either claim.
+
+The graph and ontology tables are durable state. The agent's reasoning is not
+stored as an unscoped replacement for that state; only validated operations,
+evidence, provenance, and audit metadata are applied.
+
+## Data ownership rules
+
+The ownership boundary is the important part of the schema:
+
+- canonical transcript, Markdown, source, and memory rows remain the evidence;
+- graph claims, embeddings, FTS rows, UMAP data, safety decisions, and
+  `MEMORY.md` are derived projections or controlled semantic state;
+- re-indexing and repair must preserve agent scope, project scope, source
+  attribution, and deletion/tombstone state;
+- removing a source purges its source-owned projections without mutating the
+  external source or silently deleting unrelated Dreaming-derived history;
+- every semantic mutation must be attributable to a scoped actor, an exact
+  evidence citation, or a validated hygiene-attention record.
