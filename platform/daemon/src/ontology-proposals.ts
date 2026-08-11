@@ -489,12 +489,33 @@ function readBackInTx(db: WriteDb, id: string, agentId: string): OntologyProposa
 	return toProposal(row);
 }
 
+function requireStrictEpisodicSourceRefInTx(db: WriteDb, agentId: string, sourceRef: unknown) {
+	const resolved = resolveStrictEpisodicSourceRef(db, { agentId, sourceRef });
+	if (resolved.status === "resolved") return resolved.source;
+	if (resolved.status === "invalid") {
+		throw new OntologyProposalError("Evidence source_ref must name a canonical episodic source", 409);
+	}
+	if (resolved.status === "cross_agent") {
+		throw new OntologyProposalError("Evidence source_ref crosses the authorized agent scope", 409);
+	}
+	throw new OntologyProposalError(`Evidence source_ref was not found: ${resolved.sourceRef}`, 409);
+}
+
+function validateProposalEvidenceSourcesInTx(db: WriteDb, agentId: string, evidence: readonly unknown[]): void {
+	for (const value of evidence) {
+		const ref = readOntologyEvidenceRef(value);
+		if (ref === null || !isRecord(ref.reference) || !("source_ref" in ref.reference)) continue;
+		requireStrictEpisodicSourceRefInTx(db, agentId, ref.reference.source_ref);
+	}
+}
+
 function insertProposalInTx(db: WriteDb, input: CreateOntologyProposalInput, ts: string): OntologyProposal {
 	const id = crypto.randomUUID();
 	const agentId = requireText(input.agentId, "agentId");
 	const operation = requireText(input.operation, "operation");
 	if (Object.keys(input.payload).length === 0) throw new OntologyProposalError("payload is required", 400);
 	const evidence = input.evidence ?? [];
+	validateProposalEvidenceSourcesInTx(db, agentId, evidence);
 	db.prepare(
 		`INSERT INTO ontology_proposals
 		 (id, agent_id, operation, status, payload, confidence, rationale,
@@ -563,23 +584,11 @@ function derivedMemorySourcesForProposalInTx(
 		if (typeof ref.reference !== "object" || ref.reference === null || Array.isArray(ref.reference)) continue;
 		const evidence = ref.reference as Readonly<Record<string, unknown>>;
 		if (!("source_ref" in evidence)) continue;
-		const resolved = resolveStrictEpisodicSourceRef(db, {
-			agentId: proposal.agent_id,
-			sourceRef: evidence.source_ref,
-		});
-		if (resolved.status !== "resolved") {
-			if (resolved.status === "invalid") {
-				throw new OntologyProposalError("Evidence source_ref must name a canonical episodic source", 409);
-			}
-			if (resolved.status === "cross_agent") {
-				throw new OntologyProposalError("Evidence source_ref crosses the authorized agent scope", 409);
-			}
-			throw new OntologyProposalError(`Evidence source_ref was not found: ${resolved.sourceRef}`, 409);
-		}
+		const source = requireStrictEpisodicSourceRefInTx(db, proposal.agent_id, evidence.source_ref);
 		sources.push({
-			sourceKind: resolved.source.kind,
-			sourceId: resolved.source.id,
-			sourcePath: resolved.source.sourcePath,
+			sourceKind: source.kind,
+			sourceId: source.id,
+			sourcePath: source.sourcePath,
 		});
 	}
 	return sources;

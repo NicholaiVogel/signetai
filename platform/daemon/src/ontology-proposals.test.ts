@@ -279,15 +279,18 @@ describe("ontology proposals", () => {
 		).toMatchObject({ stale_at: expect.any(String) });
 	});
 
-	it("rejects invalid proposal source_refs before creating semantic memory provenance (#1343)", () => {
+	it("rejects invalid proposal source_refs before creating proposals or semantic memory provenance (#1343)", () => {
 		getDbAccessor().withWriteTx((db) => {
 			db.prepare(
 				`INSERT INTO memories
 				 (id, content, type, agent_id, visibility, memory_kind, created_at, updated_at)
 				 VALUES
 				 ('valid-source', 'Valid same-scope evidence.', 'fact', 'ant', 'global', 'episodic', ?, ?),
+				 ('pending-source', 'Evidence for a pending proposal.', 'fact', 'ant', 'global', 'episodic', ?, ?),
 				 ('other-source', 'Other agent evidence.', 'fact', 'other', 'global', 'episodic', ?, ?)`,
 			).run(
+				"2026-08-04T00:00:00.000Z",
+				"2026-08-04T00:00:00.000Z",
 				"2026-08-04T00:00:00.000Z",
 				"2026-08-04T00:00:00.000Z",
 				"2026-08-04T00:00:00.000Z",
@@ -307,11 +310,12 @@ describe("ontology proposals", () => {
 					db
 						.prepare(
 							`SELECT
+							 (SELECT COUNT(*) FROM ontology_proposals WHERE agent_id = 'ant') AS proposals,
 							 (SELECT COUNT(*) FROM entity_attributes WHERE agent_id = 'ant') AS attributes,
 							 (SELECT COUNT(*) FROM memories WHERE agent_id = 'ant' AND memory_kind = 'derived') AS derived,
 							 (SELECT COUNT(*) FROM derived_memory_sources WHERE agent_id = 'ant') AS links`,
 						)
-						.get() as { attributes: number; derived: number; links: number },
+						.get() as { proposals: number; attributes: number; derived: number; links: number },
 			);
 
 		const valid = applyOntologyOperation(getDbAccessor(), {
@@ -331,18 +335,34 @@ describe("ontology proposals", () => {
 			),
 		).toEqual({ source_kind: "memory", source_id: "valid-source" });
 
-		const beforeRejectedApply = counts();
+		const deduped = applyOntologyOperation(getDbAccessor(), {
+			agentId: "ant",
+			actor: "test",
+			operation: "set_claim_value",
+			payload: payload("valid"),
+			evidence: [{ source_ref: "memory:valid-source" }],
+		});
+		expect(deduped.result?.deduped).toBe(true);
+		expect(deduped.result?.attributeId).toBe(valid.result?.attributeId);
+		expect(counts()).toEqual({ proposals: 2, attributes: 1, derived: 1, links: 1 });
+
+		const beforeRejectedWrites = counts();
 		expect(() =>
-			applyOntologyOperation(getDbAccessor(), {
+			createOntologyProposal(getDbAccessor(), {
 				agentId: "ant",
-				actor: "test",
 				operation: "set_claim_value",
 				payload: payload("missing"),
 				evidence: [{ source_ref: "memory:missing-source" }],
 			}),
 		).toThrow(new OntologyProposalError("Evidence source_ref was not found: memory:missing-source", 409));
-		expect(counts()).toEqual(beforeRejectedApply);
-
+		expect(() =>
+			createOntologyProposal(getDbAccessor(), {
+				agentId: "ant",
+				operation: "set_claim_value",
+				payload: payload("cross_scope"),
+				evidence: [{ source_ref: "memory:other-source" }],
+			}),
+		).toThrow(new OntologyProposalError("Evidence source_ref crosses the authorized agent scope", 409));
 		expect(() =>
 			applyOntologyOperation(getDbAccessor(), {
 				agentId: "ant",
@@ -350,22 +370,54 @@ describe("ontology proposals", () => {
 				operation: "set_claim_value",
 				payload: payload("blank"),
 				evidence: [{ source_ref: "memory:" }],
+				propose: true,
 			}),
 		).toThrow(new OntologyProposalError("Evidence source_ref must name a canonical episodic source", 409));
-		expect(counts()).toEqual(beforeRejectedApply);
+		expect(() =>
+			applyOntologyOperationBatch(getDbAccessor(), {
+				agentId: "ant",
+				actor: "test",
+				propose: true,
+				operations: [
+					{
+						operation: "set_claim_value",
+						payload: payload("batch_valid"),
+						evidence: [{ source_ref: "memory:valid-source" }],
+					},
+					{
+						operation: "set_claim_value",
+						payload: payload("batch_missing"),
+						evidence: [{ source_ref: "memory:missing-source" }],
+					},
+				],
+			}),
+		).toThrow(new OntologyProposalError("Evidence source_ref was not found: memory:missing-source", 409));
+		expect(() =>
+			applyOntologyOperation(getDbAccessor(), {
+				agentId: "ant",
+				actor: "test",
+				operation: "set_claim_value",
+				payload: payload("direct_missing"),
+				evidence: [{ source_ref: "memory:missing-source" }],
+			}),
+		).toThrow(new OntologyProposalError("Evidence source_ref was not found: memory:missing-source", 409));
+		expect(counts()).toEqual(beforeRejectedWrites);
 
-		const crossScope = createOntologyProposal(getDbAccessor(), {
+		const pending = createOntologyProposal(getDbAccessor(), {
 			agentId: "ant",
 			operation: "set_claim_value",
-			payload: payload("cross_scope"),
-			evidence: [{ source_ref: "memory:other-source" }],
+			payload: payload("deleted_before_apply"),
+			evidence: [{ source_ref: "memory:pending-source" }],
 		});
-		const beforePendingApply = counts();
-		expect(() => applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: crossScope.id, actor: "test" })).toThrow(
-			new OntologyProposalError("Evidence source_ref crosses the authorized agent scope", 409),
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare("UPDATE memories SET is_deleted = 1 WHERE id = ? AND agent_id = ?").run("pending-source", "ant");
+		});
+		const beforeDeletedSourceApply = counts();
+		expect(() => applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: pending.id, actor: "test" })).toThrow(
+			new OntologyProposalError("Evidence source_ref was not found: memory:pending-source", 409),
 		);
-		expect(counts()).toEqual(beforePendingApply);
-		expect(getOntologyProposal(getDbAccessor(), crossScope.id, "ant")?.status).toBe("pending");
+		expect(counts()).toEqual(beforeDeletedSourceApply);
+		expect(getOntologyProposal(getDbAccessor(), pending.id, "ant")?.status).toBe("pending");
 	});
 
 	it("rejects generic entity labels before creating ontology entities", () => {
