@@ -90,13 +90,39 @@ function captureTelemetry(): { readonly collector: TelemetryCollector; readonly 
 	return { collector, events };
 }
 
-function seedTranscript(db: Database, id: string, content: string, capturedAt?: string): void {
+function seedTranscript(db: Database, id: string, content: string, capturedAt?: string, agentId = AGENT): void {
 	const timestamp = capturedAt ?? (db.prepare("SELECT datetime('now') AS now").get() as { now: string }).now;
 	db.prepare(
 		`INSERT INTO session_transcripts
 		 (session_key, content, agent_id, created_at, updated_at, completed_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-	).run(id, content, AGENT, timestamp, timestamp, timestamp);
+	).run(id, content, agentId, timestamp, timestamp, timestamp);
+}
+
+function seedArtifact(
+	db: Database,
+	path: string,
+	content: string,
+	revision: string,
+	capturedAt: string,
+	agentId = AGENT,
+): void {
+	db.prepare(
+		`INSERT INTO memory_artifacts
+		 (agent_id, source_path, source_sha256, source_kind, session_id, session_key, session_token,
+		  captured_at, content, updated_at, is_deleted)
+		 VALUES (?, ?, ?, 'source_obsidian_markdown', ?, ?, ?, ?, ?, ?, 0)`,
+	).run(
+		agentId,
+		path,
+		revision,
+		`session-${path}`,
+		`session-${path}`,
+		`token-${path}`,
+		capturedAt,
+		content,
+		capturedAt,
+	);
 }
 
 function seedSummary(db: Database, id: string, content: string, tokens: number, agentId = AGENT): void {
@@ -149,35 +175,181 @@ describe("Dreaming", () => {
 		).toEqual({ capturedAt: "2026-03-01T00:00:00.000Z", kind: "summary", id: "fragment" });
 	});
 
-	it("uses the fixed agent prompt and resets the evidence backlog to the surfaced frontier", async () => {
-		seedSummary(db, "s1", "durable episodic evidence for the backlog.", 500);
+	it("drains oversized evidence only after every delivered fragment completes (#1430)", async () => {
+		seedTranscript(db, "s1", "x".repeat(5_000));
 		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
 		let prompt = "";
-		const result = await runDreamingAgentPass(
+		const run = async () =>
+			runDreamingAgentPass(
+				accessor,
+				{
+					async run(input) {
+						prompt = input.prompt;
+						// The scan-first listing surfaces the pending evidence, so
+						// the pass-end watermark legitimately advances to it and
+						// the same evidence must not re-trigger the next pass.
+						const search = input.tools.find((tool) => tool.name === "search_evidence");
+						if (!search) throw new Error("Missing search_evidence");
+						await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
+						return { summary: "Done" };
+					},
+				},
+				defaultCfg(),
+				"/tmp",
+				AGENT,
+				[AGENT],
+				"incremental",
+			);
+		const result = await run();
+		expect(result.summary).toBe("Done");
+		expect(prompt).toBe(DREAMING_AGENT_PROMPT);
+		const firstDelivery = getDreamingToolCalls(accessor, AGENT, result.passId).find(
+			(call) => call.toolName === "search_evidence",
+		);
+		expect(firstDelivery?.output).toMatchObject({
+			items: [expect.objectContaining({ sourceRef: "transcript:s1", contentOffset: 0, contentLength: 5_000 })],
+		});
+		const partial = db
+			.prepare(
+				"SELECT delivered_offset AS offset, source_length AS length FROM dreaming_evidence_consumption WHERE source_id = ?",
+			)
+			.get("s1") as { offset: number; length: number } | null;
+		expect(partial).toEqual(expect.objectContaining({ length: 5_000 }));
+		expect(partial?.offset).toBeGreaterThan(0);
+		expect(partial?.offset).toBeLessThan(partial?.length ?? 0);
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
+
+		const second = await run();
+		const secondDelivery = getDreamingToolCalls(accessor, AGENT, second.passId).find(
+			(call) => call.toolName === "search_evidence",
+		);
+		expect(secondDelivery?.output).toMatchObject({
+			items: [expect.objectContaining({ sourceRef: "transcript:s1", contentOffset: 2_000, contentLength: 5_000 })],
+		});
+		// The second pass records the next contiguous fragment; the final
+		// 1,000-character fragment remains pending until a third pass.
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
+		await run();
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBe(0);
+	}, 15_000);
+
+	it("does not consume evidence delivered by a failed pass (#1430)", async () => {
+		seedTranscript(db, "failed-delivery", "Evidence must survive an interrupted pass.");
+		await expect(
+			runDreamingAgentPass(
+				accessor,
+				{
+					async run(input) {
+						const search = input.tools.find((tool) => tool.name === "search_evidence");
+						if (!search) throw new Error("Missing search_evidence");
+						await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
+						throw new Error("interrupted after delivery");
+					},
+				},
+				defaultCfg(),
+				"/tmp",
+				AGENT,
+				[AGENT],
+				"incremental-content",
+			),
+		).rejects.toThrow("interrupted after delivery");
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_consumption WHERE source_id = ?")
+					.get("failed-delivery") as {
+					count: number;
+				}
+			).count,
+		).toBe(0);
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
+	});
+
+	it("does not acknowledge an artifact revision replaced during a pass (#1430)", async () => {
+		const capturedAt = "2026-08-11T00:00:00.000Z";
+		seedArtifact(db, "sources/revised.md", "The old revision was delivered.", "sha-old", capturedAt);
+		await runDreamingAgentPass(
 			accessor,
 			{
 				async run(input) {
-					prompt = input.prompt;
-					// The scan-first listing surfaces the pending evidence, so
-					// the pass-end watermark legitimately advances to it and
-					// the same evidence must not re-trigger the next pass.
 					const search = input.tools.find((tool) => tool.name === "search_evidence");
 					if (!search) throw new Error("Missing search_evidence");
 					await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
-					return { summary: "Done" };
+					db.prepare("UPDATE memory_artifacts SET content = ?, source_sha256 = ? WHERE source_path = ?").run(
+						"The replacement revision must be delivered again.",
+						"sha-new",
+						"sources/revised.md",
+					);
+					return { summary: "Source changed while this pass ran" };
 				},
 			},
 			defaultCfg(),
 			"/tmp",
 			AGENT,
 			[AGENT],
-			"incremental",
+			"incremental-content",
 		);
-		expect(result.summary).toBe("Done");
-		expect(prompt).toBe(DREAMING_AGENT_PROMPT);
-		// The evidence queue resets to the surfaced frontier: the same
-		// evidence must not re-trigger the next pass.
-		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBe(0);
+		expect(
+			(
+				db
+					.prepare(
+						"SELECT COUNT(*) AS count FROM dreaming_evidence_consumption WHERE source_id = ? AND source_revision = ?",
+					)
+					.get("sources/revised.md", "sha-new") as { count: number }
+			).count,
+		).toBe(0);
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
+	});
+
+	it("keeps deferred delivery pending in its owning agent scope (#1430)", async () => {
+		const otherAgent = "other";
+		seedTranscript(db, "deferred-delivery", "Default scope may acknowledge the matching ref.", undefined, AGENT);
+		seedTranscript(db, "deferred-delivery", "Evidence the agent names as deferred.", undefined, otherAgent);
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const search = input.tools.find((tool) => tool.name === "search_evidence");
+					const write = input.tools.find((tool) => tool.name === "runbook_write");
+					if (!search || !write) throw new Error("Missing Dreaming delivery tools");
+					await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
+					await search.execute("call", { agentId: otherAgent }, undefined, undefined, {} as never);
+					await write.execute(
+						"call",
+						{
+							summary: "## Deferred\n- transcript:deferred-delivery remains mid-stream",
+							deferredEvidence: [{ agentId: otherAgent, sourceRef: "transcript:deferred-delivery" }],
+						},
+						undefined,
+						undefined,
+						{} as never,
+					);
+					return { summary: "Deferred source" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT, otherAgent],
+			"incremental-content",
+		);
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_consumption WHERE agent_id = ?")
+					.get(otherAgent) as {
+					count: number;
+				}
+			).count,
+		).toBe(0);
+		expect(
+			(
+				db.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_consumption WHERE agent_id = ?").get(AGENT) as {
+					count: number;
+				}
+			).count,
+		).toBe(1);
+		expect(getDreamingEpisodicTokenBacklog(accessor, otherAgent)).toBeGreaterThan(0);
 	});
 
 	it("replaces a historical summary DAG row with the direct transcript projection", async () => {
@@ -989,8 +1161,10 @@ describe("Dreaming", () => {
 			accessor,
 			{
 				async run(input) {
+					const search = input.tools.find((tool) => tool.name === "search_evidence");
 					const apply = input.tools.find((tool) => tool.name === "apply_ontology_ops");
-					if (!apply) throw new Error("Missing apply_ontology_ops");
+					if (!search || !apply) throw new Error("Missing Dreaming delivery tools");
+					await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
 					await apply.execute(
 						"call",
 						{
@@ -1015,6 +1189,15 @@ describe("Dreaming", () => {
 			"incremental",
 		);
 		expect(result).toMatchObject({ applied: 0, failed: 1 });
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_consumption WHERE source_id = ?")
+					.get("rejected-summary") as {
+					count: number;
+				}
+			).count,
+		).toBe(0);
 	});
 
 	it("records empty and failed bounded-agent passes honestly", async () => {
@@ -1286,6 +1469,48 @@ describe("Dreaming", () => {
 			[AGENT],
 			"incremental-content",
 		);
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBe(0);
+	});
+
+	it("acknowledges evidence that arrives during a content-attention pass without advancing the watermark (#1430)", async () => {
+		accessor.withWriteTx((tx) => {
+			enqueueDreamingAttentionInTx(tx, {
+				agentId: AGENT,
+				kind: "surprisal",
+				subjectRef: "memory:mid-pass-arrival",
+			});
+		});
+
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					seedTranscript(db, "mid-pass-arrival", "Evidence arrived while this content pass was already running.");
+					const search = input.tools.find((tool) => tool.name === "search_evidence");
+					if (!search) throw new Error("Missing search_evidence");
+					await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
+					return { summary: "Reviewed late evidence" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental-content",
+		);
+
+		// The time watermark remains a pass-start discovery boundary, but the
+		// returned late source is durably consumed and leaves no episodic backlog.
+		expect(getDreamingState(accessor, AGENT).lastPassAt).toBeNull();
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_consumption WHERE source_id = ?")
+					.get("mid-pass-arrival") as {
+					count: number;
+				}
+			).count,
+		).toBe(1);
 		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBe(0);
 	});
 

@@ -245,14 +245,11 @@ describe("dreaming-agent-tools", () => {
 		expect(JSON.stringify(entity).length).toBeLessThan(10_000);
 	});
 
-	it("search_evidence defaults since to the scope's evidence watermark when omitted (#1149)", async () => {
-		// Regression for #1149: the scan-first listing used to anchor `since`
-		// to pass-start (read off the runbook), so evidence captured between
-		// the last watermark and pass start was never listed. An omitted
-		// `since` must fall back to dreaming_state.last_pass_at — the
-		// frontier the last pass actually surfaced — so the unprocessed
-		// window is listed, and an explicit earlier `since` still reaches
-		// older evidence.
+	it("search_evidence scan-first ignores the time watermark and lists incomplete evidence (#1430)", async () => {
+		// Regression for #1430: a time watermark is only a newness frontier.
+		// A scan-first call must instead drain every source revision whose
+		// delivered offset is incomplete, including evidence older than the
+		// watermark. An explicit historical range stays available as well.
 		getDbAccessor().withWriteTx((db) => {
 			db.prepare("INSERT INTO dreaming_state (agent_id, last_pass_at) VALUES (?, ?)").run(
 				"owner",
@@ -282,7 +279,7 @@ describe("dreaming-agent-tools", () => {
 		);
 		const refs = (listed.items as Array<{ sourceRef: string }>).map((item) => item.sourceRef);
 		expect(refs).toContain("memory:mem-new");
-		expect(refs).not.toContain("memory:mem-old");
+		expect(refs).toContain("memory:mem-old");
 
 		const explicit = readResult(
 			await findTool(tools, "search_evidence").execute(

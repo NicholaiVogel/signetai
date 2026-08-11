@@ -317,6 +317,9 @@ describe("migration framework", () => {
 		// v99 keeps Pi Dreaming capability traces local and pass-scoped.
 		expect(tableNames).toContain("dreaming_tool_calls");
 
+		// v131 records successful source-fragment delivery independently of the time watermark.
+		expect(tableNames).toContain("dreaming_evidence_consumption");
+
 		// v14 tables
 		expect(tableNames).toContain("telemetry_events");
 

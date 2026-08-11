@@ -29,6 +29,7 @@ import { detectProspectiveContradictionRisk } from "./antonyms";
 import { getDreamingAttentionAcrossScopes, getDreamingAttentionScoped } from "./dreaming-attention";
 import { nextDreamingEvidenceFragment, renderDreamingEvidence } from "./dreaming-evidence";
 import type { DreamingAgentEvidence } from "./dreaming-evidence";
+import { deliveredOffsetForSource } from "./dreaming-evidence-consumption";
 import { DREAMING_ONTOLOGY_OPERATION_SCHEMA } from "./dreaming-operation-contract";
 import {
 	type ApplyDreamingOperationsResult,
@@ -87,11 +88,11 @@ function filterDreamingAttributes(
 
 /**
  * The scope's evidence watermark (`dreaming_state.last_pass_at`): the
- * frontier the last pass actually surfaced. `search_evidence` anchors its
- * scan-first listing here (when the agent omits `since`) so the unprocessed
- * window is listed instead of pass-start (#1149). Missing on first run, an
- * old workspace, or a scope that never passed: returns null so the listing
- * falls back to unbounded.
+ * frontier the last pass actually surfaced. It limits historical searches
+ * that omit `since`; scan-first delivery deliberately ignores it and drains
+ * source revisions from their durable delivered offsets (#1430). Missing on
+ * first run, an old workspace, or a scope that never passed: returns null so
+ * historical searches fall back to unbounded.
  */
 function readEvidenceWatermark(db: ReadDb, agentId: string): string | null {
 	try {
@@ -139,6 +140,7 @@ function projectEvidenceItem(
 		sourceId: source.sourceId,
 		sourcePath: source.sourcePath,
 		sourceEntryId: source.sourceEntryId,
+		sourceRevision: source.sourceRevision ?? source.capturedAt,
 		project: source.project,
 		harness: source.harness,
 		capturedAt: source.capturedAt,
@@ -498,7 +500,7 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 		capability(
 			"search_evidence",
 			"Search episodic evidence",
-			"Full-text search immutable episodic memories, artifacts, and transcripts in one agent scope. Historical summary records can be requested explicitly with kind=summary, but are not part of the default Dreaming delivery path. Results contain exact bounded excerpts of the rendered evidence with contentOffset/contentLength; use sourceRef for citations, which are validated against the complete canonical source. Each record carries completed: memory, artifact, and summary records are settled captures (true); a transcript is true only after the session-end machinery writes its completion marker, and false while the session is still running — do not file claims from a still-growing transcript, since its states may be contradicted by the session's end. If contentTruncated is true, page exact fragments with the same sourceRef and chunkSize: start at offset=0 when contentHasPrevious is true, then use offset=contentOffset+content.length from the fragment just returned until contentHasNext is false. Omit the query AND since to list the unprocessed window: the listing starts at the scope's evidence watermark (the last pass's surfaced frontier), so the newest unseen sources come first. Narrow with a query if the list is large; pass an explicit earlier since only when you need older history. Artifacts are deduped by content hash: content-identical files across vault paths collapse to one canonical entry.",
+			"Full-text search immutable episodic memories, artifacts, and transcripts in one agent scope. Historical summary records can be requested explicitly with kind=summary, but are not part of the default Dreaming delivery path. Results contain exact bounded excerpts of the rendered evidence with contentOffset/contentLength; use sourceRef for citations, which are validated against the complete canonical source. Each record carries completed: memory, artifact, and summary records are settled captures (true); a transcript is true only after the session-end machinery writes its completion marker, and false while the session is still running — do not file claims from a still-growing transcript, since its states may be contradicted by the session's end. If contentTruncated is true, page exact fragments with the same sourceRef and chunkSize: start at offset=0 when contentHasPrevious is true, then use offset=contentOffset+content.length from the fragment just returned until contentHasNext is false. Omit query, since, and before to drain the durable delivery queue: it lists every incomplete source revision and resumes at its delivered offset, regardless of time watermark. Narrow with a query if the list is large; pass an explicit earlier since only when you need older history. Artifacts are deduped by content hash: content-identical files across vault paths collapse to one canonical entry.",
 			true,
 			z.object({
 				agentId: z.string().min(1),
@@ -528,21 +530,31 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 							? { ok: false, error: "Evidence fragment offset is outside the source" }
 							: { ok: true, items: [fragment] };
 					}
-					// The scan-first listing omits `since`; anchor it to the
-					// scope's evidence watermark instead of pass-start so the
-					// unprocessed window [last surfaced frontier -> now] is
-					// listed, never the fresh minutes after pass start only
-					// (#1149).
-					const effectiveSince = since ?? readEvidenceWatermark(db, scopeId);
+					// A scan-first call is the delivery queue. It ignores the time
+					// watermark for selection, drains only incomplete evidence revisions,
+					// and resumes each source at its persisted delivered offset.
+					const scanFirst = query === undefined && since === undefined && before === undefined;
+					const effectiveSince = scanFirst ? undefined : (since ?? readEvidenceWatermark(db, scopeId) ?? undefined);
 					const sources = searchEpisodicSources(db, {
 						agentId: scopeId,
 						query: query ?? "",
-						since: effectiveSince ?? undefined,
+						since: effectiveSince,
 						before,
 						kind,
+						excludeDelivered: scanFirst,
 						limit,
 					});
-					return { ok: true, items: projectEvidence(sources, query ?? "") };
+					const items = scanFirst
+						? sources.flatMap((source) => {
+								const fragment = projectEvidenceFragment(
+									source,
+									deliveredOffsetForSource(db, scopeId, source),
+									MAX_EVIDENCE_EXCERPT_CHARS,
+								);
+								return fragment === null ? [] : [fragment];
+							})
+						: projectEvidence(sources, query ?? "");
+					return { ok: true, items };
 				}),
 		),
 		capability(
@@ -627,12 +639,24 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 		capability(
 			"runbook_write",
 			"Write Dreaming runbook",
-			"Before finishing a Dreaming pass, store one short structured note for future passes to review.",
+			"Before finishing a Dreaming pass, store one short structured note for future passes to review. Deferred evidence in another scope must include its agentId.",
 			false,
 			z.object({
 				summary: z.string().trim().min(1).max(2_000),
 				openQuestions: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
 				deferred: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
+				deferredEvidence: z
+					.array(
+						z.union([
+							z.string().regex(/^(memory|artifact|transcript|summary):.+$/),
+							z.object({
+								agentId: z.string().trim().min(1),
+								sourceRef: z.string().regex(/^(memory|artifact|transcript|summary):.+$/),
+							}),
+						]),
+					)
+					.max(20)
+					.default([]),
 			}),
 			async (entry) => {
 				if (!params.passId) return { ok: false, error: "Runbook writes require a live Dreaming pass" };

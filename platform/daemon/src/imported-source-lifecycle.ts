@@ -56,6 +56,13 @@ export function markImportedSourceUnsupported(
 		const artifacts = countChanges(
 			db.prepare("DELETE FROM memory_artifacts WHERE agent_id = ? AND source_id = ?").run(agentId, sourceId),
 		);
+		// Consumption rows describe the removed source's old artifact revisions.
+		// Delete them in the same lifecycle transaction so a re-import starts
+		// cleanly instead of inheriting a stale delivered frontier.
+		db.prepare("DELETE FROM dreaming_evidence_consumption WHERE agent_id = ? AND source_entry_id = ?").run(
+			agentId,
+			sourceId,
+		);
 		const prefix = `${sourceId}:`;
 		const embeddingRows = db
 			.prepare(

@@ -340,6 +340,60 @@ describe("episodic source selection", () => {
 		]);
 	});
 
+	it("keeps content-identical artifacts distinct across configured sources", () => {
+		getDbAccessor().withWriteTx((db) => {
+			for (const [sourceId, sourcePath] of [
+				["import-a", "imports/a.md"],
+				["import-b", "imports/b.md"],
+			] as const) {
+				db.prepare(
+					`INSERT INTO memory_artifacts
+					 (agent_id, source_path, source_sha256, source_kind, source_id, session_id, session_token,
+					  captured_at, content, updated_at, is_deleted)
+					 VALUES ('ant', ?, 'same-content', 'source_markdown', ?, 'session-a', 'token-a',
+					  '2026-08-01T11:00:00.000Z', 'Shared source evidence', '2026-08-01T11:00:00.000Z', 0)`,
+				).run(sourcePath, sourceId);
+			}
+		});
+
+		const matches = getDbAccessor().withReadDb((db) =>
+			searchEpisodicSources(db, { agentId: "ant", query: "Shared source evidence" }),
+		);
+		expect(matches.map((match) => ({ id: match.id, sourceEntryId: match.sourceEntryId }))).toEqual([
+			{ id: "imports/a.md", sourceEntryId: "import-a" },
+			{ id: "imports/b.md", sourceEntryId: "import-b" },
+		]);
+	});
+
+	it("re-lists an artifact revision when its captured time is unchanged", () => {
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memory_artifacts
+				 (agent_id, source_path, source_sha256, source_kind, source_id, session_id, session_token,
+				  captured_at, content, updated_at, is_deleted)
+				 VALUES ('ant', 'imports/revised.md', 'sha-old', 'source_markdown', 'import-a', 'session-a', 'token-a',
+				  '2026-08-01T11:00:00.000Z', 'Old fact', '2026-08-01T11:00:00.000Z', 0)`,
+			).run();
+			db.prepare(
+				`INSERT INTO dreaming_evidence_consumption
+				 (agent_id, source_kind, source_id, source_captured_at, source_entry_id, source_revision,
+				  delivered_offset, source_length, pass_id, updated_at)
+				 VALUES ('ant', 'artifact', 'imports/revised.md', '2026-08-01T11:00:00.000Z', 'import-a',
+				  'sha-old', 8, 8, 'pass-old', '2026-08-01T11:01:00.000Z')`,
+			).run();
+			db.prepare(
+				`UPDATE memory_artifacts
+				 SET source_sha256 = 'sha-new', content = 'New fact', updated_at = '2026-08-01T12:00:00.000Z'
+				 WHERE agent_id = 'ant' AND source_path = 'imports/revised.md'`,
+			).run();
+		});
+
+		const matches = getDbAccessor().withReadDb((db) =>
+			searchEpisodicSources(db, { agentId: "ant", query: "", kind: "artifact", excludeDelivered: true }),
+		);
+		expect(matches).toMatchObject([{ id: "imports/revised.md", sourceRevision: "sha-new", content: "New fact" }]);
+	});
+
 	it("re-lists corrupt pre-epoch artifacts behind the since watermark (#1149)", () => {
 		// Regression for #1149: artifacts stamped with the DOS-epoch sentinel
 		// (1980, from timestamp-stripping filesystems) can never be reached

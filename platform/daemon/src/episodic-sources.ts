@@ -49,6 +49,12 @@ export interface EpisodicSourceRecord {
 	 * node/session id in `sourceId`.
 	 */
 	readonly sourceEntryId: string | null;
+	/**
+	 * Stable content revision for the delivery frontier. Artifacts use their
+	 * source hash when available because a path may be re-indexed without a
+	 * different captured_at value; other immutable rows use capturedAt.
+	 */
+	readonly sourceRevision?: string;
 	readonly project: string | null;
 	readonly harness: string | null;
 	readonly capturedAt: string;
@@ -230,7 +236,7 @@ export function readEpisodicArtifact(db: ReadDb, agentId: string, id: string): E
 	const placeholders = ids.map(() => "?").join(", ");
 	const row = db
 		.prepare(
-			`SELECT source_path, source_kind, source_id, source_node_id, session_id, session_key, session_token,
+			`SELECT source_path, source_sha256, source_kind, source_id, source_node_id, session_id, session_key, session_token,
 			        project, harness, content, captured_at, updated_at
 			 FROM memory_artifacts
 			 WHERE agent_id = ?
@@ -248,6 +254,7 @@ export function readEpisodicArtifact(db: ReadDb, agentId: string, id: string): E
 		.get(agentId, id, ...ids, ...ids, ...ids, ...ids) as
 		| {
 				readonly source_path: string;
+				readonly source_sha256: string | null;
 				readonly source_kind: string;
 				readonly source_id: string | null;
 				readonly source_node_id: string | null;
@@ -274,6 +281,7 @@ export function readEpisodicArtifact(db: ReadDb, agentId: string, id: string): E
 		sourceKind: row.source_kind,
 		sourceId: row.source_node_id ?? row.session_key ?? row.session_id ?? row.session_token,
 		sourceEntryId: readNonEmptyTrimmed(row.source_id),
+		sourceRevision: readNonEmptyTrimmed(row.source_sha256) ?? row.captured_at ?? row.updated_at,
 		sourcePath: row.source_path,
 		project: row.project,
 		harness: row.harness,
@@ -500,7 +508,7 @@ export function readRecentEpisodicSources(
 	const artifacts: EpisodicSourceRecord[] = wants("artifact")
 		? db
 				.prepare(
-					`SELECT source_path, source_kind, source_id, source_node_id, session_id, session_key, session_token,
+					`SELECT source_path, source_sha256, source_kind, source_id, source_node_id, session_id, session_key, session_token,
 			        project, harness, content, captured_at, updated_at
 			 FROM memory_artifacts AS ma
 			 WHERE ma.agent_id = ? AND COALESCE(ma.is_deleted, 0) = 0
@@ -542,6 +550,7 @@ export function readRecentEpisodicSources(
 				.map((row) => {
 					const artifact = row as {
 						readonly source_path: string;
+						readonly source_sha256: string | null;
 						readonly source_kind: string;
 						readonly source_id: string | null;
 						readonly source_node_id: string | null;
@@ -561,6 +570,7 @@ export function readRecentEpisodicSources(
 						sourceKind: artifact.source_kind,
 						sourceId: artifact.source_node_id ?? artifact.session_key ?? artifact.session_id ?? artifact.session_token,
 						sourceEntryId: readNonEmptyTrimmed(artifact.source_id),
+						sourceRevision: readNonEmptyTrimmed(artifact.source_sha256) ?? artifact.captured_at ?? artifact.updated_at,
 						sourcePath: artifact.source_path,
 						project: artifact.project,
 						harness: artifact.harness,
@@ -796,6 +806,8 @@ export function searchEpisodicSources(
 		readonly since?: string;
 		readonly before?: string;
 		readonly kind?: "memory" | "artifact" | "transcript" | "summary";
+		/** Scan-first delivery drains only records whose current revision is not complete. */
+		readonly excludeDelivered?: boolean;
 		readonly limit?: number;
 	},
 ): EpisodicSourceRecord[] {
@@ -814,6 +826,27 @@ export function searchEpisodicSources(
 	// forever.
 	const sinceArgs: unknown[] = params.since !== undefined ? [params.since, EPISODIC_CAPTURED_AT_FLOOR] : [];
 	const beforeArgs: unknown[] = params.before !== undefined ? [params.before] : [];
+	const deliveredFilterEnabled =
+		params.excludeDelivered === true &&
+		db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dreaming_evidence_consumption'").get() !=
+			null;
+	const deliveredPredicate = (
+		kind: EpisodicSourceKind,
+		id: string,
+		capturedAt: string,
+		sourceEntryId: string,
+		sourceRevision: string,
+	): string =>
+		deliveredFilterEnabled
+			? `AND NOT EXISTS (
+				SELECT 1 FROM dreaming_evidence_consumption dec
+				 WHERE dec.agent_id = ? AND dec.source_kind = '${kind}' AND dec.source_id = ${id}
+				   AND dec.source_captured_at = ${capturedAt} AND dec.source_entry_id = ${sourceEntryId}
+				   AND dec.source_revision = ${sourceRevision}
+				   AND dec.delivered_offset >= dec.source_length
+			)`
+			: "";
+	const deliveredArgs = deliveredFilterEnabled ? [params.agentId] : [];
 	const transcriptSearchTime = tableHasColumn(db, "session_transcripts", "updated_at")
 		? "COALESCE(updated_at, created_at)"
 		: "created_at";
@@ -830,31 +863,34 @@ export function searchEpisodicSources(
 			        AND COALESCE(is_deleted, 0) = 0 AND visibility != 'archived' AND scope IS NULL
 			        AND COALESCE(type, '') != 'session_summary' AND content LIKE ?
 			        ${params.since ? "AND (julianday(created_at) >= julianday(?) OR julianday(created_at) < julianday(?))" : ""}
-			        ${params.before ? "AND julianday(created_at) <= julianday(?)" : ""}`,
-			args: [params.agentId, like, ...sinceArgs, ...beforeArgs],
+			        ${params.before ? "AND julianday(created_at) <= julianday(?)" : ""}
+			        ${deliveredPredicate("memory", "id", "created_at", "''", "created_at")}`,
+			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs],
 		});
 	}
 	if (params.kind === undefined || params.kind === "artifact") {
 		branches.push({
-			// Artifacts are deduped by content hash: content-identical files
-			// across vault paths collapse to one canonical row (most recent
-			// captured_at; tie-break by path). Empty placeholder artifacts are
-			// excluded entirely.
+			// Artifacts are deduped by content hash within their configured source:
+			// content-identical paths in one source collapse to one canonical row,
+			// but independently imported sources must each retain their own durable
+			// delivery frontier. Empty placeholder artifacts are excluded entirely.
 			sql: `SELECT 'artifact' AS kind, ma.source_path AS id, ma.captured_at AS captured_at
 			      FROM memory_artifacts ma
 			      WHERE ma.agent_id = ? AND COALESCE(ma.is_deleted, 0) = 0
 			        AND length(ma.content) > 0 AND ma.content LIKE ?
 			        ${params.since ? "AND (julianday(ma.captured_at) >= julianday(?) OR julianday(ma.captured_at) < julianday(?))" : ""}
 			        ${params.before ? "AND julianday(ma.captured_at) <= julianday(?)" : ""}
+			        ${deliveredPredicate("artifact", "ma.source_path", "ma.captured_at", "COALESCE(ma.source_id, '')", "CASE WHEN ma.source_sha256 IS NULL OR ma.source_sha256 = '' THEN ma.captured_at ELSE ma.source_sha256 END")}
 			        AND (ma.source_sha256 IS NULL OR ma.source_sha256 = ''
 			             OR (ma.agent_id, ma.source_path) = (
 			               SELECT ma2.agent_id, ma2.source_path FROM memory_artifacts ma2
 			               WHERE ma2.agent_id = ma.agent_id AND COALESCE(ma2.is_deleted, 0) = 0
 			                 AND ma2.source_sha256 = ma.source_sha256
+			                 AND COALESCE(ma2.source_id, '') = COALESCE(ma.source_id, '')
 			               ORDER BY ma2.captured_at DESC, ma2.source_path ASC
 			               LIMIT 1
 			             ))`,
-			args: [params.agentId, like, ...sinceArgs, ...beforeArgs],
+			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs],
 		});
 	}
 	if (params.kind === undefined || params.kind === "transcript") {
@@ -863,8 +899,9 @@ export function searchEpisodicSources(
 			      FROM session_transcripts
 			      WHERE agent_id = ? AND ${transcriptCompleted} AND content LIKE ?
 			        ${params.since ? `AND (julianday(${transcriptSearchTime}) >= julianday(?) OR julianday(${transcriptSearchTime}) < julianday(?))` : ""}
-			        ${params.before ? `AND julianday(${transcriptSearchTime}) <= julianday(?)` : ""}`,
-			args: [params.agentId, like, ...sinceArgs, ...beforeArgs],
+			        ${params.before ? `AND julianday(${transcriptSearchTime}) <= julianday(?)` : ""}
+			        ${deliveredPredicate("transcript", "session_key", transcriptSearchTime, "''", transcriptSearchTime)}`,
+			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs],
 		});
 	}
 	if (params.kind === "summary") {
@@ -875,8 +912,9 @@ export function searchEpisodicSources(
 			        AND COALESCE(source_type, 'summary') IN ('summary', 'compaction', 'checkpoint')
 			        AND content LIKE ?
 			        ${params.since ? "AND (julianday(latest_at) >= julianday(?) OR julianday(latest_at) < julianday(?))" : ""}
-			        ${params.before ? "AND julianday(latest_at) <= julianday(?)" : ""}`,
-			args: [params.agentId, like, ...sinceArgs, ...beforeArgs],
+			        ${params.before ? "AND julianday(latest_at) <= julianday(?)" : ""}
+			        ${deliveredPredicate("summary", "id", "latest_at", "''", "latest_at")}`,
+			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs],
 		});
 	}
 

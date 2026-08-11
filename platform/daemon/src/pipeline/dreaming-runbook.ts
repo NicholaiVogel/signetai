@@ -6,10 +6,19 @@
 import type { DbAccessor, WriteDb } from "../db-accessor";
 import type { DreamingAgentEvidence } from "./dreaming-evidence";
 
+export interface DreamingDeferredEvidence {
+	readonly agentId: string;
+	readonly sourceRef: string;
+}
+
+export type DreamingDeferredEvidenceEntry = string | DreamingDeferredEvidence;
+
 export interface DreamingRunbookEntry {
 	readonly summary: string;
 	readonly openQuestions: readonly string[];
 	readonly deferred: readonly string[];
+	/** Canonical source refs deliberately deferred, never acknowledged as consumed. */
+	readonly deferredEvidence: readonly DreamingDeferredEvidenceEntry[];
 }
 
 export interface DreamingEvidenceWindow {
@@ -60,6 +69,23 @@ function parseTextList(value: unknown): readonly string[] {
 	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+function parseDeferredEvidenceList(value: unknown): readonly DreamingDeferredEvidenceEntry[] {
+	if (!Array.isArray(value)) return [];
+	const entries: DreamingDeferredEvidenceEntry[] = [];
+	for (const item of value) {
+		if (typeof item === "string") {
+			entries.push(item);
+			continue;
+		}
+		if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+		const entry = item as Record<string, unknown>;
+		if (typeof entry.agentId === "string" && typeof entry.sourceRef === "string") {
+			entries.push({ agentId: entry.agentId, sourceRef: entry.sourceRef });
+		}
+	}
+	return entries;
+}
+
 function parseRunbook(value: string | null): DreamingRunbookEntry | null {
 	const row = parseRecord(value);
 	if (!row || typeof row.summary !== "string") return null;
@@ -67,6 +93,7 @@ function parseRunbook(value: string | null): DreamingRunbookEntry | null {
 		summary: row.summary,
 		openQuestions: parseTextList(row.openQuestions),
 		deferred: parseTextList(row.deferred),
+		deferredEvidence: parseDeferredEvidenceList(row.deferredEvidence),
 	};
 }
 

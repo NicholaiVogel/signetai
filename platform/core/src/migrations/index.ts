@@ -136,6 +136,7 @@ import { up as ontologyContradictions } from "./127-ontology-contradictions";
 import { up as boundedQueueDiagnostics } from "./128-bounded-queue-diagnostics";
 import { up as retireStructuralJobs } from "./129-retire-structural-jobs";
 import { up as embeddingRepairState } from "./130-embedding-repair-state";
+import { up as dreamingEvidenceConsumption } from "./131-dreaming-evidence-consumption";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1211,6 +1212,12 @@ export const MIGRATIONS: readonly Migration[] = [
 		name: "embedding-repair-state",
 		up: embeddingRepairState,
 		artifacts: { tables: ["embedding_repair_budget", "embedding_repair_backoff"] },
+	},
+	{
+		version: 131,
+		name: "dreaming-evidence-consumption",
+		up: dreamingEvidenceConsumption,
+		artifacts: { tables: ["dreaming_evidence_consumption"] },
 	},
 ];
 

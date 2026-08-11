@@ -573,11 +573,16 @@ describe("Sources routes", () => {
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as {
 			sources: Array<{
-				stats?: { artifacts: number; chunks: number; indexed: number };
+				stats?: { artifacts: number; chunks: number; indexed: number; hasEligibleUnconsumedEvidence: boolean };
 				health?: { status?: string; purge?: { orphanChunks?: number } };
 			}>;
 		};
-		expect(body.sources[0]?.stats).toEqual({ artifacts: 1, chunks: 1, indexed: 1 });
+		expect(body.sources[0]?.stats).toEqual({
+			artifacts: 1,
+			chunks: 1,
+			indexed: 1,
+			hasEligibleUnconsumedEvidence: false,
+		});
 		expect(body.sources[0]?.health).toMatchObject({
 			status: "healthy",
 			purge: { orphanChunks: 0 },
@@ -631,9 +636,42 @@ describe("Sources routes", () => {
 		const res = await makeApp().request("/api/sources");
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as {
-			sources: Array<{ stats?: { artifacts: number; chunks: number; indexed: number } }>;
+			sources: Array<{
+				stats?: { artifacts: number; chunks: number; indexed: number; hasEligibleUnconsumedEvidence: boolean };
+			}>;
 		};
-		expect(body.sources[0]?.stats).toEqual({ artifacts: 1, chunks: 1, indexed: 1 });
+		expect(body.sources[0]?.stats).toEqual({
+			artifacts: 1,
+			chunks: 1,
+			indexed: 1,
+			hasEligibleUnconsumedEvidence: true,
+		});
+
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO dreaming_evidence_consumption
+				 (agent_id, source_kind, source_id, source_captured_at, source_entry_id, source_revision, delivered_offset, source_length, pass_id, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			).run(
+				"default",
+				"artifact",
+				"discord://guild/123456789012345678",
+				"2026-01-01T00:00:00.000Z",
+				added.source.id,
+				"sha",
+				"Guild".length,
+				"Guild".length,
+				"pass-complete",
+				"2026-01-01T00:00:00.000Z",
+			);
+		});
+		const completed = await makeApp().request("/api/sources");
+		const completedBody = (await completed.json()) as {
+			sources: Array<{
+				stats?: { artifacts: number; chunks: number; indexed: number; hasEligibleUnconsumedEvidence: boolean };
+			}>;
+		};
+		expect(completedBody.sources[0]?.stats?.hasEligibleUnconsumedEvidence).toBe(false);
 	});
 
 	it("exports source snapshots while excluding local Discord cache DMs by default", async () => {

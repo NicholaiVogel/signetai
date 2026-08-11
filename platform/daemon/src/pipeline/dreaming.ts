@@ -28,6 +28,7 @@ import {
 	type EpisodicSourceRecord,
 	readEpisodicSource,
 	readRecentEpisodicSources,
+	searchEpisodicSources,
 	timestampMillis,
 } from "../episodic-sources";
 import { type GraphHygieneCaps, getDreamingHygieneCandidatesInDb } from "../knowledge-graph-hygiene";
@@ -57,6 +58,7 @@ import {
 	nextDreamingEvidenceFragment,
 	renderDreamingEvidence,
 } from "./dreaming-evidence";
+import { deliveredOffsetForSource, recordDreamingEvidenceConsumptionInTx } from "./dreaming-evidence-consumption";
 import {
 	type RejectedDreamingEvidence,
 	autoRequeueRepairedDreamingEvidence,
@@ -290,6 +292,20 @@ const DREAMING_WORKLOAD_CLASS = "memory_extraction";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function deferredEvidenceKeys(value: unknown, primaryAgentId: string): ReadonlySet<string> | null {
+	if (!isRecord(value) || !Array.isArray(value.deferredEvidence)) return new Set();
+	const keys = new Set<string>();
+	for (const item of value.deferredEvidence) {
+		if (typeof item === "string") {
+			keys.add(`${primaryAgentId}\u0000${item}`);
+			continue;
+		}
+		if (!isRecord(item) || typeof item.agentId !== "string" || typeof item.sourceRef !== "string") return null;
+		keys.add(`${item.agentId}\u0000${item.sourceRef}`);
+	}
+	return keys;
 }
 
 // ---------------------------------------------------------------------------
@@ -1547,12 +1563,27 @@ export async function runDreamingAgentPass(
 				passId,
 			);
 			recordRejectedDreamingEvidenceInTx(db, passId, rejectedEvidence);
-			// The evidence queue resets to the pass watermark for EVERY scope
-			// the pass consumed evidence for: the next pass's backlog counts
-			// only sources captured after the surfaced frontier. A hygiene
+			if (mode !== "incremental-hygiene" && failed === 0) {
+				const runbook = db
+					.prepare("SELECT runbook_json AS runbookJson FROM dreaming_passes WHERE id = ?")
+					.get(passId) as {
+					runbookJson: string | null;
+				} | null;
+				let deferredEvidence: ReadonlySet<string> | null = new Set();
+				try {
+					deferredEvidence = deferredEvidenceKeys(JSON.parse(runbook?.runbookJson ?? "{}"), agentId);
+				} catch {
+					deferredEvidence = null;
+				}
+				// A malformed runbook is never permission to acknowledge evidence.
+				if (deferredEvidence !== null) recordDreamingEvidenceConsumptionInTx(db, { passId, deferredEvidence });
+			}
+			// The time watermark preserves chronological discovery and mid-pass
+			// catch-up. Durable delivery offsets independently decide whether an
+			// individual immutable source revision is still backlog. A hygiene
 			// pass consumes no evidence, so it must not advance the watermark —
-			// advancing it would hide the unprocessed backlog from the next
-			// content pass and starve content again (#1098).
+			// advancing it would hide unprocessed sources from the next content
+			// pass and starve content again (#1098).
 			if (dreamingModeAdvancesEvidence(mode, totalBacklog > 0)) {
 				for (const scope of scopes) {
 					if ((backlogByScope.get(scope) ?? 0) === 0) continue;
@@ -1753,6 +1784,21 @@ export function getDreamingEpisodicTokenBacklog(accessor: DbAccessor, agentId: s
 }
 
 export function getDreamingEpisodicTokenBacklogInDb(db: ReadDb, agentId: string): number {
+	const hasConsumption =
+		db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dreaming_evidence_consumption'").get() !=
+		null;
+	if (hasConsumption) {
+		const queued = searchEpisodicSources(db, {
+			agentId,
+			query: "",
+			excludeDelivered: true,
+			limit: 50,
+		});
+		return queued.reduce((total, source) => {
+			const remaining = renderDreamingEvidence(source).slice(deliveredOffsetForSource(db, agentId, source));
+			return total + countTokens(remaining);
+		}, 0);
+	}
 	const state = readDreamingState(db, agentId);
 	const queued = readRecentEpisodicSources(
 		db,
