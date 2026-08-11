@@ -1,274 +1,64 @@
 ---
 title: "Skills"
-description: "Install, manage, and discover agent skills."
+description: "Install, inspect, search, and remove agent skills."
 ---
 
-Install, manage, and discover agent skills. Skills are packaged instructions that extend what your agent can do.
+Skills are directories under `$SIGNET_WORKSPACE/skills/` with a `SKILL.md` instruction file. A harness can surface installed skills to an agent, but the skill remains instructions: it does not grant commands or permissions by itself.
 
----
+## CLI commands
 
-## What Are Skills?
-
-A skill is a directory inside `$SIGNET_WORKSPACE/skills/` containing at minimum a `SKILL.md` file. That file describes what the skill does and how the agent should use it. Skills are markdown — they contain *instructions*, not executable code.
-
-```
-$SIGNET_WORKSPACE/skills/
-├── remember/
-│   └── SKILL.md          # /remember command
-├── recall/
-│   └── SKILL.md          # /recall command
-├── browser-use/
-│   └── SKILL.md          # browser automation
-└── github/
-    └── SKILL.md          # GitHub CLI operations
-```
-
-When a [harness](/harnesses/) loads your agent, the installed skills are included in the system prompt (via the `<available_skills>` section in AGENTS.md). The agent reads the relevant SKILL.md and follows its instructions.
-
----
-
-## CLI Commands
+The current `signet skill` command set is intentionally small:
 
 ```bash
 # List installed skills
 signet skill list
 
-# Search the skills.sh registry
+# Search installed skills and the registry
 signet skill search browser
 
-# Install from skills.sh
-signet skill install browser-use
+# Install a registry entry or an owner/repository reference
+signet skill install owner/repository
 
-# Show details about a skill
-signet skill info browser-use
+# Print an installed SKILL.md
+signet skill show browser-use
 
-# Remove a skill
-signet skill remove weather
-
-# Update all installed skills
-signet skill update
-
-# Update a specific skill
-signet skill update github
-
-# Create a new skill (scaffolding)
-signet skill create my-tool
+# Remove an installed skill
+signet skill uninstall browser-use
+# `remove` is an alias for `uninstall`
 ```
 
+`info`, `update`, `create`, and `publish` are not registered Signet CLI commands. Create or edit a local skill directory with your normal editor and publish it through the registry or repository workflow that owns it, rather than treating those retired commands as supported Signet behavior.
+
+## Install and search behavior
+
+When the daemon is available, list, show, install, and remove use its skills API. When the daemon is unavailable, the CLI can list local directories, show local `SKILL.md` files, install through the configured skills runner, and search local plus public registry results. Registry results are discovery aids: inspect the source before installing an unfamiliar skill.
+
+```text
+$SIGNET_WORKSPACE/skills/
+└── release-notes/
+    └── SKILL.md
+```
+
+## SKILL.md shape
+
+A skill is ordinary Markdown with optional YAML frontmatter. Keep the frontmatter truthful and the body specific about when to use the skill, expected inputs, boundaries, and verification.
+
+```markdown
 ---
-
-## Built-in Skills
-
-Signet ships with three built-in skills that integrate directly with the [Memory](/memory/) system (see [Memory Skills](/memory-skills/) for full details):
-
-### `/remember`
-
-Save information to persistent memory. Content is embedded automatically for semantic search.
-
-```bash
-# CLI
-signet remember "nicholai prefers bun over npm"
-signet remember "critical memory" --critical
-signet remember "tagged memory" -t tag1,tag2
-
-# In harness
-/remember nicholai prefers bun over npm
-/remember critical: never push directly to main
-/remember [tag1,tag2]: tagged content here
-```
-
-Prefixes:
-- `critical:` or `--critical` — pins the memory (never decays, always included in session context)
-- `[tag1,tag2]:` or `-t tag1,tag2` — adds searchable tags
-
-See [MEMORY.md](/memory/) for full details.
-
-### `/recall`
-
-Search memories with hybrid semantic + keyword search.
-
-```bash
-# CLI
-signet recall "coding preferences"
-signet recall "signet architecture" --type decision -l 5
-
-# In harness
-/recall coding preferences
-/recall signet architecture
-/recall what did we decide about auth
-```
-
-See [MEMORY.md](/memory/) for full details.
-
-### `/memory-debug`
-
-Diagnose memory issues end-to-end (daemon health, remember/write path, recall/read path, embedding health, and API checks).
-
-```bash
-# In harness
-/memory-debug
-/memory-debug recall is empty
-
-# Core checks it should run
-signet status
-signet remember "memory-debug smoke test" -t debug,smoke
-signet recall "memory-debug smoke test" --json
-```
-
-Use this when memory results are missing, low quality, or inconsistent across sessions.
-
----
-
-## SKILL.md Format
-
-Skills are defined with YAML frontmatter followed by markdown content.
-
-## ```markdown
-name: example-skill
-description: Brief description for skill listings
-version: 1.0.0
-author: username
-homepage: https://github.com/user/skill-repo
-dependencies:
-  bins: [some-cli]            # Required CLI tools
-  skills: [other-skill]       # Required other skills
-user_invocable: true          # Can be triggered with /skill-name
-arg_hint: "<query>"           # Help text for args
-## builtin: false                # true for Signet built-ins
-
-# Skill Name
-
-What this skill does and when to use it.
-
-## Usage
-
-```
-/skill-name some argument
-```
-
-## Examples
-
-...
-
-## Implementation
-
-Instructions for the agent on how to carry out this skill...
-```
-
-The `user_invocable: true` flag means users can trigger the skill with `/skill-name` in their harness. The `builtin: true` flag marks skills that integrate directly with the Signet daemon API (like remember and recall).
-
----
-
-## skills.sh Integration
-
-[skills.sh](https://skills.sh) is a public registry of agent skills. Signet searches and installs from it via the `npx skills` CLI.
-
-### How install works
-
-1. `signet skill install <name>` calls `npx skills add <name> --global --yes`
-2. The skill is installed to `$SIGNET_WORKSPACE/skills/<name>/`
-3. The SKILL.md file is parsed for metadata
-4. The harness config is updated to include the new skill
-
-### How search works
-
-1. `signet skill search <query>` calls `npx skills search <query>`
-2. Results show name, description, and install count
-3. Already-installed skills are marked
-
----
-
-## Dashboard
-
-The [Dashboard](/dashboard/)'s **Skills** panel provides a UI for everything the CLI does:
-
-- **Installed tab** — lists skills with name, description, version
-- **Browse tab** — search skills.sh, install with one click
-- **Detail view** — shows the full SKILL.md content
-
----
-
-## Creating Custom Skills
-
-```bash
-signet skill create my-tool
-```
-
-This creates `$SIGNET_WORKSPACE/skills/my-tool/SKILL.md` with a starter template. Edit it to describe what the skill does.
-
-### Example: a custom deployment skill
-
-## ```markdown
-name: deploy-staging
-description: Deploy the current project to staging
+name: release-notes
+description: Draft release notes from merged pull requests.
 version: 0.1.0
-author: nicholai
 user_invocable: true
-## arg_hint: "[service-name]"
-
-# deploy-staging
-
-Deploys the current project to the staging environment.
-
-## Usage
-
-```
-/deploy-staging
-/deploy-staging api-service
-```
-
-## Implementation
-
-1. Check that you're on a clean git branch (no uncommitted changes)
-2. Run `bun run build` to build the project
-3. Run the project's deploy script: `./scripts/deploy.sh staging`
-4. Report the deployment URL when complete
-
-If there are uncommitted changes, stop and ask the user if they want to commit first.
-```
-
+arg_hint: "<release range>"
 ---
 
-## Harness Integration
+# Release notes
 
-### Claude Code and OpenCode
-
-An `<available_skills>` section is generated in the AGENTS.md copy for each harness, listing installed skills by name and description. The agent uses this to know which skills are available.
-
-### OpenClaw
-
-Skills are referenced in the `skills.entries` section of the OpenClaw workspace config, pointing to the `$SIGNET_WORKSPACE/skills/` directory.
-
----
-
-## Security
-
-Skills are markdown files — they're instructions, not code. A skill only does what the agent chooses to do after reading it. However:
-
-- A malicious skill could instruct the agent to do harmful things.
-- Only install skills from sources you trust.
-- Skill signing and verification is planned for a future release.
-
----
-
-## Publishing a Skill
-
-To share a skill on skills.sh:
-
-```bash
-cd $SIGNET_WORKSPACE/skills/my-skill
-signet skill publish
+Use when the caller asks for release-note drafting.
 ```
 
-Requirements:
-- Valid SKILL.md with required frontmatter (`name`, `description`, `version`, `author`)
-- Unique skill name on skills.sh
-- skills.sh account (authenticate via `signet auth`)
+## Safety
 
----
+Skills can contain untrusted instructions. Install only sources you trust, review a skill before use, and do not treat a skill as authorization to access secrets, alter accounts, or run destructive commands.
 
-## Versioning
-
-Skills use semver in the `version` frontmatter field. `signet skill update` compares the installed version against the registry and replaces if newer.
-
-User-created skills (no registry source) are never auto-updated.
+For memory-specific skills, see [Memory skills](/memory-skills/).

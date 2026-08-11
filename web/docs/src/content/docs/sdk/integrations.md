@@ -1,325 +1,76 @@
 ---
 title: "SDK integrations"
-description: "Integrate Signet with React, Vercel AI SDK, OpenAI SDK, connectors, and hooks."
+description: "Use React, AI SDK, OpenAI, lifecycle hooks, and connectors through the current SDK surface."
 ---
 
-## React Hooks
+## React
 
-`@signet/sdk/react` (imported from `react.tsx`) ships React bindings
-built on top of `SignetClient`. They require React 18+ and must be used
-inside a `SignetProvider`.
-
-```typescript
-import { SignetProvider, useSignet, useMemorySearch, useMemory }
-  from "@signet/sdk/react";
-```
-
-**`SignetProvider`** — Wrap your app or subtree. Runs a health check on
-mount and exposes `connected` and `error` via context.
+`@signet/sdk/react` provides `SignetProvider`, `useSignet`, `useMemorySearch`, and `useMemory`.
 
 ```tsx
-<SignetProvider config={{ daemonUrl: "http://localhost:3850" }}>
-  <App />
-</SignetProvider>
+import { SignetProvider, useMemorySearch } from "@signet/sdk/react";
+
+function Preferences() {
+  const { data, loading, error } = useMemorySearch("user preferences", {
+    limit: 5,
+    type: "preference",
+  });
+  if (loading) return <p>Loading…</p>;
+  if (error) return <p>{error.message}</p>;
+  return <ul>{data?.map((memory) => <li key={memory.id}>{memory.content}</li>)}</ul>;
+}
+
+export function App() {
+  return <SignetProvider config={{ daemonUrl: "http://localhost:3850" }}><Preferences /></SignetProvider>;
+}
 ```
 
-You can also pass a pre-constructed `client` instance if you need to
-share it outside React.
+`useMemorySearch(null)` and `useMemory(null)` suppress their request. `SignetProvider` checks `health()` on mount and exposes `connected` and `error` through `useSignet()`.
 
-**`useSignet()`** — Access the raw context: `{ client, connected, error }`.
-Throws if called outside a `SignetProvider`.
+## Vercel AI SDK and OpenAI tools
 
-**`useMemorySearch(query, opts?)`** — Reactive recall. Re-runs whenever
-`query` changes. Returns `{ data, loading, error }`. Pass `null` to
-suppress the search.
-
-```tsx
-const { data: results, loading } = useMemorySearch("user preferences", {
-  limit: 5,
-  type: "preference",
-  aggregate: true,
-  aggregateBudget: "small",
-});
-```
-
-**`useMemory(id)`** — Fetch a single memory by ID reactively. Returns
-`{ data, loading, error }`. Pass `null` to suppress.
-
-```tsx
-const { data: memory, error } = useMemory(selectedId);
-```
-
-Both hooks clean up in-flight requests on unmount via `AbortController`.
-
-## Vercel AI SDK Integration
-
-`@signet/sdk/ai-sdk` provides tool definitions and context injection
-compatible with the Vercel AI SDK (`ai` package from sdk.vercel.ai).
-Requires `zod` as a peer dependency (already present if you use the AI
-SDK).
-
-**`memoryTools(client)`** — Returns an object of tool definitions
-(`memory_search`, `memory_store`, `memory_modify`, `memory_forget`)
-that can be passed directly to the `tools` parameter of `generateText`
-or `streamText`.
+The SDK exports four memory tools: `memory_search`, `memory_store`, `memory_modify`, and `memory_forget`.
 
 ```typescript
 import { SignetClient } from "@signet/sdk";
 import { memoryTools } from "@signet/sdk/ai-sdk";
 import { generateText } from "ai";
 
-const signet = new SignetClient();
-const tools = await memoryTools(signet);
-
-const result = await generateText({
-  model: yourModel,
-  tools,
-  prompt: "What do you know about the user's coding preferences?",
-});
+const client = new SignetClient();
+const result = await generateText({ model, tools: await memoryTools(client), prompt: "Find relevant preferences." });
 ```
 
-Each tool is a standard Vercel AI SDK tool with `description`,
-`parameters` (zod schema), and `execute` function.
-The `memory_search` tool accepts `aggregate`, `aggregateBudget`, and
-`saveAggregate` for explicit aggregate recall.
+For OpenAI function calling, use `memoryToolDefinitions()` to construct the tool list and `executeMemoryTool(client, name, parsedArgs)` to dispatch a returned function call. Both adapters use camelCase arguments such as `aggregateBudget`, `sessionKey`, and `agentId` because they call the TypeScript client, not the raw daemon wire schema.
 
-**`getMemoryContext(client, userMessage, opts?)`** — Convenience helper
-that runs a recall search and formats the results as a markdown string
-suitable for injecting into a system prompt.
+## Lifecycle hooks
+
+The SDK uses camelCase request fields. The daemon may accept compatibility wire aliases, but SDK callers should use the exported TypeScript shape.
 
 ```typescript
-import { getMemoryContext } from "@signet/sdk/ai-sdk";
+import { SignetClient } from "@signet/sdk";
 
-const context = await getMemoryContext(signet, userMessage, {
-  limit: 5,
-  minScore: 0.3,
-});
-// Returns "" if no results survive score filtering,
-// or "## Relevant Memories\n- ..." otherwise
+const client = new SignetClient();
+await client.sessionStart({ sessionKey: "session-123", harness: "my-harness", project: "/workspace/app" });
+const context = await client.userPromptSubmit({ sessionKey: "session-123", prompt: "Review the migration", project: "/workspace/app" });
+await client.sessionEnd({ sessionKey: "session-123", harness: "my-harness", transcript: "…", project: "/workspace/app" });
+await client.preCompaction({ sessionKey: "session-123", context: "Current session summary", project: "/workspace/app" });
+await client.compactionComplete({ sessionKey: "session-123", summary: "Compacted summary", project: "/workspace/app" });
+await client.synthesisComplete({ content: "Memory summary", project: "/workspace/app" });
 ```
 
-## OpenAI SDK Integration
-
-`@signet/sdk/openai` provides tool definitions and a dispatcher
-compatible with OpenAI's function calling format.
-
-**`memoryToolDefinitions()`** — Returns an array of OpenAI-format tool
-definitions (`memory_search`, `memory_store`, `memory_modify`,
-`memory_forget`) ready for the `tools` parameter of
-`openai.chat.completions.create`.
-
-```typescript
-import { memoryToolDefinitions, executeMemoryTool } from "@signet/sdk/openai";
-
-const tools = memoryToolDefinitions();
-
-const response = await openai.chat.completions.create({
-  model: "gpt-4o",
-  tools,
-  messages,
-});
-```
-
-**`executeMemoryTool(client, toolName, args)`** — Dispatches a tool call
-to the corresponding `SignetClient` method. Pass the function name and
-parsed arguments from an OpenAI tool call response.
-
-```typescript
-for (const call of response.choices[0].message.tool_calls ?? []) {
-  const result = await executeMemoryTool(
-    signet,
-    call.function.name,
-    JSON.parse(call.function.arguments),
-  );
-}
-```
-
-## Hooks & Synthesis
-
-Session lifecycle hooks for context injection and memory extraction.
-
-**Session Lifecycle Hooks**
-
-**`sessionStart(opts)`** — Inject context at session start.
-
-```typescript
-await signet.sessionStart({
-  project: "/home/user/myapp",
-  harness: "claude-code",
-  sessionKey: "sess-abc-123",
-});
-```
-
-**`userPromptSubmit(opts)`** — Load context before each user prompt.
-
-```typescript
-const context = await signet.userPromptSubmit({
-  prompt: "How do I implement authentication?",
-  project: "/home/user/myapp",
-  sessionKey: "sess-abc-123",
-});
-// context.context — injected prompt context
-```
-
-**`sessionEnd(opts)`** — Extract memories at session end.
-
-```typescript
-await signet.sessionEnd({
-  sessionKey: "sess-abc-123",
-  project: "/home/user/myapp",
-  summary: "Implemented JWT authentication with refresh tokens",
-});
-```
-
-**Memory Operation Hooks**
-
-**`hookRemember(opts)`** — Save memory via hook (with session context).
-
-```typescript
-await signet.hookRemember({
-  content: "User prefers functional components over class components",
-  type: "preference",
-  sessionKey: "sess-abc-123",
-  runtimePath: "plugin",
-});
-```
-
-`rememberHook(opts)` remains available as a deprecated compatibility alias.
-
-**`hookRecall(opts)`** — Recall via hook (with session context).
-
-```typescript
-const result = await signet.hookRecall({
-  query: "component preferences",
-  project: "/home/user/myapp",
-  type: "preference",
-  tags: "ui,components",
-  since: "2026-01-01T00:00:00Z",
-  sessionKey: "sess-abc-123",
-  runtimePath: "plugin",
-});
-// result.results — recall rows
-// result.memories — deprecated alias of result.results
-// result.count — deprecated alias of result.results.length
-// result.meta.noHits — true when recall succeeded but found nothing
-// result.bypassed — true when the session is bypassed
-// result.internal — true for no-hook internal calls
-```
-
-`recallHook(opts)` remains available as a deprecated compatibility alias.
-
-**Compaction Hooks**
-
-**`preCompaction(opts)`** — Get instructions before context compaction.
-
-```typescript
-const instructions = await signet.preCompaction({
-  session_key: "sess-abc-123",
-  tokens_used: 95000,
-  tokens_max: 100000,
-});
-// instructions.guidance — what to preserve in summary
-```
-
-**`compactionComplete(opts)`** — Save compaction summary.
-
-```typescript
-await signet.compactionComplete({
-  session_key: "sess-abc-123",
-  summary: "Discussed React hooks patterns and authentication implementation",
-  preserved_memories: ["mem-1", "mem-2"],
-});
-```
-
-**Synthesis Hooks**
-
-**`getSynthesisConfig()`** — Get MEMORY.md synthesis configuration.
-
-```typescript
-const config = await signet.getSynthesisConfig();
-// config.enabled — whether synthesis is enabled
-// config.frequency — how often to run
-```
-
-**`requestSynthesis(opts)`** — Request MEMORY.md synthesis.
-
-```typescript
-await signet.requestSynthesis({
-  project: "/home/user/myapp",
-  reason: "Major architectural decisions made",
-});
-```
-
-**`completeSynthesis(opts)`** — Save synthesized MEMORY.md.
-
-```typescript
-await signet.completeSynthesis({
-  project: "/home/user/myapp",
-  content: "# Project Memory\n\n...",
-  session_key: "sess-abc-123",
-});
-```
+`sessionEnd` requires `sessionKey` and `harness`; it does not take a `summary` field. `synthesisComplete` is the exported method name, not `completeSynthesis`.
 
 ## Connectors
 
-Manage external data source connectors (filesystem, APIs, databases).
-
-**`listConnectors()`** — List all registered connectors.
-
 ```typescript
-const connectors = await signet.listConnectors();
-// connectors[n].id — connector identifier
-// connectors[n].provider — connector type (filesystem, github, etc.)
-// connectors[n].status — "active" | "error" | "paused"
-// connectors[n].last_sync — last successful sync time
-```
-
-**`createConnector(opts)`** — Register a new connector.
-
-```typescript
-const connector = await signet.createConnector({
+const created = await client.createConnector({
   provider: "filesystem",
-  config: {
-    path: "/home/user/notes",
-    file_patterns: ["*.md", "*.txt"],
-  },
-  sync_interval: 300,  // Sync every 5 minutes
+  displayName: "Project notes",
+  settings: { rootPath: "/workspace/notes" },
 });
-// connector.id — assigned connector ID
+
+await client.syncConnector(created.id);
+const health = await client.getConnectorHealth(created.id);
 ```
 
-**`getConnector(id)`** — Get connector details.
-
-```typescript
-const connector = await signet.getConnector("conn-abc-123");
-console.log(connector.status, connector.last_sync);
-```
-
-**`syncConnector(id)`** — Trigger incremental sync.
-
-```typescript
-await signet.syncConnector("conn-abc-123");
-// Syncs only new/changed files since last sync
-```
-
-**`fullSyncConnector(id)`** — Trigger full re-sync.
-
-```typescript
-await signet.fullSyncConnector("conn-abc-123");
-// Re-ingests all files (useful after config changes)
-```
-
-**`deleteConnector(id)`** — Delete a connector.
-
-```typescript
-await signet.deleteConnector("conn-abc-123");
-```
-
-**`checkConnectorHealth(id)`** — Check connector health status.
-
-```typescript
-const health = await signet.checkConnectorHealth("conn-abc-123");
-// health.status — "healthy" | "degraded" | "failed"
-// health.last_error — recent error message (if any)
-// health.metrics — connector-specific metrics
-```
+Supported `createConnector` providers are `filesystem`, `github-docs`, and `gdrive`. Use `settings`, not retired `config`, and use `getConnectorHealth`, not `checkConnectorHealth`.

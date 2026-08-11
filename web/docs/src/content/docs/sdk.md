@@ -1,16 +1,16 @@
 ---
 title: "SDK"
-description: "Integration SDK for third-party applications."
+description: "Typed TypeScript client for the Signet daemon."
 ---
 
-Integration SDK for third-party applications.
+`@signet/sdk` is the typed HTTP client for the Signet daemon. It has no SQLite dependency and exports four public entry points:
 
-`@signet/sdk` is a typed TypeScript HTTP client for the Signet [Daemon](/daemon/)
-[API](/api/). It has no native dependencies — no SQLite, no `@signet/core` —
-making it suitable for embedding in any Node.js, Bun, or browser environment
-that can reach the daemon over HTTP.
-
-Install with:
+| Import | Surface |
+|---|---|
+| `@signet/sdk` | `SignetClient`, errors, and public types |
+| `@signet/sdk/react` | React provider and memory hooks |
+| `@signet/sdk/ai-sdk` | Vercel AI SDK adapters |
+| `@signet/sdk/openai` | OpenAI function-tool adapters |
 
 ```bash
 bun add @signet/sdk
@@ -20,15 +20,9 @@ npm install @signet/sdk
 
 ## In this section
 
-- [SDK quickstart](/sdk/getting-started/)
-  Install, configure, and make the first typed Signet SDK calls.
-- [Core client](/sdk/core-client/)
-  Use client methods, jobs, sessions, scheduling, Git, secrets, and typed errors.
-- [SDK integrations](/sdk/integrations/)
-  Integrate Signet with React, Vercel AI SDK, OpenAI SDK, connectors, and hooks.
-- [Operations SDK](/sdk/operations/)
-  Use plugin diagnostics, skills, analytics, repair, pipeline, config, and embedding APIs.
-- [Knowledge and agents](/sdk/knowledge-agents/)
-  Use knowledge graph, cross-agent messaging, predictor, and timeline APIs.
-- [Helpers, types, and migration](/sdk/types-migration/)
-  Use helper methods, TypeScript types, error contracts, and migration guidance.
+- [SDK quickstart](/sdk/getting-started/): construct the client and make a first memory call.
+- [Core client](/sdk/core-client/): memory operations, auth, and queued secret execution.
+- [SDK integrations](/sdk/integrations/): React, AI SDK, OpenAI, lifecycle hooks, and connectors.
+- [Operations SDK](/sdk/operations/): plugins, skills, telemetry, repair, configuration, and embeddings.
+- [Knowledge and agents](/sdk/knowledge-agents/): knowledge graph and cross-agent coordination.
+- [Helpers, types, and migration](/sdk/types-migration/): supported helpers, exported types, errors, and version guidance.

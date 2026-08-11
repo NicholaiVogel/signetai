@@ -91,6 +91,16 @@ Common refinements:
 | `since` | string | no | Only include memories created after this date |
 | `until` | string | no | Only include memories created before this date |
 
+Context and temporal controls:
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `time` | object | no | Temporal range with optional `start`, `end`, `facets` (`captured`, `session`, `source`, `observed`, `occurred`, `valid`), and mode (`auto`, `timeline`, or `filter`) |
+| `session_key` | string | no | Session key used for per-context recall deduplication |
+| `agent_id` | string | no | Agent scope for the recall request |
+| `include_recalled` | boolean | no | Include rows already recalled in this context |
+| `scope` | `"global" \| "agent" \| "session"` | no | Constrain recall to that memory scope |
+
 Advanced controls:
 
 | Name | Type | Required | Description |
@@ -143,7 +153,7 @@ hints, and transcripts are forwarded as request metadata.
 | `importance` | number | no | Importance score 0–1 |
 | `tags` | string | no | Comma-separated tags for categorization |
 | `pinned` | boolean | no | Pin this memory so it bypasses decay |
-| `hints` | string[] | no | Prospective recall hints and alternate phrasings |
+| `hints` | string[] | yes | At least one non-empty prospective recall hint or alternate phrasing |
 | `transcript` | string | no | Raw source text to preserve alongside the extracted memory |
 | `structured` | object | no | Pre-extracted entity/aspect/attribute data retained as episodic evidence alongside the content; not applied directly to the knowledge graph from this tool |
 | `reviewAfter` | string | no | ISO timestamp after which Dreaming should surface the memory for temporal review |
@@ -156,7 +166,8 @@ hints, and transcripts are forwarded as request metadata.
 {
   "content": "User prefers Bun over npm for package management",
   "importance": 0.8,
-  "tags": "preference,tooling"
+  "tags": "preference,tooling",
+  "hints": ["package manager preference", "Bun versus npm"]
 }
 ```
 
@@ -531,9 +542,9 @@ explicitly, or `op://...` for 1Password compatibility references.
 
 ```json
 {
-  "command": "curl -H \"Authorization: Bearer $OPENAI_API_KEY\" https://api.openai.com/v1/models",
+  "command": "node ./sync.js",
   "secrets": {
-    "OPENAI_API_KEY": "OPENAI_API_KEY"
+    "SYNC_SERVICE_TOKEN": "SYNC_SERVICE_TOKEN"
   }
 }
 ```
@@ -599,10 +610,10 @@ accepts optional `depth` and `direction` (`forward`, `backward`, or `both`).
 
 AI harnesses discover Signet's MCP server in one of two ways:
 
-### Automatic (via `signet install`)
+### Automatic (via `signet setup` or the harness connector)
 
 The connector for each harness registers the MCP server in the harness's
-configuration file during installation. No manual steps needed.
+configuration file during setup. No manual steps are needed.
 
 ### Manual discovery
 
@@ -660,8 +671,10 @@ SIGNET_PORT         # Override daemon port (default: 3850)
 
 ### Claude Code
 
-The Claude Code connector registers the MCP server in
-`~/.claude/settings.json` during `signet install`:
+The Claude Code connector registers the MCP server in the top-level
+`~/.claude.json` user configuration during setup. Hook configuration remains
+in `~/.claude/settings.json`; Claude Code does not read `mcpServers` from that
+file.
 
 ```json
 {

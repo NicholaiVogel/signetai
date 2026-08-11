@@ -5,62 +5,32 @@ description: "Connect Signet to Hermes Agent."
 
 ## Hermes Agent
 
-Hermes Agent is an open-source terminal AI agent by Nous Research. Signet
-integrates as a pluggable memory provider via Hermes's `MemoryProvider` ABC,
-deploying a Python plugin that bridges all Signet daemon hooks into the
-Hermes lifecycle.
+Signet integrates with Hermes Agent through a Python `MemoryProvider` plugin. The connector installs the provider in the user plugin directory and, when a Hermes checkout is discovered, can also install its repo plugin copy. It configures `memory.provider: signet` and the daemon connection variables in the Hermes home.
 
-### Files managed by Signet
+### Managed files
 
-| Location | Description |
-|----------|-------------|
-| `~/.hermes/plugins/signet/__init__.py` | User-level Signet `MemoryProvider` implementation |
-| `~/.hermes/plugins/signet/client.py` | User-level HTTP client for the Signet daemon API |
-| `~/.hermes/plugins/signet/plugin.yaml` | User-level plugin metadata |
-| `~/.hermes/plugins/signet/signet.install.json` | Install marker with connector version and plugin source hash |
-| `<hermes-repo>/plugins/memory/signet/__init__.py` | Signet `MemoryProvider` implementation |
-| `<hermes-repo>/plugins/memory/signet/client.py` | HTTP client for the Signet daemon API |
-| `<hermes-repo>/plugins/memory/signet/plugin.yaml` | Plugin metadata |
-| `<hermes-repo>/plugins/memory/signet/signet.install.json` | Install marker with connector version and plugin source hash |
-| `~/.hermes/config.yaml` | `memory.provider: signet` activation |
-| `~/.hermes/.env` | Daemon connection environment variables |
+| Location | Purpose |
+|---|---|
+| `~/.hermes/plugins/signet/` | User-level Signet provider files and install marker |
+| `<hermes-repo>/plugins/memory/signet/` | Optional repo-plugin copy when a checkout is discovered |
+| `~/.hermes/config.yaml` | Enables `memory.provider: signet` |
+| `~/.hermes/.env` | Non-secret daemon connection configuration |
 
-### How it works
+### Lifecycle behavior
 
-1. `signet setup` (with `hermes-agent` selected) copies the Python plugin
-   into both `~/.hermes/plugins/signet/` and, when discovered,
-   `<hermes-repo>/plugins/memory/signet/`.
-2. The connector writes install markers, daemon connection env vars to
-   `~/.hermes/.env`, and activates the provider by setting
-   `memory.provider: signet` in Hermes config.
-3. At session start, Hermes calls `initialize()` on the plugin, which fires
-   `POST /api/hooks/session-start` to load identity, memories, and system
-   prompt injection from the daemon.
-4. On each user turn, `queue_prefetch()` fires
-   `POST /api/hooks/user-prompt-submit` for entity current-view context when
-   the prompt mentions a known entity or active alias.
-5. At session end, `on_session_end()` sends the accumulated transcript via
-   `POST /api/hooks/session-end` for async pipeline extraction.
-6. Committed Hermes built-in memory writes are mirrored through a serialized
-   FIFO queue so add/replace/remove callbacks retain their batch order.
+The provider calls the Signet hook API at session start, before relevant user turns, compaction boundaries, delegation, and session end. Those hooks provide automatic context and capture evidence. The provider's tools are separate, on-demand operations.
+
+Committed Hermes built-in memory writes are mirrored through a serialized FIFO queue so add, replace, and remove callbacks retain their batch order.
 
 ### Built-in memory mirror semantics
 
-The Hermes connector uses synchronization rather than leaving Signet with an
-add-only copy of Hermes memory:
+The Hermes connector uses synchronization rather than leaving Signet with an add-only copy of Hermes memory:
 
 - `add` creates immutable episodic evidence in Signet.
-- `replace` creates a new row and atomically supersedes the row matched by
-  Hermes's `old_text`.
+- `replace` creates a new row and atomically supersedes the row matched by Hermes's `old_text`.
 - `remove` soft-deletes the matched row.
 
-Superseded and deleted rows remain available for provenance and audit history,
-but current Signet recall and list views exclude them. Mirror rows are tagged
-with their Hermes target and use Signet's default `global` visibility, matching
-the connector's existing write contract. They carry agent, project, session,
-source, and a deterministic idempotency key. Retrying a callback is therefore
-safe, and a missing or ambiguous mirrored match is never treated as permission
-to mutate an unrelated Signet memory.
+Superseded and deleted rows remain available for provenance and audit history, but current Signet recall and list views exclude them. Mirror rows are tagged with their Hermes target and use Signet's default `global` visibility, matching the connector's existing write contract. They carry agent, project, session, source, and a deterministic idempotency key. Retrying a callback is therefore safe, and a missing or ambiguous mirrored match is never treated as permission to mutate an unrelated Signet memory.
 
 ### Native memory bridge
 
@@ -78,41 +48,23 @@ soft-deleted and excluded from active recall. Artifacts remain scoped to the
 current Signet agent, and an exact current `hermes-memory-write` mirror is not
 returned a second time during recall.
 
-### Tools exposed to the agent
+### Tools exposed to Hermes
 
-| Tool | Description |
-|------|-------------|
-| `memory_search` | Hybrid memory search (keyword + semantic + knowledge graph) |
-| `signet_session_search` | Search active or completed session transcripts |
-| `memory_store` | Store a fact/preference/decision with auto entity extraction |
-| `memory_get` | Retrieve a memory by ID |
-| `memory_list` | List memories with optional filters |
-| `memory_modify` | Edit an existing memory |
-| `memory_forget` | Soft-delete a memory |
-| `recall` / `remember` | Compatibility aliases for search/store |
+| Tool | Purpose |
+|---|---|
+| `memory_search` | Hybrid memory recall |
+| `signet_session_search` | Search Signet session transcripts |
+| `memory_store` | Store a durable memory |
+| `memory_get`, `memory_list` | Inspect memory records |
+| `memory_modify`, `memory_forget` | Edit or soft-delete a memory |
+| `recall`, `remember` | Compatibility aliases |
 
-### Supported hooks
+`signet_session_search` is intentionally namespaced. Hermes already has a built-in `session_search` tool, so registering the Signet transcript tool under that bare name would collide and be dropped. Use `signet_session_search` when the task needs Signet-managed transcript evidence; Hermes's built-in `session_search` remains its own surface.
 
-| Hook | Supported |
-|------|-----------|
-| session-start | yes — identity + memories via `system_prompt_block()` |
-| user-prompt-submit | yes — entity current-view context via `queue_prefetch()` / `prefetch()` |
-| pre-compaction | yes — daemon-generated summary guidelines via `on_pre_compress()` |
-| compaction-complete | yes — saves summary as session memory via `on_compaction_complete()` |
-| checkpoint-extract | yes — periodic mid-session delta extraction every 30 turns |
-| session-end | yes — transcript extraction via `on_session_end()` |
+### Verify installation
 
-### Delegation support
+```bash
+signet doctor hermes
+```
 
-When Hermes delegates to subagents, the parent's `on_delegation()` hook
-stores the task+result pair as a Signet memory tagged `["delegation", "subagent"]`.
-
-### Prerequisites
-
-- Hermes Agent installed (repo with `plugins/memory/` directory)
-- Signet daemon running (`signet start`)
-- `signet setup --harness hermes-agent`
-- `signet doctor hermes` reports daemon health, plugin freshness, config
-  activation, and Hermes tool routing
-
----
+The diagnostic checks provider activation, plugin freshness, daemon reachability, and the registered Signet tool names. It does not replace normal Hermes diagnostics for unrelated configuration problems.
