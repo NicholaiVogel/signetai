@@ -64,12 +64,12 @@ export function SettingsModal() {
 	return (
 		<Dialog open={open} onOpenChange={setOpen}>
 			<DialogContent
-				className="sig-modal flex h-[560px] max-h-[calc(100vh-48px)] w-[840px] max-w-[calc(100vw-48px)] gap-0 overflow-hidden rounded-[12px] border border-[oklch(1_0_0/0.1)] bg-card p-0 sm:max-w-[840px] [html:not(.dark)_&]:border-[oklch(0_0_0/0.1)]"
+				className="sig-modal flex h-[560px] max-h-[calc(100vh-48px)] w-[840px] max-w-[calc(100vw-48px)] gap-0 overflow-hidden rounded-[12px] border border-[oklch(1_0_0/0.1)] bg-card p-0 sm:max-w-[840px] max-sm:h-[calc(100vh-24px)] max-sm:max-w-[calc(100vw-24px)] max-sm:flex-col [html:not(.dark)_&]:border-[oklch(0_0_0/0.1)]"
 				showCloseButton={false}
 			>
 				{/* internal sidebar */}
-				<aside className="flex w-[220px] shrink-0 flex-col gap-1 border-r border-[oklch(1_0_0/0.06)] bg-[color-mix(in_oklch,var(--background)_60%,var(--card))] p-3 pt-4.5 [html:not(.dark)_&]:border-[oklch(0_0_0/0.06)]">
-					<div className="px-2.5 pb-2 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+				<aside className="flex w-[220px] shrink-0 flex-col gap-1 border-r border-[oklch(1_0_0/0.06)] bg-[color-mix(in_oklch,var(--background)_60%,var(--card))] p-3 pt-4.5 max-sm:h-auto max-sm:w-full max-sm:flex-row max-sm:items-center max-sm:justify-between max-sm:gap-0 max-sm:border-b max-sm:border-r-0 max-sm:p-2 [html:not(.dark)_&]:border-[oklch(0_0_0/0.06)]">
+					<div className="px-2.5 pb-2 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground max-sm:hidden">
 						Settings
 					</div>
 					{NAV.map((n) => (
@@ -78,7 +78,7 @@ export function SettingsModal() {
 							type="button"
 							onClick={() => setSection(n.id)}
 							className={cn(
-								"flex items-center gap-2.5 rounded-[var(--radius)] px-2.5 py-2 text-left text-[13px] transition-colors",
+								"flex items-center gap-2.5 rounded-[var(--radius)] px-2.5 py-2 text-left text-[13px] transition-colors max-sm:gap-0.5 max-sm:px-0.5 max-sm:py-1.5 max-sm:text-[10px]",
 								section === n.id
 									? "bg-[color-mix(in_oklch,var(--foreground)_9%,transparent)] font-medium text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.08)]"
 									: "text-muted-foreground hover:bg-[color-mix(in_oklch,var(--foreground)_6%,transparent)] hover:text-foreground",
@@ -1130,7 +1130,11 @@ function formatAge(seconds: number | null): string {
 	return `${Math.round(seconds / 3600)}h ago`;
 }
 
-function TelemetryHealthPanel() {
+export function formatTelemetryCount(count: number): string {
+	return count.toLocaleString("en-US");
+}
+
+export function TelemetryHealthPanel() {
 	const healthQuery = useAsync(() => api.getTelemetryHealth(), { intervalMs: 30_000 });
 	const health = healthQuery.data;
 	const status = !health ? "unavailable" : !health.enabled ? "disabled" : health.status;
@@ -1146,13 +1150,36 @@ function TelemetryHealthPanel() {
 				<GroupLabel suffix="local queue + remote delivery">Telemetry delivery</GroupLabel>
 				<span className={cn("font-mono text-[9.5px] font-semibold uppercase", statusClass)}>{status}</span>
 			</div>
-			{health?.enabled ? (
-				<div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-					<HealthMeta label="Daemon activity" value={formatAge(health.lastDaemonEventAgeSec)} />
-					<HealthMeta label="Queued" value={String(health.queuedUnsentEventCount)} />
-					<HealthMeta label="Last delivery" value={formatAge(health.lastSuccessfulDeliveryAgeSec)} />
-					<HealthMeta label="Recent failures" value={String(health.recentDeliveryFailureCount)} />
-				</div>
+			{healthQuery.loading ? (
+				<div className="font-mono text-[10px] text-muted-foreground">Loading collector health…</div>
+			) : health?.enabled ? (
+				<>
+					{health.droppedEventCount > 0 && (
+						<div
+							role="alert"
+							className="mb-2 flex items-start gap-2 rounded-[var(--radius)] border border-[oklch(0.7_0.18_25/0.42)] bg-[oklch(0.7_0.18_25/0.1)] px-2 py-1.5 text-[10px] leading-snug text-slate-700 dark:text-slate-200"
+						>
+							<TriangleAlert className="mt-px size-3.5 shrink-0 text-[oklch(0.72_0.18_25)]" aria-hidden="true" />
+							<span>
+								{formatTelemetryCount(health.droppedEventCount)} local collector event{health.droppedEventCount === 1 ? " was" : "s were"} dropped after the persisted queue reached capacity. This data cannot be delivered later.
+							</span>
+						</div>
+					)}
+					<div className="grid grid-cols-2 gap-1.5 sm:grid-cols-5">
+						<HealthMeta label="Daemon activity" value={formatAge(health.lastDaemonEventAgeSec)} />
+						<HealthMeta label="Queued" value={formatTelemetryCount(health.queuedUnsentEventCount)} />
+						<HealthMeta label="Queue age" value={formatAge(health.oldestUnsentEventAgeSec)} />
+						<HealthMeta label="Last delivery" value={formatAge(health.lastSuccessfulDeliveryAgeSec)} />
+						<HealthMeta label="Recent failures" value={formatTelemetryCount(health.recentDeliveryFailureCount)} />
+					</div>
+					{health.status === "degraded" && health.queuedUnsentEventCount > 0 && (
+						<div className="mt-1.5 text-[10px] leading-snug text-slate-600 dark:text-slate-300">
+							Delivery is degraded. The oldest queued event is {formatAge(health.oldestUnsentEventAgeSec)}.
+						</div>
+					)}
+				</>
+			) : health ? (
+				<div className="font-mono text-[10px] text-muted-foreground">Telemetry collection is disabled on this daemon.</div>
 			) : (
 				<div className="font-mono text-[10px] text-muted-foreground">Collector health is unavailable from this daemon.</div>
 			)}
@@ -1200,7 +1227,7 @@ function LogsSection() {
 	return (
 		<div className="-m-5 flex h-full flex-col">
 			<TelemetryHealthPanel />
-			<div className="flex items-center gap-2.5 border-b border-[oklch(1_0_0/0.06)] px-6 pb-3 pt-1.5 [html:not(.dark)_&]:border-[oklch(0_0_0/0.06)]">
+			<div className="flex flex-wrap items-center gap-2.5 border-b border-[oklch(1_0_0/0.06)] px-6 pb-3 pt-1.5 max-sm:grid max-sm:grid-cols-[auto_minmax(0,1fr)] max-sm:gap-2 max-sm:px-3 [html:not(.dark)_&]:border-[oklch(0_0_0/0.06)]">
 				<button
 					type="button"
 					onClick={exportLogs}
@@ -1208,17 +1235,17 @@ function LogsSection() {
 				>
 					<Download className="size-3" /> Export
 				</button>
-				<div className="flex-1" />
-				<div className="flex h-7 min-w-0 items-center gap-1.75 rounded-[var(--radius)] border border-[oklch(1_0_0/0.1)] bg-[color-mix(in_oklch,var(--foreground)_3%,transparent)] px-2.5 [html:not(.dark)_&]:border-[oklch(0_0_0/0.1)]">
+				<div className="flex-1 max-sm:hidden" />
+				<div className="flex h-7 min-w-0 items-center gap-1.75 rounded-[var(--radius)] border border-[oklch(1_0_0/0.1)] bg-[color-mix(in_oklch,var(--foreground)_3%,transparent)] px-2.5 max-sm:flex-1 max-sm:gap-1 max-sm:px-2 [html:not(.dark)_&]:border-[oklch(0_0_0/0.1)]">
 					<Search className="size-3 shrink-0 text-muted-foreground" />
 					<input
 						value={query}
 						onChange={(e) => setQuery(e.target.value)}
 						placeholder="Filter logs…"
-						className="w-[110px] border-0 bg-transparent text-[11px] outline-none placeholder:text-muted-foreground"
+						className="w-[110px] border-0 bg-transparent text-[11px] outline-none placeholder:text-muted-foreground max-sm:w-[62px]"
 					/>
 				</div>
-				<div className="flex shrink-0 gap-px rounded-[var(--radius)] border border-[oklch(1_0_0/0.08)] bg-[color-mix(in_oklch,var(--foreground)_4%,transparent)] p-0.75 [html:not(.dark)_&]:border-[oklch(0_0_0/0.08)]">
+				<div className="flex shrink-0 gap-px rounded-[var(--radius)] border border-[oklch(1_0_0/0.08)] bg-[color-mix(in_oklch,var(--foreground)_4%,transparent)] p-0.75 max-sm:col-span-2 max-sm:justify-center max-sm:gap-0 max-sm:p-0.5 [html:not(.dark)_&]:border-[oklch(0_0_0/0.08)]">
 					{(["all", "info", "warn", "error"] as const).map((l) => (
 						<button
 							key={l}
@@ -1228,7 +1255,7 @@ function LogsSection() {
 								setOpenRaw(null);
 							}}
 							className={cn(
-								"flex items-center gap-1.25 rounded-[calc(var(--radius)-2px)] px-2.25 py-1 font-mono text-[9.5px] font-semibold uppercase tracking-[0.05em] transition-colors",
+								"flex items-center gap-1.25 rounded-[calc(var(--radius)-2px)] px-2.25 py-1 font-mono text-[9.5px] font-semibold uppercase tracking-[0.05em] transition-colors max-sm:gap-1 max-sm:px-1.5 max-sm:text-[8.5px]",
 								level === l
 									? "bg-[var(--active-overlay)] text-foreground"
 									: "text-muted-foreground hover:text-foreground",
