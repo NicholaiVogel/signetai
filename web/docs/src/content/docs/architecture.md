@@ -1,31 +1,18 @@
 ---
 title: "Architecture"
-description: "Full technical architecture documentation."
+description: "Contributor-facing package, data, and runtime architecture."
 ---
 
-Full technical architecture documentation.
+This section is a technical reference for contributors. It describes the current runtime and persistence boundaries, not a product tutorial or a configuration guide.
 
-Technical reference for the Signet [Daemon](/daemon/) and supporting packages.
-This document covers the full system — from package boundaries through
-database schema — with enough detail to reason about correctness,
-performance, and failure modes.
-
-This is a substrate document. It explains how Signet stores, structures,
-and routes memory today. It should not be read as a claim that the graph
-or retrieval stack is the product by itself. Those layers exist to
-support bounded, high-quality context selection.
-
----
+Signet has one canonical state layer: agent-scoped SQLite rows and user-facing workspace artifacts. Search indexes, embeddings, caches, and projections are derived from that state. The daemon owns writes and exposes the HTTP surface; the CLI, dashboard, and harness integrations are clients of that daemon.
 
 ## In this section
 
-- [Packages and data flow](/architecture/packages-data-flow/)
-  Repository package boundaries and Signet end-to-end data flow.
-- [Pipeline and storage](/architecture/pipeline-storage/)
-  Pipeline, queue, graph, document, and database architecture.
-- [Platform services](/architecture/platform-services/)
-  Authentication, analytics, connectors, diagnostics, and repair architecture.
-- [Data lifecycle](/architecture/data-lifecycle/)
-  Normalization, projection, retention, and user-data layout.
-- [Interfaces and agents](/architecture/interfaces-agents/)
-  HTTP interfaces, key implementation files, and multi-agent support.
+- [Packages and data flow](/architecture/packages-data-flow/): repository ownership and the current evidence-to-retrieval path.
+- [Pipeline and storage](/architecture/pipeline-storage/): active workers, persistence, and retired worker boundaries.
+- [Platform services](/architecture/platform-services/): authentication, connectors, diagnostics, and repair.
+- [Data lifecycle](/architecture/data-lifecycle/): normalization, retention, projections, and workspace layout.
+- [Interfaces and agents](/architecture/interfaces-agents/): public runtime boundaries and agent scoping.
+
+For product concepts, start with [What Is Signet](/what-is-signet/), [Memory and recall](/memory/), and [Knowledge architecture](/knowledge-architecture/).
