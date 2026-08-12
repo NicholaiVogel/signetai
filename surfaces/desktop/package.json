@@ -1,6 +1,6 @@
 {
 	"name": "@signet/desktop",
-	"version": "0.199.12",
+	"version": "0.199.13",
 	"private": true,
 	"description": "Electron desktop distribution layer for Signet",
 	"homepage": "https://signetai.sh",
