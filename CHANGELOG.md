@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-12
-- Bug fixes: repair macOS signing workflow; fail closed on macOS signing; preserve legacy store keys; persist stable machine identity; defer launchd update restart; enforce Bun single-instance lock; clean secret temp files; atomically persist secrets; support zsh installer.
+- Bug fixes: honor updater eligibility; own packaged app updates; accept Docker native opt-out; skip optional native addon; fail fast on native build errors; repair macOS signing workflow; fail closed on macOS signing; preserve legacy store keys; persist stable machine identity; defer launchd update restart; enforce Bun single-instance lock; clean secret temp files; atomically persist secrets; support zsh installer.
 
 ### 2026-08-11
 - Features: measure dreaming cache usage; bridge Hermes native memory; add bounded resource telemetry.
@@ -43,6 +43,19 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: extract shared Signet runtime env builder; extract shared small helpers used by harness connectors (#957).
 
 ## Release Ledger
+
+## [0.199.12] - 2026-08-12
+
+Release summary: 5 bug fixes.
+Tag range: `v0.199.11..v0.199.12`.
+
+### Bug Fixes
+
+- **desktop**: honor updater eligibility
+- **desktop**: own packaged app updates
+- **tests**: accept Docker native opt-out
+- **docker**: skip optional native addon
+- **scripts**: fail fast on native build errors
 
 ## [0.199.11] - 2026-08-12
 
