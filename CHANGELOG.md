@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-12
-- Bug fixes: clean secret temp files; atomically persist secrets; support zsh installer.
+- Bug fixes: defer launchd update restart; enforce Bun single-instance lock; clean secret temp files; atomically persist secrets; support zsh installer.
 
 ### 2026-08-11
 - Features: measure dreaming cache usage; bridge Hermes native memory; add bounded resource telemetry.
@@ -43,6 +43,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: extract shared Signet runtime env builder; extract shared small helpers used by harness connectors (#957).
 
 ## Release Ledger
+
+## [0.199.9] - 2026-08-12
+
+Release summary: 2 bug fixes.
+Tag range: `v0.199.8..v0.199.9`.
+
+### Bug Fixes
+
+- **daemon**: defer launchd update restart
+- **daemon**: enforce Bun single-instance lock
 
 ## [0.199.8] - 2026-08-12
 
