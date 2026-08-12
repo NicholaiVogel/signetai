@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-12
-- Bug fixes: recover malformed connector markers; validate connector marker; warn on blocked asset install; bound Pi permit waits; bound Pi agent initialization; bound stateless MCP requests; skip PATH writes in noninteractive installs; expose document ingest admission; normalize vacuum space failures; harden vacuum space checks; bound PATH alias matching; match PATH entries exactly; preserve PATH startup precedence; persist native install PATH; relax macOS signing gate; execute pyenv installer via shell; retain one migration backup; defer legacy vacuum conversion; honor updater eligibility; own packaged app updates; accept Docker native opt-out; skip optional native addon; fail fast on native build errors; repair macOS signing workflow; fail closed on macOS signing; preserve legacy store keys; persist stable machine identity; defer launchd update restart; enforce Bun single-instance lock; clean secret temp files; atomically persist secrets; support zsh installer.
+- Bug fixes: reject error-shaped count responses; use live sidebar counts; recover malformed connector markers; validate connector marker; warn on blocked asset install; bound Pi permit waits; bound Pi agent initialization; bound stateless MCP requests; skip PATH writes in noninteractive installs; expose document ingest admission; normalize vacuum space failures; harden vacuum space checks; bound PATH alias matching; match PATH entries exactly; preserve PATH startup precedence; persist native install PATH; relax macOS signing gate; execute pyenv installer via shell; retain one migration backup; defer legacy vacuum conversion; honor updater eligibility; own packaged app updates; accept Docker native opt-out; skip optional native addon; fail fast on native build errors; repair macOS signing workflow; fail closed on macOS signing; preserve legacy store keys; persist stable machine identity; defer launchd update restart; enforce Bun single-instance lock; clean secret temp files; atomically persist secrets; support zsh installer.
 - Docs: explain macOS unsigned CLI.
 
 ### 2026-08-11
@@ -44,6 +44,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: extract shared Signet runtime env builder; extract shared small helpers used by harness connectors (#957).
 
 ## Release Ledger
+
+## [0.199.24] - 2026-08-12
+
+Release summary: 2 bug fixes.
+Tag range: `v0.199.23..v0.199.24`.
+
+### Bug Fixes
+
+- **dashboard**: reject error-shaped count responses
+- **dashboard**: use live sidebar counts
 
 ## [0.199.23] - 2026-08-12
 
