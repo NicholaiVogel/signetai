@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-13
+- Bug fixes: preserve startup diagnostics.
+
 ### 2026-08-12
 - Bug fixes: handle signal startup exits; capture startup stderr; skip Electron downloads in daemon builds; hard-bound integrity scan; defer startup integrity scan; reject error-shaped count responses; use live sidebar counts; recover malformed connector markers; validate connector marker; warn on blocked asset install; bound Pi permit waits; bound Pi agent initialization; bound stateless MCP requests; skip PATH writes in noninteractive installs; expose document ingest admission; normalize vacuum space failures; harden vacuum space checks; bound PATH alias matching; match PATH entries exactly; preserve PATH startup precedence; persist native install PATH; relax macOS signing gate; execute pyenv installer via shell; retain one migration backup; defer legacy vacuum conversion; honor updater eligibility; own packaged app updates; accept Docker native opt-out; skip optional native addon; fail fast on native build errors; repair macOS signing workflow; fail closed on macOS signing; preserve legacy store keys; persist stable machine identity; defer launchd update restart; enforce Bun single-instance lock; clean secret temp files; atomically persist secrets; support zsh installer.
 - Docs: explain macOS unsigned CLI.
@@ -38,12 +41,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: honor SIGNET_TELEMETRY_OPTOUT; close hygiene attention pin gaps found in adversarial review; pin hygiene archive targets by subjectRef when flag details omit ids; write setup opt-out to memory.pipelineV2; defer summary jobs when synthesis resolver uninitialised; label prompt-estimate tokens instead of zero-filling breakdown; watermark tracks surfaced evidence; close adversarial-review findings on #1148; surface daemon deaths with lifecycle record, exit-path logs, and concurrency load test; close remaining adversarial-review findings on #1147; close cap bypasses + lineage scope leak found in adversarial review; unshadow Astro home page from stale static index.html; drop vanished native-memory artifacts, back off failed reads (#1142); defer source tombstone cleanup to post-DB-init (#1143); reclaim SQLite free pages via auto_vacuum (#1139); content runbook defers mid-stream transcripts and supersedes contradictions.
 - Docs: add dreaming tab screenshots; mark #1026 usage analytics done.
 
-### 2026-08-06
-- Features: add GET /api/mode environment probe.
-- Bug fixes: guard daemon ownership; stop test temp-dir leak + unblock event loop on locked file reads; sanitize auth env values; honor native embedding fallback; formal TTL-eviction lifecycle — checkpoint + idempotent finalization (#902); reflect live agent and pipeline state.
-- Refactoring: extract shared Signet runtime env builder; extract shared small helpers used by harness connectors (#957).
-
 ## Release Ledger
+
+## [0.199.28] - 2026-08-13
+
+Release summary: 1 bug fix.
+Tag range: `v0.199.27..v0.199.28`.
+
+### Bug Fixes
+
+- **daemon**: preserve startup diagnostics
 
 ## [0.199.27] - 2026-08-12
 
