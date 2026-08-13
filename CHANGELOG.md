@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-13
-- Bug fixes: match startup status diagnostics; match windows exit status; make signal regression portable; preserve startup diagnostics.
+- Bug fixes: probe zero-free backup volumes; match startup status diagnostics; match windows exit status; make signal regression portable; preserve startup diagnostics.
 
 ### 2026-08-12
 - Bug fixes: handle signal startup exits; capture startup stderr; skip Electron downloads in daemon builds; hard-bound integrity scan; defer startup integrity scan; reject error-shaped count responses; use live sidebar counts; recover malformed connector markers; validate connector marker; warn on blocked asset install; bound Pi permit waits; bound Pi agent initialization; bound stateless MCP requests; skip PATH writes in noninteractive installs; expose document ingest admission; normalize vacuum space failures; harden vacuum space checks; bound PATH alias matching; match PATH entries exactly; preserve PATH startup precedence; persist native install PATH; relax macOS signing gate; execute pyenv installer via shell; retain one migration backup; defer legacy vacuum conversion; honor updater eligibility; own packaged app updates; accept Docker native opt-out; skip optional native addon; fail fast on native build errors; repair macOS signing workflow; fail closed on macOS signing; preserve legacy store keys; persist stable machine identity; defer launchd update restart; enforce Bun single-instance lock; clean secret temp files; atomically persist secrets; support zsh installer.
@@ -42,6 +42,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: add dreaming tab screenshots; mark #1026 usage analytics done.
 
 ## Release Ledger
+
+## [0.199.31] - 2026-08-13
+
+Release summary: 1 bug fix.
+Tag range: `v0.199.30..v0.199.31`.
+
+### Bug Fixes
+
+- **daemon**: probe zero-free backup volumes
 
 ## [0.199.30] - 2026-08-13
 
