@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-14
+- Bug fixes: restore macOS application menus.
+
 ### 2026-08-13
 - Features: expose workload diagnostics.
 - Bug fixes: fail on filesystem budget truncation; bound filesystem traversal; narrow keychain error matching; classify locked git keychains; stop detached daemon process groups; preflight macOS pickers; resolve Windows Bun fallback; handle bundled runtime ENOENT; prevent duplicate app launches; narrow retry predicate; retry transient GitHub API failures; validate semantic premises; reject failed backlog snapshots; coalesce liveness probes; coalesce daemon startup probes; migrate localhost daemon URLs; route client loopback resolution; normalize loopback daemon URLs; isolate legacy OpenClaw env; close hermetic env gaps; isolate hermetic test environment; resolve launchd child executables; preserve launchd executable paths; classify discovery permission denials; cover Discord TCC cache reads; guide macOS permission denials; avoid WAL on network volumes; close embedding ownership race; close embedding repair races; default repaired embedding scope; preserve cross-agent embeddings; scope orphan embedding repair; scope embedding maintenance; guard content migration races; guard migration promotion races; guard repair promotion races; converge autonomous embedding repairs; correct workload diagnostics; count telemetry log write drops; bound telemetry JSONL; probe zero-free backup volumes; match startup status diagnostics; match windows exit status; make signal regression portable; preserve startup diagnostics.
@@ -38,6 +41,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: document cost accounting; add TELEMETRY.md reference.
 
 ## Release Ledger
+
+## [0.200.18] - 2026-08-14
+
+Release summary: 1 bug fix.
+Tag range: `v0.200.17..v0.200.18`.
+
+### Bug Fixes
+
+- **desktop**: restore macOS application menus
 
 ## [0.200.17] - 2026-08-14
 
