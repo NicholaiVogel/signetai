@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-14
-- Bug fixes: isolate token cache scopes; cache exact backlog tokens; avoid synchronous backlog encoding; harden macOS FD failures; support macOS FD accounting; gate duplicate removal guidance; restore macOS tray click; materialize core native deps; maintain Dreaming gate paths; cover Dreaming helper paths; isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
+- Bug fixes: enforce strict Biome rules; isolate token cache scopes; cache exact backlog tokens; avoid synchronous backlog encoding; harden macOS FD failures; support macOS FD accounting; gate duplicate removal guidance; restore macOS tray click; materialize core native deps; maintain Dreaming gate paths; cover Dreaming helper paths; isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
 
 ### 2026-08-13
 - Features: expose workload diagnostics.
@@ -41,6 +41,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: document cost accounting; add TELEMETRY.md reference.
 
 ## Release Ledger
+
+## [0.200.27] - 2026-08-14
+
+Release summary: 1 bug fix.
+Tag range: `v0.200.26..v0.200.27`.
+
+### Bug Fixes
+
+- **quality**: enforce strict Biome rules
 
 ## [0.200.26] - 2026-08-14
 
