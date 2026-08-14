@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-14
-- Bug fixes: isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
+- Bug fixes: maintain Dreaming gate paths; cover Dreaming helper paths; isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
 
 ### 2026-08-13
 - Features: expose workload diagnostics.
@@ -41,6 +41,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: document cost accounting; add TELEMETRY.md reference.
 
 ## Release Ledger
+
+## [0.200.22] - 2026-08-14
+
+Release summary: 2 bug fixes.
+Tag range: `v0.200.21..v0.200.22`.
+
+### Bug Fixes
+
+- **ci**: maintain Dreaming gate paths
+- **ci**: cover Dreaming helper paths
 
 ## [0.200.21] - 2026-08-14
 
