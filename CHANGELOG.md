@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-14
-- Bug fixes: restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
+- Bug fixes: bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
 
 ### 2026-08-13
 - Features: expose workload diagnostics.
@@ -41,6 +41,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: document cost accounting; add TELEMETRY.md reference.
 
 ## Release Ledger
+
+## [0.200.20] - 2026-08-14
+
+Release summary: 1 bug fix.
+Tag range: `v0.200.19..v0.200.20`.
+
+### Bug Fixes
+
+- **daemon**: bypass stale MCP refresh snapshots
 
 ## [0.200.19] - 2026-08-14
 
