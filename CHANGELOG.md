@@ -37,12 +37,14 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: use canonical session hashing.
 - Docs: document cost accounting; add TELEMETRY.md reference.
 
-### 2026-08-07
-- Features: emit dreaming.pass with token usage; require natural-language pass summaries in runbook; dreaming tab with live trace, summary, and ledger; emit install.activated on first run; emit pipeline.embedding with stats; PostHog ping, default-on disclosure; GitHub release download stats (Phase 3 of #1026); Phase 2 opt-in telemetry with open log + lifecycle events; anonymous post-install telemetry ping with opt-out; per-install PostHog analytics; record embedding token usage at the fetch boundary (#1154); record provider-reported token usage on dreaming passes; export session transcripts for training/fine-tuning; supersedes lineage at remember-write time + lineage chain; hygiene over-cap detector flags consolidation targets; merge_aspects consolidation op + bump graph caps to 20/50; write-gate aspect/attribute caps that force supersession; redesign marketing site and docs system; review_after column + store surfaces for temporal-claim expiry (#945).
-- Bug fixes: honor SIGNET_TELEMETRY_OPTOUT; close hygiene attention pin gaps found in adversarial review; pin hygiene archive targets by subjectRef when flag details omit ids; write setup opt-out to memory.pipelineV2; defer summary jobs when synthesis resolver uninitialised; label prompt-estimate tokens instead of zero-filling breakdown; watermark tracks surfaced evidence; close adversarial-review findings on #1148; surface daemon deaths with lifecycle record, exit-path logs, and concurrency load test; close remaining adversarial-review findings on #1147; close cap bypasses + lineage scope leak found in adversarial review; unshadow Astro home page from stale static index.html; drop vanished native-memory artifacts, back off failed reads (#1142); defer source tombstone cleanup to post-DB-init (#1143); reclaim SQLite free pages via auto_vacuum (#1139); content runbook defers mid-stream transcripts and supersedes contradictions.
-- Docs: add dreaming tab screenshots; mark #1026 usage analytics done.
-
 ## Release Ledger
+
+## [0.200.17] - 2026-08-14
+
+Release summary: internal maintenance release with no conventional commit entries captured.
+Tag range: `v0.200.16..v0.200.17`.
+
+No notable changes were captured from conventional commit subjects for this release.
 
 ## [0.200.16] - 2026-08-13
 
