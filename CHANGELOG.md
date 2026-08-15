@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-15
 - Features: use native keyring master keys; observer-scoped assertions; add phase one connector setup.
-- Bug fixes: validate native keyring encoding; degrade malformed keyring health; degrade health for missing keyring; report keyring health and fallback; stage Kimi connector for npm; clear recovered source status; back off source embeddings; await rebased backlog regression; count full evidence backlog; derive observer assertions; prove observer-scoped divergence; hand off native inspector; proxy Bun inspector discovery; prevent inspector port collision; retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
+- Bug fixes: align browser opener types; bound browser opener cleanup; observe browser open failures; surface browser open failures; validate native keyring encoding; degrade malformed keyring health; degrade health for missing keyring; report keyring health and fallback; stage Kimi connector for npm; clear recovered source status; back off source embeddings; await rebased backlog regression; count full evidence backlog; derive observer assertions; prove observer-scoped divergence; hand off native inspector; proxy Bun inspector discovery; prevent inspector port collision; retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
 - Refactoring: remove dead Python vector path.
 - Docs: align Kimi Code nav; add Kimi Code support.
 
@@ -40,6 +40,18 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: forward Bun inspector setting; cover remote executor consent; gate remote memory extraction; make manifest locking async; bound stale session sweep work; report previous exit telemetry; bound traversal hydration; preserve Python interpreter fallback; use python3 probe fallback; classify skipped embeddings; open Codex OAuth externally; pair pipeline error types; preserve explicit route pins; make generated routes routable; recover claims without reinjection.
 
 ## Release Ledger
+
+## [0.203.1] - 2026-08-15
+
+Release summary: 4 bug fixes.
+Tag range: `v0.203.0..v0.203.1`.
+
+### Bug Fixes
+
+- **cli**: align browser opener types
+- **cli**: bound browser opener cleanup
+- **cli**: observe browser open failures
+- **cli**: surface browser open failures
 
 ## [0.203.0] - 2026-08-15
 
