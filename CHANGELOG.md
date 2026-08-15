@@ -8,9 +8,9 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-15
 - Features: use native keyring master keys; observer-scoped assertions; add phase one connector setup.
-- Bug fixes: bound Darwin ps cleanup; use ps for darwin ACPX ownership; reap escaped ACPX children on darwin; harden launchd migration; isolate launchd workspaces; bound deferred session switches; reset scheduled run outcomes; preserve forced run outcomes; resolve deferred shutdown work; preserve deferred session ordering; bound provider and drain work; align proof package with main; fence abandoned synthesis writes; emit owner proof observations; align proof package version; align browser opener types; bound browser opener cleanup; observe browser open failures; surface browser open failures; validate native keyring encoding; degrade malformed keyring health; degrade health for missing keyring; report keyring health and fallback; stage Kimi connector for npm; clear recovered source status; back off source embeddings; await rebased backlog regression; count full evidence backlog; derive observer assertions; prove observer-scoped divergence; hand off native inspector; proxy Bun inspector discovery; prevent inspector port collision; retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
-- Refactoring: remove dead Python vector path.
-- Docs: align Kimi Code nav; add Kimi Code support.
+- Bug fixes: close interpolated import gap; close extension import audit gap; isolate sync accessor module; close event-loop scanner bypasses; close sync accessor escape hatch; refresh inventory after rebase; track sync API aliases; close static scan bypasses; close event-loop bypasses; close event-loop audit gaps; classify bootstrap calls by reachability; enforce exact baseline inventory and pin deterministic count; reconcile baseline to truthful 1056 inventory; count every same-line call site; validate allowlist semantics; parse event-loop call sites; bound Darwin ps cleanup; use ps for darwin ACPX ownership; reap escaped ACPX children on darwin; harden launchd migration; isolate launchd workspaces; bound deferred session switches; reset scheduled run outcomes; preserve forced run outcomes; resolve deferred shutdown work; preserve deferred session ordering; bound provider and drain work; align proof package with main; fence abandoned synthesis writes; emit owner proof observations; align proof package version; align browser opener types; bound browser opener cleanup; observe browser open failures; surface browser open failures; validate native keyring encoding; degrade malformed keyring health; degrade health for missing keyring; report keyring health and fallback; stage Kimi connector for npm; clear recovered source status; back off source embeddings; await rebased backlog regression; count full evidence backlog; derive observer assertions; prove observer-scoped divergence; hand off native inspector; proxy Bun inspector discovery; prevent inspector port collision; retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
+- Refactoring: enforce async db accessor types; add async db contract audit; remove dead Python vector path.
+- Docs: document deferred accessor cleanup; align Kimi Code nav; add Kimi Code support.
 
 ### 2026-08-14
 - Bug fixes: enforce strict Biome rules; isolate token cache scopes; cache exact backlog tokens; avoid synchronous backlog encoding; harden macOS FD failures; support macOS FD accounting; gate duplicate removal guidance; restore macOS tray click; materialize core native deps; maintain Dreaming gate paths; cover Dreaming helper paths; isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
@@ -40,6 +40,39 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: forward Bun inspector setting; cover remote executor consent; gate remote memory extraction; make manifest locking async; bound stale session sweep work; report previous exit telemetry; bound traversal hydration; preserve Python interpreter fallback; use python3 probe fallback; classify skipped embeddings; open Codex OAuth externally; pair pipeline error types; preserve explicit route pins; make generated routes routable; recover claims without reinjection.
 
 ## Release Ledger
+
+## [0.203.5] - 2026-08-15
+
+Release summary: 16 bug fixes, 2 refactors, and 1 docs update.
+Tag range: `v0.203.4..v0.203.5`.
+
+### Bug Fixes
+
+- **audit**: close interpolated import gap
+- **daemon**: close extension import audit gap
+- **daemon**: isolate sync accessor module
+- **audit**: close event-loop scanner bypasses
+- **daemon**: close sync accessor escape hatch
+- **audit**: refresh inventory after rebase
+- **audit**: track sync API aliases
+- **audit**: close static scan bypasses
+- **audit**: close event-loop bypasses
+- **daemon**: close event-loop audit gaps
+- **audit**: classify bootstrap calls by reachability
+- **audit**: enforce exact baseline inventory and pin deterministic count
+- **audit**: reconcile baseline to truthful 1056 inventory
+- **audit**: count every same-line call site
+- **audit**: validate allowlist semantics
+- **audit**: parse event-loop call sites
+
+### Refactoring
+
+- **daemon**: enforce async db accessor types
+- **daemon**: add async db contract audit
+
+### Docs
+
+- **daemon**: document deferred accessor cleanup
 
 ## [0.203.4] - 2026-08-15
 
