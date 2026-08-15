@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-15
 - Features: use native keyring master keys; observer-scoped assertions; add phase one connector setup.
-- Bug fixes: harden launchd migration; isolate launchd workspaces; bound deferred session switches; reset scheduled run outcomes; preserve forced run outcomes; resolve deferred shutdown work; preserve deferred session ordering; bound provider and drain work; align proof package with main; fence abandoned synthesis writes; emit owner proof observations; align proof package version; align browser opener types; bound browser opener cleanup; observe browser open failures; surface browser open failures; validate native keyring encoding; degrade malformed keyring health; degrade health for missing keyring; report keyring health and fallback; stage Kimi connector for npm; clear recovered source status; back off source embeddings; await rebased backlog regression; count full evidence backlog; derive observer assertions; prove observer-scoped divergence; hand off native inspector; proxy Bun inspector discovery; prevent inspector port collision; retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
+- Bug fixes: bound Darwin ps cleanup; use ps for darwin ACPX ownership; reap escaped ACPX children on darwin; harden launchd migration; isolate launchd workspaces; bound deferred session switches; reset scheduled run outcomes; preserve forced run outcomes; resolve deferred shutdown work; preserve deferred session ordering; bound provider and drain work; align proof package with main; fence abandoned synthesis writes; emit owner proof observations; align proof package version; align browser opener types; bound browser opener cleanup; observe browser open failures; surface browser open failures; validate native keyring encoding; degrade malformed keyring health; degrade health for missing keyring; report keyring health and fallback; stage Kimi connector for npm; clear recovered source status; back off source embeddings; await rebased backlog regression; count full evidence backlog; derive observer assertions; prove observer-scoped divergence; hand off native inspector; proxy Bun inspector discovery; prevent inspector port collision; retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
 - Refactoring: remove dead Python vector path.
 - Docs: align Kimi Code nav; add Kimi Code support.
 
@@ -40,6 +40,17 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: forward Bun inspector setting; cover remote executor consent; gate remote memory extraction; make manifest locking async; bound stale session sweep work; report previous exit telemetry; bound traversal hydration; preserve Python interpreter fallback; use python3 probe fallback; classify skipped embeddings; open Codex OAuth externally; pair pipeline error types; preserve explicit route pins; make generated routes routable; recover claims without reinjection.
 
 ## Release Ledger
+
+## [0.203.4] - 2026-08-15
+
+Release summary: 3 bug fixes.
+Tag range: `v0.203.3..v0.203.4`.
+
+### Bug Fixes
+
+- **daemon**: bound Darwin ps cleanup
+- **daemon**: use ps for darwin ACPX ownership
+- **daemon**: reap escaped ACPX children on darwin
 
 ## [0.203.3] - 2026-08-15
 
