@@ -7,8 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-15
-- Features: add phase one connector setup.
-- Bug fixes: hand off native inspector; proxy Bun inspector discovery; prevent inspector port collision; retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
+- Features: observer-scoped assertions; add phase one connector setup.
+- Bug fixes: derive observer assertions; prove observer-scoped divergence; hand off native inspector; proxy Bun inspector discovery; prevent inspector port collision; retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
 - Refactoring: remove dead Python vector path.
 
 ### 2026-08-14
@@ -39,6 +39,20 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: forward Bun inspector setting; cover remote executor consent; gate remote memory extraction; make manifest locking async; bound stale session sweep work; report previous exit telemetry; bound traversal hydration; preserve Python interpreter fallback; use python3 probe fallback; classify skipped embeddings; open Codex OAuth externally; pair pipeline error types; preserve explicit route pins; make generated routes routable; recover claims without reinjection.
 
 ## Release Ledger
+
+## [0.202.0] - 2026-08-15
+
+Release summary: 1 feature and 2 bug fixes.
+Tag range: `v0.201.2..v0.202.0`.
+
+### Features
+
+- **ontology**: observer-scoped assertions
+
+### Bug Fixes
+
+- **eval**: derive observer assertions
+- **eval**: prove observer-scoped divergence
 
 ## [0.201.2] - 2026-08-15
 
