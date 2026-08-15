@@ -8,7 +8,8 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-15
 - Features: add phase one connector setup.
-- Bug fixes: align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
+- Bug fixes: retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
+- Refactoring: remove dead Python vector path.
 
 ### 2026-08-14
 - Bug fixes: enforce strict Biome rules; isolate token cache scopes; cache exact backlog tokens; avoid synchronous backlog encoding; harden macOS FD failures; support macOS FD accounting; gate duplicate removal guidance; restore macOS tray click; materialize core native deps; maintain Dreaming gate paths; cover Dreaming helper paths; isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
@@ -38,6 +39,19 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: forward Bun inspector setting; cover remote executor consent; gate remote memory extraction; make manifest locking async; bound stale session sweep work; report previous exit telemetry; bound traversal hydration; preserve Python interpreter fallback; use python3 probe fallback; classify skipped embeddings; open Codex OAuth externally; pair pipeline error types; preserve explicit route pins; make generated routes routable; recover claims without reinjection.
 
 ## Release Ledger
+
+## [0.201.1] - 2026-08-15
+
+Release summary: 1 bug fix and 1 refactor.
+Tag range: `v0.201.0..v0.201.1`.
+
+### Bug Fixes
+
+- **cli**: retire legacy Python embeddings
+
+### Refactoring
+
+- **cli**: remove dead Python vector path
 
 ## [0.201.0] - 2026-08-15
 
