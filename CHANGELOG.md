@@ -7,7 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-15
-- Bug fixes: authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
+- Features: add phase one connector setup.
+- Bug fixes: align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
 
 ### 2026-08-14
 - Bug fixes: enforce strict Biome rules; isolate token cache scopes; cache exact backlog tokens; avoid synchronous backlog encoding; harden macOS FD failures; support macOS FD accounting; gate duplicate removal guidance; restore macOS tray click; materialize core native deps; maintain Dreaming gate paths; cover Dreaming helper paths; isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
@@ -37,6 +38,23 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: forward Bun inspector setting; cover remote executor consent; gate remote memory extraction; make manifest locking async; bound stale session sweep work; report previous exit telemetry; bound traversal hydration; preserve Python interpreter fallback; use python3 probe fallback; classify skipped embeddings; open Codex OAuth externally; pair pipeline error types; preserve explicit route pins; make generated routes routable; recover claims without reinjection.
 
 ## Release Ledger
+
+## [0.201.0] - 2026-08-15
+
+Release summary: 1 feature and 5 bug fixes.
+Tag range: `v0.200.29..v0.201.0`.
+
+### Features
+
+- **kimi**: add phase one connector setup
+
+### Bug Fixes
+
+- **kimi**: align rebased connector version
+- **kimi**: align connector release version
+- **kimi**: align connector release version
+- **kimi**: align connector package version
+- **kimi**: route setup through Kimi ACPX agent
 
 ## [0.200.29] - 2026-08-15
 
