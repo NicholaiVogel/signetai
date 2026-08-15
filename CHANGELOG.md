@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-15
+- Bug fixes: preserve package manifest formatting.
+
 ### 2026-08-14
 - Bug fixes: enforce strict Biome rules; isolate token cache scopes; cache exact backlog tokens; avoid synchronous backlog encoding; harden macOS FD failures; support macOS FD accounting; gate duplicate removal guidance; restore macOS tray click; materialize core native deps; maintain Dreaming gate paths; cover Dreaming helper paths; isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
 
@@ -33,14 +36,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Features: reconcile indeterminate ACP deliveries (#1263); launch Starlight documentation; deliver cross-agent notifications.
 - Bug fixes: forward Bun inspector setting; cover remote executor consent; gate remote memory extraction; make manifest locking async; bound stale session sweep work; report previous exit telemetry; bound traversal hydration; preserve Python interpreter fallback; use python3 probe fallback; classify skipped embeddings; open Codex OAuth externally; pair pipeline error types; preserve explicit route pins; make generated routes routable; recover claims without reinjection.
 
-### 2026-08-08
-- Features: make inference routes inspectable; add per-install cost tracking; flush CLI command events; add config snapshot event; sync to 4.3.3 — install script, clear+briefing tools, capabilities; one-shot first-use events; track recall usage; sanitized crash reports for remote debugging; embed live dashboard demo in marketing showcase.
-- Bug fixes: stabilize session end identity; preserve legacy routing migration; count explicit session boundaries; require entity summary manifests; persist session lifecycle claims; tag development installs; preserve active session costs; preserve upstream stats contracts; recover resumed session attribution; align telemetry stats response types; resolve configured routing targets; emit pipeline error telemetry; harden 4.3.3 sync per review; format pass summaries as Markdown; session.end at real boundaries only; hash agentId in inference events with the per-install id; address adversarial review of runbook rewrite; process-heavy runbook with must-nots; resolve attention flags the agent judged and declined; cap audit transcript size and archive by rename instead of duplicating (#1163); consolidate EDEADLK/dataless artifact-read warnings instead of per-file spam (#1161); probe configured llama.cpp base_url in fallback status check; probe the configured llama.cpp base_url in the embedding fallback; live config in embedding migration; restart the embedding-index build on config change and cap provider-failure retries; harden the file logger retry path; make the file logger recover from write failures instead of going silent forever; raise dreaming pass deadline to 20 minutes; enforce the agent-session deadline when the agent loop never returns; prevent stale-session sweep starvation, short-session re-fire, and index-defeating query; dedup stale-session sweep unconditionally (null harness must not re-fire); sweep stale live-retained sessions and fire their deferred session-end; keep check loop alive on pass failure; serve the dashboard demo via a worker-owned /demo/ route; declare the ASSETS binding for the framing worker; enforce dashboard framing headers in a worker; _headers override must precede the site-wide rule; render dashboard embed at 1536x864 zoom instead of cropping; drop showcase view switcher, enlarge dashboard embed; polish embedded dashboard demo.
-- Performance: add memory_entity_mentions (entity_id, memory_id) join index (#1158).
-- Refactoring: use canonical session hashing.
-- Docs: document cost accounting; add TELEMETRY.md reference.
-
 ## Release Ledger
+
+## [0.200.28] - 2026-08-15
+
+Release summary: 1 bug fix.
+Tag range: `v0.200.27..v0.200.28`.
+
+### Bug Fixes
+
+- **release**: preserve package manifest formatting
 
 ## [0.200.27] - 2026-08-14
 
