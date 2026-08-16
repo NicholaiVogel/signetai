@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-16
 - Features: attach to live dreaming passes.
-- Bug fixes: release read lease before await; release read leases before awaits; bound database admission.
+- Bug fixes: fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
 
 ### 2026-08-15
 - Features: add dreaming parity profile; use native keyring master keys; observer-scoped assertions; add phase one connector setup.
@@ -40,6 +40,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: catalog health events; improve issue triage workflow.
 
 ## Release Ledger
+
+## [0.205.1] - 2026-08-16
+
+Release summary: 1 bug fix.
+Tag range: `v0.205.0..v0.205.1`.
+
+### Bug Fixes
+
+- **cli**: fall back for headless secret exec
 
 ## [0.205.0] - 2026-08-16
 
