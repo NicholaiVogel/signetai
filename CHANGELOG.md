@@ -8,7 +8,8 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-16
 - Features: attach to live dreaming passes.
-- Bug fixes: fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
+- Bug fixes: recover crashed DB owner submission; recover DB owner after deadline kill; run compiled DB owner smoke; verify native DB owner client; dispatch native DB owner worker; bound DB owner admission; fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
+- Refactoring: add process DB owner.
 
 ### 2026-08-15
 - Features: add dreaming parity profile; use native keyring master keys; observer-scoped assertions; add phase one connector setup.
@@ -40,6 +41,24 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: catalog health events; improve issue triage workflow.
 
 ## Release Ledger
+
+## [0.205.2] - 2026-08-16
+
+Release summary: 6 bug fixes and 1 refactor.
+Tag range: `v0.205.1..v0.205.2`.
+
+### Bug Fixes
+
+- **daemon**: recover crashed DB owner submission
+- **daemon**: recover DB owner after deadline kill
+- **ci**: run compiled DB owner smoke
+- **daemon**: verify native DB owner client
+- **daemon**: dispatch native DB owner worker
+- **daemon**: bound DB owner admission
+
+### Refactoring
+
+- **daemon**: add process DB owner
 
 ## [0.205.1] - 2026-08-16
 
