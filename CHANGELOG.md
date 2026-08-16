@@ -7,6 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-16
+- Features: attach to live dreaming passes.
 - Bug fixes: release read lease before await; release read leases before awaits; bound database admission.
 
 ### 2026-08-15
@@ -39,6 +40,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: catalog health events; improve issue triage workflow.
 
 ## Release Ledger
+
+## [0.205.0] - 2026-08-16
+
+Release summary: 1 feature.
+Tag range: `v0.204.5..v0.205.0`.
+
+### Features
+
+- **cli**: attach to live dreaming passes
 
 ## [0.204.5] - 2026-08-16
 
