@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-16
 - Features: attach to live dreaming passes.
-- Bug fixes: route integrity through owner; recover crashed DB owner submission; recover DB owner after deadline kill; run compiled DB owner smoke; verify native DB owner client; dispatch native DB owner worker; bound DB owner admission; fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
+- Bug fixes: route exhaustion failure to owner; route embedding work to owner; preserve recall during cutover; prevent embedding resurrection; close embedding swap write race; resume vector projection rebuild; harden vector rebuild; chunk embedding promotion; route integrity through owner; recover crashed DB owner submission; recover DB owner after deadline kill; run compiled DB owner smoke; verify native DB owner client; dispatch native DB owner worker; bound DB owner admission; fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
 - Refactoring: add process DB owner.
 
 ### 2026-08-15
@@ -41,6 +41,22 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: catalog health events; improve issue triage workflow.
 
 ## Release Ledger
+
+## [0.205.4] - 2026-08-16
+
+Release summary: 8 bug fixes.
+Tag range: `v0.205.3..v0.205.4`.
+
+### Bug Fixes
+
+- **daemon**: route exhaustion failure to owner
+- **daemon**: route embedding work to owner
+- **daemon**: preserve recall during cutover
+- **daemon**: prevent embedding resurrection
+- **daemon**: close embedding swap write race
+- **daemon**: resume vector projection rebuild
+- **daemon**: harden vector rebuild
+- **daemon**: chunk embedding promotion
 
 ## [0.205.3] - 2026-08-16
 
