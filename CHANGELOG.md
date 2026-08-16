@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-16
 - Features: restore prompt clock signal; attach to live dreaming passes.
-- Bug fixes: preserve aggregate recall partials; repair FTS mutation drift; recover partial FTS loss; recover lost FTS checkpoints; cache FTS completeness; bound partial FTS recall; surface partial FTS recall; bridge deferred FTS recall; normalize prompt clock replay; repair prompt clock adapters; gate deferred startup callbacks; serialize deferred owner work; defer cold-start runtime work; isolate startup scan environment; forward CPU profile options; repair native inspector handoff; preserve routed outage causes; map recall outages to 503; propagate reranker failures; restore recall reranking; serialize migration reads; await rehearsal boost; order telemetry repair audit; wire maintenance owner startup; reconcile owner lanes after rebase; isolate owner maintenance lanes; route FTS maintenance to owner; route exhaustion failure to owner; route embedding work to owner; preserve recall during cutover; prevent embedding resurrection; close embedding swap write race; resume vector projection rebuild; harden vector rebuild; chunk embedding promotion; route integrity through owner; recover crashed DB owner submission; recover DB owner after deadline kill; run compiled DB owner smoke; verify native DB owner client; dispatch native DB owner worker; bound DB owner admission; fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
+- Bug fixes: make source deletion resumable; atomize lifecycle telemetry; route sources through db owner; satisfy source routing audit; finish source owner routing; route native sources through owner; expose source graph owner operations; route snapshot import through owner; preserve aggregate recall partials; repair FTS mutation drift; recover partial FTS loss; recover lost FTS checkpoints; cache FTS completeness; bound partial FTS recall; surface partial FTS recall; bridge deferred FTS recall; normalize prompt clock replay; repair prompt clock adapters; gate deferred startup callbacks; serialize deferred owner work; defer cold-start runtime work; isolate startup scan environment; forward CPU profile options; repair native inspector handoff; preserve routed outage causes; map recall outages to 503; propagate reranker failures; restore recall reranking; serialize migration reads; await rehearsal boost; order telemetry repair audit; wire maintenance owner startup; reconcile owner lanes after rebase; isolate owner maintenance lanes; route FTS maintenance to owner; route exhaustion failure to owner; route embedding work to owner; preserve recall during cutover; prevent embedding resurrection; close embedding swap write race; resume vector projection rebuild; harden vector rebuild; chunk embedding promotion; route integrity through owner; recover crashed DB owner submission; recover DB owner after deadline kill; run compiled DB owner smoke; verify native DB owner client; dispatch native DB owner worker; bound DB owner admission; fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
 - Refactoring: route recall through owner; add process DB owner.
 - Docs: fix profiling cold start; make profiling launch linear; wait for inspector readiness.
 
@@ -42,6 +42,22 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: catalog health events; improve issue triage workflow.
 
 ## Release Ledger
+
+## [0.206.2] - 2026-08-16
+
+Release summary: 8 bug fixes.
+Tag range: `v0.206.1..v0.206.2`.
+
+### Bug Fixes
+
+- **daemon**: make source deletion resumable
+- **sources**: atomize lifecycle telemetry
+- **daemon**: route sources through db owner
+- **daemon**: satisfy source routing audit
+- **daemon**: finish source owner routing
+- **daemon**: route native sources through owner
+- **daemon**: expose source graph owner operations
+- **daemon**: route snapshot import through owner
 
 ## [0.206.1] - 2026-08-16
 

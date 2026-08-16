@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "signet-native"
-version = "0.206.1"
+version = "0.206.2"
 dependencies = [
  "napi",
  "napi-build",
