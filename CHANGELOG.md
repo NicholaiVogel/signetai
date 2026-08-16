@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-16
+- Bug fixes: release read lease before await; release read leases before awaits; bound database admission.
+
 ### 2026-08-15
 - Features: add dreaming parity profile; use native keyring master keys; observer-scoped assertions; add phase one connector setup.
 - Bug fixes: retry telemetry repair locks; support Node sqlite repair; refresh recovery ledger; preserve recovery pass precision; close recovery race; sequence orphan recovery; close recovery audit gaps; make recovery async; resolve active embedding profile before backfill writes; make stale cleanup atomic; await route deletions; harden daemonless locking; support daemonless CLI; bound Discord heartbeat timer; close recall async gaps; await async recall slice work; refresh recall migration ledger; await async db call chains; make vector reads atomic; preserve recall during cutover; keep vector recall generation aligned; prevent embedding resurrection; close embedding swap write race; resume vector projection rebuild; harden vector rebuild; chunk embedding promotion; restore main quality gates; refresh rebased migration ledger; close source lifecycle races; deduplicate migration notes; drain async source telemetry; refresh async migration ledger; narrow async slice scope; async pipeline maintenance; refresh rebased telemetry ledger; close opt-out write race; refresh telemetry ledger; gate telemetry startup backoff; async telemetry writes; refresh source event-loop ledger; guard truncated source cleanup; stream native source imports; close interpolated import gap; close extension import audit gap; isolate sync accessor module; close event-loop scanner bypasses; close sync accessor escape hatch; refresh inventory after rebase; track sync API aliases; close static scan bypasses; close event-loop bypasses; close event-loop audit gaps; classify bootstrap calls by reachability; enforce exact baseline inventory and pin deterministic count; reconcile baseline to truthful 1056 inventory; count every same-line call site; validate allowlist semantics; parse event-loop call sites; bound Darwin ps cleanup; use ps for darwin ACPX ownership; reap escaped ACPX children on darwin; harden launchd migration; isolate launchd workspaces; bound deferred session switches; reset scheduled run outcomes; preserve forced run outcomes; resolve deferred shutdown work; preserve deferred session ordering; bound provider and drain work; align proof package with main; fence abandoned synthesis writes; emit owner proof observations; align proof package version; align browser opener types; bound browser opener cleanup; observe browser open failures; surface browser open failures; validate native keyring encoding; degrade malformed keyring health; degrade health for missing keyring; report keyring health and fallback; stage Kimi connector for npm; clear recovered source status; back off source embeddings; await rebased backlog regression; count full evidence backlog; derive observer assertions; prove observer-scoped divergence; hand off native inspector; proxy Bun inspector discovery; prevent inspector port collision; retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
@@ -35,11 +38,18 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Performance: stabilize memory injection.
 - Docs: catalog health events; improve issue triage workflow.
 
-### 2026-08-09
-- Features: reconcile indeterminate ACP deliveries (#1263); launch Starlight documentation; deliver cross-agent notifications.
-- Bug fixes: forward Bun inspector setting; cover remote executor consent; gate remote memory extraction; make manifest locking async; bound stale session sweep work; report previous exit telemetry; bound traversal hydration; preserve Python interpreter fallback; use python3 probe fallback; classify skipped embeddings; open Codex OAuth externally; pair pipeline error types; preserve explicit route pins; make generated routes routable; recover claims without reinjection.
-
 ## Release Ledger
+
+## [0.204.5] - 2026-08-16
+
+Release summary: 3 bug fixes.
+Tag range: `v0.204.4..v0.204.5`.
+
+### Bug Fixes
+
+- **daemon**: release read lease before await
+- **daemon**: release read leases before awaits
+- **daemon**: bound database admission
 
 ## [0.204.4] - 2026-08-15
 
