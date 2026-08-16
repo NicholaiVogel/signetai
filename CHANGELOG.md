@@ -7,8 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-16
-- Features: attach to live dreaming passes.
-- Bug fixes: gate deferred startup callbacks; serialize deferred owner work; defer cold-start runtime work; isolate startup scan environment; forward CPU profile options; repair native inspector handoff; preserve routed outage causes; map recall outages to 503; propagate reranker failures; restore recall reranking; serialize migration reads; await rehearsal boost; order telemetry repair audit; wire maintenance owner startup; reconcile owner lanes after rebase; isolate owner maintenance lanes; route FTS maintenance to owner; route exhaustion failure to owner; route embedding work to owner; preserve recall during cutover; prevent embedding resurrection; close embedding swap write race; resume vector projection rebuild; harden vector rebuild; chunk embedding promotion; route integrity through owner; recover crashed DB owner submission; recover DB owner after deadline kill; run compiled DB owner smoke; verify native DB owner client; dispatch native DB owner worker; bound DB owner admission; fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
+- Features: restore prompt clock signal; attach to live dreaming passes.
+- Bug fixes: normalize prompt clock replay; repair prompt clock adapters; gate deferred startup callbacks; serialize deferred owner work; defer cold-start runtime work; isolate startup scan environment; forward CPU profile options; repair native inspector handoff; preserve routed outage causes; map recall outages to 503; propagate reranker failures; restore recall reranking; serialize migration reads; await rehearsal boost; order telemetry repair audit; wire maintenance owner startup; reconcile owner lanes after rebase; isolate owner maintenance lanes; route FTS maintenance to owner; route exhaustion failure to owner; route embedding work to owner; preserve recall during cutover; prevent embedding resurrection; close embedding swap write race; resume vector projection rebuild; harden vector rebuild; chunk embedding promotion; route integrity through owner; recover crashed DB owner submission; recover DB owner after deadline kill; run compiled DB owner smoke; verify native DB owner client; dispatch native DB owner worker; bound DB owner admission; fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
 - Refactoring: route recall through owner; add process DB owner.
 - Docs: fix profiling cold start; make profiling launch linear; wait for inspector readiness.
 
@@ -42,6 +42,20 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: catalog health events; improve issue triage workflow.
 
 ## Release Ledger
+
+## [0.206.0] - 2026-08-16
+
+Release summary: 1 feature and 2 bug fixes.
+Tag range: `v0.205.10..v0.206.0`.
+
+### Features
+
+- **hooks**: restore prompt clock signal
+
+### Bug Fixes
+
+- **opencode**: normalize prompt clock replay
+- **hooks**: repair prompt clock adapters
 
 ## [0.205.10] - 2026-08-16
 
