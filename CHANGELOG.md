@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-17
+- Bug fixes: resume startup FTS recovery.
+
 ### 2026-08-16
 - Features: restore prompt clock signal; attach to live dreaming passes.
 - Bug fixes: make source deletion resumable; atomize lifecycle telemetry; route sources through db owner; satisfy source routing audit; finish source owner routing; route native sources through owner; expose source graph owner operations; route snapshot import through owner; preserve aggregate recall partials; repair FTS mutation drift; recover partial FTS loss; recover lost FTS checkpoints; cache FTS completeness; bound partial FTS recall; surface partial FTS recall; bridge deferred FTS recall; normalize prompt clock replay; repair prompt clock adapters; gate deferred startup callbacks; serialize deferred owner work; defer cold-start runtime work; isolate startup scan environment; forward CPU profile options; repair native inspector handoff; preserve routed outage causes; map recall outages to 503; propagate reranker failures; restore recall reranking; serialize migration reads; await rehearsal boost; order telemetry repair audit; wire maintenance owner startup; reconcile owner lanes after rebase; isolate owner maintenance lanes; route FTS maintenance to owner; route exhaustion failure to owner; route embedding work to owner; preserve recall during cutover; prevent embedding resurrection; close embedding swap write race; resume vector projection rebuild; harden vector rebuild; chunk embedding promotion; route integrity through owner; recover crashed DB owner submission; recover DB owner after deadline kill; run compiled DB owner smoke; verify native DB owner client; dispatch native DB owner worker; bound DB owner admission; fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
@@ -35,13 +38,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Performance: skip low-signal prompt recall.
 - Docs: refresh interface references; refresh setup guide; refresh architecture guide; refresh dashboard and source contracts; refresh operator runbooks; sync root-derived guidance; document extraction outcomes; add sources diagram asset; use typography banner as README header; rewrite pipeline storage; document Dreaming flow; refresh memory reference; add source import guide.
 
-### 2026-08-10
-- Features: persist contradiction state beside competing claims; evaluate surprisal-guided attention selection; expose authorized claim reasoning traces (#1318); unified dashboard source imports; attribute dreaming pass target; wire dreaming review suggestions; retry repaired evidence; add telemetry opt-out; expose collector delivery health; expose accounting provenance; add source lifecycle telemetry (#1276); add marketing PostHog events; record dreaming pass effects.
-- Bug fixes: repair FTS health and rebuilds; serialize skill reconciliation triggers; aggregate imported documents; unify source import modal; bound skill catalog fetches; bound marketplace review sync; serialize maintenance cycles; bound fresh queue diagnostics scans; prevent runtime probe stampedes (#1329); release traversal read connections; async ACPX process cleanup; expose workload pressure diagnostics; bound internal self-http calls; bound OS Chat inference; bound service health probe; mirror replace/remove; complete cache-stable memory injection; gate hostile content projections; scroll dreaming summary; recover document leases on startup; quarantine migration embedding failures; repair stale synthesis config; make entity merges idempotent; close telemetry repair gaps; make integrity repair audit atomic; repair corrupt telemetry indexes; parse abbreviated date ranges; bound SQLite writer admission; bound memory capture concurrency; remove legacy memory pipeline routing; summarize pipeline operations (#1278); preserve mixed coverage; correct Pi accounting provenance; filter reasoning from evidence; remove duplicate projection helper; retain transcript manifest projection; account for recovered dreaming passes; disclose CLI command delivery (#1280); classify deployment role and install provenance; canonicalize embedding endpoint (#1264); bound wedge pressure probes; merge growing recovery snapshots; retain worker status telemetry; harden retired transcript recovery; retire summary-worker delivery; measure recall delivery outcomes; add bounded wedge pressure telemetry; persist first-use milestones atomically.
-- Performance: stabilize memory injection.
-- Docs: catalog health events; improve issue triage workflow.
-
 ## Release Ledger
+
+## [0.206.3] - 2026-08-17
+
+Release summary: 1 bug fix.
+Tag range: `v0.206.2..v0.206.3`.
+
+### Bug Fixes
+
+- **daemon**: resume startup FTS recovery
 
 ## [0.206.2] - 2026-08-16
 
