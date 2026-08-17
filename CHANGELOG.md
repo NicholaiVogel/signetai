@@ -7,7 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-17
-- Bug fixes: report import cleanup failures; restore generation-safe import cleanup; migrate import extraction write; migrate source purge to async owner; route import writes through owner; honor tombstone contract in lifecycle cleanup; scope lifecycle cleanup generations; CAS dashboard import cleanup; CAS source deletion generations; retain legacy deletion barriers; make legacy tombstones unknown; use durable lifecycle generations; gate source tombstones by generation; retain deletion tombstones; hide tombstoned sources; defer tombstone cleanup; await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
+- Features: add Dreaming curated head.
+- Bug fixes: finish memory lineage lifecycle; retire legacy writer protocol; enforce curated head authority and agent scope; await memory head database access; report missing head commits; enforce Dreaming head provenance; report import cleanup failures; restore generation-safe import cleanup; migrate import extraction write; migrate source purge to async owner; route import writes through owner; honor tombstone contract in lifecycle cleanup; scope lifecycle cleanup generations; CAS dashboard import cleanup; CAS source deletion generations; retain legacy deletion barriers; make legacy tombstones unknown; use durable lifecycle generations; gate source tombstones by generation; retain deletion tombstones; hide tombstoned sources; defer tombstone cleanup; await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
 
 ### 2026-08-16
 - Features: restore prompt clock signal; attach to live dreaming passes.
@@ -39,6 +40,24 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: refresh interface references; refresh setup guide; refresh architecture guide; refresh dashboard and source contracts; refresh operator runbooks; sync root-derived guidance; document extraction outcomes; add sources diagram asset; use typography banner as README header; rewrite pipeline storage; document Dreaming flow; refresh memory reference; add source import guide.
 
 ## Release Ledger
+
+## [0.207.0] - 2026-08-17
+
+Release summary: 1 feature and 6 bug fixes.
+Tag range: `v0.206.8..v0.207.0`.
+
+### Features
+
+- **memory**: add Dreaming curated head
+
+### Bug Fixes
+
+- **daemon**: finish memory lineage lifecycle
+- **memory-head**: retire legacy writer protocol
+- **memory-head**: enforce curated head authority and agent scope
+- **dreaming**: await memory head database access
+- **dreaming**: report missing head commits
+- **memory**: enforce Dreaming head provenance
 
 ## [0.206.8] - 2026-08-17
 
