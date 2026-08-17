@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-17
 - Features: add Dreaming curated head.
-- Bug fixes: finish memory lineage lifecycle; retire legacy writer protocol; enforce curated head authority and agent scope; await memory head database access; report missing head commits; enforce Dreaming head provenance; report import cleanup failures; restore generation-safe import cleanup; migrate import extraction write; migrate source purge to async owner; route import writes through owner; honor tombstone contract in lifecycle cleanup; scope lifecycle cleanup generations; CAS dashboard import cleanup; CAS source deletion generations; retain legacy deletion barriers; make legacy tombstones unknown; use durable lifecycle generations; gate source tombstones by generation; retain deletion tombstones; hide tombstoned sources; defer tombstone cleanup; await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
+- Bug fixes: fence valid addon versions during sweep; use hash-keyed addon materialization; preserve live addon during publish retries; publish embedded addons safely on Windows; repair Windows keyring asset and materialization parity; enforce compiled keyring asset contracts; require keyring native addon by absolute path in compiled builds; finish memory lineage lifecycle; retire legacy writer protocol; enforce curated head authority and agent scope; await memory head database access; report missing head commits; enforce Dreaming head provenance; report import cleanup failures; restore generation-safe import cleanup; migrate import extraction write; migrate source purge to async owner; route import writes through owner; honor tombstone contract in lifecycle cleanup; scope lifecycle cleanup generations; CAS dashboard import cleanup; CAS source deletion generations; retain legacy deletion barriers; make legacy tombstones unknown; use durable lifecycle generations; gate source tombstones by generation; retain deletion tombstones; hide tombstoned sources; defer tombstone cleanup; await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
 
 ### 2026-08-16
 - Features: restore prompt clock signal; attach to live dreaming passes.
@@ -40,6 +40,21 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: refresh interface references; refresh setup guide; refresh architecture guide; refresh dashboard and source contracts; refresh operator runbooks; sync root-derived guidance; document extraction outcomes; add sources diagram asset; use typography banner as README header; rewrite pipeline storage; document Dreaming flow; refresh memory reference; add source import guide.
 
 ## Release Ledger
+
+## [0.207.1] - 2026-08-17
+
+Release summary: 7 bug fixes.
+Tag range: `v0.207.0..v0.207.1`.
+
+### Bug Fixes
+
+- **native**: fence valid addon versions during sweep
+- **native**: use hash-keyed addon materialization
+- **native**: preserve live addon during publish retries
+- **native**: publish embedded addons safely on Windows
+- **native**: repair Windows keyring asset and materialization parity
+- **native**: enforce compiled keyring asset contracts
+- **secrets**: require keyring native addon by absolute path in compiled builds
 
 ## [0.207.0] - 2026-08-17
 
