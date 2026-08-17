@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-17
-- Bug fixes: await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
+- Bug fixes: honor tombstone contract in lifecycle cleanup; scope lifecycle cleanup generations; CAS dashboard import cleanup; CAS source deletion generations; retain legacy deletion barriers; make legacy tombstones unknown; use durable lifecycle generations; gate source tombstones by generation; retain deletion tombstones; hide tombstoned sources; defer tombstone cleanup; await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
 
 ### 2026-08-16
 - Features: restore prompt clock signal; attach to live dreaming passes.
@@ -39,6 +39,25 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: refresh interface references; refresh setup guide; refresh architecture guide; refresh dashboard and source contracts; refresh operator runbooks; sync root-derived guidance; document extraction outcomes; add sources diagram asset; use typography banner as README header; rewrite pipeline storage; document Dreaming flow; refresh memory reference; add source import guide.
 
 ## Release Ledger
+
+## [0.206.7] - 2026-08-17
+
+Release summary: 11 bug fixes.
+Tag range: `v0.206.6..v0.206.7`.
+
+### Bug Fixes
+
+- **daemon**: honor tombstone contract in lifecycle cleanup
+- **daemon**: scope lifecycle cleanup generations
+- **daemon**: CAS dashboard import cleanup
+- **sources**: CAS source deletion generations
+- **sources**: retain legacy deletion barriers
+- **sources**: make legacy tombstones unknown
+- **sources**: use durable lifecycle generations
+- **daemon**: gate source tombstones by generation
+- **daemon**: retain deletion tombstones
+- **daemon**: hide tombstoned sources
+- **daemon**: defer tombstone cleanup
 
 ## [0.206.6] - 2026-08-17
 
