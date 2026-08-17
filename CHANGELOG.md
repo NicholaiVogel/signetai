@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-17
-- Bug fixes: serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
+- Bug fixes: await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
 
 ### 2026-08-16
 - Features: restore prompt clock signal; attach to live dreaming passes.
@@ -39,6 +39,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: refresh interface references; refresh setup guide; refresh architecture guide; refresh dashboard and source contracts; refresh operator runbooks; sync root-derived guidance; document extraction outcomes; add sources diagram asset; use typography banner as README header; rewrite pipeline storage; document Dreaming flow; refresh memory reference; add source import guide.
 
 ## Release Ledger
+
+## [0.206.6] - 2026-08-17
+
+Release summary: 2 bug fixes.
+Tag range: `v0.206.5..v0.206.6`.
+
+### Bug Fixes
+
+- **daemon**: await synthesis purge
+- **daemon**: await async source-owner tests
 
 ## [0.206.5] - 2026-08-17
 
