@@ -7,8 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-17
-- Features: add Dreaming curated head.
-- Bug fixes: reap orphaned db owner workers; fence valid addon versions during sweep; use hash-keyed addon materialization; preserve live addon during publish retries; publish embedded addons safely on Windows; repair Windows keyring asset and materialization parity; enforce compiled keyring asset contracts; require keyring native addon by absolute path in compiled builds; finish memory lineage lifecycle; retire legacy writer protocol; enforce curated head authority and agent scope; await memory head database access; report missing head commits; enforce Dreaming head provenance; report import cleanup failures; restore generation-safe import cleanup; migrate import extraction write; migrate source purge to async owner; route import writes through owner; honor tombstone contract in lifecycle cleanup; scope lifecycle cleanup generations; CAS dashboard import cleanup; CAS source deletion generations; retain legacy deletion barriers; make legacy tombstones unknown; use durable lifecycle generations; gate source tombstones by generation; retain deletion tombstones; hide tombstoned sources; defer tombstone cleanup; await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
+- Features: add explicit target resolution; wire Dreaming head capability and manifest; add Dreaming curated head.
+- Bug fixes: contain uninstall profile mutations; close explicit target registration gaps; harden explicit target writes; enforce explicit target ownership; route memory head curation through async writer; make head curation atomic; reap orphaned db owner workers; fence valid addon versions during sweep; use hash-keyed addon materialization; preserve live addon during publish retries; publish embedded addons safely on Windows; repair Windows keyring asset and materialization parity; enforce compiled keyring asset contracts; require keyring native addon by absolute path in compiled builds; finish memory lineage lifecycle; retire legacy writer protocol; enforce curated head authority and agent scope; await memory head database access; report missing head commits; enforce Dreaming head provenance; report import cleanup failures; restore generation-safe import cleanup; migrate import extraction write; migrate source purge to async owner; route import writes through owner; honor tombstone contract in lifecycle cleanup; scope lifecycle cleanup generations; CAS dashboard import cleanup; CAS source deletion generations; retain legacy deletion barriers; make legacy tombstones unknown; use durable lifecycle generations; gate source tombstones by generation; retain deletion tombstones; hide tombstoned sources; defer tombstone cleanup; await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
 
 ### 2026-08-16
 - Features: restore prompt clock signal; attach to live dreaming passes.
@@ -40,6 +40,25 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: refresh interface references; refresh setup guide; refresh architecture guide; refresh dashboard and source contracts; refresh operator runbooks; sync root-derived guidance; document extraction outcomes; add sources diagram asset; use typography banner as README header; rewrite pipeline storage; document Dreaming flow; refresh memory reference; add source import guide.
 
 ## Release Ledger
+
+## [0.208.0] - 2026-08-17
+
+Release summary: 2 features and 6 bug fixes.
+Tag range: `v0.207.2..v0.208.0`.
+
+### Features
+
+- **hermes**: add explicit target resolution
+- **memory**: wire Dreaming head capability and manifest
+
+### Bug Fixes
+
+- **hermes**: contain uninstall profile mutations
+- **hermes**: close explicit target registration gaps
+- **hermes**: harden explicit target writes
+- **hermes**: enforce explicit target ownership
+- **daemon**: route memory head curation through async writer
+- **dreaming**: make head curation atomic
 
 ## [0.207.2] - 2026-08-17
 
