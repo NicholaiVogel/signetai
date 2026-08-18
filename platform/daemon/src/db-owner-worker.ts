@@ -62,6 +62,20 @@ const Database = (
 	options?: Record<string, unknown>,
 ) => SqliteDatabase;
 
+export function loadSqliteVecIfAvailable(db: SqliteDatabase, extension: string): boolean {
+	try {
+		if (typeof db.loadExtension !== "function") throw new Error("SQLite loadExtension API unavailable");
+		db.loadExtension(extension);
+		return true;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.warn(
+			`sqlite-vec extension could not be loaded on ${process.platform}: ${message}; continuing without vec, KNN recall is degraded`,
+		);
+		return false;
+	}
+}
+
 export function runDbOwnerWorker(): void {
 	const dbPath = process.env.SIGNET_DB_OWNER_DB_PATH;
 	if (dbPath === undefined) throw new Error("DB owner requires SIGNET_DB_OWNER_DB_PATH");
@@ -77,10 +91,7 @@ export function runDbOwnerWorker(): void {
 	const db = new Database(dbPath);
 	db.exec("PRAGMA busy_timeout = 5000");
 	const vecExtension = findSqliteVecExtension();
-	if (vecExtension !== null) {
-		if (typeof db.loadExtension !== "function") throw new Error("SQLite loadExtension API unavailable");
-		db.loadExtension(vecExtension);
-	}
+	if (vecExtension !== null) loadSqliteVecIfAvailable(db, vecExtension);
 
 	const BUSY_RETRIES = 3;
 	const BUSY_BACKOFF_MS = 50;
