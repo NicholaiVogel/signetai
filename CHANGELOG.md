@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-18
 - Features: implement agents view.
-- Bug fixes: preserve async embedding usage read; wire chunked vacuum reclaim into maintenance; chunk incremental vacuum reclaim; move vacuum conversion to owner; isolate dashboard status reads; support daemonless update recovery; isolate database initialization from event loop; publish head and manifest atomically; preserve unknown backup space metrics; handle degenerate statfs block sizes; resolve macOS Homebrew outside PATH; gate reindex before scanning; honor open circuit in reindex; wire provider breaker notices and probes; wire embedding breaker failure paths; share embedding provider circuit breaker; isolate embedding usage database work; persist embedding provider failure retry; retire remaining completion callers; align patch policy group validation; accept null policy group on agent creation; honor Hermes profile targets; restore Biome and daemon typecheck gates; clear group when changing memory scope; confirm agent scope edits.
+- Bug fixes: retire db owner synchronously on write rejection; requeue undispatched job; stop DB owner transport retry loop; preserve db owner transport stderr; create db owner parent directory; preserve async embedding usage read; wire chunked vacuum reclaim into maintenance; chunk incremental vacuum reclaim; move vacuum conversion to owner; isolate dashboard status reads; support daemonless update recovery; isolate database initialization from event loop; publish head and manifest atomically; preserve unknown backup space metrics; handle degenerate statfs block sizes; resolve macOS Homebrew outside PATH; gate reindex before scanning; honor open circuit in reindex; wire provider breaker notices and probes; wire embedding breaker failure paths; share embedding provider circuit breaker; isolate embedding usage database work; persist embedding provider failure retry; retire remaining completion callers; align patch policy group validation; accept null policy group on agent creation; honor Hermes profile targets; restore Biome and daemon typecheck gates; clear group when changing memory scope; confirm agent scope edits.
 
 ### 2026-08-17
 - Features: enforce memory policy mutations; add Hermes profile connect and disconnect; add explicit target resolution; wire Dreaming head capability and manifest; add Dreaming curated head.
@@ -38,6 +38,18 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: explain macOS unsigned CLI.
 
 ## Release Ledger
+
+## [0.211.14] - 2026-08-18
+
+Release summary: 4 bug fixes.
+Tag range: `v0.211.13..v0.211.14`.
+
+### Bug Fixes
+
+- **daemon**: retire db owner synchronously on write rejection; requeue undispatched job
+- **daemon**: stop DB owner transport retry loop
+- **daemon**: preserve db owner transport stderr
+- **daemon**: create db owner parent directory
 
 ## [0.211.13] - 2026-08-18
 
