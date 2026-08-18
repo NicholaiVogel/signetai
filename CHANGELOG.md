@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-18
 - Features: implement agents view.
-- Bug fixes: align patch policy group validation; accept null policy group on agent creation; honor Hermes profile targets; restore Biome and daemon typecheck gates; clear group when changing memory scope; confirm agent scope edits.
+- Bug fixes: retire remaining completion callers; align patch policy group validation; accept null policy group on agent creation; honor Hermes profile targets; restore Biome and daemon typecheck gates; clear group when changing memory scope; confirm agent scope edits.
 
 ### 2026-08-17
 - Features: enforce memory policy mutations; add Hermes profile connect and disconnect; add explicit target resolution; wire Dreaming head capability and manifest; add Dreaming curated head.
@@ -38,6 +38,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: explain macOS unsigned CLI.
 
 ## Release Ledger
+
+## [0.211.4] - 2026-08-18
+
+Release summary: 1 bug fix.
+Tag range: `v0.211.3..v0.211.4`.
+
+### Bug Fixes
+
+- **synthesis**: retire remaining completion callers
 
 ## [0.211.3] - 2026-08-18
 
