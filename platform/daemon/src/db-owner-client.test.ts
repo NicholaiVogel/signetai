@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -82,18 +82,25 @@ describe("DB owner client", () => {
 	test("keeps the owner alive when sqlite-vec cannot be loaded", async () => {
 		const database = makeDb();
 		directory = database.directory;
-		const sqlite = new Database(database.path);
-		expect(loadSqliteVecIfAvailable(sqlite, join(database.directory, "missing-vec-extension"))).toBe(false);
-		sqlite.close();
-		client = createDbOwnerClient({ dbPath: database.path });
-		await client.start();
-		await expect(
-			client.submit<readonly { readonly value: number }[]>(
-				{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "all" } },
-				{ operation: "vec-degraded-plain-query", lane: "read", deadlineMs: 1_000 },
-			).result,
-		).resolves.toEqual([{ value: 1 }]);
-		expect(client.health().state).toBe("ready");
+		const extensionOverride = join(database.directory, "not-an-extension.txt");
+		writeFileSync(extensionOverride, "this is deliberately not a sqlite extension");
+		const previousVecPath = process.env.SIGNET_VEC_PATH;
+		process.env.SIGNET_VEC_PATH = extensionOverride;
+		try {
+			client = createDbOwnerClient({ dbPath: database.path, workerPath: join(import.meta.dir, "db-owner-worker.ts") });
+			await client.start();
+			await expect(
+				client.submit<readonly { readonly value: number }[]>(
+					{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "all" } },
+					{ operation: "vec-degraded-plain-query", lane: "read", deadlineMs: 1_000 },
+				).result,
+			).resolves.toEqual([{ value: 1 }]);
+			expect(client.health().state).toBe("ready");
+			expect(client.health().pid).not.toBeNull();
+		} finally {
+			if (previousVecPath === undefined) Reflect.deleteProperty(process.env, "SIGNET_VEC_PATH");
+			else process.env.SIGNET_VEC_PATH = previousVecPath;
+		}
 	});
 
 	test("detects an owner survivor when harness teardown is skipped", async () => {
