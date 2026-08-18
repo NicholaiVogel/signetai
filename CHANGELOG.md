@@ -6,6 +6,10 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-18
+- Features: implement agents view.
+- Bug fixes: clear group when changing memory scope; confirm agent scope edits.
+
 ### 2026-08-17
 - Features: enforce memory policy mutations; add Hermes profile connect and disconnect; add explicit target resolution; wire Dreaming head capability and manifest; add Dreaming curated head.
 - Bug fixes: validate agent policy route fields; harden policy route validation; repair retired synthesis hook regressions; restore Dreaming memory publication; close synthesis publication side doors; retire idle-gap head publication; validate profile descendant paths; enforce Hermes profile ownership; preserve detached resume checkout; bound release resume tag length; safely resume releases from exact tag; make nightly release resumable; contain uninstall profile mutations; close explicit target registration gaps; harden explicit target writes; enforce explicit target ownership; route memory head curation through async writer; make head curation atomic; reap orphaned db owner workers; fence valid addon versions during sweep; use hash-keyed addon materialization; preserve live addon during publish retries; publish embedded addons safely on Windows; repair Windows keyring asset and materialization parity; enforce compiled keyring asset contracts; require keyring native addon by absolute path in compiled builds; finish memory lineage lifecycle; retire legacy writer protocol; enforce curated head authority and agent scope; await memory head database access; report missing head commits; enforce Dreaming head provenance; report import cleanup failures; restore generation-safe import cleanup; migrate import extraction write; migrate source purge to async owner; route import writes through owner; honor tombstone contract in lifecycle cleanup; scope lifecycle cleanup generations; CAS dashboard import cleanup; CAS source deletion generations; retain legacy deletion barriers; make legacy tombstones unknown; use durable lifecycle generations; gate source tombstones by generation; retain deletion tombstones; hide tombstoned sources; defer tombstone cleanup; await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
@@ -33,13 +37,21 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: handle signal startup exits; capture startup stderr; skip Electron downloads in daemon builds; hard-bound integrity scan; defer startup integrity scan; reject error-shaped count responses; use live sidebar counts; recover malformed connector markers; validate connector marker; warn on blocked asset install; bound Pi permit waits; bound Pi agent initialization; bound stateless MCP requests; skip PATH writes in noninteractive installs; expose document ingest admission; normalize vacuum space failures; harden vacuum space checks; bound PATH alias matching; match PATH entries exactly; preserve PATH startup precedence; persist native install PATH; relax macOS signing gate; execute pyenv installer via shell; retain one migration backup; defer legacy vacuum conversion; honor updater eligibility; own packaged app updates; accept Docker native opt-out; skip optional native addon; fail fast on native build errors; repair macOS signing workflow; fail closed on macOS signing; preserve legacy store keys; persist stable machine identity; defer launchd update restart; enforce Bun single-instance lock; clean secret temp files; atomically persist secrets; support zsh installer.
 - Docs: explain macOS unsigned CLI.
 
-### 2026-08-11
-- Features: measure dreaming cache usage; bridge Hermes native memory; add bounded resource telemetry.
-- Bug fixes: validate staged Bun runtime; atomically write workspace pointer; cover Dreaming gate dependencies; stabilize Discord source API anchor; bound attention suffix coordinates; preserve attention evidence during apply; accept retained attention coordinates; retain attention suffix flags; preserve retry boundary; make ontology retries safe; bound Dreaming ontology writes; bound continuation selection; rotate capped frontiers; pin partial evidence; continue capped evidence; track evidence delivery; correct cache accounting; scope indexed access strictness; make root test contract installable; preserve rebase test contracts; restore plugin test contracts; guard optional tag capture; preserve budget on aborted embedding repair; charge repair budget on persist; persist embedding repair budget; reconcile missing native artifacts; preserve upstream timeout fallback; normalize routed deadlines; bound routed ACPX labels; bound ACPX attribution; attribute ACPX locality; recover incomplete duplicates; make extraction outcome atomic; preserve extraction outcomes; surface extraction outcomes; revalidate proposal sources at apply time; reject invalid proposal sources; validate proposal sources; keep Dreaming cause causal; report readiness truthfully; extend marketplace proxy startup; cap marketplace MCP clients; preserve low-signal response shape; clarify telemetry data loss; show telemetry data loss; preserve Pi zero timeout; bound Pi concurrency; guard structural audit rollback; retire structural jobs; honor shared hint recall; scope prospective hints; bound filesystem reads by stat; async filesystem connector I/O; cap document ingest work; refresh queued ACPX deadline; back off ACPX sterile retries; reconcile failed vector writes; cache routing config loads; bound imported documents card.
-- Performance: skip low-signal prompt recall.
-- Docs: refresh interface references; refresh setup guide; refresh architecture guide; refresh dashboard and source contracts; refresh operator runbooks; sync root-derived guidance; document extraction outcomes; add sources diagram asset; use typography banner as README header; rewrite pipeline storage; document Dreaming flow; refresh memory reference; add source import guide.
-
 ## Release Ledger
+
+## [0.211.0] - 2026-08-18
+
+Release summary: 1 feature and 2 bug fixes.
+Tag range: `v0.210.0..v0.211.0`.
+
+### Features
+
+- **dashboard**: implement agents view
+
+### Bug Fixes
+
+- **dashboard**: clear group when changing memory scope
+- **dashboard**: confirm agent scope edits
 
 ## [0.210.0] - 2026-08-17
 
