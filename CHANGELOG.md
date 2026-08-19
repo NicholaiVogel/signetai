@@ -6,6 +6,10 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-19
+- Bug fixes: format count baseline with Biome-canonical tabs.
+- Docs: add documentation site guidance.
+
 ### 2026-08-18
 - Features: implement agents view.
 - Bug fixes: degrade instead of die when sqlite-vec fails to load; degrade when sqlite-vec load fails; bound /health DB read admission to 500ms; retire db owner synchronously on write rejection; requeue undispatched job; stop DB owner transport retry loop; preserve db owner transport stderr; create db owner parent directory; preserve async embedding usage read; wire chunked vacuum reclaim into maintenance; chunk incremental vacuum reclaim; move vacuum conversion to owner; isolate dashboard status reads; support daemonless update recovery; isolate database initialization from event loop; publish head and manifest atomically; preserve unknown backup space metrics; handle degenerate statfs block sizes; resolve macOS Homebrew outside PATH; gate reindex before scanning; honor open circuit in reindex; wire provider breaker notices and probes; wire embedding breaker failure paths; share embedding provider circuit breaker; isolate embedding usage database work; persist embedding provider failure retry; retire remaining completion callers; align patch policy group validation; accept null policy group on agent creation; honor Hermes profile targets; restore Biome and daemon typecheck gates; clear group when changing memory scope; confirm agent scope edits.
@@ -33,11 +37,20 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Features: expose workload diagnostics.
 - Bug fixes: fail on filesystem budget truncation; bound filesystem traversal; narrow keychain error matching; classify locked git keychains; stop detached daemon process groups; preflight macOS pickers; resolve Windows Bun fallback; handle bundled runtime ENOENT; prevent duplicate app launches; narrow retry predicate; retry transient GitHub API failures; validate semantic premises; reject failed backlog snapshots; coalesce liveness probes; coalesce daemon startup probes; migrate localhost daemon URLs; route client loopback resolution; normalize loopback daemon URLs; isolate legacy OpenClaw env; close hermetic env gaps; isolate hermetic test environment; resolve launchd child executables; preserve launchd executable paths; classify discovery permission denials; cover Discord TCC cache reads; guide macOS permission denials; avoid WAL on network volumes; close embedding ownership race; close embedding repair races; default repaired embedding scope; preserve cross-agent embeddings; scope orphan embedding repair; scope embedding maintenance; guard content migration races; guard migration promotion races; guard repair promotion races; converge autonomous embedding repairs; correct workload diagnostics; count telemetry log write drops; bound telemetry JSONL; probe zero-free backup volumes; match startup status diagnostics; match windows exit status; make signal regression portable; preserve startup diagnostics.
 
-### 2026-08-12
-- Bug fixes: handle signal startup exits; capture startup stderr; skip Electron downloads in daemon builds; hard-bound integrity scan; defer startup integrity scan; reject error-shaped count responses; use live sidebar counts; recover malformed connector markers; validate connector marker; warn on blocked asset install; bound Pi permit waits; bound Pi agent initialization; bound stateless MCP requests; skip PATH writes in noninteractive installs; expose document ingest admission; normalize vacuum space failures; harden vacuum space checks; bound PATH alias matching; match PATH entries exactly; preserve PATH startup precedence; persist native install PATH; relax macOS signing gate; execute pyenv installer via shell; retain one migration backup; defer legacy vacuum conversion; honor updater eligibility; own packaged app updates; accept Docker native opt-out; skip optional native addon; fail fast on native build errors; repair macOS signing workflow; fail closed on macOS signing; preserve legacy store keys; persist stable machine identity; defer launchd update restart; enforce Bun single-instance lock; clean secret temp files; atomically persist secrets; support zsh installer.
-- Docs: explain macOS unsigned CLI.
-
 ## Release Ledger
+
+## [0.211.17] - 2026-08-19
+
+Release summary: 1 bug fix and 1 docs update.
+Tag range: `v0.211.16..v0.211.17`.
+
+### Bug Fixes
+
+- **audit**: format count baseline with Biome-canonical tabs
+
+### Docs
+
+- add documentation site guidance
 
 ## [0.211.16] - 2026-08-18
 
