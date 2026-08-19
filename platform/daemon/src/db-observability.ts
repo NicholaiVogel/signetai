@@ -93,6 +93,11 @@ let failed = 0;
 let completed = 0;
 let eventLoopHeartbeatAtMs = Date.now();
 let eventLoopHeartbeatIntervalMs = DEFAULT_EVENT_LOOP_HEARTBEAT_INTERVAL_MS;
+// A late monitor fire is retained until the next on-time fire. The timer
+// callback updates eventLoopHeartbeatAtMs immediately, so the observed stall
+// must be kept separately for a queued liveness request to see it.
+let eventLoopLatchedStatus: EventLoopHealthStatus = "ok";
+let eventLoopLatchedStallMs = 0;
 
 function appendBounded<T>(items: T[], value: T): void {
 	items.push(value);
@@ -153,6 +158,15 @@ export function computeEventLoopStall(
 
 /** Record a fire from the shared event-loop monitor interval. */
 export function recordEventLoopHeartbeat(firedAtMs: number, heartbeatIntervalMs: number): void {
+	const observed = computeEventLoopStall(eventLoopHeartbeatAtMs, firedAtMs, heartbeatIntervalMs);
+	if (observed.status === "ok") {
+		// One healthy, on-time fire is the explicit decay rule for a prior wedge.
+		eventLoopLatchedStatus = "ok";
+		eventLoopLatchedStallMs = 0;
+	} else {
+		eventLoopLatchedStatus = observed.status;
+		eventLoopLatchedStallMs = observed.stallMs;
+	}
 	eventLoopHeartbeatAtMs = firedAtMs;
 	eventLoopHeartbeatIntervalMs = heartbeatIntervalMs;
 }
@@ -193,7 +207,15 @@ export function getDbRuntimeMetrics(): DbRuntimeMetrics {
 /** A cheap probe for liveness routes. It never reads database state. */
 export function getEventLoopLiveness(nowMs = Date.now()): EventLoopLiveness {
 	const lag = percentiles(eventLoopLagSamples);
-	const stall = computeEventLoopStall(eventLoopHeartbeatAtMs, nowMs, eventLoopHeartbeatIntervalMs);
+	const current = computeEventLoopStall(eventLoopHeartbeatAtMs, nowMs, eventLoopHeartbeatIntervalMs);
+	const stall =
+		current.status === "ok" && eventLoopLatchedStatus !== "ok"
+			? {
+					status: eventLoopLatchedStatus,
+					stallMs: eventLoopLatchedStallMs,
+					stallSeconds: eventLoopLatchedStallMs / 1000,
+				}
+			: current;
 	return {
 		...stall,
 		lastHeartbeatAtMs: eventLoopHeartbeatAtMs,
@@ -214,6 +236,8 @@ export function resetDbObservability(): void {
 	completed = 0;
 	eventLoopHeartbeatAtMs = Date.now();
 	eventLoopHeartbeatIntervalMs = DEFAULT_EVENT_LOOP_HEARTBEAT_INTERVAL_MS;
+	eventLoopLatchedStatus = "ok";
+	eventLoopLatchedStallMs = 0;
 	queue = {
 		readDepth: 0,
 		readMaxDepth: 0,

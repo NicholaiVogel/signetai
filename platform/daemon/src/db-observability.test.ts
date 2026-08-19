@@ -5,6 +5,7 @@ import {
 	getEventLoopLiveness,
 	recordDbOperation,
 	recordEventLoopLag,
+	recordEventLoopHeartbeat,
 	resetDbObservability,
 	setDbQueueTelemetry,
 } from "./db-observability";
@@ -74,5 +75,23 @@ describe("database owner observability", () => {
 			stallSeconds: 0.75,
 		});
 		expect(computeEventLoopStall(10_000, 14_000, 2_000).status).toBe("wedged");
+	});
+
+	test("latches an observed late heartbeat until one healthy fire clears it", () => {
+		recordEventLoopHeartbeat(10_000, 2_000);
+		recordEventLoopHeartbeat(12_750, 2_000);
+
+		expect(getEventLoopLiveness(12_750)).toMatchObject({
+			status: "degraded",
+			stallMs: 750,
+			stallSeconds: 0.75,
+		});
+
+		recordEventLoopHeartbeat(14_750, 2_000);
+		expect(getEventLoopLiveness(14_750)).toMatchObject({
+			status: "ok",
+			stallMs: 0,
+			stallSeconds: 0,
+		});
 	});
 });
