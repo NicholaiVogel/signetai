@@ -11,6 +11,7 @@ Every submitted job has this shape:
   id: string,
   operation: string,
   lane: "read" | "write" | "maintenance",
+  workloadClass: "foreground" | "maintenance",
   enqueuedAt: number,
   deadlineAt: number,
   estimatedWorkUnits: number,
@@ -57,7 +58,7 @@ Every submitted job has this shape:
 }
 ```
 
-`enqueuedAt` and `deadlineAt` use Unix milliseconds. `deadlineAt` is an absolute deadline, so queue wait and execution consume the same budget. Admission is bounded at 64 pending jobs, 10,000 estimated work units per job, and a 60-second deadline for read/write jobs. Maintenance jobs may use a 15-minute deadline for bounded, killable operations such as the one-time VACUUM conversion. `maxResultBytes` is bounded at 1 MiB. A result above that limit is rejected with `DB_OWNER_RESULT_TOO_LARGE`; callers must page the SQL query or select fewer columns. The owner never emits an unbounded result line. `estimatedWorkUnits` is admission and telemetry metadata, not permission to exceed the deadline. The `sleep` request exists only for lifecycle and deadline tests and is not a production database operation.
+`enqueuedAt` and `deadlineAt` use Unix milliseconds. `deadlineAt` is an absolute deadline, so queue wait and execution consume the same budget. Each workload class has an independent bounded admission queue of 64 pending jobs, so foreground work retains capacity while maintenance is saturated. The writer scheduler prioritizes foreground jobs and forces a maintenance turn after a bounded foreground burst; it never preempts a synchronous job already running. Each job is also limited to 10,000 estimated work units and a 60-second deadline for read/write jobs. Maintenance jobs may use a 15-minute deadline for bounded, killable operations such as the one-time VACUUM conversion. `maxResultBytes` is bounded at 1 MiB. A result above that limit is rejected with `DB_OWNER_RESULT_TOO_LARGE`; callers must page the SQL query or select fewer columns. The owner never emits an unbounded result line. `estimatedWorkUnits` is admission and telemetry metadata, not permission to exceed the deadline. The `sleep` request exists only for lifecycle and deadline tests and is not a production database operation.
 
 ## Wire messages
 
@@ -80,11 +81,13 @@ The owner sends:
 
 ## Execution and cancellation
 
-The owner has two independent FIFO processes: a reader for `read` jobs and a
+The owner has two independent processes: a reader for `read` jobs and a
 serial writer for `write` and `maintenance` jobs. A read job therefore does
 not wait behind a synchronous maintenance job. Each process has its own SQLite
-connection; WAL mode provides the concurrent read/write boundary. The writer
-still serializes all writes and maintenance work. A `run` statement is wrapped
+connection; WAL mode provides the concurrent read/write boundary. Inside the
+writer, foreground and maintenance jobs have separate FIFO admission queues;
+foreground jobs have priority with a bounded burst so maintenance cannot starve.
+The writer still serializes all writes and maintenance work. A `run` statement is wrapped
 in `BEGIN IMMEDIATE`/`COMMIT` unless `transactional: false` is explicit. A
 transaction request wraps all of its statements atomically. A `batch` contains
 only `run` statements and also rolls back on failure; `requireChanges` is a
@@ -102,7 +105,7 @@ Construction failure, malformed protocol input, owner exit, deadline kill, and j
 - `submit(request, options)` returns a serializable job envelope and a typed result handle.
 - `awaitResult(handle, timeoutMs?)` awaits a result and cancels on the optional caller timeout.
 - `cancel(jobId)` requests cancellation.
-- `health()` returns owner state, PID, generation, queued count, active job, and last error without touching SQLite.
+- `health()` returns owner state, PID, generation, total and per-class queue counts, active job/class, oldest pending ages, and last error without touching SQLite.
 - `health()` also reports hard-deadline kills, so maintenance pressure is visible without touching SQLite.
 - `close()` sends shutdown and is idempotent.
 

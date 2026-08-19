@@ -744,7 +744,7 @@ async function upsertSourceArtifactRow(
 ): Promise<void> {
 	await dbOwnerSourceArtifactUpsert(
 		{ fields: artifactFieldsFromFrontmatter(path, frontmatter, body, sourceMtimeMs, options) },
-		{ operation: "sources.artifacts.upsert", lane: "write", estimatedWorkUnits: 2 },
+		{ operation: "sources.artifacts.upsert", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 2 },
 	);
 }
 
@@ -887,7 +887,12 @@ export async function softDeleteArtifactRowsForPath(
 					[deletedAt, deletedAt, absolutePath],
 				),
 			];
-	await dbOwnerBatch(statements, { operation: "sources.artifacts.soft-delete", lane: "write", estimatedWorkUnits: 2 });
+	await dbOwnerBatch(statements, {
+		operation: "sources.artifacts.soft-delete",
+		lane: "write",
+		workloadClass: "maintenance",
+		estimatedWorkUnits: 2,
+	});
 }
 
 export async function deleteArtifactRowsForPath(path: string, agentId: string | null): Promise<void> {
@@ -899,7 +904,12 @@ export async function deleteArtifactRowsForPath(path: string, agentId: string | 
 			? ownerStatement("DELETE FROM memory_artifacts WHERE source_path = ? AND agent_id = ?", [value, agentId])
 			: ownerStatement("DELETE FROM memory_artifacts WHERE source_path = ?", [value]),
 	);
-	await dbOwnerBatch(statements, { operation: "sources.artifacts.delete", lane: "write", estimatedWorkUnits: 2 });
+	await dbOwnerBatch(statements, {
+		operation: "sources.artifacts.delete",
+		lane: "write",
+		workloadClass: "maintenance",
+		estimatedWorkUnits: 2,
+	});
 }
 
 // Coalesce duplicate scoped reindexes, but serialize all scopes. A global
@@ -977,7 +987,12 @@ async function doReindex(agentId?: string): Promise<void> {
 			batch.map((item) => ({
 				fields: artifactFieldsFromFrontmatter(item.path, item.frontmatter, item.body, item.mtime),
 			})),
-			{ operation: "sources.reindex.artifacts-upsert", lane: "write", estimatedWorkUnits: batch.length * 2 },
+			{
+				operation: "sources.reindex.artifacts-upsert",
+				lane: "write",
+				workloadClass: "maintenance",
+				estimatedWorkUnits: batch.length * 2,
+			},
 		);
 		pendingUpserts.length = 0;
 		commitBatchCacheUpserts(batch);
@@ -998,6 +1013,7 @@ async function doReindex(agentId?: string): Promise<void> {
 		await dbOwnerBatch(statements, {
 			operation: "sources.reindex.artifacts-delete",
 			lane: "write",
+			workloadClass: "maintenance",
 			estimatedWorkUnits: batch.length * 2,
 		});
 		pendingDeletes.length = 0;

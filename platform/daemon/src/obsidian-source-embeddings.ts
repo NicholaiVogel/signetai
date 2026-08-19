@@ -342,6 +342,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 				await dbOwnerBatch([ownerSafetyStatement(input.agentId, embeddingId, chunk.chunkText)], {
 					operation: "sources.embeddings.owner.safety",
 					lane: "write",
+					workloadClass: "maintenance",
 				});
 			skipped++;
 			continue;
@@ -410,6 +411,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 		await dbOwnerBatch(statements, {
 			operation: "sources.embeddings.owner.write",
 			lane: "write",
+			workloadClass: "maintenance",
 			estimatedWorkUnits: statements.length,
 		});
 		embedded++;
@@ -436,7 +438,11 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 					: []),
 				ownerStatement(`DELETE FROM embeddings WHERE id IN (${staleIds.map(() => "?").join(", ")})`, staleIds),
 			];
-			await dbOwnerBatch(statements, { operation: "sources.embeddings.owner.stale.delete", lane: "write" });
+			await dbOwnerBatch(statements, {
+				operation: "sources.embeddings.owner.stale.delete",
+				lane: "write",
+				workloadClass: "maintenance",
+			});
 		}
 	}
 	return providerUnavailable
@@ -485,7 +491,7 @@ async function purgeObsidianSourceEmbeddingsByPrefixViaOwner(prefix: string, age
 				: []),
 			ownerStatement(`DELETE FROM embeddings WHERE id IN (${ids.map(() => "?").join(", ")})`, ids),
 		],
-		{ operation: "sources.embeddings.owner.purge.write", lane: "write" },
+		{ operation: "sources.embeddings.owner.purge.write", lane: "write", workloadClass: "maintenance" },
 	);
 	return ids.length;
 }

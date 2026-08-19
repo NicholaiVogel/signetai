@@ -11,6 +11,7 @@ import type {
 	DbOwnerRequest,
 	DbOwnerSerializedError,
 	DbOwnerFailureCause,
+	DbOwnerWorkloadClass,
 } from "./db-owner-protocol";
 import {
 	DB_OWNER_MAX_DEADLINE_MS,
@@ -20,12 +21,15 @@ import {
 	DB_OWNER_MAX_WORK_UNITS,
 } from "./db-owner-protocol";
 
-export type { DbOwnerLane, DbOwnerRequest } from "./db-owner-protocol";
+export type { DbOwnerLane, DbOwnerRequest, DbOwnerWorkloadClass } from "./db-owner-protocol";
 
 export type DbOwnerHealthState = "starting" | "ready" | "dead" | "failed" | "closed";
 
 /** Keep owner admission bounded like the Phase B async database queues. */
 export const MAX_DB_OWNER_PENDING_JOBS = DB_OWNER_MAX_QUEUE_DEPTH;
+/** Each scheduling class has its own bounded admission queue. */
+export const MAX_DB_OWNER_FOREGROUND_JOBS = DB_OWNER_MAX_QUEUE_DEPTH;
+export const MAX_DB_OWNER_MAINTENANCE_JOBS = DB_OWNER_MAX_QUEUE_DEPTH;
 export const MAX_DB_OWNER_WORK_UNITS = DB_OWNER_MAX_WORK_UNITS;
 export const MAX_DB_OWNER_DEADLINE_MS = DB_OWNER_MAX_DEADLINE_MS;
 export const MAX_DB_OWNER_RESULT_BYTES = DB_OWNER_MAX_RESULT_BYTES;
@@ -35,7 +39,12 @@ export interface DbOwnerHealth {
 	readonly pid: number | null;
 	readonly generation: number;
 	readonly queuedJobs: number;
+	readonly foregroundQueuedJobs: number;
+	readonly maintenanceQueuedJobs: number;
 	readonly activeJobId: string | null;
+	readonly activeWorkloadClass: DbOwnerWorkloadClass | null;
+	readonly foregroundOldestAgeMs: number | null;
+	readonly maintenanceOldestAgeMs: number | null;
 	readonly lastError: string | null;
 	/** Number of owner processes SIGKILLed by a hard job deadline. */
 	readonly deadlineKills: number;
@@ -44,6 +53,8 @@ export interface DbOwnerHealth {
 export interface DbOwnerSubmitOptions {
 	readonly operation: string;
 	readonly lane: DbOwnerLane;
+	/** Defaults to foreground for read/write and maintenance for maintenance lane. */
+	readonly workloadClass?: DbOwnerWorkloadClass;
 	readonly deadlineMs: number;
 	readonly estimatedWorkUnits?: number;
 }
@@ -149,6 +160,12 @@ function messageFromError(error: DbOwnerSerializedError): Error {
 	return new DbOwnerError(error.name, error.message, error.causeFamily);
 }
 
+function oldestAge(first: number | null, second: number | null): number | null {
+	if (first === null) return second;
+	if (second === null) return first;
+	return Math.max(first, second);
+}
+
 function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient {
 	let child: ChildProcess | null = null;
 	let startPromise: Promise<void> | null = null;
@@ -171,12 +188,30 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	}
 
 	function currentHealth(): DbOwnerHealth {
+		const now = Date.now();
+		const jobs = [...pending.values()];
+		const count = (workloadClass: DbOwnerWorkloadClass): number =>
+			jobs.filter((entry) => entry.job.workloadClass === workloadClass).length;
+		const oldestAge = (workloadClass: DbOwnerWorkloadClass): number | null => {
+			const oldest = jobs
+				.filter((entry) => entry.job.workloadClass === workloadClass)
+				.reduce<number | null>(
+					(value, entry) => (value === null ? entry.job.enqueuedAt : Math.min(value, entry.job.enqueuedAt)),
+					null,
+				);
+			return oldest === null ? null : Math.max(0, now - oldest);
+		};
 		return {
 			state,
 			pid,
 			generation,
 			queuedJobs: pending.size,
+			foregroundQueuedJobs: count("foreground"),
+			maintenanceQueuedJobs: count("maintenance"),
 			activeJobId,
+			activeWorkloadClass: activeJobId === null ? null : (pending.get(activeJobId)?.job.workloadClass ?? null),
+			foregroundOldestAgeMs: oldestAge("foreground"),
+			maintenanceOldestAgeMs: oldestAge("maintenance"),
 			lastError,
 			deadlineKills,
 		};
@@ -488,10 +523,14 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 				`DB owner estimatedWorkUnits exceeds the ${MAX_DB_OWNER_WORK_UNITS}-unit admission limit`,
 			);
 		}
-		if (pending.size >= MAX_DB_OWNER_PENDING_JOBS) {
+		const workloadClass =
+			submitOptions.workloadClass ?? (submitOptions.lane === "maintenance" ? "maintenance" : "foreground");
+		const classJobs = [...pending.values()].filter((entry) => entry.job.workloadClass === workloadClass).length;
+		const maxClassJobs = workloadClass === "foreground" ? MAX_DB_OWNER_FOREGROUND_JOBS : MAX_DB_OWNER_MAINTENANCE_JOBS;
+		if (classJobs >= maxClassJobs) {
 			throw new DbOwnerAdmissionError(
 				"DB_OWNER_QUEUE_FULL",
-				`DB owner admission queue is full at ${MAX_DB_OWNER_PENDING_JOBS} pending jobs`,
+				`DB owner ${workloadClass} admission queue is full at ${maxClassJobs} pending jobs`,
 			);
 		}
 		const now = Date.now();
@@ -499,6 +538,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			id: `db-owner-${process.pid}-${++sequence}`,
 			operation: submitOptions.operation,
 			lane: submitOptions.lane,
+			workloadClass,
 			enqueuedAt: now,
 			deadlineAt: now + submitOptions.deadlineMs,
 			estimatedWorkUnits,
@@ -624,7 +664,12 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 			pid: read.pid ?? maintenance.pid,
 			generation: Math.max(read.generation, maintenance.generation),
 			queuedJobs: read.queuedJobs + maintenance.queuedJobs,
+			foregroundQueuedJobs: read.foregroundQueuedJobs + maintenance.foregroundQueuedJobs,
+			maintenanceQueuedJobs: read.maintenanceQueuedJobs + maintenance.maintenanceQueuedJobs,
 			activeJobId: read.activeJobId ?? maintenance.activeJobId,
+			activeWorkloadClass: read.activeWorkloadClass ?? maintenance.activeWorkloadClass,
+			foregroundOldestAgeMs: oldestAge(read.foregroundOldestAgeMs, maintenance.foregroundOldestAgeMs),
+			maintenanceOldestAgeMs: oldestAge(read.maintenanceOldestAgeMs, maintenance.maintenanceOldestAgeMs),
 			lastError: read.lastError ?? maintenance.lastError,
 			deadlineKills: read.deadlineKills + maintenance.deadlineKills,
 		};

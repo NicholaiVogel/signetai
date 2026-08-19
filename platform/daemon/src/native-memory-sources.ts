@@ -919,7 +919,12 @@ export async function indexNativeMemoryFile(
 							? {}
 							: { markdownPaths: [...options.markdownPathIndex.byRel.values()] }),
 					},
-					{ operation: "sources.graph.owner.index", lane: "write", estimatedWorkUnits: 10 },
+					{
+						operation: "sources.graph.owner.index",
+						lane: "write",
+						workloadClass: "maintenance",
+						estimatedWorkUnits: 10,
+					},
 				);
 				semanticIndexed = true;
 			}
@@ -996,7 +1001,12 @@ export async function removeNativeMemoryFile(
 				root: source.root,
 				filePath,
 			},
-			{ operation: "sources.graph.owner.file-purge", lane: "write", estimatedWorkUnits: 6 },
+			{
+				operation: "sources.graph.owner.file-purge",
+				lane: "write",
+				workloadClass: "maintenance",
+				estimatedWorkUnits: 6,
+			},
 		);
 	}
 }
@@ -1040,7 +1050,7 @@ export async function purgeNativeMemorySourceArtifacts(source: NativeMemorySourc
 				params,
 			),
 		],
-		{ operation: "sources.artifacts.purge", lane: "write", estimatedWorkUnits: 4 },
+		{ operation: "sources.artifacts.purge", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 4 },
 	);
 	const artifactRows = (artifactResult as { readonly changes: number }).changes;
 	let embeddingRows = 0;
@@ -1055,7 +1065,12 @@ export async function purgeNativeMemorySourceArtifacts(source: NativeMemorySourc
 				sourceId: source.sourceId ?? sourceIdForObsidianRoot(source.root),
 				root: source.root,
 			},
-			{ operation: "sources.graph.owner.purge", lane: "write", estimatedWorkUnits: 10 },
+			{
+				operation: "sources.graph.owner.purge",
+				lane: "write",
+				workloadClass: "maintenance",
+				estimatedWorkUnits: 10,
+			},
 		);
 	}
 	return artifactRows + embeddingRows;

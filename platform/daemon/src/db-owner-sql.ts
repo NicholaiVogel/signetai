@@ -1,7 +1,7 @@
 /** Typed SQL helpers for work that must execute inside the DB owner process. */
 
 import type { DbOwnerClient } from "./db-owner-client";
-import type { DbOwnerParameter, DbOwnerRequest } from "./db-owner-protocol";
+import type { DbOwnerParameter, DbOwnerRequest, DbOwnerWorkloadClass } from "./db-owner-protocol";
 
 export interface DbOwnerRunResult {
 	readonly changes: number;
@@ -11,6 +11,7 @@ export interface DbOwnerRunResult {
 export interface DbOwnerSqlOptions {
 	readonly operation: string;
 	readonly lane?: "read" | "write" | "maintenance";
+	readonly workloadClass?: DbOwnerWorkloadClass;
 	readonly deadlineMs?: number;
 	readonly estimatedWorkUnits?: number;
 }
@@ -29,6 +30,7 @@ function submit<Result>(client: DbOwnerClient, request: DbOwnerRequest, options:
 	const handle = client.submit<Result>(request, {
 		operation: options.operation,
 		lane: options.lane ?? "maintenance",
+		workloadClass: options.workloadClass,
 		deadlineMs: options.deadlineMs ?? 30_000,
 		estimatedWorkUnits: options.estimatedWorkUnits,
 	});

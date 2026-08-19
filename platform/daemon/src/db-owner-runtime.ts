@@ -16,6 +16,7 @@ import type {
 	DbOwnerSourceSnapshotImport,
 	DbOwnerSourceArtifactUpsert,
 	DbOwnerStatement,
+	DbOwnerWorkloadClass,
 } from "./db-owner-protocol";
 
 let client: DbOwnerClient | null = null;
@@ -84,6 +85,7 @@ export async function getDbOwner(): Promise<DbOwnerClient> {
 export interface DbOwnerSqlOptions {
 	readonly operation: string;
 	readonly lane?: "read" | "write" | "maintenance";
+	readonly workloadClass?: DbOwnerWorkloadClass;
 	readonly deadlineMs?: number;
 	readonly estimatedWorkUnits?: number;
 }
@@ -92,6 +94,7 @@ function submitOptions(options: DbOwnerSqlOptions): DbOwnerSubmitOptions {
 	return {
 		operation: options.operation,
 		lane: options.lane ?? "write",
+		workloadClass: options.workloadClass,
 		deadlineMs: options.deadlineMs ?? 5_000,
 		estimatedWorkUnits: options.estimatedWorkUnits,
 	};
