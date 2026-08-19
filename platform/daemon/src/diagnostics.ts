@@ -440,27 +440,30 @@ export function getMutationHealth(db: ReadDb): MutationHealth {
 }
 
 export function getDuplicateHealth(db: ReadDb): DuplicateHealth {
-	const dupRow = db
+	// Read the maintained one-row aggregate (migration 138) instead of
+	// grouping every active memory by content_hash on the HTTP-serving isolate
+	// (#1670). The hash-count table is only the mutation-side read model; this
+	// route performs one primary-key lookup and never scans either payload table
+	// or the distinct-hash projection.
+	const row = db
 		.prepare(
-			`SELECT
-				COALESCE(SUM(excess), 0) AS exact_dupes,
-				COUNT(*) AS exact_clusters
-			 FROM (
-				SELECT content_hash, COUNT(*) - 1 AS excess
-				FROM memories
-				WHERE is_deleted = 0 AND content_hash IS NOT NULL
-				  AND pinned = 0 AND manual_override = 0
-				GROUP BY content_hash
-				HAVING COUNT(*) > 1
-			 )`,
+			`SELECT total_active AS totalActive,
+			        exact_duplicates AS exactDuplicates,
+			        exact_clusters AS exactClusters
+			 FROM memories_diagnostics_state
+			 WHERE id = 1`,
 		)
-		.get() as { exact_dupes: number; exact_clusters: number } | undefined;
+		.get() as
+		| {
+				totalActive: number;
+				exactDuplicates: number;
+				exactClusters: number;
+		  }
+		| undefined;
 
-	const totalRow = db.prepare("SELECT COUNT(*) AS n FROM memories WHERE is_deleted = 0").get() as { n: number };
-
-	const totalActive = totalRow.n;
-	const exactDuplicates = dupRow?.exact_dupes ?? 0;
-	const exactClusters = dupRow?.exact_clusters ?? 0;
+	const totalActive = row?.totalActive ?? 0;
+	const exactDuplicates = row?.exactDuplicates ?? 0;
+	const exactClusters = row?.exactClusters ?? 0;
 	const duplicateRatio = totalActive > 0 ? exactDuplicates / totalActive : 0;
 
 	let score = 1.0;
