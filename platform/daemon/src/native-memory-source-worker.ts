@@ -1,9 +1,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, opendir, readFile, stat } from "node:fs/promises";
+import { lstat, opendir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveEmbeddedWorkerPath } from "./native-runtime-assets";
+import { buildObsidianSourceChunks, type ObsidianSourceChunk } from "./obsidian-source-embeddings";
 
 export interface NativeSourceWorkerPattern {
 	readonly glob: string;
@@ -15,6 +17,8 @@ export interface NativeSourceWorkerPattern {
 export interface NativeSourceWorkerSource {
 	readonly root: string;
 	readonly files: readonly NativeSourceWorkerPattern[];
+	readonly harness?: string;
+	readonly sourceId?: string;
 }
 
 export interface NativeSourceWorkerFile {
@@ -22,6 +26,10 @@ export interface NativeSourceWorkerFile {
 	readonly content: string;
 	readonly mtimeMs: number;
 	readonly kind: string;
+	readonly contentHash: string;
+	readonly lineCount: number;
+	readonly rolloutId?: string;
+	readonly chunks?: readonly ObsidianSourceChunk[];
 }
 
 export interface NativeSourceWorkerPage {
@@ -30,6 +38,7 @@ export interface NativeSourceWorkerPage {
 	readonly scanned: number;
 	readonly total: number;
 	readonly complete: boolean;
+	readonly frontier: readonly string[];
 }
 
 interface ScanCommand {
@@ -37,6 +46,7 @@ interface ScanCommand {
 	readonly id: string;
 	readonly source: NativeSourceWorkerSource;
 	readonly cursor: string | null;
+	readonly frontier?: readonly string[];
 	readonly pageSize: number;
 }
 
@@ -89,71 +99,78 @@ function matchesPattern(source: NativeSourceWorkerSource, filePath: string): str
 	return null;
 }
 
-async function* walk(root: string): AsyncGenerator<string> {
-	let directory: Awaited<ReturnType<typeof opendir>>;
-	try {
-		directory = await opendir(root);
-	} catch {
-		return;
-	}
-	const entries: string[] = [];
-	try {
-		for await (const entry of directory) {
-			if (entry.name === ".git") continue;
-			entries.push(join(root, entry.name));
-		}
-	} catch {
-		return;
-	}
-	entries.sort((left, right) => left.localeCompare(right));
-	for (const path of entries) {
-		try {
-			const info = await lstat(path);
-			if (info.isSymbolicLink()) continue;
-			if (info.isDirectory()) {
-				yield* walk(path);
-				continue;
-			}
-			if (info.isFile()) yield path;
-		} catch {
-			// Files can disappear while a source is being edited. The next scan
-			// will observe the new state; a missing file is not a worker failure.
-		}
-	}
+function normalizeMarkdownBody(body: string): string {
+	const lines = body
+		.replace(/\r\n?/g, "\n")
+		.split("\n")
+		.map((line) => line.trimEnd());
+	while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+	return lines.join("\n");
+}
+
+function contentMetadata(content: string): Pick<NativeSourceWorkerFile, "contentHash" | "lineCount" | "rolloutId"> {
+	const normalized = content.replace(/\r\n?/g, "\n").replace(/\n$/, "");
+	const rolloutId = content.match(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i)?.[0];
+	return {
+		contentHash: createHash("sha256").update(normalizeMarkdownBody(content), "utf8").digest("hex"),
+		lineCount: normalized.length === 0 ? 0 : normalized.split("\n").length,
+		...(rolloutId === undefined ? {} : { rolloutId }),
+	};
 }
 
 async function scan(command: ScanCommand): Promise<NativeSourceWorkerPage> {
-	const paths: string[] = [];
-	for await (const path of walk(command.source.root)) {
-		if (matchesPattern(command.source, path) === null) continue;
-		paths.push(path);
-	}
-	paths.sort((left, right) => left.localeCompare(right));
-	const cursor = command.cursor;
-	const after = cursor === null ? paths : paths.filter((path) => path > cursor);
-	const selected = after.slice(0, Math.max(1, Math.min(100, Math.trunc(command.pageSize))));
+	const pageSize = Math.max(1, Math.min(100, Math.trunc(command.pageSize)));
+	const frontier = [...(command.frontier ?? [command.source.root])];
 	const files: NativeSourceWorkerFile[] = [];
-	for (const path of selected) {
+	while (frontier.length > 0 && files.length < pageSize) {
+		const path = frontier.pop();
+		if (path === undefined) break;
 		try {
-			const info = await stat(path);
+			const info = await lstat(path);
+			if (info.isDirectory()) {
+				const directory = await opendir(path);
+				const entries: string[] = [];
+				for await (const entry of directory) {
+					if (entry.name !== ".git") entries.push(join(path, entry.name));
+				}
+				entries.sort((left, right) => right.localeCompare(left));
+				frontier.push(...entries);
+				continue;
+			}
 			if (!info.isFile()) continue;
+			const kind = matchesPattern(command.source, path);
+			if (kind === null) continue;
+			const content = await readFile(path, "utf8");
+			const chunks =
+				command.source.harness === "obsidian" &&
+				command.source.sourceId !== undefined &&
+				kind === "source_obsidian_markdown"
+					? buildObsidianSourceChunks({
+							sourceId: command.source.sourceId,
+							root: command.source.root,
+							filePath: path,
+							content,
+						})
+					: undefined;
 			files.push({
 				path,
-				content: await readFile(path, "utf8"),
+				content,
 				mtimeMs: info.mtimeMs,
-				kind: matchesPattern(command.source, path) ?? "",
+				kind,
+				...contentMetadata(content),
+				...(chunks === undefined ? {} : { chunks }),
 			});
 		} catch {
-			// The parent will reconcile a vanished artifact on the next pass.
+			// Files and directories can disappear while a source is being edited.
 		}
 	}
-	const lastPath = selected[selected.length - 1] ?? command.cursor;
 	return {
 		files,
-		nextCursor: lastPath ?? null,
+		nextCursor: files[files.length - 1]?.path ?? command.cursor,
 		scanned: files.length,
-		total: paths.length,
-		complete: selected.length < Math.max(1, Math.min(100, Math.trunc(command.pageSize))),
+		total: files.length,
+		complete: frontier.length === 0,
+		frontier,
 	};
 }
 
@@ -212,6 +229,7 @@ export interface NativeSourceWorkerHandle {
 	readonly scan: (input: {
 		readonly source: NativeSourceWorkerSource;
 		readonly cursor: string | null;
+		readonly frontier?: readonly string[] | null;
 		readonly pageSize: number;
 	}) => Promise<NativeSourceWorkerPage>;
 	readonly cancel: () => void;
@@ -282,6 +300,7 @@ export function createNativeSourceWorker(): NativeSourceWorkerHandle {
 	const scan = async (inputValue: {
 		readonly source: NativeSourceWorkerSource;
 		readonly cursor: string | null;
+		readonly frontier?: readonly string[] | null;
 		readonly pageSize: number;
 	}): Promise<NativeSourceWorkerPage> => {
 		await start();
@@ -299,7 +318,9 @@ export function createNativeSourceWorker(): NativeSourceWorkerHandle {
 				reject(new Error(`native source worker scan exceeded ${NATIVE_SOURCE_WORKER_SCAN_DEADLINE_MS}ms`));
 			}, NATIVE_SOURCE_WORKER_SCAN_DEADLINE_MS);
 			pending.set(id, { resolve, reject, timer });
-			stdin.write(`${JSON.stringify({ type: "scan", id, ...inputValue })}\n`);
+			stdin.write(
+				`${JSON.stringify({ type: "scan", id, ...inputValue, frontier: inputValue.frontier ?? undefined })}\n`,
+			);
 		});
 	};
 	return {

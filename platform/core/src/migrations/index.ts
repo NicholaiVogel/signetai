@@ -147,6 +147,7 @@ import { up as boundedStatusProjections } from "./138-bounded-status-projections
 import { up as nativeSourceSyncState } from "./139-native-source-sync-state";
 import { up as transcriptRecoveryFrontier } from "./140-transcript-recovery-frontier";
 import { up as sourceSyncCheckpoints } from "./141-source-sync-checkpoints";
+import { up as sourceSyncFrontier } from "./142-source-sync-frontier";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1295,6 +1296,12 @@ export const MIGRATIONS: readonly Migration[] = [
 		name: "source-sync-checkpoints",
 		up: sourceSyncCheckpoints,
 		artifacts: { tables: ["source_sync_checkpoints"] },
+	},
+	{
+		version: 142,
+		name: "source-sync-frontier",
+		up: sourceSyncFrontier,
+		artifacts: { columns: [{ table: "source_sync_checkpoints", column: "frontier" }] },
 	},
 ];
 

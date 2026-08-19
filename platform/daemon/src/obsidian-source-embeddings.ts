@@ -52,6 +52,8 @@ export interface IndexObsidianSourceEmbeddingsInput {
 	readonly root: string;
 	readonly filePath: string;
 	readonly content: string;
+	/** Chunks prepared by the killable native-source worker. */
+	readonly chunks?: readonly ObsidianSourceChunk[];
 	readonly embeddingConfig: EmbeddingConfig;
 	readonly fetchEmbedding: SourceEmbeddingFetch;
 }
@@ -276,7 +278,7 @@ export function buildObsidianSourceChunks(input: {
 export async function indexObsidianSourceEmbeddingsViaOwner(
 	input: IndexObsidianSourceEmbeddingsInput,
 ): Promise<IndexObsidianSourceEmbeddingsResult> {
-	const chunks = buildObsidianSourceChunks(input);
+	const chunks = input.chunks === undefined ? buildObsidianSourceChunks(input) : [...input.chunks];
 	const configured = await ownerEmbeddingConfig(input.embeddingConfig);
 	if (configured.provider === "none") return { chunks: 0, embedded: 0, skipped: 0, providerUnavailable: false };
 	const failureKey = sourceEmbeddingFailureKey(input, configured.model);
