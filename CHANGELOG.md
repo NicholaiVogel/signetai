@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-19
-- Bug fixes: close phase d pollers deterministically; harden phase d acceptance harness; hard self-destruct timer in acceptance runner; seed real embedding vectors; fail loudly on shape drift; resolve core migrations via relative path; format count baseline with Biome-canonical tabs.
+- Bug fixes: bound status and diagnostics projections; close phase d pollers deterministically; harden phase d acceptance harness; hard self-destruct timer in acceptance runner; seed real embedding vectors; fail loudly on shape drift; resolve core migrations via relative path; format count baseline with Biome-canonical tabs.
 - Docs: add documentation site guidance.
 
 ### 2026-08-18
@@ -38,6 +38,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: fail on filesystem budget truncation; bound filesystem traversal; narrow keychain error matching; classify locked git keychains; stop detached daemon process groups; preflight macOS pickers; resolve Windows Bun fallback; handle bundled runtime ENOENT; prevent duplicate app launches; narrow retry predicate; retry transient GitHub API failures; validate semantic premises; reject failed backlog snapshots; coalesce liveness probes; coalesce daemon startup probes; migrate localhost daemon URLs; route client loopback resolution; normalize loopback daemon URLs; isolate legacy OpenClaw env; close hermetic env gaps; isolate hermetic test environment; resolve launchd child executables; preserve launchd executable paths; classify discovery permission denials; cover Discord TCC cache reads; guide macOS permission denials; avoid WAL on network volumes; close embedding ownership race; close embedding repair races; default repaired embedding scope; preserve cross-agent embeddings; scope orphan embedding repair; scope embedding maintenance; guard content migration races; guard migration promotion races; guard repair promotion races; converge autonomous embedding repairs; correct workload diagnostics; count telemetry log write drops; bound telemetry JSONL; probe zero-free backup volumes; match startup status diagnostics; match windows exit status; make signal regression portable; preserve startup diagnostics.
 
 ## Release Ledger
+
+## [0.211.19] - 2026-08-19
+
+Release summary: 2 bug fixes.
+Tag range: `v0.211.18..v0.211.19`.
+
+### Bug Fixes
+
+- bound status and diagnostics projections (#1689)
+- **daemon**: bound status and diagnostics projections
 
 ## [0.211.18] - 2026-08-19
 
