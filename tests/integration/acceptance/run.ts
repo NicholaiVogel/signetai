@@ -30,7 +30,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { buildProductionDb, type ProductionDbResult } from "./build-db";
 import { evaluateStability, percentile, type StabilityMeasurements } from "./criteria";
 
@@ -38,6 +38,7 @@ const harnessDir = import.meta.dir;
 const repoRoot = resolve(harnessDir, "..", "..", "..");
 const daemonScript = join(repoRoot, "platform/daemon/src/daemon.ts");
 const probeScript = join(harnessDir, "loop-probe.ts");
+const activeFetchControllers = new Set<AbortController>();
 
 // -- CLI ---------------------------------------------------------------------
 
@@ -82,16 +83,38 @@ const SCALE =
 interface TimedResponse {
 	readonly status: number;
 	readonly ms: number;
+	readonly json?: unknown;
 }
 
-async function timedFetch(url: string, timeoutMs: number, init?: RequestInit): Promise<TimedResponse> {
+async function timedFetch(
+	url: string,
+	timeoutMs: number,
+	init?: RequestInit,
+	readJson = false,
+): Promise<TimedResponse> {
 	const startedAt = performance.now();
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), timeoutMs);
+	activeFetchControllers.add(controller);
 	try {
-		const response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+		const response = await fetch(url, { ...init, signal: controller.signal });
+		if (readJson) {
+			const text = await response.text();
+			let json: unknown;
+			try {
+				json = JSON.parse(text);
+			} catch {
+				json = undefined;
+			}
+			return { status: response.status, ms: performance.now() - startedAt, json };
+		}
 		await response.arrayBuffer();
 		return { status: response.status, ms: performance.now() - startedAt };
 	} catch {
 		return { status: 0, ms: performance.now() - startedAt };
+	} finally {
+		clearTimeout(timeout);
+		activeFetchControllers.delete(controller);
 	}
 }
 
@@ -141,9 +164,9 @@ function buildSourceTree(root: string, files: number, dirs: number): void {
 			if (idx >= files) break;
 			const body: string[] = [`# note ${idx}`, ""];
 			for (let line = 0; line < 40; line++) {
-				body.push(words[(idx + line) % words.length] + " " + words[(idx + line * 3) % words.length] + " line " + line);
+				body.push(`${words[(idx + line) % words.length]} ${words[(idx + line * 3) % words.length]} line ${line}`);
 			}
-			writeFileSync(join(dir, `note-${String(idx).padStart(6, "0")}.md`), body.join("\n") + "\n");
+			writeFileSync(join(dir, `note-${String(idx).padStart(6, "0")}.md`), `${body.join("\n")}\n`);
 		}
 	}
 }
@@ -178,6 +201,38 @@ interface PhaseMark {
 const phaseMarks: PhaseMark[] = [];
 function markPhase(phase: string): void {
 	phaseMarks.push({ at: Date.now(), phase });
+}
+
+const emergencyArtifactPath = join(
+	resolve(args.out ?? join(tmpdir(), "phase-d-acceptance-artifacts")),
+	`phase-d-acceptance-${args.scale}-failure.json`,
+);
+
+function writeEmergencyArtifact(kind: string, message: string): void {
+	try {
+		mkdirSync(resolve(args.out ?? join(tmpdir(), "phase-d-acceptance-artifacts")), { recursive: true });
+		writeFileSync(
+			emergencyArtifactPath,
+			JSON.stringify(
+				{
+					harness: "phase-d-stability-acceptance",
+					issue: 1543,
+					scale: args.scale,
+					evaluation: {
+						pass: false,
+						checks: [],
+						summary: `Phase D stability acceptance aborted during ${kind}: ${message}`,
+					},
+					phaseMarks,
+					error: { kind, message },
+				},
+				null,
+				2,
+			),
+		);
+	} catch (error) {
+		console.error(`[phase-d] could not write failure artifact ${emergencyArtifactPath}: ${String(error)}`);
+	}
 }
 
 // Module-level daemon handle so the self-destruct timer can always reach it.
@@ -266,7 +321,7 @@ async function main(): Promise<number> {
 		buildSourceTree(sourceRoot, SCALE.sourceTreeFiles, SCALE.sourceTreeDirs);
 		writeFileSync(
 			join(agentsDir, "sources.json"),
-			JSON.stringify(
+			`${JSON.stringify(
 				{
 					version: 1,
 					sources: [
@@ -286,7 +341,7 @@ async function main(): Promise<number> {
 				},
 				null,
 				2,
-			) + "\n",
+			)}\n`,
 		);
 
 		// 5. Spawn the daemon with the probe preloaded into its process. The
@@ -372,6 +427,7 @@ async function main(): Promise<number> {
 		const statusLatencies: number[] = [];
 		const statusFailures = { count: 0 };
 		const diagnosticsLatencies: number[] = [];
+		const queueDepthSamples: Array<{ at: number; memory: number | null; summary: number | null }> = [];
 		let stop = false;
 
 		// (a) /health/live every 250ms — the hot liveness path.
@@ -397,8 +453,19 @@ async function main(): Promise<number> {
 		// (a) diagnostics report every 5s (getDiagnostics equivalent).
 		const diagnosticsLoop = (async () => {
 			while (!stop) {
-				const r = await timedFetch(`${origin}/api/diagnostics`, 10_000);
+				const r = await timedFetch(`${origin}/api/diagnostics`, 10_000, undefined, true);
 				diagnosticsLatencies.push(r.ms);
+				const body = r.json as
+					| { queue?: { depth?: unknown }; workloads?: { memoryQueueDepth?: unknown; summaryQueueDepth?: unknown } }
+					| undefined;
+				const queue = body?.workloads;
+				if (queue && (typeof queue.memoryQueueDepth === "number" || typeof queue.summaryQueueDepth === "number")) {
+					queueDepthSamples.push({
+						at: Date.now(),
+						memory: typeof queue.memoryQueueDepth === "number" ? queue.memoryQueueDepth : null,
+						summary: typeof queue.summaryQueueDepth === "number" ? queue.summaryQueueDepth : null,
+					});
+				}
 				await Bun.sleep(5_000);
 			}
 		})();
@@ -467,7 +534,11 @@ async function main(): Promise<number> {
 			await Bun.sleep(1_000);
 		}
 		stop = true;
-		await Promise.all([liveLoop, statusLoop, diagnosticsLoop, writeLoop]);
+		for (const controller of activeFetchControllers) controller.abort();
+		await Promise.race([
+			Promise.allSettled([liveLoop, statusLoop, diagnosticsLoop, writeLoop]),
+			Bun.sleep(15_000).then(() => console.error("[phase-d] pollers did not settle within 15s after the run deadline")),
+		]);
 
 		// 8. Collect probe results and evaluate.
 		const probe = await fetchProbeReport(probeOrigin);
@@ -521,6 +592,7 @@ async function main(): Promise<number> {
 				samples: diagnosticsLatencies.length,
 				p95Ms: Math.round(percentile(diagnosticsLatencies, 0.95)),
 				maxMs: diagnosticsLatencies.length > 0 ? Math.round(Math.max(...diagnosticsLatencies)) : 0,
+				queueDepthSamples,
 			},
 			measurements,
 			evaluation,
@@ -583,13 +655,22 @@ if (import.meta.main) {
 	// SIGKILL to the daemon + exit 124 so the timeout is unmistakable in logs.
 	const SELF_DESTRUCT_MS = (args.scale === "smoke" ? 9 : 16) * 60_000;
 	const selfDestruct = setTimeout(() => {
-		console.error(
-			`[phase-d] SELF-DESTRUCT: exceeded ${SELF_DESTRUCT_MS / 60_000}min wall clock — killing daemon and aborting`,
-		);
+		const message = `exceeded ${SELF_DESTRUCT_MS / 60_000}min wall clock`;
+		console.error(`[phase-d] SELF-DESTRUCT: ${message} — killing daemon and aborting`);
+		writeEmergencyArtifact("self-destruct", message);
 		if (daemonRef && !daemonRef.killed) daemonRef.kill("SIGKILL");
 		process.exit(124);
 	}, SELF_DESTRUCT_MS);
 	selfDestruct.unref?.();
 
-	process.exitCode = await main();
+	try {
+		process.exitCode = await main();
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`[phase-d] harness failed: ${message}`);
+		writeEmergencyArtifact("harness-error", message);
+		process.exitCode = 1;
+	} finally {
+		clearTimeout(selfDestruct);
+	}
 }

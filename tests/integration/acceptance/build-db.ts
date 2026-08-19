@@ -83,7 +83,7 @@ function sentence(rng: () => number, minLength: number): string {
 	}
 	if (parts.length === 0) return "memory";
 	const text = parts.join(" ");
-	return text.charAt(0).toUpperCase() + text.slice(1) + ".";
+	return `${text.charAt(0).toUpperCase() + text.slice(1)}.`;
 }
 
 function sentences(rng: () => number, count: number, minLength: number): string {
@@ -165,7 +165,6 @@ export function buildProductionDb(dbPath: string, options: ProductionDbOptions =
 				id, agent_id, content_hash, vector, dimensions, source_type, source_id, chunk_text, created_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
-		let embeddingRows = 0;
 		// Deterministic pseudo-random unit vector (float32 blob, 768 dims —
 		// the nomic-embed-text-v1.5 profile). Values only need to be stable
 		// and dense; the daemon never similarity-matches them in this
@@ -227,7 +226,6 @@ export function buildProductionDb(dbPath: string, options: ProductionDbOptions =
 						content.slice(0, 512),
 						createdAt,
 					);
-					embeddingRows++;
 				}
 			}
 			db.exec("COMMIT");

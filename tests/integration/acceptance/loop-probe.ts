@@ -73,7 +73,7 @@ function report(): Record<string, unknown> {
 	};
 }
 
-const portRaw = process.env.SIGNET_PHASE_D_PROBE_PORT;
+const portRaw = Bun.env.SIGNET_PHASE_D_PROBE_PORT;
 const port = portRaw ? Number.parseInt(portRaw, 10) : Number.NaN;
 if (Number.isInteger(port) && port > 0) {
 	const server = createServer((req, res) => {
