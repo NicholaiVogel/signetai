@@ -7,8 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-19
-- Features: prioritize owner foreground workloads.
-- Bug fixes: checkpoint integrity maintenance; bound integrity maintenance retries; harden incremental integrity maintenance; validate live PR body in readiness checklist; read PR checklist body live; close owner lane review findings; unblock DB-owner startup handshake; address db owner startup review findings; unblock db owner startup handshake; bound status and diagnostics projections; close phase d pollers deterministically; harden phase d acceptance harness; hard self-destruct timer in acceptance runner; seed real embedding vectors; fail loudly on shape drift; resolve core migrations via relative path; format count baseline with Biome-canonical tabs.
+- Features: expose truthful event-loop health; prioritize owner foreground workloads.
+- Bug fixes: baseline event-loop monitor restarts; latch event-loop wedge state; expose truthful event-loop health; checkpoint integrity maintenance; bound integrity maintenance retries; harden incremental integrity maintenance; validate live PR body in readiness checklist; read PR checklist body live; close owner lane review findings; unblock DB-owner startup handshake; address db owner startup review findings; unblock db owner startup handshake; bound status and diagnostics projections; close phase d pollers deterministically; harden phase d acceptance harness; hard self-destruct timer in acceptance runner; seed real embedding vectors; fail loudly on shape drift; resolve core migrations via relative path; format count baseline with Biome-canonical tabs.
 - Docs: add documentation site guidance.
 
 ### 2026-08-18
@@ -39,6 +39,21 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: fail on filesystem budget truncation; bound filesystem traversal; narrow keychain error matching; classify locked git keychains; stop detached daemon process groups; preflight macOS pickers; resolve Windows Bun fallback; handle bundled runtime ENOENT; prevent duplicate app launches; narrow retry predicate; retry transient GitHub API failures; validate semantic premises; reject failed backlog snapshots; coalesce liveness probes; coalesce daemon startup probes; migrate localhost daemon URLs; route client loopback resolution; normalize loopback daemon URLs; isolate legacy OpenClaw env; close hermetic env gaps; isolate hermetic test environment; resolve launchd child executables; preserve launchd executable paths; classify discovery permission denials; cover Discord TCC cache reads; guide macOS permission denials; avoid WAL on network volumes; close embedding ownership race; close embedding repair races; default repaired embedding scope; preserve cross-agent embeddings; scope orphan embedding repair; scope embedding maintenance; guard content migration races; guard migration promotion races; guard repair promotion races; converge autonomous embedding repairs; correct workload diagnostics; count telemetry log write drops; bound telemetry JSONL; probe zero-free backup volumes; match startup status diagnostics; match windows exit status; make signal regression portable; preserve startup diagnostics.
 
 ## Release Ledger
+
+## [0.213.0] - 2026-08-19
+
+Release summary: 1 feature and 3 bug fixes.
+Tag range: `v0.212.2..v0.213.0`.
+
+### Features
+
+- **daemon**: expose truthful event-loop health (#1693)
+
+### Bug Fixes
+
+- **daemon**: baseline event-loop monitor restarts
+- **daemon**: latch event-loop wedge state
+- **daemon**: expose truthful event-loop health
 
 ## [0.212.2] - 2026-08-19
 
