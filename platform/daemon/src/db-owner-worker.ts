@@ -526,7 +526,6 @@ export function runDbOwnerWorker(): void {
 		}
 	});
 
-	send({ type: "ready", pid: process.pid });
 	void activeJobId;
 }
 

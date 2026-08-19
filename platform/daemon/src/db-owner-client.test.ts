@@ -132,7 +132,7 @@ describe("DB owner client", () => {
 		}
 	});
 
-	test("allows the DB owner startup deadline to be overridden by environment", async () => {
+	test("rejects when an overridden DB owner startup deadline expires", async () => {
 		const database = makeDb();
 		directory = database.directory;
 		const workerPath = join(database.directory, "delayed-ready-worker.js");
@@ -141,10 +141,24 @@ describe("DB owner client", () => {
 			'setTimeout(() => process.stdout.write(JSON.stringify({ type: "ready", pid: process.pid }) + "\\n"), 100);',
 		);
 		const previousTimeout = process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS;
-		process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = "250";
+		process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = "50";
 		try {
 			client = createDbOwnerClient({ dbPath: database.path, workerPath });
-			await expect(client.start()).resolves.toBeUndefined();
+			await expect(client.start()).rejects.toMatchObject({ code: "DB_OWNER_START_TIMEOUT" });
+		} finally {
+			if (previousTimeout === undefined) Reflect.deleteProperty(process.env, "SIGNET_DB_OWNER_START_TIMEOUT_MS");
+			else process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = previousTimeout;
+		}
+	});
+
+	test("rejects garbage DB owner startup timeout configuration", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const previousTimeout = process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS;
+		process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = "abc";
+		try {
+			client = createDbOwnerClient({ dbPath: database.path });
+			await expect(client.start()).rejects.toMatchObject({ code: "DB_OWNER_START_TIMEOUT_INVALID" });
 		} finally {
 			if (previousTimeout === undefined) Reflect.deleteProperty(process.env, "SIGNET_DB_OWNER_START_TIMEOUT_MS");
 			else process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = previousTimeout;

@@ -127,7 +127,7 @@ export interface DbOwnerClientOptions {
 	readonly workerRole?: "generic" | "recall";
 }
 
-const DEFAULT_DB_OWNER_START_TIMEOUT_MS = 5_000;
+const DEFAULT_DB_OWNER_START_TIMEOUT_MS = 15_000;
 
 function resolveStartupTimeoutMs(options: DbOwnerClientOptions): number {
 	const configured = options.startupTimeoutMs ?? process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS;
