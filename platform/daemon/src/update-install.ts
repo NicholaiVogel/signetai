@@ -4,7 +4,13 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix, win32 } from "node:path";
 import { type SignetUpdateTarget, getGlobalInstallCommand } from "@signet/core";
-import { logger } from "./logger";
+
+export type UpdateLogCategory = "system" | "update";
+
+export interface UpdateLogger {
+	info(category: UpdateLogCategory, message: string, data?: Record<string, unknown>): void;
+	warn(category: UpdateLogCategory, message: string, data?: Record<string, unknown>): void;
+}
 
 export type UpdateInstallErrorCode =
 	| "invalid_target_version"
@@ -45,6 +51,7 @@ export interface UpdateInstallDeps {
 	readonly env?: NodeJS.ProcessEnv;
 	readonly platform?: NodeJS.Platform;
 	readonly arch?: string;
+	readonly logger?: UpdateLogger;
 }
 
 interface NativeManifestAsset {
@@ -535,7 +542,7 @@ async function installPackageManagerUpdate(
 ): Promise<string> {
 	const installPackage = `${settings.packageName}@${version}`;
 	const installCommand = getGlobalInstallCommand(target.family, installPackage);
-	logger.info("system", "Running package-manager update command", {
+	deps.logger?.info("system", "Running package-manager update command", {
 		command: `${installCommand.command} ${installCommand.args.join(" ")}`,
 		family: target.family,
 		activeExecutablePath: target.executablePath,

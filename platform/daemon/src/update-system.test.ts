@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseExecutableVersion, parseNativeReleaseManifest, verifyExecutableVersion } from "./update-install";
 import {
 	MAX_UPDATE_INTERVAL_SECONDS,
@@ -43,6 +44,19 @@ function mustMatch(src: string, pattern: RegExp): string {
 	}
 	return match[0];
 }
+
+describe("Issue 1697: shared update logic does not start daemon runtime work", () => {
+	it("exits after importing update-system in a short-lived process", () => {
+		const updateSystemUrl = pathToFileURL(join(__dirname, "update-system.ts")).href;
+		const result = spawnSync(process.execPath, ["-e", `import(${JSON.stringify(updateSystemUrl)});`], {
+			stdio: "ignore",
+			timeout: 1500,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.status).toBe(0);
+	});
+});
 
 describe("Bug 5: pendingRestartVersion is set only after successful verification", () => {
 	it("does not gate pendingRestartVersion on targetVersion", () => {
@@ -895,7 +909,7 @@ describe("Bug 4: log level for disabled auto-updates", () => {
 
 		// Should use info level, not debug
 		expect(timerBody).not.toContain('logger.debug("system", "Auto-update disabled"');
-		expect(timerBody).toContain("logger.info");
+		expect(timerBody).toContain("updateLogger.info");
 		expect(timerBody).toContain("signet update enable");
 	});
 });
