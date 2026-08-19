@@ -132,6 +132,20 @@ function listenOnEphemeralPort(server: Server): Promise<number> {
 	});
 }
 
+/** Resolve when the interval elapses, or immediately when the poller stops. */
+function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
+	if (signal.aborted) return Promise.resolve();
+	return new Promise((resolveSleep) => {
+		const timer = setTimeout(done, ms);
+		function done(): void {
+			clearTimeout(timer);
+			signal.removeEventListener("abort", done);
+			resolveSleep();
+		}
+		signal.addEventListener("abort", done, { once: true });
+	});
+}
+
 /** Reserve an OS port and leave it CLOSED: connections are refused, never queued. */
 async function reserveDeadPort(): Promise<number> {
 	const holder = createServer();
@@ -428,7 +442,9 @@ async function main(): Promise<number> {
 		const statusFailures = { count: 0 };
 		const diagnosticsLatencies: number[] = [];
 		const queueDepthSamples: Array<{ at: number; memory: number | null; summary: number | null }> = [];
+		let queueDepthUnavailableReason: string | null = null;
 		let stop = false;
+		const pollerAbort = new AbortController();
 
 		// (a) /health/live every 250ms — the hot liveness path.
 		const liveLoop = (async () => {
@@ -436,7 +452,7 @@ async function main(): Promise<number> {
 				const r = await timedFetch(`${origin}/health/live`, 5_000);
 				liveLatencies.push(r.ms);
 				if (r.status !== 200) liveFailures.count++;
-				await Bun.sleep(250);
+				await sleepAbortable(250, pollerAbort.signal);
 			}
 		})();
 
@@ -446,27 +462,46 @@ async function main(): Promise<number> {
 				const r = await timedFetch(`${origin}/api/status`, 10_000);
 				statusLatencies.push(r.ms);
 				if (r.status !== 200) statusFailures.count++;
-				await Bun.sleep(2_000);
+				await sleepAbortable(2_000, pollerAbort.signal);
 			}
 		})();
 
-		// (a) diagnostics report every 5s (getDiagnostics equivalent).
+		// (a) diagnostics report every 5s (getDiagnostics equivalent). Queue
+		// depth is read from the daemon's dedicated observable route rather than
+		// guessing fields that are not present in /api/diagnostics.
 		const diagnosticsLoop = (async () => {
 			while (!stop) {
-				const r = await timedFetch(`${origin}/api/diagnostics`, 10_000, undefined, true);
+				const [r, queueResponse] = await Promise.all([
+					timedFetch(`${origin}/api/diagnostics`, 10_000, undefined, true),
+					timedFetch(`${origin}/api/diagnostics/queue`, 10_000, undefined, true),
+				]);
 				diagnosticsLatencies.push(r.ms);
-				const body = r.json as
-					| { queue?: { depth?: unknown }; workloads?: { memoryQueueDepth?: unknown; summaryQueueDepth?: unknown } }
-					| undefined;
-				const queue = body?.workloads;
-				if (queue && (typeof queue.memoryQueueDepth === "number" || typeof queue.summaryQueueDepth === "number")) {
-					queueDepthSamples.push({
-						at: Date.now(),
-						memory: typeof queue.memoryQueueDepth === "number" ? queue.memoryQueueDepth : null,
-						summary: typeof queue.summaryQueueDepth === "number" ? queue.summaryQueueDepth : null,
-					});
+				const queues = (
+					queueResponse.json as
+						| {
+								queues?: {
+									memory?: { pending?: unknown; leased?: unknown };
+									summary?: { pending?: unknown; leased?: unknown };
+								};
+						  }
+						| undefined
+				)?.queues;
+				const depth = (queue: { pending?: unknown; leased?: unknown } | undefined): number | null => {
+					const pending = queue?.pending;
+					const leased = queue?.leased;
+					return typeof pending === "number" && typeof leased === "number" ? pending + leased : null;
+				};
+				const memoryDepth = depth(queues?.memory);
+				const summaryDepth = depth(queues?.summary);
+				if (queueResponse.status === 200 && (memoryDepth !== null || summaryDepth !== null)) {
+					queueDepthSamples.push({ at: Date.now(), memory: memoryDepth, summary: summaryDepth });
+				} else if (queueDepthSamples.length === 0) {
+					queueDepthUnavailableReason =
+						queueResponse.status === 0
+							? "GET /api/diagnostics/queue did not respond"
+							: `GET /api/diagnostics/queue returned HTTP ${queueResponse.status} without pending/leased queue counts`;
 				}
-				await Bun.sleep(5_000);
+				await sleepAbortable(5_000, pollerAbort.signal);
 			}
 		})();
 
@@ -492,7 +527,7 @@ async function main(): Promise<number> {
 						headers: { "content-type": "application/json" },
 						body: JSON.stringify(body),
 					});
-					await Bun.sleep(150);
+					await sleepAbortable(150, pollerAbort.signal);
 				}
 			});
 			await Promise.all(workers);
@@ -534,11 +569,20 @@ async function main(): Promise<number> {
 			await Bun.sleep(1_000);
 		}
 		stop = true;
+		pollerAbort.abort();
 		for (const controller of activeFetchControllers) controller.abort();
-		await Promise.race([
-			Promise.allSettled([liveLoop, statusLoop, diagnosticsLoop, writeLoop]),
-			Bun.sleep(15_000).then(() => console.error("[phase-d] pollers did not settle within 15s after the run deadline")),
+		const POLLER_SHUTDOWN_TIMEOUT_MS = 15_000;
+		const pollers = Promise.allSettled([liveLoop, statusLoop, diagnosticsLoop, writeLoop]);
+		const shutdownResult = await Promise.race([
+			pollers.then(() => "settled" as const),
+			Bun.sleep(POLLER_SHUTDOWN_TIMEOUT_MS).then(() => "timeout" as const),
 		]);
+		const pollersSettled = shutdownResult === "settled";
+		if (!pollersSettled) {
+			console.error(
+				`[phase-d] pollers did not settle within ${POLLER_SHUTDOWN_TIMEOUT_MS / 1000}s after the run deadline`,
+			);
+		}
 
 		// 8. Collect probe results and evaluate.
 		const probe = await fetchProbeReport(probeOrigin);
@@ -569,7 +613,22 @@ async function main(): Promise<number> {
 				maxMs: statusLatencies.length > 0 ? Math.max(...statusLatencies) : 0,
 			},
 		};
-		const evaluation = evaluateStability(measurements);
+		let evaluation = evaluateStability(measurements);
+		if (!pollersSettled) {
+			const shutdownCheck = {
+				name: "pollers settle after run deadline",
+				pass: false,
+				observed: `pollers still pending after ${POLLER_SHUTDOWN_TIMEOUT_MS / 1000}s`,
+				limit: "all pollers settled",
+			};
+			evaluation = {
+				pass: false,
+				checks: [...evaluation.checks, shutdownCheck],
+				summary: evaluation.pass
+					? `Phase D stability acceptance FAILED: pollers did not settle within ${POLLER_SHUTDOWN_TIMEOUT_MS / 1000}s after the run deadline.`
+					: `${evaluation.summary} Pollers also did not settle within ${POLLER_SHUTDOWN_TIMEOUT_MS / 1000}s after the run deadline.`,
+			};
+		}
 
 		// 9. Output: human summary + machine-readable artifact.
 		let logs = "";
@@ -588,11 +647,18 @@ async function main(): Promise<number> {
 			runSeconds: SCALE.runSeconds,
 			providerDownPort: deadEmbeddingPort,
 			writeLoadRequests: SCALE.writeLoad,
+			shutdown: {
+				pollersSettled,
+				timedOut: !pollersSettled,
+				timeoutMs: POLLER_SHUTDOWN_TIMEOUT_MS,
+			},
 			diagnostics: {
 				samples: diagnosticsLatencies.length,
 				p95Ms: Math.round(percentile(diagnosticsLatencies, 0.95)),
 				maxMs: diagnosticsLatencies.length > 0 ? Math.round(Math.max(...diagnosticsLatencies)) : 0,
 				queueDepthSamples,
+				queueDepthRoute: "/api/diagnostics/queue",
+				queueDepthUnavailableReason,
 			},
 			measurements,
 			evaluation,
