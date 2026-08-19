@@ -3,8 +3,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDbOwnerMaintenance } from "./db-owner-maintenance";
-import { createDbOwnerClient } from "./db-owner-client";
+import { createDbOwnerMaintenance, runOwnerMaintenanceWithRetry } from "./db-owner-maintenance";
+import { createDbOwnerClient, DbOwnerDiedError, type DbOwnerClient } from "./db-owner-client";
 import { isFtsIndexIncomplete, setFtsIndexIncomplete } from "./fts-index-state";
 import { completeFtsStartupRecovery } from "./fts-startup-recovery";
 
@@ -81,6 +81,63 @@ describe("DB owner FTS maintenance", () => {
 		maintenance = null;
 		if (directory !== null) rmSync(directory, { recursive: true, force: true });
 		directory = null;
+	});
+
+	test("recomputes the remaining run budget after an owner retry", async () => {
+		const deadlines: number[] = [];
+		let attempt = 0;
+		const owner = {
+			start: async (): Promise<void> => {},
+			submit: (_request: unknown, options: { readonly deadlineMs: number }) => {
+				deadlines.push(options.deadlineMs);
+				const currentAttempt = attempt++;
+				const delayMs = currentAttempt === 0 ? 20 : Math.min(250, options.deadlineMs + 10);
+				return {
+					job: {} as never,
+					result: new Promise<unknown>((resolve, reject) => {
+						setTimeout(() => {
+							if (currentAttempt === 0) reject(new DbOwnerDiedError());
+							else resolve("ok");
+						}, delayMs);
+					}),
+					cancel: (): void => {},
+				};
+			},
+		} as unknown as DbOwnerClient;
+
+		const startedAt = Date.now();
+		await expect(
+			runOwnerMaintenanceWithRetry(owner, { kind: "sleep", durationMs: 0 }, "test.owner-retry", {
+				deadlineMs: 100,
+			}),
+		).resolves.toBe("ok");
+
+		expect(deadlines).toHaveLength(2);
+		expect(deadlines[1]).toBeLessThan(deadlines[0]);
+		expect(Date.now() - startedAt).toBeLessThan(125);
+	});
+
+	test("reports queue admission separately from owner execution time", async () => {
+		const reported: Array<{ readonly queueAdmissionMs: number; readonly ownerExecutionMs: number }> = [];
+		const owner = {
+			start: async (): Promise<void> => {},
+			submit: () => ({
+				job: { enqueuedAt: 100 } as never,
+				result: Promise.resolve("ok"),
+				metrics: Promise.resolve({ startedAt: 130, finishedAt: 190 }),
+				cancel: (): void => {},
+			}),
+		} as unknown as DbOwnerClient;
+
+		await expect(
+			runOwnerMaintenanceWithRetry(owner, { kind: "sleep", durationMs: 0 }, "test.owner-metrics", {
+				deadlineMs: 1_000,
+				onOwnerMetrics: (metrics) => {
+					reported.push(metrics);
+				},
+			}),
+		).resolves.toBe("ok");
+		expect(reported).toEqual([{ queueAdmissionMs: 30, ownerExecutionMs: 60 }]);
 	});
 
 	test("backfills in bounded owner transactions and persists completion", async () => {

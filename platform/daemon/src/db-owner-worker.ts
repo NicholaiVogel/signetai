@@ -14,6 +14,7 @@ import type {
 	DbOwnerCommand,
 	DbOwnerEvent,
 	DbOwnerJob,
+	DbOwnerJobMetrics,
 	DbOwnerParameter,
 	DbOwnerRecallPayload,
 	DbOwnerStatement,
@@ -459,8 +460,19 @@ export function runDbOwnerWorker(): void {
 		return { sleptMs: durationMs };
 	}
 
-	function result(jobId: string, outcome: "completed" | "cancelled" | "timed_out", value?: unknown): void {
-		send({ type: "result", jobId, outcome, ...(value === undefined ? {} : { result: value }) });
+	function result(
+		jobId: string,
+		outcome: "completed" | "cancelled" | "timed_out",
+		value?: unknown,
+		metrics?: DbOwnerJobMetrics,
+	): void {
+		send({
+			type: "result",
+			jobId,
+			outcome,
+			...(value === undefined ? {} : { result: value }),
+			...(metrics === undefined ? {} : { metrics }),
+		});
 	}
 
 	function failed(jobId: string, name: string, message: string): void {
@@ -478,16 +490,26 @@ export function runDbOwnerWorker(): void {
 			}
 			activeJobId = job.id;
 			send({ type: "started", jobId: job.id, workloadClass: job.workloadClass });
+			const startedAt = Date.now();
 			try {
 				if (cancelled.delete(job.id)) {
 					result(job.id, "cancelled");
 				} else if (Date.now() >= job.deadlineAt) {
 					result(job.id, "timed_out");
 				} else {
-					result(job.id, "completed", await execute(job));
+					result(job.id, "completed", await execute(job), {
+						startedAt,
+						finishedAt: Date.now(),
+					});
 				}
 			} catch (error) {
-				send({ type: "result", jobId: job.id, outcome: "failed", error: serializeError(error) });
+				send({
+					type: "result",
+					jobId: job.id,
+					outcome: "failed",
+					error: serializeError(error),
+					metrics: { startedAt, finishedAt: Date.now() },
+				});
 			} finally {
 				activeJobId = null;
 				setImmediate(() => void next());

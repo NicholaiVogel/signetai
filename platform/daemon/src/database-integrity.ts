@@ -22,6 +22,21 @@ import { resolveEmbeddedWorkerPath } from "./native-runtime-assets";
 
 export type DatabaseIntegrityState = "unknown" | "healthy" | "repaired" | "corrupt" | "unavailable";
 
+export interface DatabaseIntegrityProgress {
+	readonly checkpointKey: string;
+	readonly phase: "running" | "complete" | "cancelled" | "timed_out" | "unavailable";
+	readonly checkedObjects: number;
+	readonly failedObjects: number;
+	readonly remainingObjects: number;
+	readonly lastObject: string | null;
+	readonly databasePagesObserved: number;
+	readonly databaseBytesObserved: number;
+	readonly elapsedMs: number;
+	readonly ownerQueueAdmissionMs: number;
+	readonly ownerExecutionMs: number;
+	readonly cancellationReason: string | null;
+}
+
 export interface IntegrityCheckStatus {
 	readonly ok: boolean;
 	readonly messages: readonly string[];
@@ -39,6 +54,7 @@ export interface DatabaseIntegrityStatus {
 	readonly ownerState: string | null;
 	readonly ownerGeneration: number | null;
 	readonly deadlineKills: number;
+	readonly incrementalProgress: DatabaseIntegrityProgress | null;
 }
 
 const UNKNOWN_CHECK: IntegrityCheckStatus = { ok: false, messages: ["not checked"] };
@@ -72,6 +88,7 @@ let latestStatus: DatabaseIntegrityStatus = {
 	ownerState: null,
 	ownerGeneration: null,
 	deadlineKills: 0,
+	incrementalProgress: null,
 };
 
 function check(db: ReadDb, pragma: "quick_check" | "integrity_check", table?: string): IntegrityCheckStatus {
@@ -119,6 +136,44 @@ function statusWith(
 		ownerState: health?.state ?? null,
 		ownerGeneration: health?.generation ?? null,
 		deadlineKills: health?.deadlineKills ?? 0,
+		incrementalProgress: null,
+	};
+}
+
+/** Publish checkpointed integrity maintenance through the existing health surfaces. */
+export function updateDatabaseIntegrityStatus(
+	progress: DatabaseIntegrityProgress,
+	errors: readonly string[] = [],
+	owner?: DbOwnerClient,
+): void {
+	const health = owner?.health();
+	const failed = progress.failedObjects > 0 || errors.length > 0;
+	const operationalFailure = progress.phase === "unavailable" || progress.phase === "timed_out";
+	const state: DatabaseIntegrityState = operationalFailure
+		? "unavailable"
+		: failed
+			? "corrupt"
+			: progress.phase === "complete"
+				? "healthy"
+				: "unknown";
+	const phase: DatabaseIntegrityStatus["phase"] =
+		progress.phase === "timed_out" ? "timed_out" : progress.phase === "running" ? "running" : "complete";
+	latestStatus = {
+		...latestStatus,
+		checkedAt: new Date().toISOString(),
+		state,
+		phase,
+		quickCheck: failed
+			? { ok: false, messages: errors.length > 0 ? errors : ["incremental integrity check failed"] }
+			: progress.phase === "complete"
+				? { ok: true, messages: [] }
+				: latestStatus.quickCheck,
+		durationMs: progress.elapsedMs,
+		repairGuidance: state === "corrupt" || state === "unavailable" ? REPAIR_GUIDANCE : null,
+		ownerState: health?.state ?? latestStatus.ownerState,
+		ownerGeneration: health?.generation ?? latestStatus.ownerGeneration,
+		deadlineKills: health?.deadlineKills ?? latestStatus.deadlineKills,
+		incrementalProgress: progress,
 	};
 }
 

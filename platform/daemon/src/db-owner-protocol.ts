@@ -173,6 +173,12 @@ export interface DbOwnerJob {
 	readonly request: DbOwnerRequest;
 }
 
+export interface DbOwnerJobMetrics {
+	/** Wall-clock timestamps captured inside the owner child process. */
+	readonly startedAt: number;
+	readonly finishedAt: number;
+}
+
 export type DbOwnerCommand =
 	| { readonly type: "submit"; readonly job: DbOwnerJob }
 	| { readonly type: "cancel"; readonly jobId: string }
@@ -194,6 +200,7 @@ export type DbOwnerEvent =
 			readonly jobId: string;
 			readonly outcome: DbOwnerOutcome;
 			readonly result?: unknown;
+			readonly metrics?: DbOwnerJobMetrics;
 			readonly error?: DbOwnerSerializedError;
 	  }
 	| { readonly type: "fatal"; readonly error: DbOwnerSerializedError };
