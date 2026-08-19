@@ -11,6 +11,8 @@ import {
 	registerDbOwnerHealthProvider,
 } from "../db-accessor";
 import type { DbOwnerHealth } from "../db-owner-client";
+import { getEventLoopLiveness, resetDbObservability } from "../db-observability";
+import { startEventLoopMonitor, stopResourceMonitors } from "../resource-monitor";
 import { mountHealthRoutes } from "./health";
 
 /**
@@ -37,6 +39,8 @@ function makeApp(): Hono {
 }
 
 beforeEach(() => {
+	stopResourceMonitors();
+	resetDbObservability();
 	closeDbAccessor();
 	dir = mkdtempSync(join(tmpdir(), "signet-health-routes-"));
 	// Point the daemon's base path at the bare temp workspace and disable the
@@ -49,6 +53,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	stopResourceMonitors();
+	resetDbObservability();
 	closeDbAccessor();
 	if (savedSignetPath === undefined) {
 		// biome-ignore lint/performance/noDelete: deleting env keys avoids stringifying undefined in process.env.
@@ -109,6 +115,9 @@ describe("GET /health/live", () => {
 		expect(typeof body.pid).toBe("number");
 		expect(typeof body.version).toBe("string");
 		expect(body.shuttingDown).toBe(false);
+		const eventLoop = body.eventLoop as Record<string, unknown>;
+		expect(eventLoop.status).toBe("ok");
+		expect(typeof eventLoop.stallSeconds).toBe("number");
 	});
 
 	test("stays 200 even when the database is unavailable", async () => {
@@ -147,6 +156,26 @@ describe("GET /health/live", () => {
 		const liveResponse = await pending;
 		expect(liveResponse.status).toBe(200);
 		expect(getDbAccessor().getReadPressure?.().activeLeases).toBe(0);
+	});
+
+	test("reports a wedged loop while a request deliberately blocks the event loop", async () => {
+		startEventLoopMonitor(50);
+		await Bun.sleep(80);
+
+		const app = makeApp();
+		app.get("/block-loop", (c) => {
+			const startedAt = Date.now();
+			while (Date.now() - startedAt < 2_100) {
+				// Deliberate synchronous block: this is the wedge signal integration proof.
+			}
+			return c.json(getEventLoopLiveness());
+		});
+
+		const res = await app.request("http://localhost/block-loop");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { status: string; stallSeconds: number };
+		expect(body.status).toBe("wedged");
+		expect(body.stallSeconds).toBeGreaterThanOrEqual(2);
 	});
 });
 
@@ -293,6 +322,9 @@ describe("GET /health (back-compat)", () => {
 		const dbRuntime = body.dbRuntime as Record<string, unknown>;
 		expect(dbRuntime.queue).toBeDefined();
 		expect(dbRuntime.eventLoopLag).toBeDefined();
+		const eventLoop = body.eventLoop as Record<string, unknown>;
+		expect(["ok", "degraded", "wedged"]).toContain(String(eventLoop.status));
+		expect(typeof eventLoop.stallSeconds).toBe("number");
 		const resources = body.resources as Record<string, unknown>;
 		expect(typeof resources.rss).toBe("number");
 		expect(typeof resources.heapUsed).toBe("number");

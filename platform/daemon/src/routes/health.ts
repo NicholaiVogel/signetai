@@ -208,6 +208,7 @@ export function mountHealthRoutes(app: Hono): void {
 		} catch {}
 
 		const databaseIntegrity = getDatabaseIntegrityStatus();
+		const eventLoop = getEventLoopLiveness();
 		return c.json({
 			status: shuttingDown
 				? "shutting_down"
@@ -225,6 +226,7 @@ export function mountHealthRoutes(app: Hono): void {
 			dbRuntime,
 			dbOwner,
 			databaseIntegrity,
+			eventLoop,
 			shuttingDown,
 			updateAvailable: us.lastCheck?.updateAvailable ?? false,
 			pendingRestart: us.pendingRestartVersion !== null,
