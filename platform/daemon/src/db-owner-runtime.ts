@@ -92,10 +92,12 @@ export interface DbOwnerSqlOptions {
 }
 
 function submitOptions(options: DbOwnerSqlOptions): DbOwnerSubmitOptions {
+	const workloadClass =
+		options.workloadClass ?? (/^(?:sources|maintenance|vacuum)\./.test(options.operation) ? "maintenance" : undefined);
 	return {
 		operation: options.operation,
 		lane: options.lane ?? "write",
-		workloadClass: options.workloadClass,
+		workloadClass,
 		deadlineMs: options.deadlineMs ?? 5_000,
 		estimatedWorkUnits: options.estimatedWorkUnits,
 	};

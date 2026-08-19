@@ -69,10 +69,11 @@ export interface DbOwnerHealth {
 	/** Per-owner-lane snapshot; present on the aggregate client health surface. */
 	readonly lanes?: {
 		readonly read: DbOwnerLaneHealth;
+		readonly write: DbOwnerLaneHealth;
 		readonly maintenance: DbOwnerLaneHealth;
 	};
 	readonly lastError: string | null;
-	/** Number of owner processes SIGKILLed by a hard job deadline. */
+	/** Number of owner processes killed by supervised shutdown or transport recovery. */
 	readonly deadlineKills: number;
 }
 
@@ -223,7 +224,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	let pid: number | null = null;
 	let activeJobId: string | null = null;
 	let lastError: string | null = null;
-	let deadlineKills = 0;
+	const deadlineKills = 0;
 	let initialization: DbOwnerInitializationState = "not_started";
 	let sequence = 0;
 	let input = "";
@@ -615,14 +616,24 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 				const entry = pending.get(job.id);
 				if (entry === undefined || entry.settled) return;
 				lastError = `deadline exceeded for ${job.id}`;
-				deadlineKills++;
+				const owner = child;
+				const dispatched = entry.dispatched;
 				settle(job.id, (settledJob) => {
 					if (!settledJob.settled) {
 						settledJob.settled = true;
 						settledJob.reject(new DbOwnerDeadlineError(job.id));
 					}
 				});
-				retireOwner(new DbOwnerDiedError(`DB owner killed after deadline for ${job.id}`));
+				// A job deadline abandons the work; it is not authority to kill the
+				// owner. The owner may still be finishing a synchronous operation,
+				// but interactive work is admitted through a separate owner below.
+				// This preserves the owner process and lets the worker consume the
+				// cancellation when the job is still queued.
+				if (dispatched && owner !== null && state === "ready") {
+					void write(owner, { type: "cancel", jobId: job.id }).catch(() => {
+						// A transport failure is handled by the owner exit path.
+					});
+				}
 			}, submitOptions.deadlineMs);
 			pendingJob = { job, resolve, reject, timer, resolveMetrics, settled: false, dispatched: false };
 			pending.set(job.id, pendingJob as PendingJob<unknown>);
@@ -708,11 +719,16 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
  */
 export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient {
 	const readLane = createSingleDbOwnerClient(options);
-	const maintenanceLane = createSingleDbOwnerClient(options);
+	// Interactive writes must never share the maintenance owner. Queue priority
+	// inside one saturated child is not capacity reservation: a synchronous
+	// maintenance job can still hold that child and its SQLite connection.
+	const writeLane = options.workerRole === "recall" ? readLane : createSingleDbOwnerClient(options);
+	const maintenanceLane = options.workerRole === "recall" ? readLane : createSingleDbOwnerClient(options);
 	let closed = false;
 
-	function laneFor(requestLane: DbOwnerLane): DbOwnerClient {
-		return requestLane === "read" ? readLane : maintenanceLane;
+	function laneFor(requestLane: DbOwnerLane, workloadClass?: DbOwnerWorkloadClass): DbOwnerClient {
+		if (workloadClass === "maintenance" || requestLane === "maintenance") return maintenanceLane;
+		return requestLane === "read" ? readLane : writeLane;
 	}
 
 	function toLaneHealth(lane: DbOwnerHealth): DbOwnerLaneHealth {
@@ -734,65 +750,76 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 
 	function health(): DbOwnerHealth {
 		const read = readLane.health();
+		const write = writeLane.health();
 		const maintenance = maintenanceLane.health();
 		const state: DbOwnerHealthState =
-			read.state === "closed" && maintenance.state === "closed"
+			read.state === "closed" && write.state === "closed" && maintenance.state === "closed"
 				? "closed"
-				: read.state === "failed" || maintenance.state === "failed"
+				: read.state === "failed" || write.state === "failed" || maintenance.state === "failed"
 					? "failed"
 					: (read.state === "dead" && read.generation > 0) ||
+							(write.state === "dead" && write.generation > 0) ||
 							(maintenance.state === "dead" && maintenance.generation > 0)
 						? "dead"
-						: read.state === "starting" || maintenance.state === "starting"
+						: read.state === "starting" || write.state === "starting" || maintenance.state === "starting"
 							? "starting"
-							: read.state === "ready" || maintenance.state === "ready"
+							: read.state === "ready" || write.state === "ready" || maintenance.state === "ready"
 								? "ready"
 								: "dead";
 		return {
 			state,
 			initialization: maintenance.initialization,
 			databaseReady: maintenance.databaseReady,
-			pid: read.pid ?? maintenance.pid,
-			generation: Math.max(read.generation, maintenance.generation),
-			queuedJobs: read.queuedJobs + maintenance.queuedJobs,
-			foregroundQueuedJobs: read.foregroundQueuedJobs + maintenance.foregroundQueuedJobs,
-			maintenanceQueuedJobs: read.maintenanceQueuedJobs + maintenance.maintenanceQueuedJobs,
-			activeJobId: read.activeJobId ?? maintenance.activeJobId,
-			activeWorkloadClass: read.activeWorkloadClass ?? maintenance.activeWorkloadClass,
-			foregroundOldestAgeMs: oldestAge(read.foregroundOldestAgeMs, maintenance.foregroundOldestAgeMs),
+			pid: read.pid ?? write.pid ?? maintenance.pid,
+			generation: Math.max(read.generation, write.generation, maintenance.generation),
+			queuedJobs: read.queuedJobs + write.queuedJobs + maintenance.queuedJobs,
+			foregroundQueuedJobs: read.foregroundQueuedJobs + write.foregroundQueuedJobs + maintenance.foregroundQueuedJobs,
+			maintenanceQueuedJobs:
+				read.maintenanceQueuedJobs + write.maintenanceQueuedJobs + maintenance.maintenanceQueuedJobs,
+			activeJobId: read.activeJobId ?? write.activeJobId ?? maintenance.activeJobId,
+			activeWorkloadClass: read.activeWorkloadClass ?? write.activeWorkloadClass ?? maintenance.activeWorkloadClass,
+			foregroundOldestAgeMs: oldestAge(
+				oldestAge(read.foregroundOldestAgeMs, write.foregroundOldestAgeMs),
+				maintenance.foregroundOldestAgeMs,
+			),
 			maintenanceOldestAgeMs: oldestAge(read.maintenanceOldestAgeMs, maintenance.maintenanceOldestAgeMs),
 			lanes: {
 				read: toLaneHealth(read),
+				write: toLaneHealth(write),
 				maintenance: toLaneHealth(maintenance),
 			},
-			lastError: read.lastError ?? maintenance.lastError,
-			deadlineKills: read.deadlineKills + maintenance.deadlineKills,
+			lastError: read.lastError ?? write.lastError ?? maintenance.lastError,
+			deadlineKills: read.deadlineKills + write.deadlineKills + maintenance.deadlineKills,
 		};
 	}
 
 	return {
 		async start(): Promise<void> {
 			if (closed) throw new DbOwnerError("DB_OWNER_CLOSED", "DB owner client is closed");
-			await Promise.all([readLane.start(), maintenanceLane.start()]);
+			await Promise.all([readLane.start(), writeLane.start(), maintenanceLane.start()]);
 		},
 		async initialize(agentsDir?: string): Promise<void> {
 			await maintenanceLane.initialize(agentsDir);
 		},
 		submit<Result>(request: DbOwnerRequest, submitOptions: DbOwnerSubmitOptions): DbOwnerJobHandle<Result> {
-			return laneFor(submitOptions.lane).submit<Result>(request, submitOptions);
+			return laneFor(submitOptions.lane, submitOptions.workloadClass).submit<Result>(request, submitOptions);
 		},
 		awaitResult<Result>(handle: DbOwnerJobHandle<Result>, timeoutMs?: number): Promise<Result> {
-			return laneFor(handle.job.lane).awaitResult(handle, timeoutMs);
+			return laneFor(handle.job.lane, handle.job.workloadClass).awaitResult(handle, timeoutMs);
 		},
 		cancel(jobId) {
 			readLane.cancel(jobId);
+			writeLane.cancel(jobId);
 			maintenanceLane.cancel(jobId);
 		},
 		health,
 		async close(): Promise<void> {
 			if (closed) return;
 			closed = true;
-			await Promise.all([readLane.close(), maintenanceLane.close()]);
+			const lanes = [readLane];
+			if (writeLane !== readLane) lanes.push(writeLane);
+			if (maintenanceLane !== readLane && maintenanceLane !== writeLane) lanes.push(maintenanceLane);
+			await Promise.all(lanes.map((lane) => lane.close()));
 		},
 	};
 }
