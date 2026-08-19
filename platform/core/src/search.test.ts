@@ -6,6 +6,36 @@ import { join } from "node:path";
 import { findSqliteVecExtension } from "./database";
 import { vectorSearch } from "./search";
 
+describe("vector search fallback", () => {
+	it("returns bounded cosine matches when sqlite-vec is unavailable", () => {
+		const raw = new Database(":memory:");
+		raw.exec(`
+			CREATE TABLE memories (id TEXT PRIMARY KEY, type TEXT, source_type TEXT);
+			CREATE TABLE embeddings (
+				id TEXT PRIMARY KEY,
+				source_id TEXT NOT NULL,
+				dimensions INTEGER NOT NULL,
+				vector BLOB
+			);
+			INSERT INTO memories VALUES ('memory-fact', 'fact', NULL), ('memory-other', 'other', NULL), ('memory-aggregate', 'fact', 'aggregate-recall');
+		`);
+		const insert = raw.prepare("INSERT INTO embeddings VALUES (?, ?, ?, ?)");
+		insert.run("embedding-fact", "memory-fact", 3, new Float32Array([1, 0, 0]));
+		insert.run("embedding-other", "memory-other", 3, new Float32Array([0, 1, 0]));
+		insert.run("embedding-aggregate", "memory-aggregate", 3, new Float32Array([1, 0, 0]));
+
+		expect(
+			vectorSearch(raw, new Float32Array([1, 0, 0]), {
+				limit: 2,
+				type: "fact",
+				excludeAggregateRecall: true,
+				maxScanRows: 10,
+			}),
+		).toEqual([{ id: "memory-fact", score: 1 }]);
+		raw.close();
+	});
+});
+
 describe("vector search during embedding projection cutover", () => {
 	it("joins the consistent old view during rebuild and the new view after completion", () => {
 		const extension = findSqliteVecExtension();

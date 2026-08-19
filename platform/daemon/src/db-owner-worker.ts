@@ -92,7 +92,7 @@ export function loadSqliteVecIfAvailable(db: SqliteDatabase, extension: string):
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.warn(
-			`sqlite-vec extension could not be loaded on ${process.platform}: ${message}; continuing without vec, KNN recall is degraded`,
+			`sqlite-vec extension could not be loaded on ${process.platform}: ${message}; continuing with bounded canonical-vector fallback, KNN throughput is degraded`,
 		);
 		return false;
 	}

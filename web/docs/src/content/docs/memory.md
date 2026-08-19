@@ -123,8 +123,10 @@ Candidate collection uses several independent channels:
   alternate phrasings. They can rescue a memory whose content does not use
   the same words as the current query.
 - **Vector search** embeds the original query and searches `vec_embeddings`
-  through `sqlite-vec`. Vector search cannot pre-filter every recall scope,
-  so constrained searches over-fetch and rely on authorization after merge.
+  through `sqlite-vec`. When that extension is unavailable, it uses a bounded
+  cosine scan over canonical vectors instead. Vector search cannot pre-filter
+  every recall scope, so constrained searches over-fetch and rely on
+  authorization after merge.
 - **Structured path candidates** search entity/aspect/group/claim paths so
   structured knowledge can surface even when its prose is sparse.
 - **Graph traversal** resolves focal entities and walks the knowledge graph.
