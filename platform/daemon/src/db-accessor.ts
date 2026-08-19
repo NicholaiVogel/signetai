@@ -678,7 +678,7 @@ function loadVecExtension(db: SqliteDatabase): void {
 		if (!vecExtPath) {
 			vecLoaded = false;
 			vecLoadError = "sqlite-vec extension not found";
-			console.warn("[db-accessor] sqlite-vec extension not found — vector search disabled");
+			console.warn("[db-accessor] sqlite-vec extension not found — using bounded canonical-vector fallback");
 		}
 	}
 	if (vecExtPath) {

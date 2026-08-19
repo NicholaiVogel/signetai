@@ -195,7 +195,10 @@ source through `document_memories(document_id, memory_id, chunk_index)`.
 Embedding calls happen before the write transaction. Chunks are normalized and
 hashed; an identical chunk already linked to the same document is skipped.
 Canonical vectors are stored in `embeddings`, with the sqlite-vec table serving
-as a derived ANN mirror when the extension is available.
+as a derived ANN mirror when the extension is available. If sqlite-vec cannot
+load, including Bun's system SQLite on macOS, semantic recall uses a bounded
+cosine scan over canonical vectors instead; recall remains functional with
+degraded throughput.
 
 A failed document updates the document row with an error and follows the same
 retry budget as its queue job. Deleting a document while work is in flight

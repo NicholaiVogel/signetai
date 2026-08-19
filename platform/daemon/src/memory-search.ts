@@ -1730,6 +1730,7 @@ export async function hybridRecall(
 							limit: vecLimit,
 							type: params.type,
 							excludeAggregateRecall,
+							maxScanRows: DB_OWNER_MAX_WORK_UNITS,
 						});
 						for (const r of vecResults) {
 							vectorMap.set(r.id, r.score);

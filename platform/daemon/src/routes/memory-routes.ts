@@ -9,6 +9,7 @@ import { aggregateRecall, parseAggregateRecallBudget, readAggregateRecallBudgetI
 import { checkScope, requirePermission, requireRateLimit } from "../auth";
 import { type ConcurrencyAdmission, createConcurrencyAdmission } from "../concurrency-admission";
 import type { DbOwnerClient } from "../db-owner-client";
+import { DB_OWNER_MAX_WORK_UNITS } from "../db-owner-protocol";
 import { hybridRecallThroughDbOwner } from "../db-owner-recall";
 import { normalizeAndHashContent } from "../content-normalization";
 import { type ReadDb, type WriteDb, getDbAccessor, runWriteTxAsync, prepareTypedStatement } from "../db-accessor";
@@ -3677,6 +3678,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 						limit: k + 1,
 						type,
 						excludeAggregateRecall: true,
+						maxScanRows: DB_OWNER_MAX_WORK_UNITS,
 					});
 				},
 				{ siteToken: "routes/memory-routes.ts:3653" },
