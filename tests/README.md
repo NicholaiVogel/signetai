@@ -70,3 +70,37 @@ edge cases (unicode-heavy, minimal).
 | Decision | ~0.6s |
 | Summary | ~3-8s |
 | Contradiction | ~0.6s |
+
+## Phase D Stability Acceptance (#1543)
+
+`tests/integration/acceptance/` boots the real daemon from source against a
+deterministic production-shaped database (~106k memories, ~11k transcript
+jobs, telemetry, source index — full scale) and judges daemon stability:
+
+- an event-loop occupancy probe is preloaded INTO the daemon process
+  (`bun --preload tests/integration/acceptance/loop-probe.ts`) and samples
+  per-second max event-loop delay via `perf_hooks.monitorEventLoopDelay`;
+- the embedding provider is intentionally dead (refused connections) while a
+  synthetic source root keeps source sync walking — the #1671 trigger shape;
+- concurrent pollers hit `/health/live` (250ms), `/api/status` (2s), and
+  `/api/diagnostics` (5s) while a foreground write load flows through the
+  normal remember path;
+- acceptance criteria (#1543): zero event-loop blocks >= 2000ms,
+  `/health/live` p95 < 500ms, `/api/status` p95 < 1000ms.
+
+The harness is a judge, not a fixer: if it fails on current main, that is the
+harness working — the numbers are the baseline.
+
+### Running
+
+```bash
+bun tests/integration/acceptance/run.ts --scale full   # full deployment profile
+bun tests/integration/acceptance/run.ts --scale smoke  # smaller db, 90s run
+bun tests/integration/acceptance/run.ts --scale smoke --keep  # keep workspace for inspection
+```
+
+Output: a human summary on stderr plus a machine-readable JSON artifact
+(`phase-d-acceptance-<scale>.json`) with per-metric percentiles, failures,
+probe samples, and the daemon log path. CI runs the smoke variant on
+PRs/main (`.github/workflows/phase-d-acceptance.yml`) and the full variant
+nightly.
