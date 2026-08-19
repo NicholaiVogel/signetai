@@ -1,7 +1,11 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Database } from "bun:sqlite";
-import { runMigrations } from "@signet/core";
+// tests/ is not a bun workspace, so `@signet/core` does not resolve from
+// here under a clean CI install (it only resolves locally via machine-global
+// node_modules). Import the real migration runner by relative path instead —
+// same code production runs, no package-name resolution involved.
+import { runMigrations } from "../../../platform/core/src/migrations/index";
 
 /**
  * Deterministic production-shaped database builder for the Phase D stability
