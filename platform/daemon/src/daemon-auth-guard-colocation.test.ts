@@ -117,6 +117,7 @@ describe("auth guard co-location", () => {
 		function rejectingRecallOwner(error: Error): DbOwnerClient {
 			return {
 				start: async () => {},
+				initialize: async () => {},
 				submit<Result>(request: DbOwnerRequest, options: DbOwnerSubmitOptions): DbOwnerJobHandle<Result> {
 					return {
 						job: {
@@ -139,6 +140,8 @@ describe("auth guard co-location", () => {
 				cancel: () => {},
 				health: () => ({
 					state: "ready",
+					initialization: "ready",
+					databaseReady: true,
 					pid: null,
 					generation: 1,
 					queuedJobs: 0,

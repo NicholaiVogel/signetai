@@ -227,6 +227,7 @@ editing the config file is impractical.
 | `SIGNET_LOG_FILE` | — | Optional explicit daemon log file path |
 | `SIGNET_LOG_DIR` | `$SIGNET_WORKSPACE/.daemon/logs` | Optional daemon log directory override |
 | `SIGNET_SQLITE_PATH` | — | macOS explicit SQLite dylib override used before Bun opens the database |
+| `SIGNET_DB_OWNER_START_TIMEOUT_MS` | `5000` | DB-owner protocol startup deadline in ms. Readiness is published before database initialization; this remains a bounded fallback for worker launch failures |
 | `SIGNET_SESSION_START_TIMEOUT` | `15000` | Session-start daemon wait budget in ms for Signet-managed clients. Generated Claude Code hook config writes this value directly. Generated Codex hook config rounds up to seconds and adds 5 seconds of harness grace |
 | `SIGNET_FETCH_TIMEOUT` | `15000` | Legacy fallback for session-start timeout in ms when `SIGNET_SESSION_START_TIMEOUT` is unset |
 | `SIGNET_PROMPT_SUBMIT_TIMEOUT` | `5000` | Prompt-submit daemon wait budget in ms; OpenCode uses this value directly, generated Claude Code hook config writes this value + 2000 ms grace, and generated Codex hook config rounds up to seconds and adds 2 seconds of harness grace |
@@ -246,6 +247,12 @@ it is unset, Signet checks `$SIGNET_WORKSPACE/libsqlite3.dylib`, where
 `~/.config/signet/workspace.json`, then the default `~/.agents`, before
 trying standard Homebrew SQLite locations and finally falling back to
 Apple's system SQLite.
+
+`SIGNET_DB_OWNER_START_TIMEOUT_MS` only controls how long the daemon client
+waits for the owner process to publish its protocol handshake. The handshake
+does not wait for SQLite construction, migrations, or vector extension loading.
+Those operations remain inside the killable owner process and have their own
+job deadlines.
 
 For non-loopback Anthropic endpoint overrides, the daemon
 only sends provider credentials during startup preflight when the host

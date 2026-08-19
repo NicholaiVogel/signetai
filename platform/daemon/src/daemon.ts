@@ -54,6 +54,7 @@ import {
 	getDbAccessor,
 	getVectorRuntimeStatus,
 	initDbAccessorLite,
+	resolveSqliteRuntimeConfig,
 	type WriteDb,
 } from "./db-accessor";
 import { type VacuumConversionHandle, startVacuumConversionWorker } from "./db-vacuum";
@@ -2044,13 +2045,10 @@ async function main() {
 
 	// Expensive schema/FTS/vector initialization must execute in the killable
 	// owner process, not merely behind an async function on this isolate.
-	dbOwnerClient = createDbOwnerClient({ dbPath: MEMORY_DB });
+	const sqliteRuntime = resolveSqliteRuntimeConfig({ agentsDir: AGENTS_DIR });
+	dbOwnerClient = createDbOwnerClient({ dbPath: MEMORY_DB, sqlitePath: sqliteRuntime.choice?.path });
 	await dbOwnerClient.start();
-	const initialization = dbOwnerClient.submit(
-		{ kind: "initialize", agentsDir: AGENTS_DIR },
-		{ operation: "db.initialize", lane: "maintenance", deadlineMs: 60_000, estimatedWorkUnits: 10_000 },
-	);
-	await dbOwnerClient.awaitResult(initialization, 60_000);
+	await dbOwnerClient.initialize(AGENTS_DIR);
 	const { extensionPath: initExtensionPath } = getVectorRuntimeStatus();
 	initDbAccessorLite(MEMORY_DB, initExtensionPath ?? "");
 	setSessionClaimStore(createSessionClaimStore(getDbAccessor()));

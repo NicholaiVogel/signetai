@@ -46,6 +46,11 @@ interface SqliteDatabase {
 	close(): void;
 }
 
+interface SqliteDatabaseConstructor {
+	new (path: string, options?: Record<string, unknown>): SqliteDatabase;
+	setCustomSQLite?: (path: string) => void;
+}
+
 const require = createRequire(import.meta.url);
 const Database = (
 	typeof (globalThis as Record<string, unknown>).Bun !== "undefined"
@@ -57,10 +62,7 @@ const Database = (
 					return require("better-sqlite3");
 				}
 			})()
-) as new (
-	path: string,
-	options?: Record<string, unknown>,
-) => SqliteDatabase;
+) as SqliteDatabaseConstructor;
 
 export function loadSqliteVecIfAvailable(db: SqliteDatabase, extension: string): boolean {
 	try {
@@ -88,10 +90,38 @@ export function runDbOwnerWorker(): void {
 	}, 250);
 	parentWatch.unref();
 
-	const db = new Database(dbPath);
-	db.exec("PRAGMA busy_timeout = 5000");
-	const vecExtension = findSqliteVecExtension();
-	if (vecExtension !== null) loadSqliteVecIfAvailable(db, vecExtension);
+	function send(event: DbOwnerEvent): void {
+		process.stdout.write(`${JSON.stringify(event)}\n`);
+	}
+
+	// Readiness attests only that the protocol channel is available. Database
+	// construction, custom SQLite selection, and extension loading are startup
+	// work owned by this process and must not delay the parent handshake.
+	send({ type: "ready", pid: process.pid });
+
+	const startupStarted = process.env.SIGNET_DB_OWNER_TEST_STARTUP_STARTED;
+	const startupRelease = process.env.SIGNET_DB_OWNER_TEST_STARTUP_RELEASE;
+	if (startupStarted !== undefined && startupRelease !== undefined) {
+		writeFileSync(startupStarted, "started\n");
+		const signal = new Int32Array(new SharedArrayBuffer(4));
+		while (!existsSync(startupRelease)) Atomics.wait(signal, 0, 0, 5);
+	}
+
+	const sqlitePath = process.env.SIGNET_DB_OWNER_SQLITE_PATH ?? process.env.SIGNET_SQLITE_PATH;
+	let db: SqliteDatabase;
+	try {
+		if (sqlitePath !== undefined && existsSync(sqlitePath) && typeof Database.setCustomSQLite === "function") {
+			Database.setCustomSQLite(sqlitePath);
+		}
+		db = new Database(dbPath);
+		db.exec("PRAGMA busy_timeout = 5000");
+		const vecExtension = findSqliteVecExtension();
+		if (vecExtension !== null) loadSqliteVecIfAvailable(db, vecExtension);
+	} catch (error) {
+		send({ type: "fatal", error: serializeError(error) });
+		process.exit(1);
+		return;
+	}
 
 	const BUSY_RETRIES = 3;
 	const BUSY_BACKOFF_MS = 50;
@@ -127,10 +157,6 @@ export function runDbOwnerWorker(): void {
 	const queue: DbOwnerJob[] = [];
 	let activeJobId: string | null = null;
 	let draining = false;
-
-	function send(event: DbOwnerEvent): void {
-		process.stdout.write(`${JSON.stringify(event)}\n`);
-	}
 
 	function bindParameter(value: DbOwnerParameter): unknown {
 		if (typeof value === "object" && value !== null && value.type === "bytes") {
