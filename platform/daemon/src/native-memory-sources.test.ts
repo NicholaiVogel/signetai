@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { addObsidianSource, loadSourcesConfig } from "@signet/core";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { resetEmbeddingCircuitBreakers } from "./embedding-circuit-breaker";
+import { resetObsidianSourceEmbeddingBackoff } from "./obsidian-source-embeddings";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
 import {
 	claudeCodeNativeMemorySource,
@@ -1000,7 +1001,7 @@ describe("native memory sources", () => {
 		).toBe(true);
 		expect(
 			await indexNativeMemoryFile(source, file, "agent-native", {
-				embeddingConfig: { provider: "native", model: "test", dimensions: 3, base_url: "" },
+				embeddingConfig: { provider: "native", model: "test", dimensions: 3, base_url: "", profile: "test" },
 				fetchEmbedding: async () => [1, 2, 3],
 			}),
 		).toBe(true);
@@ -1190,7 +1191,7 @@ describe("native memory sources", () => {
 				file,
 				"agent-native",
 				{
-					embeddingConfig: { provider: "native", model: "test", dimensions: 3, base_url: "" },
+					embeddingConfig: { provider: "native", model: "test", dimensions: 3, base_url: "", profile: "test" },
 					fetchEmbedding: async () => [1, 2, 3],
 				},
 			),
@@ -1208,71 +1209,152 @@ describe("native memory sources", () => {
 		expect(rows.some((row) => row.chunk_text.includes("heading: Signet Sources"))).toBe(true);
 	});
 
-	it("completes source artifact sync and backoffs embeddings when the provider is down", async () => {
+	it("pauses a source before scanning when its embedding provider is unavailable", async () => {
 		const root = join(dir, "provider-down-vault");
 		const file = join(root, "permanent", "Pending.md");
 		mkdirSync(join(root, "permanent"), { recursive: true });
-		writeFileSync(
-			file,
-			"# Pending Embeddings\n\nThe source artifact remains searchable as canonical evidence while its provider-down embedding work waits for retry.\n",
-		);
+		writeFileSync(file, "# Pending Embeddings\n\nProvider availability must gate all source work.\n");
 		let fetches = 0;
-		let heartbeats = 0;
-		const statuses: string[] = [];
-		const heartbeat = setInterval(() => {
-			heartbeats++;
-		}, 5);
+		const indexed: string[] = [];
 		const source = obsidianNativeMemorySource(root, "Provider Down Vault", "obsidian:provider-down");
-		const handle = startNativeMemoryBridge([source], {
-			agentId: "agent-native",
-			pollIntervalMs: 0,
-			sourceGraphEnabled: true,
-			embeddingConfig: { provider: "native", model: "down-model", dimensions: 3, base_url: "" },
-			fetchEmbedding: async (_text, _cfg, _role, options) => {
-				fetches++;
-				await new Promise((resolve) => setTimeout(resolve, 25));
-				options?.onFailure?.("provider_unavailable");
-				return null;
-			},
-			onFileIndexed: (event) => {
-				if (event.status) statuses.push(event.status);
-			},
-		});
+		const makeHandle = () =>
+			startNativeMemoryBridge([source], {
+				agentId: "agent-native",
+				pollIntervalMs: 0,
+				sourceGraphEnabled: false,
+				embeddingConfig: { provider: "native", model: "down-model", dimensions: 3, base_url: "", profile: "down" },
+				fetchEmbedding: async (_text, _cfg, _role, options) => {
+					fetches++;
+					options?.onFailure?.("provider_unavailable");
+					return null;
+				},
+				onFileIndexed: (event) => indexed.push(event.filePath),
+			});
+		const handle = makeHandle();
 		try {
-			expect(await handle.syncExisting()).toBe(1);
 			expect(await handle.syncExisting()).toBe(0);
 			expect(fetches).toBe(1);
-			expect(heartbeats).toBeGreaterThan(0);
-			expect(statuses).toEqual(["embeddings pending - provider down", "embeddings pending - provider down"]);
-
-			const semanticRows = getDbAccessor().withReadDb(
-				(db) =>
-					db
-						.prepare(
-							`SELECT
-							(SELECT COUNT(*) FROM entities WHERE agent_id = ? AND source_id = ? AND source_path = ?) AS graph_count,
-							(SELECT COUNT(*) FROM embeddings WHERE agent_id = ? AND source_type = 'source_chunk') AS embedding_count`,
-						)
-						.get("agent-native", "obsidian:provider-down", file, "agent-native") as {
-						graph_count: number;
-						embedding_count: number;
-					},
-			);
-			expect(semanticRows.graph_count).toBe(0);
-			expect(semanticRows.embedding_count).toBe(0);
-
-			const artifact = getDbAccessor().withReadDb(
-				(db) =>
-					db.prepare("SELECT source_path, content FROM memory_artifacts WHERE source_path = ?").get(file) as {
-						source_path: string;
-						content: string;
-					},
-			);
-			expect(artifact.source_path).toBe(file);
-			expect(artifact.content).toContain("canonical evidence");
+			expect(indexed).toEqual([]);
+			expect(
+				await getDbAccessor().withReadDbAsync(
+					(db) =>
+						db
+							.prepare(
+								"SELECT status, checkpoint_path, pause_reason FROM native_source_sync_state WHERE agent_id = ? AND source_key = ?",
+							)
+							.get("agent-native", "obsidian:provider-down") as {
+							status: string;
+							checkpoint_path: string | null;
+							pause_reason: string | null;
+						},
+				),
+			).toEqual({ status: "paused", checkpoint_path: null, pause_reason: "provider_unavailable" });
 		} finally {
-			clearInterval(heartbeat);
 			await handle.close();
+		}
+
+		// A new bridge must honor the durable pause without rescanning, owner
+		// churn, or a legacy artifact fallback.
+		const restarted = makeHandle();
+		try {
+			expect(await restarted.syncExisting()).toBe(0);
+			expect(fetches).toBe(1);
+			expect(indexed).toEqual([]);
+		} finally {
+			await restarted.close();
+		}
+	});
+
+	it("resumes a paused source from its durable checkpoint after provider recovery", async () => {
+		const root = join(dir, "checkpoint-vault");
+		const first = join(root, "permanent", "A.md");
+		const second = join(root, "permanent", "B.md");
+		mkdirSync(join(root, "permanent"), { recursive: true });
+		writeFileSync(first, "# Checkpoint A\n\nThe first note completes before the provider fails.\n");
+		writeFileSync(
+			second,
+			"# Checkpoint B\n\nThe second note resumes after recovery and contains enough durable source text to require an embedding checkpoint.\n",
+		);
+		let failSecond = true;
+		let chunkCalls = 0;
+		const calls: string[] = [];
+		const indexed: string[] = [];
+		const source = obsidianNativeMemorySource(root, "Checkpoint Vault", "obsidian:checkpoint");
+		const makeHandle = () =>
+			startNativeMemoryBridge([source], {
+				agentId: "agent-native",
+				pollIntervalMs: 0,
+				sourceGraphEnabled: false,
+				embeddingConfig: {
+					provider: "native",
+					model: "checkpoint-model",
+					dimensions: 3,
+					base_url: "",
+					profile: "checkpoint",
+				},
+				fetchEmbedding: async (text, _cfg, _role, options) => {
+					calls.push(text);
+					if (text.trim().length > 0) {
+						chunkCalls++;
+						if (failSecond && chunkCalls === 2) {
+							options?.onFailure?.("provider_unavailable");
+							return null;
+						}
+					}
+					return [1, 2, 3];
+				},
+				onFileIndexed: (event) => indexed.push(event.filePath),
+			});
+		const firstHandle = makeHandle();
+		try {
+			expect(await firstHandle.syncExisting()).toBe(2);
+			expect(indexed).toContain(first);
+			expect(indexed).toContain(second);
+			expect(
+				await getDbAccessor().withReadDbAsync(
+					(db) =>
+						db
+							.prepare(
+								"SELECT status, checkpoint_path, pause_reason FROM native_source_sync_state WHERE agent_id = ? AND source_key = ?",
+							)
+							.get("agent-native", "obsidian:checkpoint") as {
+							status: string;
+							checkpoint_path: string | null;
+							pause_reason: string | null;
+						},
+				),
+			).toEqual({ status: "paused", checkpoint_path: first, pause_reason: "provider_unavailable" });
+		} finally {
+			await firstHandle.close();
+		}
+
+		failSecond = false;
+		resetEmbeddingCircuitBreakers();
+		resetObsidianSourceEmbeddingBackoff();
+		const callsBeforeRecovery = calls.length;
+		const indexedBeforeRecovery = indexed.length;
+		const recovered = makeHandle();
+		try {
+			expect(await recovered.syncExisting()).toBe(1);
+			expect(indexed.slice(indexedBeforeRecovery)).toEqual([second]);
+			expect(calls.slice(callsBeforeRecovery).some((text) => text.includes("Checkpoint A"))).toBe(false);
+			expect(calls.slice(callsBeforeRecovery).some((text) => text.includes("Checkpoint B"))).toBe(true);
+			expect(
+				await getDbAccessor().withReadDbAsync(
+					(db) =>
+						db
+							.prepare(
+								"SELECT status, checkpoint_path, pause_reason FROM native_source_sync_state WHERE agent_id = ? AND source_key = ?",
+							)
+							.get("agent-native", "obsidian:checkpoint") as {
+							status: string;
+							checkpoint_path: string | null;
+							pause_reason: string | null;
+						},
+				),
+			).toEqual({ status: "running", checkpoint_path: null, pause_reason: null });
+		} finally {
+			await recovered.close();
 		}
 	});
 
@@ -1377,7 +1459,7 @@ describe("native memory sources", () => {
 
 		expect(
 			await indexNativeMemoryFile(initialSource, privateFile, "agent-native", {
-				embeddingConfig: { provider: "native", model: "test", dimensions: 3, base_url: "" },
+				embeddingConfig: { provider: "native", model: "test", dimensions: 3, base_url: "", profile: "test" },
 				fetchEmbedding: async () => [1, 2, 3],
 			}),
 		).toBe(true);
@@ -1612,7 +1694,7 @@ describe("native memory sources", () => {
 		handle = startNativeMemoryBridge([source], {
 			agentId: "agent-native",
 			pollIntervalMs: 0,
-			embeddingConfig: { provider: "native", model: "test", dimensions: 3, base_url: "" },
+			embeddingConfig: { provider: "native", model: "test", dimensions: 3, base_url: "", profile: "test" },
 			fetchEmbedding: async () => {
 				embeddingCalls++;
 				if (embeddingCalls === 1) {
@@ -1649,7 +1731,7 @@ describe("native memory sources", () => {
 		const handle = startNativeMemoryBridge([obsidianNativeMemorySource(root, "Slow Vault", "obsidian:slow-vault")], {
 			agentId: "agent-native",
 			pollIntervalMs: 1,
-			embeddingConfig: { provider: "native", model: "test", dimensions: 3, base_url: "" },
+			embeddingConfig: { provider: "native", model: "test", dimensions: 3, base_url: "", profile: "test" },
 			fetchEmbedding: async () => {
 				await Bun.sleep(20);
 				return [1, 2, 3];
