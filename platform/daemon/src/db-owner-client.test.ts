@@ -13,9 +13,12 @@ import {
 	MAX_DB_OWNER_PENDING_JOBS,
 	MAX_DB_OWNER_WORK_UNITS,
 } from "./db-owner-client";
+import { shouldRecordDbOwnerCancellation } from "./db-owner-worker";
 import { findSqliteVecExtension } from "@signet/core";
 import { closeDbAccessor, initDbAccessor } from "./db-accessor";
+import { createDbOwnerMaintenance, registerDbOwnerMaintenance } from "./db-owner-maintenance";
 import { recallThroughDbOwner } from "./db-owner-recall";
+import { dbOwnerQuery } from "./db-owner-runtime";
 
 function makeDb(): { readonly directory: string; readonly path: string } {
 	const directory = mkdtempSync(join(tmpdir(), "signet-db-owner-"));
@@ -54,6 +57,7 @@ describe("DB owner client", () => {
 	let directory: string | null = null;
 
 	afterEach(async () => {
+		registerDbOwnerMaintenance(null);
 		await client?.close();
 		client = null;
 		if (directory !== null) rmSync(directory, { recursive: true, force: true });
@@ -518,7 +522,6 @@ describe("DB owner client", () => {
 			{ operation: "maintenance.deadline-test", lane: "maintenance", deadlineMs: 40 },
 		);
 		await expect(slow.result).rejects.toBeInstanceOf(DbOwnerDeadlineError);
-		expect(client.health().deadlineKills).toBe(0);
 		expect(client.health().lanes?.maintenance.pid).not.toBeNull();
 		const fast = client.submit<unknown[]>(
 			{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "all" } },
@@ -594,6 +597,43 @@ describe("DB owner client", () => {
 		await first.result;
 		expect(client.health().queuedJobs).toBe(0);
 		expect(client.health().activeJobId).toBeNull();
+	});
+
+	test("does not retain cancellation IDs for completed or active jobs", () => {
+		const completedJobs = Array.from({ length: 1_000 }, (_, index) => ({ id: `completed-${index}` }));
+		const activeJob = { id: "active" };
+
+		for (const job of completedJobs) {
+			expect(shouldRecordDbOwnerCancellation(job.id, null, [], [])).toBe(false);
+		}
+		expect(shouldRecordDbOwnerCancellation(activeJob.id, activeJob.id, [], [])).toBe(false);
+		expect(shouldRecordDbOwnerCancellation("queued", null, [{ ...activeJob, id: "queued" }], [])).toBe(true);
+	});
+
+	test("classifies a sources operation as maintenance despite a foreground override", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		registerDbOwnerMaintenance(createDbOwnerMaintenance({ dbPath: database.path, owner: client }));
+		const slow = client.submit(
+			{ kind: "sleep", durationMs: 250 },
+			{ operation: "maintenance.classifier-saturation", lane: "maintenance", deadlineMs: 1_000 },
+		);
+		await waitFor(() => client?.health().lanes?.maintenance.activeJobId === slow.job.id);
+
+		const query = dbOwnerQuery<readonly { readonly value: number }[]>(
+			{ sql: "SELECT 1 AS value", result: "all" },
+			{
+				operation: "sources.foreground-override",
+				lane: "write",
+				workloadClass: "foreground",
+				deadlineMs: 1_000,
+			},
+		);
+		await waitFor(() => client?.health().lanes?.maintenance.queuedJobs === 1);
+		expect(client.health().lanes?.write.queuedJobs).toBe(0);
+		await expect(query).resolves.toEqual([{ value: 1 }]);
+		await slow.result;
 	});
 
 	test("rejects owner work beyond the bounded queue admission cap", async () => {

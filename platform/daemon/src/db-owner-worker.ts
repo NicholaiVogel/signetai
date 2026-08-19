@@ -79,6 +79,16 @@ export function loadSqliteVecIfAvailable(db: SqliteDatabase, extension: string):
 	}
 }
 
+export function shouldRecordDbOwnerCancellation(
+	jobId: string,
+	activeJobId: string | null,
+	foregroundJobs: readonly Pick<DbOwnerJob, "id">[],
+	maintenanceJobs: readonly Pick<DbOwnerJob, "id">[],
+): boolean {
+	if (jobId === activeJobId) return false;
+	return foregroundJobs.some((job) => job.id === jobId) || maintenanceJobs.some((job) => job.id === jobId);
+}
+
 export function runDbOwnerWorker(): void {
 	const dbPath = process.env.SIGNET_DB_OWNER_DB_PATH;
 	if (dbPath === undefined) throw new Error("DB owner requires SIGNET_DB_OWNER_DB_PATH");
@@ -177,6 +187,7 @@ export function runDbOwnerWorker(): void {
 		}
 		return undefined;
 	}
+
 	function bindParameter(value: DbOwnerParameter): unknown {
 		if (typeof value === "object" && value !== null && value.type === "bytes") {
 			return Buffer.from(value.base64, "base64");
@@ -525,6 +536,7 @@ export function runDbOwnerWorker(): void {
 			process.exit(0);
 		}
 		if (command.type === "cancel") {
+			if (!shouldRecordDbOwnerCancellation(command.jobId, activeJobId, foregroundQueue, maintenanceQueue)) return;
 			cancelled.add(command.jobId);
 			return;
 		}

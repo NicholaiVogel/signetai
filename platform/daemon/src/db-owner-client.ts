@@ -48,7 +48,6 @@ export interface DbOwnerLaneHealth {
 	readonly foregroundOldestAgeMs: number | null;
 	readonly maintenanceOldestAgeMs: number | null;
 	readonly lastError: string | null;
-	readonly deadlineKills: number;
 }
 
 export interface DbOwnerHealth {
@@ -73,8 +72,6 @@ export interface DbOwnerHealth {
 		readonly maintenance: DbOwnerLaneHealth;
 	};
 	readonly lastError: string | null;
-	/** Number of owner processes killed by supervised shutdown or transport recovery. */
-	readonly deadlineKills: number;
 }
 
 export interface DbOwnerSubmitOptions {
@@ -224,7 +221,6 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	let pid: number | null = null;
 	let activeJobId: string | null = null;
 	let lastError: string | null = null;
-	const deadlineKills = 0;
 	let initialization: DbOwnerInitializationState = "not_started";
 	let sequence = 0;
 	let input = "";
@@ -263,7 +259,6 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			foregroundOldestAgeMs: oldestAge("foreground"),
 			maintenanceOldestAgeMs: oldestAge("maintenance"),
 			lastError,
-			deadlineKills,
 		};
 	}
 
@@ -744,7 +739,6 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 			foregroundOldestAgeMs: lane.foregroundOldestAgeMs,
 			maintenanceOldestAgeMs: lane.maintenanceOldestAgeMs,
 			lastError: lane.lastError,
-			deadlineKills: lane.deadlineKills,
 		};
 	}
 
@@ -789,7 +783,6 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 				maintenance: toLaneHealth(maintenance),
 			},
 			lastError: read.lastError ?? write.lastError ?? maintenance.lastError,
-			deadlineKills: read.deadlineKills + write.deadlineKills + maintenance.deadlineKills,
 		};
 	}
 

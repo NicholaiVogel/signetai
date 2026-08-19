@@ -161,7 +161,6 @@ describe("auth guard co-location", () => {
 					foregroundOldestAgeMs: null,
 					maintenanceOldestAgeMs: null,
 					lastError: null,
-					deadlineKills: 0,
 				}),
 				close: async () => {},
 			};

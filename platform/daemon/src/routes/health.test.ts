@@ -78,7 +78,6 @@ describe("GET /health owner diagnostics", () => {
 			foregroundOldestAgeMs: 12,
 			maintenanceOldestAgeMs: 34,
 			lastError: null,
-			deadlineKills: 0,
 		} as const;
 		const ownerHealth = {
 			...lane,
