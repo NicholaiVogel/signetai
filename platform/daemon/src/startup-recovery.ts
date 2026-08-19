@@ -64,6 +64,7 @@ const PENDING_INTEGRITY: DatabaseIntegrityStatus = {
 	ownerState: null,
 	ownerGeneration: null,
 	deadlineKills: 0,
+	incrementalProgress: null,
 };
 
 let activeRecovery: Promise<StartupRecoveryReport> | null = null;

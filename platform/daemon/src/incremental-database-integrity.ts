@@ -12,7 +12,8 @@
  */
 
 import { DbOwnerDeadlineError, type DbOwnerClient } from "./db-owner-client";
-import { ownerQueryOne, ownerTransaction, ownerRunStatement } from "./db-owner-maintenance";
+import { ownerQueryAll, ownerQueryOne, ownerTransaction, ownerRunStatement } from "./db-owner-maintenance";
+import { updateDatabaseIntegrityStatus, type DatabaseIntegrityProgress } from "./database-integrity";
 
 const CHECKPOINT_TABLE = "db_integrity_checkpoints";
 const DEFAULT_CHECKPOINT_KEY = "database.quick-check";
@@ -27,20 +28,13 @@ const MAX_WORK_UNITS = 64;
 
 export type IncrementalIntegrityPhase = "running" | "complete" | "cancelled" | "timed_out" | "unavailable";
 
-export interface IncrementalIntegrityProgress {
+export interface IncrementalIntegrityProgress extends DatabaseIntegrityProgress {
 	readonly checkpointKey: string;
 	readonly phase: IncrementalIntegrityPhase;
-	readonly checkedTables: number;
-	readonly failedTables: number;
-	readonly remainingTables: number;
-	readonly lastTable: string | null;
-	readonly pagesChecked: number;
-	readonly bytesChecked: number;
-	readonly elapsedMs: number;
-	readonly ownerQueueWaitMs: number;
-	readonly ownerLaneOccupancyMs: number;
-	readonly memoryRssBytes: number;
-	readonly cancellationReason: string | null;
+	readonly checkedObjects: number;
+	readonly failedObjects: number;
+	readonly remainingObjects: number;
+	readonly lastObject: string | null;
 }
 
 export interface IncrementalIntegrityResult extends IncrementalIntegrityProgress {
@@ -56,6 +50,7 @@ export interface IncrementalIntegrityOptions {
 	readonly maxWorkUnits?: number;
 	readonly signal?: AbortSignal;
 	readonly onProgress?: (progress: IncrementalIntegrityProgress) => void | Promise<void>;
+	readonly onBeforeCheckpointCommit?: () => void | Promise<void>;
 }
 
 interface Checkpoint {
@@ -69,6 +64,8 @@ interface Checkpoint {
 
 interface TableRow {
 	readonly name: string;
+	readonly type: "table" | "index" | "view" | "trigger";
+	readonly cursor: string;
 }
 
 interface NumberRow {
@@ -82,7 +79,10 @@ interface PageCountRow {
 
 interface QuickCheckRow {
 	readonly quick_check?: unknown;
+	readonly integrity_check?: unknown;
 }
+
+const TELEMETRY_INTEGRITY_CURSOR = "\uffff:telemetry_integrity";
 
 function boundedString(value: string | undefined): string {
 	const key = value?.trim() || DEFAULT_CHECKPOINT_KEY;
@@ -183,39 +183,57 @@ async function resetCompleteCheckpoint(owner: DbOwnerClient, key: string, deadli
 
 async function readPageMetrics(
 	owner: DbOwnerClient,
-	deadlineMs: number,
+	deadlineMs: () => number,
 ): Promise<{ readonly pages: number; readonly bytes: number }> {
 	const pageCount = await ownerQueryOne<PageCountRow>(owner, "integrity.page-count", "PRAGMA page_count", [], {
-		deadlineMs,
+		deadlineMs: deadlineMs(),
 	});
 	const pageSize = await ownerQueryOne<PageCountRow>(owner, "integrity.page-size", "PRAGMA page_size", [], {
-		deadlineMs,
+		deadlineMs: deadlineMs(),
 	});
 	const pages = scalar(pageCount?.page_count);
 	return { pages, bytes: pages * scalar(pageSize?.page_size) };
 }
 
-async function nextTable(owner: DbOwnerClient, cursor: string, deadlineMs: number): Promise<TableRow | undefined> {
-	return await ownerQueryOne<TableRow>(
+async function nextObject(
+	owner: DbOwnerClient,
+	cursor: string,
+	deadlineMs: () => number,
+): Promise<TableRow | undefined> {
+	const object = await ownerQueryOne<TableRow>(
 		owner,
-		"integrity.tables.next",
-		`SELECT name FROM sqlite_schema
-		 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-		   AND name <> ? AND name > ?
-		 ORDER BY name LIMIT ?`,
-		[CHECKPOINT_TABLE, cursor, 1],
-		{ deadlineMs },
+		"integrity.objects.next",
+		`SELECT name, type, name || ':' || type AS cursor FROM sqlite_schema
+		 WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+		   AND name <> ? AND (name || ':' || type) > ?
+		   AND type IN ('table', 'index', 'view', 'trigger')
+		 ORDER BY name, type LIMIT 1`,
+		[CHECKPOINT_TABLE, cursor],
+		{ deadlineMs: deadlineMs() },
 	);
+	if (object !== undefined) return object;
+	if (cursor >= TELEMETRY_INTEGRITY_CURSOR) return undefined;
+	const telemetry = await ownerQueryOne<{ readonly name: string }>(
+		owner,
+		"integrity.telemetry.exists",
+		"SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'telemetry_events'",
+		[],
+		{ deadlineMs: deadlineMs() },
+	);
+	return telemetry === undefined
+		? undefined
+		: { name: "telemetry_events", type: "table", cursor: TELEMETRY_INTEGRITY_CURSOR };
 }
 
-async function remainingTables(owner: DbOwnerClient, cursor: string, deadlineMs: number): Promise<number> {
+async function remainingObjects(owner: DbOwnerClient, cursor: string, deadlineMs: number): Promise<number> {
 	const row = await ownerQueryOne<NumberRow>(
 		owner,
-		"integrity.tables.remaining",
-		`SELECT COUNT(*) AS value FROM sqlite_schema
-		 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-		   AND name <> ? AND name > ?`,
-		[CHECKPOINT_TABLE, cursor],
+		"integrity.objects.remaining",
+		`SELECT COUNT(*) + CASE WHEN ? < ? AND EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'telemetry_events') THEN 1 ELSE 0 END AS value FROM sqlite_schema
+		 WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+		   AND name <> ? AND (name || ':' || type) > ?
+		   AND type IN ('table', 'index', 'view', 'trigger')`,
+		[cursor, TELEMETRY_INTEGRITY_CURSOR, CHECKPOINT_TABLE, cursor],
 		{ deadlineMs },
 	);
 	return scalar(row?.value);
@@ -224,14 +242,14 @@ async function remainingTables(owner: DbOwnerClient, cursor: string, deadlineMs:
 async function persistTable(
 	owner: DbOwnerClient,
 	key: string,
-	table: string,
+	object: string,
 	checkpoint: Checkpoint,
 	metrics: { readonly pages: number; readonly bytes: number },
 	failed: boolean,
 	deadlineMs: number,
 ): Promise<Checkpoint> {
 	const next: Checkpoint = {
-		cursor: table,
+		cursor: object,
 		checkedTables: checkpoint.checkedTables + 1,
 		failedTables: checkpoint.failedTables + (failed ? 1 : 0),
 		pagesChecked: checkpoint.pagesChecked + metrics.pages,
@@ -283,7 +301,7 @@ function progressFrom(
 	phase: IncrementalIntegrityPhase,
 	checkpoint: Checkpoint,
 	remaining: number,
-	lastTable: string | null,
+	lastObject: string | null,
 	elapsedMs: number,
 	ownerQueueWaitMs: number,
 	ownerLaneOccupancyMs: number,
@@ -292,16 +310,16 @@ function progressFrom(
 	return {
 		checkpointKey: key,
 		phase,
-		checkedTables: checkpoint.checkedTables,
-		failedTables: checkpoint.failedTables,
-		remainingTables: remaining,
-		lastTable,
-		pagesChecked: checkpoint.pagesChecked,
-		bytesChecked: checkpoint.bytesChecked,
+		checkedObjects: checkpoint.checkedTables,
+		failedObjects: checkpoint.failedTables,
+		remainingObjects: remaining,
+		lastObject,
+		databasePagesObserved: checkpoint.pagesChecked,
+		databaseBytesObserved: checkpoint.bytesChecked,
 		elapsedMs,
-		ownerQueueWaitMs,
+		ownerRequestLatencyMs: ownerQueueWaitMs,
 		ownerLaneOccupancyMs,
-		memoryRssBytes: process.memoryUsage().rss,
+		daemonMemoryRssBytes: process.memoryUsage().rss,
 		cancellationReason,
 	};
 }
@@ -339,24 +357,35 @@ export async function runIncrementalDatabaseIntegrityCheck(
 	};
 	let lastTable: string | null = null;
 	const errors: string[] = [];
+	class IntegrityRunBudgetError extends Error {
+		constructor() {
+			super("incremental integrity run budget exhausted");
+			this.name = "IntegrityRunBudgetError";
+		}
+	}
+	const remainingBudget = (): number => {
+		const remaining = runBudgetMs - (Date.now() - startedAt);
+		if (remaining < 1) throw new IntegrityRunBudgetError();
+		return Math.min(ownerDeadlineMs, Math.floor(remaining));
+	};
 	const emit = async (phase: IncrementalIntegrityPhase, reason: string | null): Promise<void> => {
-		const remaining = await remainingTables(options.owner, checkpoint.cursor, ownerDeadlineMs).catch(() => 0);
-		await options.onProgress?.(
-			progressFrom(
-				key,
-				phase,
-				checkpoint,
-				remaining,
-				lastTable,
-				Date.now() - startedAt,
-				queueWaitMs,
-				ownerOccupancyMs,
-				reason,
-			),
+		const remaining = await remainingObjects(options.owner, checkpoint.cursor, remainingBudget()).catch(() => 0);
+		const progress = progressFrom(
+			key,
+			phase,
+			checkpoint,
+			remaining,
+			lastTable,
+			Date.now() - startedAt,
+			queueWaitMs,
+			ownerOccupancyMs,
+			reason,
 		);
+		updateDatabaseIntegrityStatus(progress, errors, options.owner);
+		await options.onProgress?.(progress);
 	};
 	const progressSnapshot = async (): Promise<IncrementalIntegrityProgress> => {
-		const remaining = await remainingTables(options.owner, checkpoint.cursor, ownerDeadlineMs).catch(() => 0);
+		const remaining = await remainingObjects(options.owner, checkpoint.cursor, remainingBudget()).catch(() => 0);
 		return progressFrom(
 			key,
 			phase,
@@ -372,12 +401,12 @@ export async function runIncrementalDatabaseIntegrityCheck(
 
 	try {
 		const setupStartedAt = Date.now();
-		await ensureCheckpoint(options.owner, key, ownerDeadlineMs);
+		await ensureCheckpoint(options.owner, key, remainingBudget());
 		ownerOccupancyMs += Date.now() - setupStartedAt;
-		checkpoint = await readCheckpoint(options.owner, key, ownerDeadlineMs);
+		checkpoint = await readCheckpoint(options.owner, key, remainingBudget());
 		if (checkpoint.status === "complete") {
-			await resetCompleteCheckpoint(options.owner, key, ownerDeadlineMs);
-			checkpoint = await readCheckpoint(options.owner, key, ownerDeadlineMs);
+			await resetCompleteCheckpoint(options.owner, key, remainingBudget());
+			checkpoint = await readCheckpoint(options.owner, key, remainingBudget());
 		}
 		await emit("running", null);
 
@@ -389,58 +418,115 @@ export async function runIncrementalDatabaseIntegrityCheck(
 				await emit("cancelled", "aborted before the next table checkpoint");
 				return { ...(await progressSnapshot()), errors };
 			}
-			if (Date.now() - startedAt >= runBudgetMs) {
+			if (runBudgetMs - (Date.now() - startedAt) < 1) {
 				phase = "timed_out";
-				cancellationReason = "maintenance run budget exhausted at a table checkpoint";
-				await emit("timed_out", "maintenance run budget exhausted at a table checkpoint");
+				cancellationReason = "maintenance run budget exhausted at an object checkpoint";
+				await emit("timed_out", cancellationReason);
 				return { ...(await progressSnapshot()), errors };
 			}
 			const queryStartedAt = Date.now();
-			const table = await nextTable(options.owner, checkpoint.cursor, ownerDeadlineMs);
+			const table = await nextObject(options.owner, checkpoint.cursor, remainingBudget);
 			queueWaitMs += Math.max(0, Date.now() - queryStartedAt);
 			if (table === undefined) {
-				await markComplete(options.owner, key, ownerDeadlineMs);
+				await markComplete(options.owner, key, remainingBudget());
 				checkpoint = { ...checkpoint, status: "complete" };
 				phase = "complete";
 				await emit("complete", null);
 				return { ...(await progressSnapshot()), errors };
 			}
-			lastTable = table.name;
+			lastTable = `${table.type}:${table.name}`;
 			const scanStartedAt = Date.now();
-			const row = await ownerQueryOne<QuickCheckRow>(
-				options.owner,
-				"integrity.quick-check.table",
-				`PRAGMA quick_check(${escapeIdentifier(table.name)})`,
-				[],
-				{ deadlineMs: ownerDeadlineMs, estimatedWorkUnits: 1 },
-			);
+			const row =
+				table.type === "table"
+					? await ownerQueryOne<QuickCheckRow>(
+							options.owner,
+							`integrity.${table.type}.check`,
+							`PRAGMA ${table.cursor === TELEMETRY_INTEGRITY_CURSOR ? "integrity_check" : "quick_check"}(${escapeIdentifier(table.name)})`,
+							[],
+							{ deadlineMs: remainingBudget(), estimatedWorkUnits: 1 },
+						)
+					: await ownerQueryOne<{ sql?: unknown }>(
+							options.owner,
+							`integrity.${table.type}.check`,
+							"SELECT sql FROM sqlite_schema WHERE type = ? AND name = ?",
+							[table.type, table.name],
+							{ deadlineMs: remainingBudget(), estimatedWorkUnits: 1 },
+						);
 			ownerOccupancyMs += Date.now() - scanStartedAt;
-			const message = text(row?.quick_check);
-			const failed = message !== "ok";
+			let message =
+				table.type === "table"
+					? text((row as QuickCheckRow | undefined)?.quick_check ?? (row as QuickCheckRow | undefined)?.integrity_check)
+					: (row as { sql?: unknown } | undefined)?.sql === undefined
+						? ""
+						: "ok";
+			let failed = message !== "ok";
+			if (table.cursor === TELEMETRY_INTEGRITY_CURSOR) {
+				const indexes = await ownerQueryAll<{ readonly name: string }>(
+					options.owner,
+					"integrity.telemetry.indexes",
+					"SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'telemetry_events' AND sql IS NOT NULL ORDER BY name",
+					[],
+					{ deadlineMs: remainingBudget(), estimatedWorkUnits: 1 },
+				);
+				if (failed && indexes.length > 0) {
+					await ownerTransaction(
+						options.owner,
+						"integrity.telemetry.reindex",
+						indexes.map((index) => ownerRunStatement(`REINDEX ${escapeIdentifier(index.name)}`)),
+						{ deadlineMs: remainingBudget(), estimatedWorkUnits: Math.min(MAX_WORK_UNITS, indexes.length + 2) },
+					);
+					const verification = await ownerQueryOne<QuickCheckRow>(
+						options.owner,
+						"integrity.telemetry.verify",
+						`PRAGMA integrity_check(${escapeIdentifier(table.name)})`,
+						[],
+						{ deadlineMs: remainingBudget(), estimatedWorkUnits: 1 },
+					);
+					message = text(verification?.integrity_check);
+					failed = message !== "ok";
+				}
+			}
 			if (failed && message.length > 0) errors.push(`${table.name}: ${message}`);
 			const metricStartedAt = Date.now();
-			const metrics = await readPageMetrics(options.owner, ownerDeadlineMs);
+			const metrics = await readPageMetrics(options.owner, remainingBudget);
 			ownerOccupancyMs += Date.now() - metricStartedAt;
-			checkpoint = await persistTable(options.owner, key, table.name, checkpoint, metrics, failed, ownerDeadlineMs);
+			await options.onBeforeCheckpointCommit?.();
+			checkpoint = await persistTable(options.owner, key, table.cursor, checkpoint, metrics, failed, remainingBudget());
 			processedInRun += 1;
 			await emit("running", null);
 		}
-		const remaining = await remainingTables(options.owner, checkpoint.cursor, ownerDeadlineMs);
+		const remaining = await remainingObjects(options.owner, checkpoint.cursor, remainingBudget());
 		if (remaining === 0) {
-			await markComplete(options.owner, key, ownerDeadlineMs);
+			await markComplete(options.owner, key, remainingBudget());
 			checkpoint = { ...checkpoint, status: "complete" };
 			phase = "complete";
 			await emit("complete", null);
 			return { ...(await progressSnapshot()), errors };
 		}
-		cancellationReason = "maintenance table budget exhausted at a table checkpoint";
+		cancellationReason = "maintenance object budget exhausted at an object checkpoint";
 		await emit("running", cancellationReason);
 		return { ...(await progressSnapshot()), errors };
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
-		phase = isDeadline(error) ? "timed_out" : "unavailable";
+		phase = isDeadline(error) || error instanceof IntegrityRunBudgetError ? "timed_out" : "unavailable";
 		cancellationReason = reason;
-		await emit(phase, reason);
+		try {
+			await emit(phase, reason);
+		} catch {
+			const progress = progressFrom(
+				key,
+				phase,
+				checkpoint,
+				0,
+				lastTable,
+				Date.now() - startedAt,
+				queueWaitMs,
+				ownerOccupancyMs,
+				reason,
+			);
+			updateDatabaseIntegrityStatus(progress, [...errors, reason], options.owner);
+			return { ...progress, errors: [...errors, reason] };
+		}
 		return { ...(await progressSnapshot()), errors: [...errors, reason] };
 	}
 }

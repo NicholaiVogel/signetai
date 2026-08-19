@@ -2500,19 +2500,22 @@ async function main() {
 					},
 				});
 				logger.info("startup-recovery", "Incremental database integrity slice complete", { ...result });
-				if (result.phase === "unavailable" || result.failedTables > 0) {
+				if (result.phase === "unavailable" || result.failedObjects > 0) {
 					logger.error("startup-recovery", "Incremental database integrity found a problem", undefined, {
 						phase: result.phase,
 						errors: result.errors,
-						lastTable: result.lastTable,
+						lastObject: result.lastObject,
 					});
 				}
-				if (result.phase === "running") {
-					const timer = setTimeout(() => {
-						void runIntegritySlice().catch((error) => {
-							logger.error("startup-recovery", "Incremental database integrity continuation rejected", error);
-						});
-					}, 0);
+				if (result.phase === "running" || result.phase === "timed_out" || result.phase === "unavailable") {
+					const timer = setTimeout(
+						() => {
+							void runIntegritySlice().catch((error) => {
+								logger.error("startup-recovery", "Incremental database integrity continuation rejected", error);
+							});
+						},
+						result.phase === "running" ? 0 : 1000,
+					);
 					timer.unref?.();
 				}
 			};
