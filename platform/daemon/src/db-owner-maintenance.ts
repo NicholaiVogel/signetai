@@ -8,7 +8,13 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { DbOwnerDiedError, type DbOwnerClient, type DbOwnerHealth, type DbOwnerJobHandle } from "./db-owner-client";
+import {
+	DbOwnerDeadlineError,
+	DbOwnerDiedError,
+	type DbOwnerClient,
+	type DbOwnerHealth,
+	type DbOwnerJobHandle,
+} from "./db-owner-client";
 import { createDbOwnerClient } from "./db-owner-client";
 import type { DbOwnerParameter, DbOwnerRequest, DbOwnerStatement } from "./db-owner-protocol";
 import { DB_OWNER_MAX_RESULT_BYTES, DB_OWNER_MAX_WORK_UNITS } from "./db-owner-protocol";
@@ -17,6 +23,14 @@ import { setFtsIndexIncomplete } from "./fts-index-state";
 export interface DbOwnerMaintenanceOptions {
 	readonly deadlineMs?: number;
 	readonly estimatedWorkUnits?: number;
+	readonly onOwnerMetrics?: (metrics: DbOwnerMaintenanceMetrics) => void | Promise<void>;
+}
+
+export interface DbOwnerMaintenanceMetrics {
+	/** Time admitted in the daemon queue before the owner child started work. */
+	readonly queueAdmissionMs: number;
+	/** Execution time measured inside the owner child process. */
+	readonly ownerExecutionMs: number;
 }
 
 const DEFAULT_OWNER_DEADLINE_MS = 5_000;
@@ -47,7 +61,31 @@ async function runOwnerJob<Result>(
 	options: DbOwnerMaintenanceOptions = {},
 ): Promise<Result> {
 	const handle: DbOwnerJobHandle<Result> = owner.submit<Result>(request, submitOptions(operation, lane, options));
-	return await handle.result;
+	const result = await handle.result;
+	const metrics = await handle.metrics;
+	if (metrics !== undefined) {
+		await options.onOwnerMetrics?.({
+			queueAdmissionMs: Math.max(0, metrics.startedAt - handle.job.enqueuedAt),
+			ownerExecutionMs: Math.max(0, metrics.finishedAt - metrics.startedAt),
+		});
+	}
+	return result;
+}
+
+async function startOwnerWithinDeadline(owner: DbOwnerClient, deadlineAt: number, operation: string): Promise<void> {
+	const remainingMs = Math.floor(deadlineAt - Date.now());
+	if (remainingMs < 1) throw new DbOwnerDeadlineError(operation);
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			owner.start(),
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new DbOwnerDeadlineError(operation)), remainingMs);
+			}),
+		]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
 }
 
 /** Run an idempotent maintenance request once more after an owner crash. */
@@ -57,12 +95,19 @@ export async function runOwnerMaintenanceWithRetry<Result>(
 	operation: string,
 	options: DbOwnerMaintenanceOptions = {},
 ): Promise<Result> {
+	const runBudgetMs = options.deadlineMs ?? DEFAULT_OWNER_DEADLINE_MS;
+	const deadlineAt = Date.now() + runBudgetMs;
+	const attemptOptions = (): DbOwnerMaintenanceOptions => {
+		const remainingMs = Math.floor(deadlineAt - Date.now());
+		if (remainingMs < 1) throw new DbOwnerDeadlineError(operation);
+		return { ...options, deadlineMs: remainingMs };
+	};
 	try {
-		return await runOwnerJob(owner, request, operation, "maintenance", options);
+		return await runOwnerJob(owner, request, operation, "maintenance", attemptOptions());
 	} catch (error) {
 		if (!(error instanceof DbOwnerDiedError)) throw error;
-		await owner.start();
-		return await runOwnerJob(owner, request, operation, "maintenance", options);
+		await startOwnerWithinDeadline(owner, deadlineAt, operation);
+		return await runOwnerJob(owner, request, operation, "maintenance", attemptOptions());
 	}
 }
 

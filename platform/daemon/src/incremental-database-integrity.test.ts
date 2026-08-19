@@ -4,7 +4,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbOwnerClient } from "./db-owner-client";
-import { runIncrementalDatabaseIntegrityCheck } from "./incremental-database-integrity";
+import {
+	runIncrementalDatabaseIntegrityCheck,
+	type IncrementalIntegrityProgress,
+} from "./incremental-database-integrity";
 import { getDatabaseIntegrityStatus } from "./database-integrity";
 
 const resources: Array<{ readonly directory: string; readonly owner: ReturnType<typeof createDbOwnerClient> }> = [];
@@ -48,7 +51,8 @@ describe("incremental database integrity maintenance (#1683)", () => {
 		expect(first.lastObject).toBe("table:alpha");
 		expect(first.databasePagesObserved).toBeGreaterThan(0);
 		expect(first.databaseBytesObserved).toBeGreaterThan(0);
-		expect(first.daemonMemoryRssBytes).toBeGreaterThan(0);
+		expect(first.ownerQueueAdmissionMs).toBeGreaterThanOrEqual(0);
+		expect(first.ownerExecutionMs).toBeGreaterThanOrEqual(0);
 
 		const second = await runIncrementalDatabaseIntegrityCheck({
 			owner: database.owner,
@@ -144,35 +148,51 @@ describe("incremental database integrity maintenance (#1683)", () => {
 		expect(result.checkedObjects).toBeGreaterThanOrEqual(7);
 	});
 
-	it("resumes from a durable boundary after the owner dies before checkpoint commit", async () => {
+	it("resumes from the committed frontier without re-querying it after interruption", async () => {
 		const database = makeDatabase();
 		await database.owner.start();
-		let interrupted = false;
+		const controller = new AbortController();
+		const scans: string[] = [];
+		let firstFrontierCommitted = false;
 		const first = await runIncrementalDatabaseIntegrityCheck({
 			owner: database.owner,
 			checkpointKey: "test.integrity.owner-interruption",
-			tablesPerRun: 1,
-			onBeforeCheckpointCommit: async () => {
-				if (interrupted) return;
-				interrupted = true;
-				const pid = database.owner.health().pid;
-				if (pid !== null) process.kill(pid, "SIGKILL");
-				await database.owner.close();
-				await new Promise((resolve) => setTimeout(resolve, 25));
+			tablesPerRun: 3,
+			onObjectScan: (object) => {
+				scans.push(`${object.type}:${object.name}`);
 			},
+			onProgress: async (progress) => {
+				if (progress.checkedObjects === 1 && !firstFrontierCommitted) {
+					firstFrontierCommitted = true;
+					controller.abort();
+					await database.owner.close();
+				}
+			},
+			signal: controller.signal,
 		});
-		expect(first.phase).toBe("unavailable");
-		expect(first.checkedObjects).toBe(0);
+		expect(first.phase).toBe("cancelled");
+		expect(first.checkedObjects).toBe(1);
+		expect(first.lastObject).toBe("table:alpha");
 
 		const freshOwner = createDbOwnerClient({ dbPath: database.path });
 		resources.push({ directory: database.directory, owner: freshOwner });
 		await freshOwner.start();
+		const resumedProgress: IncrementalIntegrityProgress[] = [];
 		const resumed = await runIncrementalDatabaseIntegrityCheck({
 			owner: freshOwner,
 			checkpointKey: "test.integrity.owner-interruption",
 			tablesPerRun: 3,
+			onObjectScan: (object) => {
+				scans.push(`${object.type}:${object.name}`);
+			},
+			onProgress: (progress) => {
+				resumedProgress.push(progress);
+			},
 		});
+		expect(resumedProgress[0]?.lastObject).toBe("table:alpha");
+		expect(resumedProgress[0]?.checkedObjects).toBe(1);
 		expect(resumed.phase).toBe("complete");
 		expect(resumed.checkedObjects).toBe(3);
+		expect(scans.filter((object) => object === "table:alpha")).toHaveLength(1);
 	});
 });

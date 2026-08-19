@@ -60,12 +60,7 @@ import {
 } from "./db-accessor";
 import { type VacuumConversionHandle, startVacuumConversionWorker } from "./db-vacuum";
 import { createDbOwnerClient, type DbOwnerClient, type DbOwnerClientOptions } from "./db-owner-client";
-import {
-	type DbOwnerMaintenance,
-	createDbOwnerMaintenance,
-	ownerRunStatement,
-	registerDbOwnerMaintenance,
-} from "./db-owner-maintenance";
+import { type DbOwnerMaintenance, createDbOwnerMaintenance, registerDbOwnerMaintenance } from "./db-owner-maintenance";
 import { createDeferredRuntimeGate, createDeferredRuntimeScheduler } from "./deferred-runtime-gate";
 import { getQueuePressureSnapshot } from "./diagnostics-queue";
 import { fetchEmbedding } from "./embedding-fetch";

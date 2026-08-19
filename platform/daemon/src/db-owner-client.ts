@@ -7,6 +7,7 @@ import type {
 	DbOwnerCommand,
 	DbOwnerEvent,
 	DbOwnerJob,
+	DbOwnerJobMetrics,
 	DbOwnerLane,
 	DbOwnerRequest,
 	DbOwnerSerializedError,
@@ -87,6 +88,8 @@ export interface DbOwnerSubmitOptions {
 export interface DbOwnerJobHandle<Result> {
 	readonly job: DbOwnerJob;
 	readonly result: Promise<Result>;
+	/** Resolves with owner-side execution timing when the job completes. */
+	readonly metrics?: Promise<DbOwnerJobMetrics | undefined>;
 	readonly cancel: () => void;
 }
 
@@ -145,6 +148,7 @@ interface PendingJob<Result> {
 	readonly resolve: (value: Result | PromiseLike<Result>) => void;
 	readonly reject: (reason?: unknown) => void;
 	readonly timer: ReturnType<typeof setTimeout>;
+	readonly resolveMetrics: (value: DbOwnerJobMetrics | undefined) => void;
 	settled: boolean;
 	dispatched: boolean;
 }
@@ -361,6 +365,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			return;
 		}
 		const pendingJob = pending.get(event.jobId);
+		pendingJob?.resolveMetrics(event.metrics);
 		if (pendingJob?.job.request.kind === "initialize") {
 			initialization = event.outcome === "completed" ? "ready" : "failed";
 		}
@@ -601,6 +606,10 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			request,
 		};
 		let pendingJob: PendingJob<Result> | null = null;
+		let resolveMetrics: (value: DbOwnerJobMetrics | undefined) => void = () => {};
+		const metrics = new Promise<DbOwnerJobMetrics | undefined>((resolve) => {
+			resolveMetrics = resolve;
+		});
 		const result = new Promise<Result>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				const entry = pending.get(job.id);
@@ -615,12 +624,12 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 				});
 				retireOwner(new DbOwnerDiedError(`DB owner killed after deadline for ${job.id}`));
 			}, submitOptions.deadlineMs);
-			pendingJob = { job, resolve, reject, timer, settled: false, dispatched: false };
+			pendingJob = { job, resolve, reject, timer, resolveMetrics, settled: false, dispatched: false };
 			pending.set(job.id, pendingJob as PendingJob<unknown>);
 			if (request.kind === "initialize") initialization = "running";
 			dispatch(job.id);
 		});
-		return { job, result, cancel: () => cancel(job.id) };
+		return { job, result, metrics, cancel: () => cancel(job.id) };
 	}
 
 	function cancel(jobId: string): void {

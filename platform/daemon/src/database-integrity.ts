@@ -32,9 +32,8 @@ export interface DatabaseIntegrityProgress {
 	readonly databasePagesObserved: number;
 	readonly databaseBytesObserved: number;
 	readonly elapsedMs: number;
-	readonly ownerRequestLatencyMs: number;
-	readonly ownerLaneOccupancyMs: number;
-	readonly daemonMemoryRssBytes: number;
+	readonly ownerQueueAdmissionMs: number;
+	readonly ownerExecutionMs: number;
 	readonly cancellationReason: string | null;
 }
 
