@@ -276,12 +276,17 @@ describe("transcript capture status projection (#1670)", () => {
 	it("reads no payload column on the status path", async () => {
 		await enqueue("agent-a", "s1", "2026-08-19T10:00:00.000Z");
 		// Proxy the ReadDb so every executed SQL string is observable. The
-		// bounded path must never touch transcript_capture_jobs.
+		// bounded path must never touch transcript_capture_jobs. Implement both
+		// get() and all() so the reverted implementation fails the intentional
+		// table-access assertion rather than a mock-shape TypeError.
 		let touchedJobsTable = false;
 		const sqlRecorder = {
-			prepare(sql: string): { get(...args: unknown[]): unknown } {
+			prepare(sql: string): {
+				get(...args: unknown[]): unknown;
+				all(...args: unknown[]): unknown[];
+			} {
 				if (sql.includes("transcript_capture_jobs")) touchedJobsTable = true;
-				return { get: () => ({}) };
+				return { get: () => null, all: () => [] };
 			},
 		};
 		const accessor = getDbAccessor();
@@ -340,17 +345,36 @@ describe("bounded status and diagnostics scale (#1670)", () => {
 			}
 		});
 
+		const median = (values: readonly number[]): number => {
+			const sorted = [...values].sort((left, right) => left - right);
+			return sorted[Math.floor(sorted.length / 2)] ?? Number.POSITIVE_INFINITY;
+		};
+		const measure = async <T>(operation: () => Promise<T>): Promise<{ value: T; elapsed: number }> => {
+			const started = performance.now();
+			const value = await operation();
+			return { value, elapsed: performance.now() - started };
+		};
+
+		// Keep a calibrated copy of the pre-#1670 aggregate in this same
+		// payload-heavy database. A timing-only assertion is too weak on a warm
+		// CI runner: the legacy scan can happen to finish under 50ms at this
+		// scale. The ratio assertion below makes the red/green discriminator
+		// explicit while the hard budget still protects the route contract.
+		const legacyStatusLatencies: number[] = [];
 		const statusLatencies: number[] = [];
 		let status = await getTranscriptCaptureStatus(accessor, "scale-agent");
-		for (let attempt = 0; attempt < 3; attempt += 1) {
-			const started = performance.now();
-			status = await getTranscriptCaptureStatus(accessor, "scale-agent");
-			statusLatencies.push(performance.now() - started);
+		for (let attempt = 0; attempt < 6; attempt += 1) {
+			const legacy = await measure(() => legacyStatusOracle("scale-agent"));
+			const projected = await measure(() => getTranscriptCaptureStatus(accessor, "scale-agent"));
+			legacyStatusLatencies.push(legacy.elapsed);
+			statusLatencies.push(projected.elapsed);
+			status = projected.value;
 		}
 		expect(status.pending).toBe(1_500);
 		expect(status.completed).toBe(500);
 		expect(status.failed).toBe(500);
 		expect(Math.max(...statusLatencies)).toBeLessThan(50);
+		expect(median(legacyStatusLatencies)).toBeGreaterThan(median(statusLatencies) * 2);
 
 		const { Hono } = await import("hono");
 		const { registerPipelineRoutes } = await import("./routes/pipeline-routes");
@@ -364,6 +388,16 @@ describe("bounded status and diagnostics scale (#1670)", () => {
 			httpStatusLatencies.push(performance.now() - started);
 		}
 		expect(Math.max(...httpStatusLatencies)).toBeLessThan(50);
+
+		const legacyDuplicateLatencies: number[] = [];
+		const duplicateLatencies: number[] = [];
+		for (let attempt = 0; attempt < 6; attempt += 1) {
+			const legacy = await measure(legacyDuplicateOracle);
+			const projected = await measure(() => accessor.withReadDbAsync((db) => getDuplicateHealth(db)));
+			legacyDuplicateLatencies.push(legacy.elapsed);
+			duplicateLatencies.push(projected.elapsed);
+		}
+		expect(median(legacyDuplicateLatencies)).toBeGreaterThan(median(duplicateLatencies) * 2);
 
 		const diagnosticsLatencies: number[] = [];
 		let diagnostics = await accessor.withReadDbAsync((db) =>
@@ -450,11 +484,16 @@ describe("duplicate health projection (#1670)", () => {
 		]);
 		let touchedMemoriesTable = false;
 		const sqlRecorder = {
-			prepare(sql: string): { get(...args: unknown[]): unknown } {
+			prepare(sql: string): {
+				get(...args: unknown[]): unknown;
+				all(...args: unknown[]): unknown[];
+			} {
 				if (/FROM\s+memories\b/.test(sql) && !sql.includes("memories_")) {
 					touchedMemoriesTable = true;
 				}
-				return { get: () => ({ exact_dupes: 0, exact_clusters: 0, n: 0 }) };
+				// Keep both statement methods implemented so reverting the fix
+				// reports the forbidden payload-table read, not a fake TypeError.
+				return { get: () => ({ totalActive: 0, exactDuplicates: 0, exactClusters: 0 }), all: () => [] };
 			},
 		};
 		getDuplicateHealth(sqlRecorder as unknown as Parameters<typeof getDuplicateHealth>[0]);
