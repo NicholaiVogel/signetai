@@ -5,7 +5,7 @@ import { dlopen, ptr, read } from "bun:ffi";
 import { readdirSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { recordEventLoopHeartbeat, recordEventLoopLag } from "./db-observability";
+import { establishEventLoopHeartbeatBaseline, recordEventLoopHeartbeat, recordEventLoopLag } from "./db-observability";
 import { logger } from "./logger";
 import { reportEventLoopLag, tickPressureState } from "./system-pressure";
 
@@ -414,7 +414,7 @@ export function startEventLoopMonitor(intervalMs = 2000): void {
 		clearInterval(eventLoopTimer);
 	}
 	let lastTick = Date.now();
-	recordEventLoopHeartbeat(lastTick, intervalMs);
+	establishEventLoopHeartbeatBaseline(lastTick, intervalMs);
 	eventLoopTimer = setInterval(() => {
 		const now = Date.now();
 		const lag = now - lastTick - intervalMs;

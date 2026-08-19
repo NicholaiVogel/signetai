@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { getEventLoopLiveness, recordEventLoopHeartbeat, resetDbObservability } from "./db-observability";
 import {
 	classifyMacOsProcPidInfoResult,
 	getResourceSnapshot,
@@ -12,6 +13,7 @@ import type { ResourceSnapshot } from "./resource-monitor";
 
 afterEach(() => {
 	stopResourceMonitors();
+	resetDbObservability();
 });
 
 describe("getResourceSnapshot", () => {
@@ -164,6 +166,41 @@ describe("startEventLoopMonitor / stopResourceMonitors", () => {
 		startEventLoopMonitor(500);
 		expect(() => startEventLoopMonitor(500)).not.toThrow();
 		stopResourceMonitors();
+	});
+
+	it("uses the first startup timestamp as the heartbeat baseline", () => {
+		const realNow = Date.now;
+		let now = 1_000;
+		Date.now = () => now;
+		try {
+			resetDbObservability();
+			now = 5_000;
+			startEventLoopMonitor(2_000);
+
+			expect(getEventLoopLiveness(now)).toMatchObject({ status: "ok", stallMs: 0 });
+		} finally {
+			Date.now = realNow;
+		}
+	});
+
+	it("uses the first restart timestamp as the heartbeat baseline", () => {
+		const realNow = Date.now;
+		let now = 1_000;
+		Date.now = () => now;
+		try {
+			resetDbObservability();
+			startEventLoopMonitor(2_000);
+			recordEventLoopHeartbeat(3_500, 2_000);
+			expect(getEventLoopLiveness(3_500).status).toBe("degraded");
+
+			stopResourceMonitors();
+			now = 50_000;
+			startEventLoopMonitor(2_000);
+
+			expect(getEventLoopLiveness(now)).toMatchObject({ status: "ok", stallMs: 0 });
+		} finally {
+			Date.now = realNow;
+		}
 	});
 });
 

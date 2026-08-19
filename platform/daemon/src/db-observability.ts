@@ -156,6 +156,14 @@ export function computeEventLoopStall(
 	};
 }
 
+/** Establish a monitor-era baseline without classifying the preceding gap. */
+export function establishEventLoopHeartbeatBaseline(firedAtMs: number, heartbeatIntervalMs: number): void {
+	eventLoopHeartbeatAtMs = firedAtMs;
+	eventLoopHeartbeatIntervalMs = heartbeatIntervalMs;
+	eventLoopLatchedStatus = "ok";
+	eventLoopLatchedStallMs = 0;
+}
+
 /** Record a fire from the shared event-loop monitor interval. */
 export function recordEventLoopHeartbeat(firedAtMs: number, heartbeatIntervalMs: number): void {
 	const observed = computeEventLoopStall(eventLoopHeartbeatAtMs, firedAtMs, heartbeatIntervalMs);
@@ -234,10 +242,7 @@ export function resetDbObservability(): void {
 	timedOut = 0;
 	failed = 0;
 	completed = 0;
-	eventLoopHeartbeatAtMs = Date.now();
-	eventLoopHeartbeatIntervalMs = DEFAULT_EVENT_LOOP_HEARTBEAT_INTERVAL_MS;
-	eventLoopLatchedStatus = "ok";
-	eventLoopLatchedStallMs = 0;
+	establishEventLoopHeartbeatBaseline(Date.now(), DEFAULT_EVENT_LOOP_HEARTBEAT_INTERVAL_MS);
 	queue = {
 		readDepth: 0,
 		readMaxDepth: 0,
