@@ -34,7 +34,7 @@ surrounding code determine ordinary implementation choices.
 | CLI and apps | `surfaces` | `surfaces/AGENTS.md`; area source and tests; `web/docs/src/content/docs/dashboard.md` for dashboard work |
 | Reusable packages | `libs`, `plugins`, `dist/signetai` | area `AGENTS.md`, package manifest, and consumers |
 | Benchmarks | `memorybench` | `memorybench/AGENTS.md` and its focused READMEs |
-| Marketing and docs site | `web` | `web/AGENTS.md`, local package scripts, and content source |
+| Marketing and docs site | `web` | `web/AGENTS.md`; for documentation-site work also read `web/docs/AGENTS.md`, local package scripts, and content source |
 | Repo structure and risk | repository root | `repo.map.yaml`, root `package.json` |
 
 Do not mirror package lists, build chains, routes, or schemas into guidance
