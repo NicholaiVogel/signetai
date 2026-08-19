@@ -21,4 +21,13 @@ describe("daemon production DB owner wiring", () => {
 		expect(source).toContain("			telemetry,\n			dbOwnerMaintenanceHandle ?? undefined,\n		);");
 		expect(source).toContain("ownerMaintenance: dbOwnerMaintenanceHandle ?? undefined,");
 	});
+
+	it("keeps post-ready integrity maintenance incremental and checkpointed", async () => {
+		const source = await Bun.file(daemonSourceUrl).text();
+
+		expect(source).toContain("runIncrementalDatabaseIntegrityCheck");
+		expect(source).toContain('checkpointKey: "database.quick-check"');
+		expect(source).toContain("INCREMENTAL_INTEGRITY_TABLES_PER_RUN");
+		expect(source).not.toContain("runDeferredIntegrityCheck");
+	});
 });

@@ -48,7 +48,7 @@ import {
 } from "./config-migration";
 import { listConnectors } from "./connectors/registry";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
-import { runDeferredIntegrityCheck } from "./database-integrity";
+import { runIncrementalDatabaseIntegrityCheck } from "./incremental-database-integrity";
 import {
 	closeDbAccessor,
 	getDbAccessor,
@@ -204,7 +204,6 @@ import {
 	stopActiveTelemetry,
 	telemetryDisabledByEnv,
 } from "./telemetry";
-import { insertHistoryEvent } from "./transactions";
 import { type TranscriptCaptureWorkerHandle, startTranscriptCaptureWorker } from "./transcript-capture-worker";
 import { type TranscriptRecoveryWorkerHandle, startTranscriptRecoveryWorker } from "./transcript-recovery-worker";
 
@@ -2457,12 +2456,12 @@ async function main() {
 
 	const BIND_MAX_DELAY_MS = 30_000;
 	const BIND_RETRY_BASE_MS = 1000;
-	// A whole-database quick_check can legitimately exceed the ordinary job
-	// budget on an existing workspace. Run it in the killable child with a
-	// bounded scan budget, while keeping each owner maintenance request on the
-	// ordinary 30s runaway-job deadline and preventing pipeline contention.
-	const DEFERRED_INTEGRITY_TIMEOUT_MS = 90_000;
-	const DEFERRED_INTEGRITY_OWNER_TIMEOUT_MS = 30_000;
+	// SQLite's global quick_check is one opaque native operation. Integrity
+	// maintenance therefore advances one table at a time and checkpoints after
+	// every owner job instead of monopolizing the post-ready owner lane.
+	const INCREMENTAL_INTEGRITY_TABLES_PER_RUN = 8;
+	const INCREMENTAL_INTEGRITY_RUN_BUDGET_MS = 5_000;
+	const INCREMENTAL_INTEGRITY_OWNER_DEADLINE_MS = 1_000;
 
 	const onListening = (info: { address: string; port: number }): void => {
 		logger.info("daemon", "Server listening", {
@@ -2487,72 +2486,42 @@ async function main() {
 			logFdSnapshot("server-ready");
 			writeDaemonLifecycle(AGENTS_DIR, buildLifecycleRecord("running"));
 			vacuumConversionHandle = startVacuumConversionWorker(getDbAccessor(), { owner: dbOwnerClient ?? undefined });
-			await runDeferredIntegrityCheck(getDbAccessor(), MEMORY_DB, {
-				timeoutMs: DEFERRED_INTEGRITY_TIMEOUT_MS,
-				ownerTimeoutMs: DEFERRED_INTEGRITY_OWNER_TIMEOUT_MS,
-				owner: dbOwnerClient ?? undefined,
-				ownerAudit: (indexes, detectionMessages) => {
-					const auditId = createHash("sha256")
-						.update(JSON.stringify({ indexes, detectionMessages }))
-						.digest("hex")
-						.slice(0, 32);
-					return [
-						ownerRunStatement(
-							`INSERT OR IGNORE INTO memory_history
-						 (id, memory_id, event, old_content, new_content, changed_by, reason, metadata, created_at, actor_type)
-						 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-							[
-								auditId,
-								"system",
-								"none",
-								null,
-								null,
-								"daemon",
-								"deferred database integrity repair",
-								JSON.stringify({ repairAction: "reindex-telemetry", indexes, detectionMessages }),
-								new Date().toISOString(),
-								"daemon",
-							],
-						),
-					];
-				},
-				audit: (db, indexes) => {
-					try {
-						insertHistoryEvent(db, {
-							memoryId: "system",
-							event: "none",
-							oldContent: null,
-							newContent: null,
-							changedBy: "daemon",
-							reason: "deferred database integrity repair",
-							metadata: JSON.stringify({ repairAction: "reindex-telemetry", indexes }),
-							createdAt: new Date().toISOString(),
-							actorType: "daemon",
-						});
-					} catch (error) {
-						if (process.env.SIGNET_ALLOW_UNAUDITED_TELEMETRY_REPAIR !== "1") throw error;
-						logger.error("startup-recovery", "Telemetry index repair committed without audit", undefined, {
-							error: error instanceof Error ? error.message : String(error),
-							indexes,
-						});
-					}
-				},
-			})
-				.then((status) => {
-					if (status.state === "corrupt" || status.state === "unavailable") {
-						logger.error("startup-recovery", "Database integrity failed after readiness", undefined, {
-							state: status.state,
-							phase: status.phase,
-							quickCheck: status.quickCheck.messages,
-							telemetryCheck: status.telemetryCheck.messages,
-							guidance:
-								"Stop the daemon, back up the database, and run the operator integrity repair flow before restarting.",
-						});
-					}
-				})
-				.catch((error) => {
-					logger.error("startup-recovery", "Deferred database integrity check rejected", error);
+			const owner = dbOwnerClient;
+			if (owner === null) throw new Error("DB owner is unavailable for incremental integrity maintenance");
+			const runIntegritySlice = async (): Promise<void> => {
+				const result = await runIncrementalDatabaseIntegrityCheck({
+					owner,
+					checkpointKey: "database.quick-check",
+					tablesPerRun: INCREMENTAL_INTEGRITY_TABLES_PER_RUN,
+					runBudgetMs: INCREMENTAL_INTEGRITY_RUN_BUDGET_MS,
+					ownerDeadlineMs: INCREMENTAL_INTEGRITY_OWNER_DEADLINE_MS,
+					onProgress: (progress): void => {
+						logger.info("startup-recovery", "Incremental database integrity progress", { ...progress });
+					},
 				});
+				logger.info("startup-recovery", "Incremental database integrity slice complete", { ...result });
+				if (result.phase === "unavailable" || result.failedTables > 0) {
+					logger.error("startup-recovery", "Incremental database integrity found a problem", undefined, {
+						phase: result.phase,
+						errors: result.errors,
+						lastTable: result.lastTable,
+					});
+				}
+				if (result.phase === "running") {
+					const timer = setTimeout(() => {
+						void runIntegritySlice().catch((error) => {
+							logger.error("startup-recovery", "Incremental database integrity continuation rejected", error);
+						});
+					}, 0);
+					timer.unref?.();
+				}
+			};
+			await runIntegritySlice();
+			if (owner.health().state === "failed") {
+				logger.error("startup-recovery", "DB owner failed during incremental integrity maintenance", undefined, {
+					ownerState: owner.health().state,
+				});
+			}
 
 			const healthStampPath = join(DAEMON_DIR, "last-healthy-start");
 			try {
