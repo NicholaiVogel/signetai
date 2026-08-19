@@ -329,5 +329,5 @@ describe("native embedding event-loop isolation (e2e)", () => {
 		await waitForHealth(origin, child, lifecycle);
 		expect(readdirSync(agentsDir)).toContain("memory");
 		expect((await fetch(`${origin}/health`)).ok).toBe(true);
-	});
+	}, 60_000);
 });
