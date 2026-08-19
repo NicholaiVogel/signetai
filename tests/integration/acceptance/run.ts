@@ -180,6 +180,9 @@ function markPhase(phase: string): void {
 	phaseMarks.push({ at: Date.now(), phase });
 }
 
+// Module-level daemon handle so the self-destruct timer can always reach it.
+let daemonRef: ChildProcess | null = null;
+
 async function main(): Promise<number> {
 	const workspace = mkdtempSync(join(tmpdir(), "signet-phase-d-"));
 	const agentsDir = join(workspace, "agents");
@@ -327,6 +330,7 @@ async function main(): Promise<number> {
 			},
 			stdio: ["ignore", "pipe", "pipe"],
 		});
+		daemonRef = daemon;
 		daemon.stdout?.on("data", (chunk: Buffer) => stdoutChunks.push(chunk.toString()));
 		daemon.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString()));
 
@@ -574,5 +578,18 @@ async function main(): Promise<number> {
 }
 
 if (import.meta.main) {
+	// Hard wall-clock self-destruct: a wedged daemon (or a hung await anywhere
+	// in the harness) must never wedge CI. The deadline covers every phase;
+	// SIGKILL to the daemon + exit 124 so the timeout is unmistakable in logs.
+	const SELF_DESTRUCT_MS = (args.scale === "smoke" ? 9 : 16) * 60_000;
+	const selfDestruct = setTimeout(() => {
+		console.error(
+			`[phase-d] SELF-DESTRUCT: exceeded ${SELF_DESTRUCT_MS / 60_000}min wall clock — killing daemon and aborting`,
+		);
+		if (daemonRef && !daemonRef.killed) daemonRef.kill("SIGKILL");
+		process.exit(124);
+	}, SELF_DESTRUCT_MS);
+	selfDestruct.unref?.();
+
 	process.exitCode = await main();
 }
