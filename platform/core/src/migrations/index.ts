@@ -146,6 +146,7 @@ import { up as dreamingHeadManifest } from "./137-dreaming-head-manifest";
 import { up as boundedStatusProjections } from "./138-bounded-status-projections";
 import { up as nativeSourceSyncState } from "./139-native-source-sync-state";
 import { up as transcriptRecoveryFrontier } from "./140-transcript-recovery-frontier";
+import { up as sourceSyncCheckpoints } from "./141-source-sync-checkpoints";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1288,6 +1289,12 @@ export const MIGRATIONS: readonly Migration[] = [
 		name: "transcript-recovery-frontier",
 		up: transcriptRecoveryFrontier,
 		artifacts: { tables: ["transcript_recovery_frontiers"] },
+	},
+	{
+		version: 141,
+		name: "source-sync-checkpoints",
+		up: sourceSyncCheckpoints,
+		artifacts: { tables: ["source_sync_checkpoints"] },
 	},
 ];
 
