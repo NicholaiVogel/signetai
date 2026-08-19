@@ -629,7 +629,7 @@ async function healSentinelCapturedAt(
 					[stampedAt, stampedAt, agentId, filePath.replace(/\\/g, "/")],
 				),
 			],
-			{ operation: "sources.artifact-heal", lane: "write", estimatedWorkUnits: 1 },
+			{ operation: "sources.artifact-heal", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 1 },
 		);
 		logger.warn("watcher", "Healed pre-epoch captured_at on native memory artifact", {
 			harness,
@@ -838,7 +838,18 @@ export async function indexNativeMemoryFile(
 	}
 
 	const hash = contentFingerprint(content);
-	const persistedHash = await nativeArtifactContentHash(filePath, agentId);
+	let persistedHash: string | null;
+	try {
+		persistedHash = await nativeArtifactContentHash(filePath, agentId);
+	} catch (error) {
+		logger.error(
+			"watcher",
+			"Cannot read native memory artifact persistence state",
+			error instanceof Error ? error : new Error(String(error)),
+			{ path: filePath },
+		);
+		return false;
+	}
 	const obsidian = source.harness === "obsidian" && pattern.kind === "source_obsidian_markdown";
 	const hermes = source.harness === "hermes-agent";
 	const sourceId = obsidian ? (source.sourceId ?? sourceIdForObsidianRoot(source.root)) : (source.sourceId ?? null);
@@ -905,8 +916,40 @@ export async function indexNativeMemoryFile(
 			});
 		}
 		let semanticIndexed = false;
+		let embeddingProviderUnavailable = false;
 		if (obsidian && sourceId) {
-			if (options.sourceGraphEnabled ?? true) {
+			if (options.embeddingConfig && options.fetchEmbedding) {
+				const embeddingResult = await indexObsidianSourceEmbeddingsViaOwner({
+					agentId,
+					sourceId,
+					root: source.root,
+					filePath,
+					content,
+					embeddingConfig: options.embeddingConfig,
+					fetchEmbedding: options.fetchEmbedding,
+				});
+				options.onEmbeddingStatus?.(embeddingResult.status);
+				embeddingProviderUnavailable = embeddingResult.providerUnavailable;
+				if (embeddingProviderUnavailable) {
+					logger.warn("watcher", "embeddings pending - provider down", {
+						path: filePath,
+						retryAfterMs: embeddingResult.retryAfterMs,
+					});
+				}
+				if (embeddingResult.embedded > 0) {
+					logger.info("watcher", "Embedded Obsidian source chunks", {
+						path: filePath,
+						chunks: embeddingResult.chunks,
+						embedded: embeddingResult.embedded,
+						skipped: embeddingResult.skipped,
+					});
+				}
+				semanticIndexed = !embeddingProviderUnavailable;
+			}
+			// A provider outage is source-scoped: persist the artifact, but do not
+			// submit graph work that would amplify every retry before the embedding
+			// gate's source-level backoff expires.
+			if (!embeddingProviderUnavailable && (options.sourceGraphEnabled ?? true)) {
 				await dbOwnerSourceGraphIndex(
 					{
 						agentId,
@@ -927,33 +970,6 @@ export async function indexNativeMemoryFile(
 					},
 				);
 				semanticIndexed = true;
-			}
-			if (options.embeddingConfig && options.fetchEmbedding) {
-				const embeddingResult = await indexObsidianSourceEmbeddingsViaOwner({
-					agentId,
-					sourceId,
-					root: source.root,
-					filePath,
-					content,
-					embeddingConfig: options.embeddingConfig,
-					fetchEmbedding: options.fetchEmbedding,
-				});
-				options.onEmbeddingStatus?.(embeddingResult.status);
-				if (embeddingResult.providerUnavailable) {
-					logger.warn("watcher", "embeddings pending - provider down", {
-						path: filePath,
-						retryAfterMs: embeddingResult.retryAfterMs,
-					});
-				}
-				if (embeddingResult.embedded > 0) {
-					logger.info("watcher", "Embedded Obsidian source chunks", {
-						path: filePath,
-						chunks: embeddingResult.chunks,
-						embedded: embeddingResult.embedded,
-						skipped: embeddingResult.skipped,
-					});
-				}
-				semanticIndexed = !embeddingResult.providerUnavailable;
 			}
 		}
 		indexed.set(key, { contentHash: hash });

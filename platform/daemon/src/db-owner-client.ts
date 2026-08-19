@@ -35,6 +35,21 @@ export const MAX_DB_OWNER_WORK_UNITS = DB_OWNER_MAX_WORK_UNITS;
 export const MAX_DB_OWNER_DEADLINE_MS = DB_OWNER_MAX_DEADLINE_MS;
 export const MAX_DB_OWNER_RESULT_BYTES = DB_OWNER_MAX_RESULT_BYTES;
 
+export interface DbOwnerLaneHealth {
+	readonly state: DbOwnerHealthState;
+	readonly pid: number | null;
+	readonly generation: number;
+	readonly queuedJobs: number;
+	readonly activeJobId: string | null;
+	readonly activeWorkloadClass: DbOwnerWorkloadClass | null;
+	readonly foregroundQueuedJobs: number;
+	readonly maintenanceQueuedJobs: number;
+	readonly foregroundOldestAgeMs: number | null;
+	readonly maintenanceOldestAgeMs: number | null;
+	readonly lastError: string | null;
+	readonly deadlineKills: number;
+}
+
 export interface DbOwnerHealth {
 	/** Process/IPC state. `ready` means transport is usable, not schema-ready. */
 	readonly state: DbOwnerHealthState;
@@ -50,6 +65,11 @@ export interface DbOwnerHealth {
 	readonly activeWorkloadClass: DbOwnerWorkloadClass | null;
 	readonly foregroundOldestAgeMs: number | null;
 	readonly maintenanceOldestAgeMs: number | null;
+	/** Per-owner-lane snapshot; present on the aggregate client health surface. */
+	readonly lanes?: {
+		readonly read: DbOwnerLaneHealth;
+		readonly maintenance: DbOwnerLaneHealth;
+	};
 	readonly lastError: string | null;
 	/** Number of owner processes SIGKILLed by a hard job deadline. */
 	readonly deadlineKills: number;
@@ -212,7 +232,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 
 	function currentHealth(): DbOwnerHealth {
 		const now = Date.now();
-		const jobs = [...pending.values()];
+		const jobs = [...pending.values()].filter((entry) => entry.job.id !== activeJobId);
 		const count = (workloadClass: DbOwnerWorkloadClass): number =>
 			jobs.filter((entry) => entry.job.workloadClass === workloadClass).length;
 		const oldestAge = (workloadClass: DbOwnerWorkloadClass): number | null => {
@@ -230,7 +250,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			databaseReady: initialization === "ready",
 			pid,
 			generation,
-			queuedJobs: pending.size,
+			queuedJobs: jobs.length,
 			foregroundQueuedJobs: count("foreground"),
 			maintenanceQueuedJobs: count("maintenance"),
 			activeJobId,
@@ -271,7 +291,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		if (job === undefined) return;
 		pending.delete(jobId);
 		clearTimeout(job.timer);
-		if (activeJobId === jobId) activeJobId = pending.keys().next().value ?? null;
+		if (activeJobId === jobId) activeJobId = null;
 		callback(job);
 	}
 
@@ -325,6 +345,10 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			startupResolve?.();
 			startupResolve = null;
 			startupReject = null;
+			return;
+		}
+		if (event.type === "started") {
+			if (pending.has(event.jobId)) activeJobId = event.jobId;
 			return;
 		}
 		if (event.type === "fatal") {
@@ -488,7 +512,6 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	}
 
 	function dispatch(jobId: string): void {
-		activeJobId ??= jobId;
 		void start().then(
 			() => {
 				const entry = pending.get(jobId);
@@ -595,7 +618,6 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			pendingJob = { job, resolve, reject, timer, settled: false, dispatched: false };
 			pending.set(job.id, pendingJob as PendingJob<unknown>);
 			if (request.kind === "initialize") initialization = "running";
-			activeJobId ??= job.id;
 			dispatch(job.id);
 		});
 		return { job, result, cancel: () => cancel(job.id) };
@@ -684,6 +706,23 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 		return requestLane === "read" ? readLane : maintenanceLane;
 	}
 
+	function toLaneHealth(lane: DbOwnerHealth): DbOwnerLaneHealth {
+		return {
+			state: lane.state,
+			pid: lane.pid,
+			generation: lane.generation,
+			queuedJobs: lane.queuedJobs,
+			activeJobId: lane.activeJobId,
+			activeWorkloadClass: lane.activeWorkloadClass,
+			foregroundQueuedJobs: lane.foregroundQueuedJobs,
+			maintenanceQueuedJobs: lane.maintenanceQueuedJobs,
+			foregroundOldestAgeMs: lane.foregroundOldestAgeMs,
+			maintenanceOldestAgeMs: lane.maintenanceOldestAgeMs,
+			lastError: lane.lastError,
+			deadlineKills: lane.deadlineKills,
+		};
+	}
+
 	function health(): DbOwnerHealth {
 		const read = readLane.health();
 		const maintenance = maintenanceLane.health();
@@ -713,6 +752,10 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 			activeWorkloadClass: read.activeWorkloadClass ?? maintenance.activeWorkloadClass,
 			foregroundOldestAgeMs: oldestAge(read.foregroundOldestAgeMs, maintenance.foregroundOldestAgeMs),
 			maintenanceOldestAgeMs: oldestAge(read.maintenanceOldestAgeMs, maintenance.maintenanceOldestAgeMs),
+			lanes: {
+				read: toLaneHealth(read),
+				maintenance: toLaneHealth(maintenance),
+			},
 			lastError: read.lastError ?? maintenance.lastError,
 			deadlineKills: read.deadlineKills + maintenance.deadlineKills,
 		};

@@ -176,10 +176,6 @@ export function runDbOwnerWorker(): void {
 		}
 		return undefined;
 	}
-
-	function send(event: DbOwnerEvent): void {
-		process.stdout.write(`${JSON.stringify(event)}\n`);
-	}
 	function bindParameter(value: DbOwnerParameter): unknown {
 		if (typeof value === "object" && value !== null && value.type === "bytes") {
 			return Buffer.from(value.base64, "base64");
@@ -481,6 +477,7 @@ export function runDbOwnerWorker(): void {
 				return;
 			}
 			activeJobId = job.id;
+			send({ type: "started", jobId: job.id, workloadClass: job.workloadClass });
 			try {
 				if (cancelled.delete(job.id)) {
 					result(job.id, "cancelled");

@@ -188,6 +188,7 @@ export interface DbOwnerSerializedError {
 
 export type DbOwnerEvent =
 	| { readonly type: "ready"; readonly pid: number }
+	| { readonly type: "started"; readonly jobId: string; readonly workloadClass: DbOwnerWorkloadClass }
 	| {
 			readonly type: "result";
 			readonly jobId: string;

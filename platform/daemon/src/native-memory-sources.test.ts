@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addObsidianSource, loadSourcesConfig } from "@signet/core";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
+import { resetEmbeddingCircuitBreakers } from "./embedding-circuit-breaker";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
 import {
 	claudeCodeNativeMemorySource,
@@ -24,6 +25,7 @@ describe("native memory sources", () => {
 	let prevSignetAgentId: string | undefined;
 
 	beforeEach(() => {
+		resetEmbeddingCircuitBreakers();
 		dir = mkdtempSync(join(tmpdir(), "signet-native-memory-"));
 		mkdirSync(join(dir, "memory"), { recursive: true });
 		writeFileSync(join(dir, "agent.yaml"), "name: NativeMemoryTest\n");
@@ -35,6 +37,7 @@ describe("native memory sources", () => {
 	});
 
 	afterEach(() => {
+		resetEmbeddingCircuitBreakers();
 		closeDbAccessor();
 		if (prevSignetPath === undefined) {
 			Reflect.deleteProperty(process.env, "SIGNET_PATH");
@@ -591,7 +594,7 @@ describe("native memory sources", () => {
 		writeFileSync(file, "Codex remembered a retryable persistence failure.\n");
 		utimesSync(file, stamp, stamp);
 
-		closeDbAccessor();
+		await closeDbAccessor();
 		expect(await indexNativeMemoryFile(source, file, "agent-native")).toBe(false);
 
 		initDbAccessor(join(dir, "memory", "memories.db"));
@@ -1223,7 +1226,7 @@ describe("native memory sources", () => {
 		const handle = startNativeMemoryBridge([source], {
 			agentId: "agent-native",
 			pollIntervalMs: 0,
-			sourceGraphEnabled: false,
+			sourceGraphEnabled: true,
 			embeddingConfig: { provider: "native", model: "down-model", dimensions: 3, base_url: "" },
 			fetchEmbedding: async (_text, _cfg, _role, options) => {
 				fetches++;
@@ -1241,6 +1244,22 @@ describe("native memory sources", () => {
 			expect(fetches).toBe(1);
 			expect(heartbeats).toBeGreaterThan(0);
 			expect(statuses).toEqual(["embeddings pending - provider down", "embeddings pending - provider down"]);
+
+			const semanticRows = getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare(
+							`SELECT
+							(SELECT COUNT(*) FROM entities WHERE agent_id = ? AND source_id = ? AND source_path = ?) AS graph_count,
+							(SELECT COUNT(*) FROM embeddings WHERE agent_id = ? AND source_type = 'source_chunk') AS embedding_count`,
+						)
+						.get("agent-native", "obsidian:provider-down", file, "agent-native") as {
+						graph_count: number;
+						embedding_count: number;
+					},
+			);
+			expect(semanticRows.graph_count).toBe(0);
+			expect(semanticRows.embedding_count).toBe(0);
 
 			const artifact = getDbAccessor().withReadDb(
 				(db) =>

@@ -323,7 +323,10 @@ describe("DB owner client", () => {
 			{ operation: "memory.foreground-priority", lane: "write", deadlineMs: 2_000 },
 		);
 		expect(client.health().foregroundQueuedJobs).toBe(1);
-		expect(client.health().maintenanceQueuedJobs).toBe(2);
+		expect(client.health().maintenanceQueuedJobs).toBe(1);
+		expect(client.health().queuedJobs).toBe(2);
+		expect(client.health().lanes?.maintenance.queuedJobs).toBe(2);
+		expect(client.health().lanes?.maintenance.activeJobId).toBe(first.job.id);
 		expect(client.health().activeWorkloadClass).toBe("maintenance");
 		const startedAt = Date.now();
 		expect(await foreground.result).toEqual([{ value: 1 }]);
@@ -554,7 +557,7 @@ describe("DB owner client", () => {
 		await waitFor(() => client?.health().activeJobId === first.job.id);
 		second.cancel();
 		await expect(second.result).rejects.toBeInstanceOf(DbOwnerCancelledError);
-		expect(client.health().queuedJobs).toBe(1);
+		expect(client.health().queuedJobs).toBe(0);
 		expect(client.health().activeJobId).toBe(first.job.id);
 		await first.result;
 		expect(client.health().queuedJobs).toBe(0);

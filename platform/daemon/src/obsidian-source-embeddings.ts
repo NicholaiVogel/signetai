@@ -281,7 +281,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 	if (configured.provider === "none") return { chunks: 0, embedded: 0, skipped: 0, providerUnavailable: false };
 	const failureKey = sourceEmbeddingFailureKey(input, configured.model);
 	const providerKey = `${configured.provider}:${configured.model}:${configured.base_url ?? ""}`;
-	let probeCause: PipelineCauseFamily = "provider_unavailable";
+	let probeCause: PipelineCauseFamily | null = null;
 	const gate = await awaitEmbeddingProviderAvailable(
 		providerKey,
 		async () => {
@@ -291,7 +291,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 					probeCause = cause;
 				},
 			});
-			return Boolean(probe?.length) && !providerUnavailableCause(probeCause);
+			return Boolean(probe?.length) && (probeCause === null || !providerUnavailableCause(probeCause));
 		},
 		SOURCE_EMBEDDING_POLL_MS,
 		() => logger.warn("embedding", `Embedding provider unavailable; retrying source indexing (${providerKey})`),

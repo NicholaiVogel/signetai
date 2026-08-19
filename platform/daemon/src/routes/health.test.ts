@@ -3,7 +3,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
-import { MAX_READ_CONNECTIONS, closeDbAccessor, getDbAccessor, initDbAccessor } from "../db-accessor";
+import {
+	MAX_READ_CONNECTIONS,
+	closeDbAccessor,
+	getDbAccessor,
+	initDbAccessor,
+	registerDbOwnerHealthProvider,
+} from "../db-accessor";
+import type { DbOwnerHealth } from "../db-owner-client";
 import { mountHealthRoutes } from "./health";
 
 /**
@@ -50,6 +57,44 @@ afterEach(() => {
 		process.env.SIGNET_PATH = savedSignetPath;
 	}
 	rmSync(dir, { recursive: true, force: true });
+});
+
+describe("GET /health owner diagnostics", () => {
+	test("exposes bounded per-lane owner queue and age metrics", async () => {
+		const lane = {
+			state: "ready",
+			pid: 123,
+			generation: 4,
+			queuedJobs: 2,
+			activeJobId: "db-owner-123-1",
+			activeWorkloadClass: "maintenance",
+			foregroundQueuedJobs: 1,
+			maintenanceQueuedJobs: 1,
+			foregroundOldestAgeMs: 12,
+			maintenanceOldestAgeMs: 34,
+			lastError: null,
+			deadlineKills: 0,
+		} as const;
+		const ownerHealth = {
+			...lane,
+			lanes: { read: lane, maintenance: lane },
+		} as DbOwnerHealth;
+		registerDbOwnerHealthProvider(() => ownerHealth);
+
+		try {
+			const res = await makeApp().request("http://localhost/health");
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as { dbOwner: DbOwnerHealth };
+			expect(body.dbOwner.queuedJobs).toBe(2);
+			expect(body.dbOwner.foregroundOldestAgeMs).toBe(12);
+			expect(body.dbOwner.maintenanceOldestAgeMs).toBe(34);
+			if (body.dbOwner.lanes === undefined) throw new Error("owner lanes missing from /health");
+			expect(body.dbOwner.lanes.read.maintenanceQueuedJobs).toBe(1);
+			expect(body.dbOwner.lanes.maintenance.foregroundQueuedJobs).toBe(1);
+		} finally {
+			registerDbOwnerHealthProvider(null);
+		}
+	});
 });
 
 describe("GET /health/live", () => {

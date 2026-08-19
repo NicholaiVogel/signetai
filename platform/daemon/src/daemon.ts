@@ -55,6 +55,7 @@ import {
 	getVectorRuntimeStatus,
 	initDbAccessorLite,
 	resolveSqliteRuntimeConfig,
+	registerDbOwnerHealthProvider,
 	type WriteDb,
 } from "./db-accessor";
 import { type VacuumConversionHandle, startVacuumConversionWorker } from "./db-vacuum";
@@ -1629,6 +1630,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 	if (dbOwnerMaintenanceHandle === null) {
 		dbOwnerMaintenanceHandle = createDbOwnerMaintenance({ dbPath: MEMORY_DB, owner: dbOwnerClient ?? undefined });
 		registerDbOwnerMaintenance(dbOwnerMaintenanceHandle);
+		registerDbOwnerHealthProvider(dbOwnerMaintenanceHandle.health);
 	}
 
 	if (memoryCfg.pipelineV2.enabled && !pipelinePaused) {
@@ -1827,6 +1829,7 @@ async function cleanup() {
 		await dbOwnerMaintenanceHandle.close().catch(() => {});
 		dbOwnerMaintenanceHandle = null;
 		registerDbOwnerMaintenance(null);
+		registerDbOwnerHealthProvider(null);
 	}
 
 	try {
