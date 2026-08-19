@@ -408,44 +408,81 @@ export async function startTranscriptCaptureWorker(
 	};
 }
 
+interface TranscriptStatusProjectionRow {
+	readonly pending: number;
+	readonly processing: number;
+	readonly completed: number;
+	readonly failed: number;
+	readonly dead: number;
+	readonly oldestPendingAt: string | null;
+	readonly lastError: string | null;
+}
+
+const EMPTY_TRANSCRIPT_STATUS: TranscriptCaptureStatusSummary = {
+	pending: 0,
+	processing: 0,
+	completed: 0,
+	failed: 0,
+	dead: 0,
+	oldestPendingAt: null,
+	lastError: null,
+};
+
+function projectionRowToSummary(row: TranscriptStatusProjectionRow): TranscriptCaptureStatusSummary {
+	return {
+		pending: row.pending,
+		processing: row.processing,
+		completed: row.completed,
+		failed: row.failed,
+		dead: row.dead,
+		oldestPendingAt: row.oldestPendingAt ?? null,
+		lastError: row.lastError ?? null,
+	};
+}
+
+/**
+ * Bounded capture status for /api/status and health surfaces.
+ *
+ * Reads the `transcript_capture_status` projection (migration 138), which
+ * triggers maintain on every job mutation. The previous implementation
+ * grouped `transcript_capture_jobs` — whose rows carry full transcript
+ * payloads inline — directly on the HTTP-serving isolate, which wedged the
+ * parent event loop on production-scale databases (#1670). Both reads here
+ * are bounded: one projection row by primary key, or a SUM over the tiny
+ * one-row-per-agent projection table. Same fields, same values, cheap source.
+ */
 export async function getTranscriptCaptureStatus(
 	dbAccessor: DbAccessor,
 	agentId?: string | null,
 ): Promise<TranscriptCaptureStatusSummary> {
 	return await dbAccessor.withReadDbAsync(async (db) => {
-		const where = agentId ? "WHERE agent_id = ?" : "";
-		const params = agentId ? [agentId] : [];
-		const rows = db
-			.prepare(
-				`SELECT status, COUNT(*) AS count, MIN(CASE WHEN status = 'pending' THEN created_at END) AS oldest_pending
-				 FROM transcript_capture_jobs ${where}
-				 GROUP BY status`,
-			)
-			.all(...params) as Array<{ status: string; count: number; oldest_pending?: string | null }>;
-		const latestError = db
-			.prepare(
-				`SELECT error FROM transcript_capture_jobs ${where}${where ? " AND" : "WHERE"} error IS NOT NULL
-				 ORDER BY updated_at DESC LIMIT 1`,
-			)
-			.get(...params) as { error?: string | null } | undefined;
-		const summary = {
-			pending: 0,
-			processing: 0,
-			completed: 0,
-			failed: 0,
-			dead: 0,
-			oldestPendingAt: null as string | null,
-			lastError: latestError?.error ?? null,
-		};
-		for (const row of rows) {
-			const key = row.status as keyof Pick<
-				TranscriptCaptureStatusSummary,
-				"pending" | "processing" | "completed" | "failed" | "dead"
-			>;
-			if (key in summary) summary[key] = row.count;
-			if (row.oldest_pending) summary.oldestPendingAt = row.oldest_pending;
+		if (agentId) {
+			const row = db
+				.prepare(
+					`SELECT pending, processing, completed, failed, dead,
+					        oldest_pending_at AS oldestPendingAt, last_error AS lastError
+					 FROM transcript_capture_status
+					 WHERE agent_id = ?`,
+				)
+				.get(agentId) as TranscriptStatusProjectionRow | undefined;
+			// bun:sqlite returns null (not undefined) for a missing row.
+			return row == null ? EMPTY_TRANSCRIPT_STATUS : projectionRowToSummary(row);
 		}
-		return summary;
+		const row = db
+			.prepare(
+				`SELECT COALESCE(SUM(pending), 0) AS pending,
+				        COALESCE(SUM(processing), 0) AS processing,
+				        COALESCE(SUM(completed), 0) AS completed,
+				        COALESCE(SUM(failed), 0) AS failed,
+				        COALESCE(SUM(dead), 0) AS dead,
+				        MIN(oldest_pending_at) AS oldestPendingAt,
+				        (SELECT last_error FROM transcript_capture_status
+				         WHERE last_error_at IS NOT NULL
+				         ORDER BY last_error_at DESC LIMIT 1) AS lastError
+				 FROM transcript_capture_status`,
+			)
+			.get() as TranscriptStatusProjectionRow | undefined;
+		return row == null ? EMPTY_TRANSCRIPT_STATUS : projectionRowToSummary(row);
 	});
 }
 
