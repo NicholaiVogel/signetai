@@ -162,10 +162,22 @@ export function buildProductionDb(dbPath: string, options: ProductionDbOptions =
 		`);
 		const insertEmbedding = db.prepare(`
 			INSERT OR IGNORE INTO embeddings (
-				id, agent_id, content_hash, dimensions, source_type, source_id, chunk_text, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				id, agent_id, content_hash, vector, dimensions, source_type, source_id, chunk_text, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		let embeddingRows = 0;
+		// Deterministic pseudo-random unit vector (float32 blob, 768 dims —
+		// the nomic-embed-text-v1.5 profile). Values only need to be stable
+		// and dense; the daemon never similarity-matches them in this
+		// harness (the provider is down by design).
+		const vectorBlob = (seed: number): Buffer => {
+			const out = Buffer.allocUnsafe(768 * 4);
+			for (let d = 0; d < 768; d++) {
+				const v = Math.sin(seed * 12.9898 + d * 78.233) * 43758.5453;
+				out.writeFloatLE(v - Math.floor(v), d * 4);
+			}
+			return out;
+		};
 		for (let base = 0; base < memoryCount; base += batchSize) {
 			const end = Math.min(base + batchSize, memoryCount);
 			db.exec("BEGIN");
@@ -208,6 +220,7 @@ export function buildProductionDb(dbPath: string, options: ProductionDbOptions =
 						`emb-${String(i).padStart(7, "0")}`,
 						agent,
 						`sha-${agent}-${i}`,
+						vectorBlob(i),
 						768,
 						"memory",
 						`mem-${String(i).padStart(7, "0")}`,
@@ -357,11 +370,31 @@ export function buildProductionDb(dbPath: string, options: ProductionDbOptions =
 		);
 
 		db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+		// Loud-failure check: INSERT OR IGNORE can silently drop rows (a
+		// constraint mismatch once left the DB with 0 embeddings while the
+		// builder reported success). Never trust the counter — count rows.
+		const actual = {
+			memories: db.prepare("SELECT COUNT(*) AS c FROM memories").get() as { c: number },
+			embeddings: db.prepare("SELECT COUNT(*) AS c FROM embeddings").get() as { c: number },
+			jobs: db.prepare("SELECT COUNT(*) AS c FROM transcript_capture_jobs").get() as { c: number },
+			telemetry: db.prepare("SELECT COUNT(*) AS c FROM telemetry_events").get() as { c: number },
+			artifacts: db.prepare("SELECT COUNT(*) AS c FROM memory_artifacts").get() as { c: number },
+		};
+		const mismatch: string[] = [];
+		if (actual.memories.c !== memoryCount) mismatch.push(`memories ${actual.memories.c}/${memoryCount}`);
+		if (actual.embeddings.c === 0 && memoryCount > 0) mismatch.push("embeddings 0 (vector NOT NULL violated?)");
+		if (actual.jobs.c !== transcriptJobs) mismatch.push(`transcript jobs ${actual.jobs.c}/${transcriptJobs}`);
+		if (actual.telemetry.c !== telemetryEvents) mismatch.push(`telemetry ${actual.telemetry.c}/${telemetryEvents}`);
+		if (actual.artifacts.c !== sourceFiles) mismatch.push(`artifacts ${actual.artifacts.c}/${sourceFiles}`);
+		if (mismatch.length > 0) {
+			throw new Error(`production-shape mismatch: ${mismatch.join("; ")} — schema drifted from the builder`);
+		}
 		const counts = {
 			memories: memoryCount,
 			transcriptJobs,
 			telemetryEvents,
 			sourceFiles,
+			embeddings: actual.embeddings.c,
 		} as const;
 		return { dbPath, counts, buildMs: Date.now() - startedAt };
 	} finally {
