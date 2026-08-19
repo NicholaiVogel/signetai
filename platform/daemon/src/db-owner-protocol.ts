@@ -8,6 +8,8 @@
  */
 
 export type DbOwnerLane = "read" | "write" | "maintenance";
+/** Scheduling class inside an owner process. */
+export type DbOwnerWorkloadClass = "foreground" | "maintenance";
 export const DB_OWNER_MAX_QUEUE_DEPTH = 64;
 export const DB_OWNER_MAX_WORK_UNITS = 10_000;
 export const DB_OWNER_MAX_DEADLINE_MS = 60_000;
@@ -163,6 +165,7 @@ export interface DbOwnerJob {
 	readonly id: string;
 	readonly operation: string;
 	readonly lane: DbOwnerLane;
+	readonly workloadClass: DbOwnerWorkloadClass;
 	readonly enqueuedAt: number;
 	readonly deadlineAt: number;
 	readonly estimatedWorkUnits: number;
@@ -185,6 +188,7 @@ export interface DbOwnerSerializedError {
 
 export type DbOwnerEvent =
 	| { readonly type: "ready"; readonly pid: number }
+	| { readonly type: "started"; readonly jobId: string; readonly workloadClass: DbOwnerWorkloadClass }
 	| {
 			readonly type: "result";
 			readonly jobId: string;

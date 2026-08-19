@@ -281,7 +281,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 	if (configured.provider === "none") return { chunks: 0, embedded: 0, skipped: 0, providerUnavailable: false };
 	const failureKey = sourceEmbeddingFailureKey(input, configured.model);
 	const providerKey = `${configured.provider}:${configured.model}:${configured.base_url ?? ""}`;
-	let probeCause: PipelineCauseFamily = "provider_unavailable";
+	let probeCause: PipelineCauseFamily | null = null;
 	const gate = await awaitEmbeddingProviderAvailable(
 		providerKey,
 		async () => {
@@ -291,7 +291,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 					probeCause = cause;
 				},
 			});
-			return Boolean(probe?.length) && !providerUnavailableCause(probeCause);
+			return Boolean(probe?.length) && (probeCause === null || !providerUnavailableCause(probeCause));
 		},
 		SOURCE_EMBEDDING_POLL_MS,
 		() => logger.warn("embedding", `Embedding provider unavailable; retrying source indexing (${providerKey})`),
@@ -342,6 +342,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 				await dbOwnerBatch([ownerSafetyStatement(input.agentId, embeddingId, chunk.chunkText)], {
 					operation: "sources.embeddings.owner.safety",
 					lane: "write",
+					workloadClass: "maintenance",
 				});
 			skipped++;
 			continue;
@@ -410,6 +411,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 		await dbOwnerBatch(statements, {
 			operation: "sources.embeddings.owner.write",
 			lane: "write",
+			workloadClass: "maintenance",
 			estimatedWorkUnits: statements.length,
 		});
 		embedded++;
@@ -436,7 +438,11 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 					: []),
 				ownerStatement(`DELETE FROM embeddings WHERE id IN (${staleIds.map(() => "?").join(", ")})`, staleIds),
 			];
-			await dbOwnerBatch(statements, { operation: "sources.embeddings.owner.stale.delete", lane: "write" });
+			await dbOwnerBatch(statements, {
+				operation: "sources.embeddings.owner.stale.delete",
+				lane: "write",
+				workloadClass: "maintenance",
+			});
 		}
 	}
 	return providerUnavailable
@@ -485,7 +491,7 @@ async function purgeObsidianSourceEmbeddingsByPrefixViaOwner(prefix: string, age
 				: []),
 			ownerStatement(`DELETE FROM embeddings WHERE id IN (${ids.map(() => "?").join(", ")})`, ids),
 		],
-		{ operation: "sources.embeddings.owner.purge.write", lane: "write" },
+		{ operation: "sources.embeddings.owner.purge.write", lane: "write", workloadClass: "maintenance" },
 	);
 	return ids.length;
 }

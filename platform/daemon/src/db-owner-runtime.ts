@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
-import { resolveSqliteAgentsDir } from "./db-accessor";
+import { hasDbAccessor, resolveSqliteAgentsDir } from "./db-accessor";
 import {
 	createDbOwnerClient,
 	DbOwnerAdmissionError,
@@ -16,6 +16,7 @@ import type {
 	DbOwnerSourceSnapshotImport,
 	DbOwnerSourceArtifactUpsert,
 	DbOwnerStatement,
+	DbOwnerWorkloadClass,
 } from "./db-owner-protocol";
 
 let client: DbOwnerClient | null = null;
@@ -78,12 +79,14 @@ export async function startDbOwner(
 export async function getDbOwner(): Promise<DbOwnerClient> {
 	const registered = getDbOwnerMaintenance()?.owner;
 	if (registered !== undefined) return registered;
+	if (!hasDbAccessor()) throw new Error("DbAccessor not initialised — call initDbAccessor() first");
 	return await startDbOwner();
 }
 
 export interface DbOwnerSqlOptions {
 	readonly operation: string;
 	readonly lane?: "read" | "write" | "maintenance";
+	readonly workloadClass?: DbOwnerWorkloadClass;
 	readonly deadlineMs?: number;
 	readonly estimatedWorkUnits?: number;
 }
@@ -92,6 +95,7 @@ function submitOptions(options: DbOwnerSqlOptions): DbOwnerSubmitOptions {
 	return {
 		operation: options.operation,
 		lane: options.lane ?? "write",
+		workloadClass: options.workloadClass,
 		deadlineMs: options.deadlineMs ?? 5_000,
 		estimatedWorkUnits: options.estimatedWorkUnits,
 	};

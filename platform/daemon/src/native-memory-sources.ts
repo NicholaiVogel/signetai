@@ -629,7 +629,7 @@ async function healSentinelCapturedAt(
 					[stampedAt, stampedAt, agentId, filePath.replace(/\\/g, "/")],
 				),
 			],
-			{ operation: "sources.artifact-heal", lane: "write", estimatedWorkUnits: 1 },
+			{ operation: "sources.artifact-heal", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 1 },
 		);
 		logger.warn("watcher", "Healed pre-epoch captured_at on native memory artifact", {
 			harness,
@@ -838,7 +838,18 @@ export async function indexNativeMemoryFile(
 	}
 
 	const hash = contentFingerprint(content);
-	const persistedHash = await nativeArtifactContentHash(filePath, agentId);
+	let persistedHash: string | null;
+	try {
+		persistedHash = await nativeArtifactContentHash(filePath, agentId);
+	} catch (error) {
+		logger.error(
+			"watcher",
+			"Cannot read native memory artifact persistence state",
+			error instanceof Error ? error : new Error(String(error)),
+			{ path: filePath },
+		);
+		return false;
+	}
 	const obsidian = source.harness === "obsidian" && pattern.kind === "source_obsidian_markdown";
 	const hermes = source.harness === "hermes-agent";
 	const sourceId = obsidian ? (source.sourceId ?? sourceIdForObsidianRoot(source.root)) : (source.sourceId ?? null);
@@ -905,24 +916,8 @@ export async function indexNativeMemoryFile(
 			});
 		}
 		let semanticIndexed = false;
+		let embeddingProviderUnavailable = false;
 		if (obsidian && sourceId) {
-			if (options.sourceGraphEnabled ?? true) {
-				await dbOwnerSourceGraphIndex(
-					{
-						agentId,
-						sourceId,
-						sourceName: source.displayName,
-						root: source.root,
-						filePath,
-						content,
-						...(options.markdownPathIndex === undefined
-							? {}
-							: { markdownPaths: [...options.markdownPathIndex.byRel.values()] }),
-					},
-					{ operation: "sources.graph.owner.index", lane: "write", estimatedWorkUnits: 10 },
-				);
-				semanticIndexed = true;
-			}
 			if (options.embeddingConfig && options.fetchEmbedding) {
 				const embeddingResult = await indexObsidianSourceEmbeddingsViaOwner({
 					agentId,
@@ -934,7 +929,8 @@ export async function indexNativeMemoryFile(
 					fetchEmbedding: options.fetchEmbedding,
 				});
 				options.onEmbeddingStatus?.(embeddingResult.status);
-				if (embeddingResult.providerUnavailable) {
+				embeddingProviderUnavailable = embeddingResult.providerUnavailable;
+				if (embeddingProviderUnavailable) {
 					logger.warn("watcher", "embeddings pending - provider down", {
 						path: filePath,
 						retryAfterMs: embeddingResult.retryAfterMs,
@@ -948,7 +944,32 @@ export async function indexNativeMemoryFile(
 						skipped: embeddingResult.skipped,
 					});
 				}
-				semanticIndexed = !embeddingResult.providerUnavailable;
+				semanticIndexed = !embeddingProviderUnavailable;
+			}
+			// A provider outage is source-scoped: persist the artifact, but do not
+			// submit graph work that would amplify every retry before the embedding
+			// gate's source-level backoff expires.
+			if (!embeddingProviderUnavailable && (options.sourceGraphEnabled ?? true)) {
+				await dbOwnerSourceGraphIndex(
+					{
+						agentId,
+						sourceId,
+						sourceName: source.displayName,
+						root: source.root,
+						filePath,
+						content,
+						...(options.markdownPathIndex === undefined
+							? {}
+							: { markdownPaths: [...options.markdownPathIndex.byRel.values()] }),
+					},
+					{
+						operation: "sources.graph.owner.index",
+						lane: "write",
+						workloadClass: "maintenance",
+						estimatedWorkUnits: 10,
+					},
+				);
+				semanticIndexed = true;
 			}
 		}
 		indexed.set(key, { contentHash: hash });
@@ -996,7 +1017,12 @@ export async function removeNativeMemoryFile(
 				root: source.root,
 				filePath,
 			},
-			{ operation: "sources.graph.owner.file-purge", lane: "write", estimatedWorkUnits: 6 },
+			{
+				operation: "sources.graph.owner.file-purge",
+				lane: "write",
+				workloadClass: "maintenance",
+				estimatedWorkUnits: 6,
+			},
 		);
 	}
 }
@@ -1040,7 +1066,7 @@ export async function purgeNativeMemorySourceArtifacts(source: NativeMemorySourc
 				params,
 			),
 		],
-		{ operation: "sources.artifacts.purge", lane: "write", estimatedWorkUnits: 4 },
+		{ operation: "sources.artifacts.purge", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 4 },
 	);
 	const artifactRows = (artifactResult as { readonly changes: number }).changes;
 	let embeddingRows = 0;
@@ -1055,7 +1081,12 @@ export async function purgeNativeMemorySourceArtifacts(source: NativeMemorySourc
 				sourceId: source.sourceId ?? sourceIdForObsidianRoot(source.root),
 				root: source.root,
 			},
-			{ operation: "sources.graph.owner.purge", lane: "write", estimatedWorkUnits: 10 },
+			{
+				operation: "sources.graph.owner.purge",
+				lane: "write",
+				workloadClass: "maintenance",
+				estimatedWorkUnits: 10,
+			},
 		);
 	}
 	return artifactRows + embeddingRows;

@@ -3,6 +3,7 @@ import { type MigrationDb, hasPendingMigrations } from "@signet/core";
 import type { Hono } from "hono";
 import { getDatabaseIntegrityStatus } from "../database-integrity";
 import { type ReadDb, type ReadPressure, type WritePressure, getDbAccessor } from "../db-accessor";
+import type { DbOwnerHealth } from "../db-owner-client";
 import { getDbRuntimeMetrics, getEventLoopLiveness } from "../db-observability";
 import {
 	QUEUE_MAX_DEAD_RATE,
@@ -183,6 +184,7 @@ export function mountHealthRoutes(app: Hono): void {
 		let dbWriter: WritePressure | null = null;
 		let dbReader: ReadPressure | null = null;
 		let dbRuntime = getDbRuntimeMetrics();
+		let dbOwner: DbOwnerHealth | null = null;
 		try {
 			const accessor = getDbAccessor();
 			try {
@@ -202,6 +204,7 @@ export function mountHealthRoutes(app: Hono): void {
 			dbWriter = accessor.getWritePressure?.() ?? null;
 			dbReader = accessor.getReadPressure?.() ?? null;
 			dbRuntime = accessor.getDbRuntimePressure?.().runtime ?? dbRuntime;
+			dbOwner = accessor.getDbOwnerHealth?.() ?? null;
 		} catch {}
 
 		const databaseIntegrity = getDatabaseIntegrityStatus();
@@ -220,6 +223,7 @@ export function mountHealthRoutes(app: Hono): void {
 			dbWriter,
 			dbReader,
 			dbRuntime,
+			dbOwner,
 			databaseIntegrity,
 			shuttingDown,
 			updateAvailable: us.lastCheck?.updateAvailable ?? false,

@@ -48,6 +48,7 @@ import {
 	type DbOperationOutcome,
 	type DbRuntimeMetrics,
 } from "./db-observability";
+import type { DbOwnerHealth } from "./db-owner-client";
 import { observeDbLatency } from "./runtime-pressure";
 import { resetFtsIndexState, setFtsIndexIncomplete } from "./fts-index-state";
 
@@ -308,6 +309,9 @@ export interface AsyncDbAccessor {
 	/** Return the combined database-owner diagnostics envelope. */
 	getDbRuntimePressure?(): DbRuntimePressure;
 
+	/** Return the bounded DB-owner workload snapshot, when the daemon has registered one. */
+	getDbOwnerHealth?(): DbOwnerHealth | null;
+
 	/** Async variant of withReadDb. The connection is held only while the
 	 * callback's synchronous database work runs and is admitted through a FIFO
 	 * lease queue. If the callback returns a promise, its continuation runs
@@ -347,6 +351,7 @@ type RuntimeDbAccessor = DbAccessor & SyncDbAccessorRuntime;
 // ---------------------------------------------------------------------------
 
 let accessor: RuntimeDbAccessor | null = null;
+let dbOwnerHealthProvider: (() => DbOwnerHealth) | null = null;
 let dbPath: string | null = null;
 let sqliteChoice: SqliteChoice | null = null;
 let sqliteAttempt: string | null = null;
@@ -1780,6 +1785,10 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 			return { writer: self.getWritePressure(), reader: self.getReadPressure(), runtime: getDbRuntimeMetrics() };
 		},
 
+		getDbOwnerHealth(): DbOwnerHealth | null {
+			return dbOwnerHealthProvider?.() ?? null;
+		},
+
 		withReadDb<T>(fn: (db: ReadDb) => T): T {
 			if (closed) throw new Error("DbAccessor is closed");
 			const startedAt = performance.now();
@@ -1899,8 +1908,14 @@ export function hasDbAccessor(): boolean {
 	return accessor !== null;
 }
 
+/** Register the live bounded DB-owner health provider for diagnostics. */
+export function registerDbOwnerHealthProvider(provider: (() => DbOwnerHealth) | null): void {
+	dbOwnerHealthProvider = provider;
+}
+
 /** Tear down the singleton and its lazy DB-owner clients. Safe to call even if never initialised. */
 export async function closeDbAccessor(): Promise<void> {
+	dbOwnerHealthProvider = null;
 	if (accessor) {
 		accessor.close();
 		accessor = null;
