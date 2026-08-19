@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { probeDaemonHealth } from "./service";
+import { generateLaunchdPlist, probeDaemonHealth } from "./service";
 
 describe("daemon service health probe (#1340)", () => {
 	it("uses the liveness endpoint with a bounded request", async () => {
@@ -28,5 +28,18 @@ describe("daemon service health probe (#1340)", () => {
 		});
 
 		expect(result).toEqual({ status: "degraded", uptime: null, pid: null });
+	});
+
+	it("copies the DB-owner startup timeout into the launchd plist", () => {
+		const previousTimeout = process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS;
+		process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = "23000";
+		try {
+			const plist = generateLaunchdPlist();
+			expect(plist).toContain("<key>SIGNET_DB_OWNER_START_TIMEOUT_MS</key>");
+			expect(plist).toContain("<string>23000</string>");
+		} finally {
+			if (previousTimeout === undefined) Reflect.deleteProperty(process.env, "SIGNET_DB_OWNER_START_TIMEOUT_MS");
+			else process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = previousTimeout;
+		}
 	});
 });

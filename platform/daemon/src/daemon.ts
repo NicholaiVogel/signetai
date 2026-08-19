@@ -54,10 +54,11 @@ import {
 	getDbAccessor,
 	getVectorRuntimeStatus,
 	initDbAccessorLite,
+	resolveSqliteRuntimeConfig,
 	type WriteDb,
 } from "./db-accessor";
 import { type VacuumConversionHandle, startVacuumConversionWorker } from "./db-vacuum";
-import { createDbOwnerClient, type DbOwnerClient } from "./db-owner-client";
+import { createDbOwnerClient, type DbOwnerClient, type DbOwnerClientOptions } from "./db-owner-client";
 import {
 	type DbOwnerMaintenance,
 	createDbOwnerMaintenance,
@@ -301,9 +302,17 @@ export function countConnectorsActive(connectors: readonly { readonly status: st
 
 export const app = new Hono();
 
+// Resolve the custom SQLite runtime once so both owner lanes use the same
+// runtime selected for this daemon instance.
+const sqliteRuntime = resolveSqliteRuntimeConfig({ agentsDir: AGENTS_DIR });
+
+export function createRecallDbOwnerOptions(sqlitePath: string | undefined): DbOwnerClientOptions {
+	return { dbPath: MEMORY_DB, sqlitePath, workerRole: "recall" };
+}
+
 // Recall uses its own child-process lane so request reads never wait behind
 // maintenance or write work in the generic owner.
-const recallDbOwner = createDbOwnerClient({ dbPath: MEMORY_DB, workerRole: "recall" });
+const recallDbOwner = createDbOwnerClient(createRecallDbOwnerOptions(sqliteRuntime.choice?.path));
 
 registerGlobalMiddleware(app);
 getOrCreateInferenceRouter(resolveDefaultBasePath());
@@ -2044,13 +2053,9 @@ async function main() {
 
 	// Expensive schema/FTS/vector initialization must execute in the killable
 	// owner process, not merely behind an async function on this isolate.
-	dbOwnerClient = createDbOwnerClient({ dbPath: MEMORY_DB });
+	dbOwnerClient = createDbOwnerClient({ dbPath: MEMORY_DB, sqlitePath: sqliteRuntime.choice?.path });
 	await dbOwnerClient.start();
-	const initialization = dbOwnerClient.submit(
-		{ kind: "initialize", agentsDir: AGENTS_DIR },
-		{ operation: "db.initialize", lane: "maintenance", deadlineMs: 60_000, estimatedWorkUnits: 10_000 },
-	);
-	await dbOwnerClient.awaitResult(initialization, 60_000);
+	await dbOwnerClient.initialize(AGENTS_DIR);
 	const { extensionPath: initExtensionPath } = getVectorRuntimeStatus();
 	initDbAccessorLite(MEMORY_DB, initExtensionPath ?? "");
 	setSessionClaimStore(createSessionClaimStore(getDbAccessor()));

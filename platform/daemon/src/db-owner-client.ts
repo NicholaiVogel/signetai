@@ -23,6 +23,7 @@ import {
 export type { DbOwnerLane, DbOwnerRequest } from "./db-owner-protocol";
 
 export type DbOwnerHealthState = "starting" | "ready" | "dead" | "failed" | "closed";
+export type DbOwnerInitializationState = "not_started" | "running" | "ready" | "failed";
 
 /** Keep owner admission bounded like the Phase B async database queues. */
 export const MAX_DB_OWNER_PENDING_JOBS = DB_OWNER_MAX_QUEUE_DEPTH;
@@ -31,7 +32,11 @@ export const MAX_DB_OWNER_DEADLINE_MS = DB_OWNER_MAX_DEADLINE_MS;
 export const MAX_DB_OWNER_RESULT_BYTES = DB_OWNER_MAX_RESULT_BYTES;
 
 export interface DbOwnerHealth {
+	/** Process/IPC state. `ready` means transport is usable, not schema-ready. */
 	readonly state: DbOwnerHealthState;
+	/** State of the explicit database initialization job. */
+	readonly initialization: DbOwnerInitializationState;
+	readonly databaseReady: boolean;
 	readonly pid: number | null;
 	readonly generation: number;
 	readonly queuedJobs: number;
@@ -56,6 +61,7 @@ export interface DbOwnerJobHandle<Result> {
 
 export interface DbOwnerClient {
 	start(): Promise<void>;
+	initialize(agentsDir?: string): Promise<void>;
 	submit<Result>(request: DbOwnerRequest, options: DbOwnerSubmitOptions): DbOwnerJobHandle<Result>;
 	awaitResult<Result>(handle: DbOwnerJobHandle<Result>, timeoutMs?: number): Promise<Result>;
 	cancel(jobId: string): void;
@@ -115,8 +121,24 @@ interface PendingJob<Result> {
 export interface DbOwnerClientOptions {
 	readonly dbPath: string;
 	readonly workerPath?: string;
+	/** SQLite runtime library to activate before the worker opens the database. */
+	readonly sqlitePath?: string;
 	readonly startupTimeoutMs?: number;
 	readonly workerRole?: "generic" | "recall";
+}
+
+const DEFAULT_DB_OWNER_START_TIMEOUT_MS = 15_000;
+
+function resolveStartupTimeoutMs(options: DbOwnerClientOptions): number {
+	const configured = options.startupTimeoutMs ?? process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS;
+	const timeoutMs = configured === undefined ? DEFAULT_DB_OWNER_START_TIMEOUT_MS : Number(configured);
+	if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+		throw new DbOwnerError(
+			"DB_OWNER_START_TIMEOUT_INVALID",
+			"DB owner startup timeout must be a positive integer in milliseconds",
+		);
+	}
+	return timeoutMs;
 }
 
 function workerArguments(workerPath: string | undefined): readonly string[] {
@@ -161,6 +183,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	let activeJobId: string | null = null;
 	let lastError: string | null = null;
 	let deadlineKills = 0;
+	let initialization: DbOwnerInitializationState = "not_started";
 	let sequence = 0;
 	let input = "";
 	let stderr = "";
@@ -173,6 +196,8 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	function currentHealth(): DbOwnerHealth {
 		return {
 			state,
+			initialization,
+			databaseReady: initialization === "ready",
 			pid,
 			generation,
 			queuedJobs: pending.size,
@@ -242,6 +267,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		startPromise = null;
 		state = closed ? "closed" : nextState;
 		lastError = error.message;
+		if (initialization === "running") initialization = "failed";
 		const rejectStartup = startupReject;
 		startupResolve = null;
 		startupReject = null;
@@ -269,10 +295,15 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		if (event.type === "fatal") {
 			lastError = event.error.message;
 			state = "failed";
+			if (initialization === "running") initialization = "failed";
 			startupReject?.(messageFromError(event.error));
 			startupReject = null;
 			startupResolve = null;
 			return;
+		}
+		const pendingJob = pending.get(event.jobId);
+		if (pendingJob?.job.request.kind === "initialize") {
+			initialization = event.outcome === "completed" ? "ready" : "failed";
 		}
 		settle(event.jobId, (job) => {
 			if (job.settled) return;
@@ -360,7 +391,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			return;
 		}
 		if (startPromise !== null) return await startPromise;
-		const timeoutMs = options.startupTimeoutMs ?? 5_000;
+		const timeoutMs = resolveStartupTimeoutMs(options);
 		state = "starting";
 		lastError = null;
 		stderr = "";
@@ -372,6 +403,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 				...process.env,
 				SIGNET_DB_OWNER_DB_PATH: options.dbPath,
 				SIGNET_DB_OWNER_WORKER: "1",
+				...(options.sqlitePath === undefined ? {} : { SIGNET_DB_OWNER_SQLITE_PATH: options.sqlitePath }),
 				...(options.workerRole === "recall" ? { SIGNET_DB_OWNER_RECALL_WORKER: "1" } : {}),
 			};
 			// A compiled daemon sets this marker so the native entrypoint dispatches
@@ -522,6 +554,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			}, submitOptions.deadlineMs);
 			pendingJob = { job, resolve, reject, timer, settled: false, dispatched: false };
 			pending.set(job.id, pendingJob as PendingJob<unknown>);
+			if (request.kind === "initialize") initialization = "running";
 			activeJobId ??= job.id;
 			dispatch(job.id);
 		});
@@ -585,7 +618,15 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		rejectAll(new DbOwnerDiedError("DB owner client closed"));
 	}
 
-	return { start, submit, awaitResult, cancel, health: currentHealth, close };
+	async function initialize(agentsDir?: string): Promise<void> {
+		const handle = submit(
+			{ kind: "initialize", agentsDir },
+			{ operation: "db.initialize", lane: "maintenance", deadlineMs: 60_000, estimatedWorkUnits: 10_000 },
+		);
+		await awaitResult(handle, 60_000);
+	}
+
+	return { start, initialize, submit, awaitResult, cancel, health: currentHealth, close };
 }
 
 /**
@@ -621,6 +662,8 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 								: "dead";
 		return {
 			state,
+			initialization: maintenance.initialization,
+			databaseReady: maintenance.databaseReady,
 			pid: read.pid ?? maintenance.pid,
 			generation: Math.max(read.generation, maintenance.generation),
 			queuedJobs: read.queuedJobs + maintenance.queuedJobs,
@@ -634,6 +677,9 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 		async start(): Promise<void> {
 			if (closed) throw new DbOwnerError("DB_OWNER_CLOSED", "DB owner client is closed");
 			await Promise.all([readLane.start(), maintenanceLane.start()]);
+		},
+		async initialize(agentsDir?: string): Promise<void> {
+			await maintenanceLane.initialize(agentsDir);
 		},
 		submit<Result>(request: DbOwnerRequest, submitOptions: DbOwnerSubmitOptions): DbOwnerJobHandle<Result> {
 			return laneFor(submitOptions.lane).submit<Result>(request, submitOptions);

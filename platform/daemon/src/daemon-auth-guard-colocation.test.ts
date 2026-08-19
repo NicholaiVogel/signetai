@@ -89,6 +89,15 @@ describe("auth guard co-location", () => {
 		return new Hono();
 	}
 
+	it("passes the resolved SQLite runtime to the recall owner", async () => {
+		const { createRecallDbOwnerOptions } = await import("./daemon");
+		expect(createRecallDbOwnerOptions("/tmp/custom-libsqlite3.dylib")).toEqual({
+			dbPath: join(tmpDir, "memory", "memories.db"),
+			sqlitePath: "/tmp/custom-libsqlite3.dylib",
+			workerRole: "recall",
+		});
+	});
+
 	async function status(app: InstanceType<typeof import("hono").Hono>, method: string, path: string): Promise<number> {
 		const res = await app.request(path, { method });
 		return res.status;
@@ -117,6 +126,7 @@ describe("auth guard co-location", () => {
 		function rejectingRecallOwner(error: Error): DbOwnerClient {
 			return {
 				start: async () => {},
+				initialize: async () => {},
 				submit<Result>(request: DbOwnerRequest, options: DbOwnerSubmitOptions): DbOwnerJobHandle<Result> {
 					return {
 						job: {
@@ -139,6 +149,8 @@ describe("auth guard co-location", () => {
 				cancel: () => {},
 				health: () => ({
 					state: "ready",
+					initialization: "ready",
+					databaseReady: true,
 					pid: null,
 					generation: 1,
 					queuedJobs: 0,

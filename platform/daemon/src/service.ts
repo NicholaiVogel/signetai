@@ -122,12 +122,14 @@ function getRuntime(): string {
 // macOS (launchd)
 // ============================================================================
 
-function generateLaunchdPlist(port: number = 3850): string {
+export function generateLaunchdPlist(port: number = 3850): string {
 	const daemonPath = getDaemonPath();
+	const startupTimeout = process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS;
 	const environment = buildLaunchdEnvironment({
 		values: {
 			SIGNET_PORT: String(port),
 			SIGNET_PATH: AGENTS_DIR,
+			...(startupTimeout === undefined ? {} : { SIGNET_DB_OWNER_START_TIMEOUT_MS: startupTimeout }),
 		},
 	});
 	return buildLaunchdPlist({

@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,7 +16,6 @@ import {
 import { findSqliteVecExtension } from "@signet/core";
 import { closeDbAccessor, initDbAccessor } from "./db-accessor";
 import { recallThroughDbOwner } from "./db-owner-recall";
-import { loadSqliteVecIfAvailable } from "./db-owner-worker";
 
 function makeDb(): { readonly directory: string; readonly path: string } {
 	const directory = mkdtempSync(join(tmpdir(), "signet-db-owner-"));
@@ -101,6 +100,79 @@ describe("DB owner client", () => {
 			if (previousVecPath === undefined) Reflect.deleteProperty(process.env, "SIGNET_VEC_PATH");
 			else process.env.SIGNET_VEC_PATH = previousVecPath;
 		}
+	});
+
+	test("publishes protocol readiness before synchronous database startup", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const startupStarted = join(database.directory, "startup-started");
+		const startupRelease = join(database.directory, "startup-release");
+		const previousStarted = process.env.SIGNET_DB_OWNER_TEST_STARTUP_STARTED;
+		const previousRelease = process.env.SIGNET_DB_OWNER_TEST_STARTUP_RELEASE;
+		process.env.SIGNET_DB_OWNER_TEST_STARTUP_STARTED = startupStarted;
+		process.env.SIGNET_DB_OWNER_TEST_STARTUP_RELEASE = startupRelease;
+		try {
+			client = createDbOwnerClient({ dbPath: database.path });
+			const start = client.start();
+			await waitFor(() => existsSync(startupStarted));
+			await expect(start).resolves.toBeUndefined();
+			writeFileSync(startupRelease, "release\n");
+			await expect(
+				client.submit<readonly { readonly value: number }[]>(
+					{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "all" } },
+					{ operation: "startup-ready-query", lane: "read", deadlineMs: 1_000 },
+				).result,
+			).resolves.toEqual([{ value: 1 }]);
+		} finally {
+			writeFileSync(startupRelease, "release\n");
+			if (previousStarted === undefined) Reflect.deleteProperty(process.env, "SIGNET_DB_OWNER_TEST_STARTUP_STARTED");
+			else process.env.SIGNET_DB_OWNER_TEST_STARTUP_STARTED = previousStarted;
+			if (previousRelease === undefined) Reflect.deleteProperty(process.env, "SIGNET_DB_OWNER_TEST_STARTUP_RELEASE");
+			else process.env.SIGNET_DB_OWNER_TEST_STARTUP_RELEASE = previousRelease;
+		}
+	});
+
+	test("rejects when an overridden DB owner startup deadline expires", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const workerPath = join(database.directory, "delayed-ready-worker.js");
+		await Bun.write(
+			workerPath,
+			'setTimeout(() => process.stdout.write(JSON.stringify({ type: "ready", pid: process.pid }) + "\\n"), 100);',
+		);
+		const previousTimeout = process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS;
+		process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = "50";
+		try {
+			client = createDbOwnerClient({ dbPath: database.path, workerPath });
+			await expect(client.start()).rejects.toMatchObject({ code: "DB_OWNER_START_TIMEOUT" });
+		} finally {
+			if (previousTimeout === undefined) Reflect.deleteProperty(process.env, "SIGNET_DB_OWNER_START_TIMEOUT_MS");
+			else process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = previousTimeout;
+		}
+	});
+
+	test("rejects garbage DB owner startup timeout configuration", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const previousTimeout = process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS;
+		process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = "abc";
+		try {
+			client = createDbOwnerClient({ dbPath: database.path });
+			await expect(client.start()).rejects.toMatchObject({ code: "DB_OWNER_START_TIMEOUT_INVALID" });
+		} finally {
+			if (previousTimeout === undefined) Reflect.deleteProperty(process.env, "SIGNET_DB_OWNER_START_TIMEOUT_MS");
+			else process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = previousTimeout;
+		}
+	});
+
+	test("keeps transport readiness distinct from database initialization", async () => {
+		const database = makeMigratedDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+		expect(client.health()).toMatchObject({ state: "ready", initialization: "not_started", databaseReady: false });
+		await client.initialize(database.directory);
+		expect(client.health()).toMatchObject({ state: "ready", initialization: "ready", databaseReady: true });
 	});
 
 	test("detects an owner survivor when harness teardown is skipped", async () => {
