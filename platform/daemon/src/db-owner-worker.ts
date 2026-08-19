@@ -154,10 +154,32 @@ export function runDbOwnerWorker(): void {
 	};
 
 	const cancelled = new Set<string>();
-	const queue: DbOwnerJob[] = [];
+	const foregroundQueue: DbOwnerJob[] = [];
+	const maintenanceQueue: DbOwnerJob[] = [];
+	let foregroundStreak = 0;
+	const MAX_FOREGROUND_BURST = 8;
 	let activeJobId: string | null = null;
 	let draining = false;
 
+	function nextJob(): DbOwnerJob | undefined {
+		if (foregroundQueue.length > 0 && (maintenanceQueue.length === 0 || foregroundStreak < MAX_FOREGROUND_BURST)) {
+			foregroundStreak += 1;
+			return foregroundQueue.shift();
+		}
+		if (maintenanceQueue.length > 0) {
+			foregroundStreak = 0;
+			return maintenanceQueue.shift();
+		}
+		if (foregroundQueue.length > 0) {
+			foregroundStreak += 1;
+			return foregroundQueue.shift();
+		}
+		return undefined;
+	}
+
+	function send(event: DbOwnerEvent): void {
+		process.stdout.write(`${JSON.stringify(event)}\n`);
+	}
 	function bindParameter(value: DbOwnerParameter): unknown {
 		if (typeof value === "object" && value !== null && value.type === "bytes") {
 			return Buffer.from(value.base64, "base64");
@@ -453,7 +475,7 @@ export function runDbOwnerWorker(): void {
 		if (draining) return;
 		draining = true;
 		const next = async (): Promise<void> => {
-			const job = queue.shift();
+			const job = nextJob();
 			if (job === undefined) {
 				draining = false;
 				return;
@@ -501,11 +523,18 @@ export function runDbOwnerWorker(): void {
 			failed(command.job.id, "DB_OWNER_WORK_BUDGET", `DB owner work budget exceeds ${DB_OWNER_MAX_WORK_UNITS} units`);
 			return;
 		}
+		const workloadClass =
+			command.job.workloadClass ?? (command.job.lane === "maintenance" ? "maintenance" : "foreground");
+		const queue = workloadClass === "foreground" ? foregroundQueue : maintenanceQueue;
 		if (queue.length >= DB_OWNER_MAX_QUEUE_DEPTH) {
-			failed(command.job.id, "DB_OWNER_QUEUE_FULL", `DB owner queue is full at ${DB_OWNER_MAX_QUEUE_DEPTH} jobs`);
+			failed(
+				command.job.id,
+				"DB_OWNER_QUEUE_FULL",
+				`DB owner ${workloadClass} queue is full at ${DB_OWNER_MAX_QUEUE_DEPTH} jobs`,
+			);
 			return;
 		}
-		queue.push(command.job);
+		queue.push(command.job.workloadClass === workloadClass ? command.job : { ...command.job, workloadClass });
 		runNext();
 	}
 
