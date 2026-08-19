@@ -82,6 +82,15 @@ and `GET /health/ready` for readiness.
       "writeActive": false
     }
   },
+  "eventLoop": {
+    "status": "ok",
+    "stallMs": 0,
+    "stallSeconds": 0,
+    "lastHeartbeatAtMs": 1771677600000,
+    "heartbeatIntervalMs": 2000,
+    "lagP95Ms": 3,
+    "lagP99Ms": 8
+  },
   "shuttingDown": false,
   "updateAvailable": false,
   "pendingRestart": false,
@@ -107,6 +116,20 @@ legacy synchronous read attempts rejected at the hard connection cap. The
 `dbRuntime.queue` snapshot reports current read/write depth, queue age, and
 active leases; `eventLoopLag` is the bounded independent event-loop sample.
 
+The process-local `eventLoop` signal separates a responsive daemon from one
+whose event loop is falling behind. Its health semantics are:
+
+| Field | Meaning |
+| --- | --- |
+| `eventLoop.status` | `ok` when the heartbeat is on schedule, `degraded` when the loop is stalled for less than 2 seconds, or `wedged` when the stall is at least 2 seconds. |
+| `eventLoop.stallSeconds` | Seconds beyond the expected heartbeat interval. |
+| `eventLoop.lastHeartbeatAtMs` | Epoch-millisecond timestamp of the last heartbeat callback. |
+| `eventLoop.heartbeatIntervalMs` | Expected interval used to calculate the stall. |
+
+The signal is diagnostic only. It is held in module memory, does not query the
+database, and does not change the HTTP status of `/health/live`, which remains
+200 while the process can answer.
+
 Memory resource values are MiB. On macOS, `physicalFootprint` and
 `peakPhysicalFootprint` come from `proc_pid_rusage` and include compressed
 and driver-backed memory that RSS can miss. They are `null` on platforms
@@ -129,7 +152,11 @@ subsystem, and always returns 200 while the process is alive.
   "port": 3850,
   "shuttingDown": false,
   "eventLoop": {
-    "status": "healthy",
+    "status": "ok",
+    "stallMs": 0,
+    "stallSeconds": 0,
+    "lastHeartbeatAtMs": 1771677600000,
+    "heartbeatIntervalMs": 2000,
     "lagP95Ms": 3,
     "lagP99Ms": 8
   }
@@ -138,8 +165,9 @@ subsystem, and always returns 200 while the process is alive.
 
 `status` is `"healthy"`, or `"shutting_down"` once shutdown has begun. The
 `eventLoop` block is diagnostic only and does not make this independent probe
-depend on database availability. It reports bounded event-loop lag samples and
-may report `"degraded"` while the process still returns 200.
+depend on database availability. It reports the current heartbeat stall and
+bounded event-loop lag samples; `"degraded"` and `"wedged"` are possible while
+the process still returns 200.
 
 The `@signet/daemon` service-management API uses this liveness endpoint for
 `getDaemonStatus()` with a 1.2-second deadline. Its returned `status` is

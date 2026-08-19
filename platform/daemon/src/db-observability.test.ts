@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+	computeEventLoopStall,
 	getDbRuntimeMetrics,
 	getEventLoopLiveness,
 	recordDbOperation,
 	recordEventLoopLag,
+	recordEventLoopHeartbeat,
 	resetDbObservability,
 	setDbQueueTelemetry,
 } from "./db-observability";
@@ -56,8 +58,40 @@ describe("database owner observability", () => {
 			writeActive: true,
 		});
 		recordEventLoopLag(100);
-		expect(getEventLoopLiveness().status).toBe("healthy");
+		expect(getEventLoopLiveness().status).toBe("ok");
 		recordEventLoopLag(2_500);
-		expect(getEventLoopLiveness().status).toBe("degraded");
+		expect(getEventLoopLiveness().status).toBe("ok");
+	});
+
+	test("classifies frozen-clock heartbeat stalls at the two-second wedge threshold", () => {
+		expect(computeEventLoopStall(10_000, 12_000, 2_000)).toEqual({
+			status: "ok",
+			stallMs: 0,
+			stallSeconds: 0,
+		});
+		expect(computeEventLoopStall(10_000, 12_750, 2_000)).toEqual({
+			status: "degraded",
+			stallMs: 750,
+			stallSeconds: 0.75,
+		});
+		expect(computeEventLoopStall(10_000, 14_000, 2_000).status).toBe("wedged");
+	});
+
+	test("latches an observed late heartbeat until one healthy fire clears it", () => {
+		recordEventLoopHeartbeat(10_000, 2_000);
+		recordEventLoopHeartbeat(12_750, 2_000);
+
+		expect(getEventLoopLiveness(12_750)).toMatchObject({
+			status: "degraded",
+			stallMs: 750,
+			stallSeconds: 0.75,
+		});
+
+		recordEventLoopHeartbeat(14_750, 2_000);
+		expect(getEventLoopLiveness(14_750)).toMatchObject({
+			status: "ok",
+			stallMs: 0,
+			stallSeconds: 0,
+		});
 	});
 });

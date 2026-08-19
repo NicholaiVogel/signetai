@@ -11,6 +11,8 @@ import {
 	registerDbOwnerHealthProvider,
 } from "../db-accessor";
 import type { DbOwnerHealth } from "../db-owner-client";
+import { resetDbObservability } from "../db-observability";
+import { startEventLoopMonitor, stopResourceMonitors } from "../resource-monitor";
 import { mountHealthRoutes } from "./health";
 
 /**
@@ -37,6 +39,8 @@ function makeApp(): Hono {
 }
 
 beforeEach(() => {
+	stopResourceMonitors();
+	resetDbObservability();
 	closeDbAccessor();
 	dir = mkdtempSync(join(tmpdir(), "signet-health-routes-"));
 	// Point the daemon's base path at the bare temp workspace and disable the
@@ -49,9 +53,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	stopResourceMonitors();
+	resetDbObservability();
 	closeDbAccessor();
 	if (savedSignetPath === undefined) {
-		// biome-ignore lint/performance/noDelete: deleting env keys avoids stringifying undefined in process.env.
 		delete process.env.SIGNET_PATH;
 	} else {
 		process.env.SIGNET_PATH = savedSignetPath;
@@ -109,6 +114,9 @@ describe("GET /health/live", () => {
 		expect(typeof body.pid).toBe("number");
 		expect(typeof body.version).toBe("string");
 		expect(body.shuttingDown).toBe(false);
+		const eventLoop = body.eventLoop as Record<string, unknown>;
+		expect(eventLoop.status).toBe("ok");
+		expect(typeof eventLoop.stallSeconds).toBe("number");
 	});
 
 	test("stays 200 even when the database is unavailable", async () => {
@@ -147,6 +155,63 @@ describe("GET /health/live", () => {
 		const liveResponse = await pending;
 		expect(liveResponse.status).toBe(200);
 		expect(getDbAccessor().getReadPressure?.().activeLeases).toBe(0);
+	});
+
+	test("latches a late heartbeat for a queued real-server /health/live request", async () => {
+		startEventLoopMonitor(50);
+		await Bun.sleep(80);
+
+		const app = makeApp();
+		app.get("/block-loop", (c) => {
+			const startedAt = Date.now();
+			while (Date.now() - startedAt < 2_100) {
+				// Deliberate synchronous block: this is the wedge signal integration proof.
+			}
+			return c.json({ blocked: true });
+		});
+
+		const server = Bun.serve({ port: 0, fetch: app.fetch });
+		const liveClient = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				[
+					'const { connect } = require("node:net");',
+					"const target = new URL(process.argv[1]);",
+					"const eol = String.fromCharCode(13, 10);",
+					"function request(path) { return new Promise((resolve, reject) => {",
+					'let response = "";',
+					"const socket = connect({ host: target.hostname, port: Number(target.port) }, () => {",
+					'socket.write("GET " + path + " HTTP/1.1" + eol + "Host: " + target.hostname + eol + "Connection: close" + eol + eol);',
+					"});",
+					'socket.on("data", (chunk) => { response += chunk.toString(); });',
+					'socket.on("end", () => resolve(response.split("\\r\\n\\r\\n")[1] ?? ""));',
+					'socket.on("error", reject);',
+					"}); }",
+					'const blocked = request("/block-loop");',
+					"await new Promise((resolve) => setTimeout(resolve, 100));",
+					'const live = request("/health/live");',
+					"await blocked;",
+					"console.log(await live);",
+				].join(" "),
+				`http://127.0.0.1:${server.port}/health/live`,
+			],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+
+		try {
+			const output = await new Response(liveClient.stdout).text();
+			expect(await liveClient.exited).toBe(0);
+			const body = JSON.parse(output.trim()) as {
+				eventLoop: { status: string; stallMs: number; lagP95Ms: number | null };
+			};
+			expect(["degraded", "wedged"]).toContain(body.eventLoop.status);
+			expect(body.eventLoop.stallMs).toBeGreaterThan(0);
+			expect(body.eventLoop.lagP95Ms).toBeGreaterThan(0);
+		} finally {
+			if (!liveClient.killed) liveClient.kill();
+			server.stop(true);
+		}
 	});
 });
 
@@ -293,6 +358,9 @@ describe("GET /health (back-compat)", () => {
 		const dbRuntime = body.dbRuntime as Record<string, unknown>;
 		expect(dbRuntime.queue).toBeDefined();
 		expect(dbRuntime.eventLoopLag).toBeDefined();
+		const eventLoop = body.eventLoop as Record<string, unknown>;
+		expect(["ok", "degraded", "wedged"]).toContain(String(eventLoop.status));
+		expect(typeof eventLoop.stallSeconds).toBe("number");
 		const resources = body.resources as Record<string, unknown>;
 		expect(typeof resources.rss).toBe("number");
 		expect(typeof resources.heapUsed).toBe("number");

@@ -58,6 +58,21 @@ export interface DbRuntimeMetrics {
 	readonly eventLoopLag: DbPercentiles;
 }
 
+export type EventLoopHealthStatus = "ok" | "degraded" | "wedged";
+
+export const EVENT_LOOP_STALL_THRESHOLD_MS = 2_000;
+const DEFAULT_EVENT_LOOP_HEARTBEAT_INTERVAL_MS = 2_000;
+
+export interface EventLoopLiveness {
+	readonly status: EventLoopHealthStatus;
+	readonly stallMs: number;
+	readonly stallSeconds: number;
+	readonly lastHeartbeatAtMs: number;
+	readonly heartbeatIntervalMs: number;
+	readonly lagP95Ms: number | null;
+	readonly lagP99Ms: number | null;
+}
+
 const MAX_SAMPLES = 512;
 const operationSamples: DbOperationSample[] = [];
 const eventLoopLagSamples: number[] = [];
@@ -76,6 +91,13 @@ let rejected = 0;
 let timedOut = 0;
 let failed = 0;
 let completed = 0;
+let eventLoopHeartbeatAtMs = Date.now();
+let eventLoopHeartbeatIntervalMs = DEFAULT_EVENT_LOOP_HEARTBEAT_INTERVAL_MS;
+// A late monitor fire is retained until the next on-time fire. The timer
+// callback updates eventLoopHeartbeatAtMs immediately, so the observed stall
+// must be kept separately for a queued liveness request to see it.
+let eventLoopLatchedStatus: EventLoopHealthStatus = "ok";
+let eventLoopLatchedStallMs = 0;
 
 function appendBounded<T>(items: T[], value: T): void {
 	items.push(value);
@@ -115,6 +137,48 @@ export function recordEventLoopLag(lagMs: number): void {
 	appendBounded(eventLoopLagSamples, lagMs);
 }
 
+/**
+ * Classify time beyond the expected heartbeat interval without reading any
+ * subsystem state. The interval itself is not a stall: a healthy heartbeat
+ * may fire anywhere inside its interval window.
+ */
+export function computeEventLoopStall(
+	lastHeartbeatAtMs: number,
+	nowMs: number,
+	heartbeatIntervalMs = DEFAULT_EVENT_LOOP_HEARTBEAT_INTERVAL_MS,
+): { readonly status: EventLoopHealthStatus; readonly stallMs: number; readonly stallSeconds: number } {
+	const elapsedMs = Math.max(0, nowMs - lastHeartbeatAtMs);
+	const stallMs = Math.max(0, elapsedMs - heartbeatIntervalMs);
+	return {
+		status: stallMs >= EVENT_LOOP_STALL_THRESHOLD_MS ? "wedged" : stallMs > 0 ? "degraded" : "ok",
+		stallMs,
+		stallSeconds: stallMs / 1000,
+	};
+}
+
+/** Establish a monitor-era baseline without classifying the preceding gap. */
+export function establishEventLoopHeartbeatBaseline(firedAtMs: number, heartbeatIntervalMs: number): void {
+	eventLoopHeartbeatAtMs = firedAtMs;
+	eventLoopHeartbeatIntervalMs = heartbeatIntervalMs;
+	eventLoopLatchedStatus = "ok";
+	eventLoopLatchedStallMs = 0;
+}
+
+/** Record a fire from the shared event-loop monitor interval. */
+export function recordEventLoopHeartbeat(firedAtMs: number, heartbeatIntervalMs: number): void {
+	const observed = computeEventLoopStall(eventLoopHeartbeatAtMs, firedAtMs, heartbeatIntervalMs);
+	if (observed.status === "ok") {
+		// One healthy, on-time fire is the explicit decay rule for a prior wedge.
+		eventLoopLatchedStatus = "ok";
+		eventLoopLatchedStallMs = 0;
+	} else {
+		eventLoopLatchedStatus = observed.status;
+		eventLoopLatchedStallMs = observed.stallMs;
+	}
+	eventLoopHeartbeatAtMs = firedAtMs;
+	eventLoopHeartbeatIntervalMs = heartbeatIntervalMs;
+}
+
 export function setDbQueueTelemetry(snapshot: DbQueueTelemetry): void {
 	queue = snapshot;
 }
@@ -149,14 +213,21 @@ export function getDbRuntimeMetrics(): DbRuntimeMetrics {
 }
 
 /** A cheap probe for liveness routes. It never reads database state. */
-export function getEventLoopLiveness(): {
-	readonly status: "healthy" | "degraded";
-	readonly lagP95Ms: number | null;
-	readonly lagP99Ms: number | null;
-} {
+export function getEventLoopLiveness(nowMs = Date.now()): EventLoopLiveness {
 	const lag = percentiles(eventLoopLagSamples);
+	const current = computeEventLoopStall(eventLoopHeartbeatAtMs, nowMs, eventLoopHeartbeatIntervalMs);
+	const stall =
+		current.status === "ok" && eventLoopLatchedStatus !== "ok"
+			? {
+					status: eventLoopLatchedStatus,
+					stallMs: eventLoopLatchedStallMs,
+					stallSeconds: eventLoopLatchedStallMs / 1000,
+				}
+			: current;
 	return {
-		status: lag.p99Ms !== null && lag.p99Ms > 2_000 ? "degraded" : "healthy",
+		...stall,
+		lastHeartbeatAtMs: eventLoopHeartbeatAtMs,
+		heartbeatIntervalMs: eventLoopHeartbeatIntervalMs,
 		lagP95Ms: lag.p95Ms,
 		lagP99Ms: lag.p99Ms,
 	};
@@ -171,6 +242,7 @@ export function resetDbObservability(): void {
 	timedOut = 0;
 	failed = 0;
 	completed = 0;
+	establishEventLoopHeartbeatBaseline(Date.now(), DEFAULT_EVENT_LOOP_HEARTBEAT_INTERVAL_MS);
 	queue = {
 		readDepth: 0,
 		readMaxDepth: 0,
