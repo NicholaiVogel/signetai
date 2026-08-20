@@ -625,11 +625,7 @@ async function removePersistedClaimAsync(sessionKey: string, agentId: string): P
 }
 
 /** Async counterpart used only during startup rehydration. */
-async function evictRestoredSessionAsync(
-	mapKey: string,
-	claim: SessionClaim,
-	emitEndTelemetry = true,
-): Promise<void> {
+async function evictRestoredSessionAsync(mapKey: string, claim: SessionClaim, emitEndTelemetry = true): Promise<void> {
 	if (!sessions.delete(mapKey)) return;
 	const key = claim.sessionKey;
 	bypassedSessions.delete(mapKey);

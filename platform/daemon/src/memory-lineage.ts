@@ -740,7 +740,11 @@ async function upsertSourceArtifactRow(
 	frontmatter: Record<string, unknown>,
 	body: string,
 	sourceMtimeMs = statSync(path).mtimeMs,
-	options: { readonly trustSourcePath?: boolean; readonly trustNativeMarker?: boolean; readonly signal?: AbortSignal } = {},
+	options: {
+		readonly trustSourcePath?: boolean;
+		readonly trustNativeMarker?: boolean;
+		readonly signal?: AbortSignal;
+	} = {},
 ): Promise<void> {
 	await dbOwnerSourceArtifactUpsert(
 		{ fields: artifactFieldsFromFrontmatter(path, frontmatter, body, sourceMtimeMs, options) },
