@@ -35,6 +35,72 @@ function makeDatabase(): {
 }
 
 describe("incremental database integrity maintenance (#1683)", () => {
+	it("does not multiply the database-wide page count by the object frontier", async () => {
+		const database = makeDatabase();
+		await database.owner.start();
+
+		const result = await runIncrementalDatabaseIntegrityCheck({
+			owner: database.owner,
+			checkpointKey: "test.integrity.database-page-count-math",
+			tablesPerRun: 3,
+			maxWorkUnits: 3,
+			runBudgetMs: 5_000,
+		});
+		const verification = new Database(database.path, { readonly: true });
+		const pageCount = (verification.prepare("PRAGMA page_count").get() as { page_count: number }).page_count;
+		const pageSize = (verification.prepare("PRAGMA page_size").get() as { page_size: number }).page_size;
+		verification.close();
+
+		expect(result.phase).toBe("complete");
+		expect(result.databasePagesObserved).toBe(pageCount);
+		expect(result.databaseBytesObserved).toBe(pageCount * pageSize);
+	});
+
+	it("parks the stuck-frontier-on-FTS-object class in a named degraded state", async () => {
+		const database = makeDatabase();
+		const db = new Database(database.path);
+		db.exec(`
+			CREATE TABLE session_transcripts (content TEXT NOT NULL);
+			CREATE VIRTUAL TABLE session_transcripts_fts USING fts5(content, content='session_transcripts', content_rowid='rowid');
+		`);
+		db.close();
+		await database.owner.start();
+		const scans: string[] = [];
+
+		const first = await runIncrementalDatabaseIntegrityCheck({
+			owner: database.owner,
+			checkpointKey: "test.integrity.stuck-frontier-fts-object",
+			tablesPerRun: 64,
+			maxWorkUnits: 64,
+			runBudgetMs: 5_000,
+			onObjectScan: (object) => {
+				scans.push(`${object.type}:${object.name}`);
+			},
+		});
+
+		expect(first.phase).toBe("degraded");
+		expect(first.degradationReason).toBe("degraded:fts-unverifiable");
+		expect(first.remainingObjects).toBe(0);
+		expect(getDatabaseIntegrityStatus()).toMatchObject({
+			state: "degraded",
+			phase: "degraded",
+			integrity: "degraded:fts-unverifiable",
+		});
+
+		const second = await runIncrementalDatabaseIntegrityCheck({
+			owner: database.owner,
+			checkpointKey: "test.integrity.stuck-frontier-fts-object",
+			tablesPerRun: 64,
+			maxWorkUnits: 64,
+			runBudgetMs: 5_000,
+			onObjectScan: (object) => {
+				scans.push(`${object.type}:${object.name}`);
+			},
+		});
+		expect(second.phase).toBe("degraded");
+		expect(scans.filter((object) => object === "table:session_transcripts_fts")).toHaveLength(1);
+	});
+
 	it("commits one table frontier per bounded slice and resumes", async () => {
 		const database = makeDatabase();
 		await database.owner.start();

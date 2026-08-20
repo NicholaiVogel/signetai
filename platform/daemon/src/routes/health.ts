@@ -212,7 +212,9 @@ export function mountHealthRoutes(app: Hono): void {
 		return c.json({
 			status: shuttingDown
 				? "shutting_down"
-				: databaseIntegrity.state === "corrupt" || databaseIntegrity.state === "unavailable"
+				: databaseIntegrity.state === "corrupt" ||
+						databaseIntegrity.state === "unavailable" ||
+						databaseIntegrity.state === "degraded"
 					? "degraded"
 					: "healthy",
 			uptime: process.uptime(),

@@ -473,7 +473,7 @@
     },
     {
       "path": "database-integrity.ts",
-      "line": 371,
+      "line": 385,
       "api": "existsSync",
       "source": "if (existsSync(bundled)) return bundled;",
       "category": "hot-path"
