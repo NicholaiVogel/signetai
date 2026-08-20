@@ -1,11 +1,21 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	createDbOwnerClient,
+	DB_OWNER_CANCEL_REGISTRY_MAX_AGE_MS,
 	DbOwnerAdmissionError,
 	DbOwnerCancelledError,
 	DbOwnerDeadlineError,
@@ -620,9 +630,9 @@ describe("DB owner client", () => {
 			);
 			await waitFor(() => client?.health().lanes?.write.activeJobId === write.job.id);
 			client.cancel(write.job.id);
-			await expect(write.result).rejects.toBeInstanceOf(DbOwnerCancelledError);
 			blocker.exec("ROLLBACK");
 			blockerReleased = true;
+			await expect(write.result).rejects.toBeInstanceOf(DbOwnerCancelledError);
 			const rows = await client.submit<readonly { readonly id: string }[]>(
 				{ kind: "query", statement: { sql: "SELECT id FROM memories ORDER BY id", result: "all" } },
 				{ operation: "memory.verify-no-stale-commit", lane: "read", deadlineMs: 1_000 },
@@ -632,6 +642,93 @@ describe("DB owner client", () => {
 			if (!blockerReleased) blocker.exec("ROLLBACK");
 			blocker.close();
 		}
+	});
+
+	test("reports the durable result when cancellation lands inside SQLite COMMIT", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const blocker = new Database(database.path);
+		blocker.exec("BEGIN");
+		blocker.prepare("SELECT id FROM memories").all();
+		const commitStarted = join(database.directory, "commit-started");
+		const previousCommitMarker = process.env.SIGNET_DB_OWNER_TEST_COMMIT_STARTED;
+		process.env.SIGNET_DB_OWNER_TEST_COMMIT_STARTED = commitStarted;
+		let blockerReleased = false;
+		try {
+			client = createDbOwnerClient({ dbPath: database.path });
+			await client.start();
+			const write = client.submit<{ readonly changes: number }>(
+				{
+					kind: "query",
+					statement: {
+						sql: "INSERT INTO memories (id, content) VALUES (?, ?)",
+						params: ["commit-window-write", "must commit exactly once"],
+						result: "run",
+					},
+				},
+				{ operation: "memory.commit-window-cancel", lane: "write", deadlineMs: 5_000 },
+			);
+			await waitFor(() => client?.health().lanes?.write.activeJobId === write.job.id);
+			await waitFor(() => existsSync(commitStarted));
+			client.cancel(write.job.id);
+			blocker.exec("ROLLBACK");
+			blockerReleased = true;
+			await expect(write.result).resolves.toMatchObject({ changes: 1 });
+			const rows = await client.submit<readonly { readonly id: string }[]>(
+				{ kind: "query", statement: { sql: "SELECT id FROM memories ORDER BY id", result: "all" } },
+				{ operation: "memory.verify-commit-window-write", lane: "read", deadlineMs: 1_000 },
+			).result;
+			expect(rows).toContainEqual({ id: "commit-window-write" });
+		} finally {
+			if (!blockerReleased) blocker.exec("ROLLBACK");
+			blocker.close();
+			if (previousCommitMarker === undefined)
+				Reflect.deleteProperty(process.env, "SIGNET_DB_OWNER_TEST_COMMIT_STARTED");
+			else process.env.SIGNET_DB_OWNER_TEST_COMMIT_STARTED = previousCommitMarker;
+		}
+	});
+
+	test("sweeps stale cancellation registries when a client starts", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const staleRegistry = join(database.directory, ".db-owner-cancel-stale");
+		writeFileSync(staleRegistry, "stale-job\n");
+		const staleTime = new Date(Date.now() - DB_OWNER_CANCEL_REGISTRY_MAX_AGE_MS * 2);
+		utimesSync(staleRegistry, staleTime, staleTime);
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+		expect(existsSync(staleRegistry)).toBe(false);
+		expect(readdirSync(database.directory).filter((entry) => entry.startsWith(".db-owner-cancel-")).length).toBe(0);
+	});
+
+	test("cleans cancellation registries after owner death before the next client starts", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+		const first = client.submit(
+			{ kind: "sleep", durationMs: 500 },
+			{ operation: "maintenance.owner-death-active", lane: "maintenance", deadlineMs: 5_000 },
+		);
+		const queued = client.submit(
+			{ kind: "query", statement: { sql: "SELECT 1", result: "all" } },
+			{ operation: "maintenance.owner-death-queued", lane: "maintenance", deadlineMs: 5_000 },
+		);
+		const firstResult = first.result.catch(() => undefined);
+		const queuedResult = queued.result.catch(() => undefined);
+		await waitFor(() => client?.health().lanes?.maintenance.activeJobId === first.job.id);
+		queued.cancel();
+		await queuedResult;
+		const ownerPid = client.health().lanes?.maintenance.pid;
+		if (ownerPid === null || ownerPid === undefined) throw new Error("maintenance owner did not publish a pid");
+		expect(readdirSync(database.directory).filter((entry) => entry.startsWith(".db-owner-cancel-")).length).toBe(1);
+		process.kill(ownerPid, "SIGKILL");
+		await waitFor(() => !processExists(ownerPid));
+		await waitFor(() => client?.health().lanes?.maintenance.state === "dead");
+		await firstResult;
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+		expect(readdirSync(database.directory).filter((entry) => entry.startsWith(".db-owner-cancel-")).length).toBe(0);
 	});
 
 	test("does not retain cancellation IDs for completed or active jobs", () => {

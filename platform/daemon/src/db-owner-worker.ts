@@ -52,6 +52,18 @@ interface SqliteDatabaseConstructor {
 	setCustomSQLite?: (path: string) => void;
 }
 
+interface JobExecutionContext {
+	readonly jobId: string;
+	committed: boolean;
+}
+
+class DbOwnerCancellationRequested extends Error {
+	constructor() {
+		super("DB owner job cancelled before commit");
+		this.name = "DB_OWNER_CANCELLED";
+	}
+}
+
 const require = createRequire(import.meta.url);
 const Database = (
 	typeof (globalThis as Record<string, unknown>).Bun !== "undefined"
@@ -154,12 +166,21 @@ export function runDbOwnerWorker(): void {
 		const signal = new Int32Array(new SharedArrayBuffer(4));
 		Atomics.wait(signal, 0, 0, milliseconds);
 	};
-	const withBusyRetry = <Result>(operation: () => Result): Result => {
+	const commit = (context?: JobExecutionContext): void => {
+		if (context !== undefined && cancellationRequested(context.jobId)) {
+			throw new DbOwnerCancellationRequested();
+		}
+		const commitMarker = process.env.SIGNET_DB_OWNER_TEST_COMMIT_STARTED;
+		if (commitMarker !== undefined) writeFileSync(commitMarker, "started\n");
+		db.exec("COMMIT");
+		if (context !== undefined) context.committed = true;
+	};
+	const withBusyRetry = <Result>(operation: () => Result, context?: JobExecutionContext): Result => {
 		for (let attempt = 0; ; attempt += 1) {
 			try {
 				db.exec("BEGIN IMMEDIATE");
 				const result = operation();
-				db.exec("COMMIT");
+				commit(context);
 				return result;
 			} catch (error) {
 				try {
@@ -229,27 +250,38 @@ export function runDbOwnerWorker(): void {
 		return value;
 	}
 
-	function executeStatement(statement: DbOwnerStatement): unknown {
+	function executeStatement(statement: DbOwnerStatement, context?: JobExecutionContext): unknown {
 		const params = (statement.params ?? []).map(bindParameter);
 		const prepared = db.prepare(statement.sql);
 		if (statement.result === "all") return enforceResultLimit(statement, prepared.all(...params));
 		if (statement.result === "get") return enforceResultLimit(statement, prepared.get(...params));
-		if (statement.transactional === false) return enforceResultLimit(statement, prepared.run(...params));
+		if (statement.transactional === false) {
+			const result = prepared.run(...params);
+			if (context !== undefined) context.committed = true;
+			return enforceResultLimit(statement, result);
+		}
 
-		return withBusyRetry(() => enforceResultLimit(statement, prepared.run(...params)));
+		return withBusyRetry(() => enforceResultLimit(statement, prepared.run(...params)), context);
 	}
 
-	function executeTransaction(statements: readonly DbOwnerStatement[]): readonly unknown[] {
+	function executeTransaction(
+		statements: readonly DbOwnerStatement[],
+		context?: JobExecutionContext,
+	): readonly unknown[] {
 		if (statements.length === 0 || statements.length > DB_OWNER_MAX_TRANSACTION_STATEMENTS) {
 			throw new Error(`DB owner transaction must contain 1 to ${DB_OWNER_MAX_TRANSACTION_STATEMENTS} statements`);
 		}
 		return withBusyRetry(() => {
-			const results = statements.map((statement) => executeStatement({ ...statement, transactional: false }));
+			const results = statements.map((statement) => executeStatement({ ...statement, transactional: false }, context));
 			return enforceResultLimit({ sql: "DB_OWNER_TRANSACTION", result: "all" }, results) as readonly unknown[];
-		});
+		}, context);
 	}
 
-	function executeBatch(statements: readonly DbOwnerStatement[], requireChanges: boolean): readonly unknown[] {
+	function executeBatch(
+		statements: readonly DbOwnerStatement[],
+		requireChanges: boolean,
+		context?: JobExecutionContext,
+	): readonly unknown[] {
 		if (statements.length === 0) throw new Error("DB owner batch must contain at least one statement");
 		db.exec("BEGIN IMMEDIATE");
 		try {
@@ -264,7 +296,7 @@ export function runDbOwnerWorker(): void {
 				}
 				results.push(result);
 			}
-			db.exec("COMMIT");
+			commit(context);
 			return enforceResultLimit({ sql: "db-owner-batch", result: "all" }, results) as readonly unknown[];
 		} catch (error) {
 			try {
@@ -283,11 +315,12 @@ export function runDbOwnerWorker(): void {
 
 	function executeSourceSnapshotImport(
 		job: Extract<DbOwnerJob["request"], { readonly kind: "source_snapshot_import" }>,
+		context?: JobExecutionContext,
 	): unknown {
 		db.exec("BEGIN IMMEDIATE");
 		try {
 			const result = applySourceSnapshotImportInTx(db as unknown as BunDatabase, job.input);
-			db.exec("COMMIT");
+			commit(context);
 			return result;
 		} catch (error) {
 			try {
@@ -304,6 +337,7 @@ export function runDbOwnerWorker(): void {
 			DbOwnerJob["request"],
 			{ readonly kind: "source_artifact_upsert" | "source_artifact_upsert_batch" }
 		>,
+		context?: JobExecutionContext,
 	): { readonly upserted: number } {
 		const inputs = request.kind === "source_artifact_upsert" ? [request.input] : request.input;
 		if (inputs.length === 0 || inputs.length > 50) throw new Error("DB owner artifact batch must contain 1 to 50 rows");
@@ -314,7 +348,7 @@ export function runDbOwnerWorker(): void {
 					conflictGuardSourceId: input.conflictGuardSourceId,
 				});
 			}
-			db.exec("COMMIT");
+			commit(context);
 			return { upserted: inputs.length };
 		} catch (error) {
 			try {
@@ -331,6 +365,7 @@ export function runDbOwnerWorker(): void {
 			DbOwnerJob["request"],
 			{ readonly kind: "source_graph_index" | "source_graph_file_purge" | "source_graph_purge" }
 		>,
+		context?: JobExecutionContext,
 	): unknown {
 		db.exec("BEGIN IMMEDIATE");
 		try {
@@ -342,7 +377,7 @@ export function runDbOwnerWorker(): void {
 			} else {
 				result = applyObsidianSourceStructurePurgeInTx(db as unknown as import("./db-accessor").WriteDb, request.input);
 			}
-			db.exec("COMMIT");
+			commit(context);
 			return result;
 		} catch (error) {
 			try {
@@ -356,11 +391,12 @@ export function runDbOwnerWorker(): void {
 
 	function executeSourceArtifactIndex(
 		request: Extract<DbOwnerJob["request"], { readonly kind: "source_artifact_index" }>,
+		context?: JobExecutionContext,
 	): unknown {
 		db.exec("BEGIN IMMEDIATE");
 		try {
 			const result = indexSourceArtifactStructureInTx(db as unknown as import("./db-accessor").WriteDb, request.input);
-			db.exec("COMMIT");
+			commit(context);
 			return result;
 		} catch (error) {
 			try {
@@ -374,11 +410,12 @@ export function runDbOwnerWorker(): void {
 
 	function executeSourceArtifactPurge(
 		request: Extract<DbOwnerJob["request"], { readonly kind: "source_artifact_purge" }>,
+		context?: JobExecutionContext,
 	): unknown {
 		db.exec("BEGIN IMMEDIATE");
 		try {
 			const result = purgeSourceArtifactStructureInTx(db as unknown as import("./db-accessor").WriteDb, request.input);
-			db.exec("COMMIT");
+			commit(context);
 			return result;
 		} catch (error) {
 			try {
@@ -452,7 +489,7 @@ export function runDbOwnerWorker(): void {
 		);
 	}
 
-	async function executeInitialization(agentsDir: string | undefined): Promise<unknown> {
+	async function executeInitialization(agentsDir: string | undefined, context?: JobExecutionContext): Promise<unknown> {
 		const startedMarker = process.env.SIGNET_DB_OWNER_TEST_INIT_STARTED;
 		const releaseMarker = process.env.SIGNET_DB_OWNER_TEST_INIT_RELEASE;
 		if (startedMarker !== undefined && releaseMarker !== undefined) {
@@ -461,25 +498,27 @@ export function runDbOwnerWorker(): void {
 		}
 		const { initDbAccessorAsync } = await import("./db-accessor");
 		await initDbAccessorAsync(ownerDbPath, { agentsDir });
+		if (context !== undefined) context.committed = true;
 		return { initialized: true };
 	}
 
-	async function execute(job: DbOwnerJob): Promise<unknown> {
-		if (job.request.kind === "initialize") return await executeInitialization(job.request.agentsDir);
-		if (job.request.kind === "query") return executeStatement(job.request.statement);
-		if (job.request.kind === "transaction") return executeTransaction(job.request.transaction.statements);
-		if (job.request.kind === "batch") return executeBatch(job.request.statements, job.request.requireChanges === true);
-		if (job.request.kind === "source_snapshot_import") return executeSourceSnapshotImport(job.request);
+	async function execute(job: DbOwnerJob, context: JobExecutionContext): Promise<unknown> {
+		if (job.request.kind === "initialize") return await executeInitialization(job.request.agentsDir, context);
+		if (job.request.kind === "query") return executeStatement(job.request.statement, context);
+		if (job.request.kind === "transaction") return executeTransaction(job.request.transaction.statements, context);
+		if (job.request.kind === "batch")
+			return executeBatch(job.request.statements, job.request.requireChanges === true, context);
+		if (job.request.kind === "source_snapshot_import") return executeSourceSnapshotImport(job.request, context);
 		if (job.request.kind === "source_artifact_upsert" || job.request.kind === "source_artifact_upsert_batch")
-			return executeSourceArtifactUpsert(job.request);
+			return executeSourceArtifactUpsert(job.request, context);
 		if (
 			job.request.kind === "source_graph_index" ||
 			job.request.kind === "source_graph_file_purge" ||
 			job.request.kind === "source_graph_purge"
 		)
-			return executeSourceGraph(job.request);
-		if (job.request.kind === "source_artifact_index") return executeSourceArtifactIndex(job.request);
-		if (job.request.kind === "source_artifact_purge") return executeSourceArtifactPurge(job.request);
+			return executeSourceGraph(job.request, context);
+		if (job.request.kind === "source_artifact_index") return executeSourceArtifactIndex(job.request, context);
+		if (job.request.kind === "source_artifact_purge") return executeSourceArtifactPurge(job.request, context);
 		if (job.request.kind === "vacuum_conversion") {
 			const { convertToIncrementalVacuum } = await import("./db-vacuum");
 			const pauseMs = Number.parseInt(process.env.SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS ?? "0", 10);
@@ -501,6 +540,7 @@ export function runDbOwnerWorker(): void {
 		if (job.request.kind === "incremental_vacuum") {
 			const pages = Math.max(1, Math.min(10_000, Math.trunc(job.request.pages)));
 			db.exec(`PRAGMA incremental_vacuum(${pages})`);
+			if (context !== undefined) context.committed = true;
 			const row = db.prepare("PRAGMA freelist_count").get() as { freelist_count?: number } | undefined;
 			return typeof row?.freelist_count === "number" ? row.freelist_count : 0;
 		}
@@ -542,14 +582,15 @@ export function runDbOwnerWorker(): void {
 			activeJobId = job.id;
 			send({ type: "started", jobId: job.id, workloadClass: job.workloadClass });
 			const startedAt = Date.now();
+			const context: JobExecutionContext = { jobId: job.id, committed: false };
 			try {
 				if (cancelled.delete(job.id) || cancellationRequested(job.id)) {
 					result(job.id, "cancelled");
 				} else if (Date.now() >= job.deadlineAt) {
 					result(job.id, "timed_out");
 				} else {
-					const value = await execute(job);
-					if (cancellationRequested(job.id)) result(job.id, "cancelled");
+					const value = await execute(job, context);
+					if (cancellationRequested(job.id) && !context.committed) result(job.id, "cancelled");
 					else
 						result(job.id, "completed", value, {
 							startedAt,
@@ -557,13 +598,17 @@ export function runDbOwnerWorker(): void {
 						});
 				}
 			} catch (error) {
-				send({
-					type: "result",
-					jobId: job.id,
-					outcome: "failed",
-					error: serializeError(error),
-					metrics: { startedAt, finishedAt: Date.now() },
-				});
+				if (error instanceof DbOwnerCancellationRequested) {
+					result(job.id, "cancelled", undefined, { startedAt, finishedAt: Date.now() });
+				} else {
+					send({
+						type: "result",
+						jobId: job.id,
+						outcome: "failed",
+						error: serializeError(error),
+						metrics: { startedAt, finishedAt: Date.now() },
+					});
+				}
 			} finally {
 				activeJobId = null;
 				setImmediate(() => void next());

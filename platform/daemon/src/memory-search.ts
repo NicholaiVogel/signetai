@@ -1849,8 +1849,11 @@ export async function hybridRecall(
 						const focal = await getFocalEntities(agentId);
 
 						if (focal.entityIds.length > 0) {
-							const traversal = await getDbAccessor().withReadDbAsync(async (db) =>
-								traverseKnowledgeGraph(focal.entityIds, db, agentId, {
+							const traversal = await traverseKnowledgeGraph(
+								focal.entityIds,
+								(readFn) => getDbAccessor().withReadDbAsync(readFn, { operation: "memory.graph-traversal" }),
+								agentId,
+								{
 									maxAspectsPerEntity: traversalCfg.maxAspectsPerEntity,
 									maxAttributesPerAspect: traversalCfg.maxAttributesPerAspect,
 									maxDependencyHops: traversalCfg.maxDependencyHops,
@@ -1860,7 +1863,7 @@ export async function hybridRecall(
 									minConfidence: traversalCfg.minConfidence,
 									timeoutMs: traversalCfg.timeoutMs,
 									scope: params.scope,
-								}),
+								},
 							);
 
 							// Cosine re-scoring: when query embedding is available,
@@ -1991,8 +1994,11 @@ export async function hybridRecall(
 						const focal = await getFocalEntities(agentId);
 
 						if (focal.entityIds.length > 0) {
-							const traversal = await getDbAccessor().withReadDbAsync(async (db) =>
-								traverseKnowledgeGraph(focal.entityIds, db, agentId, {
+							const traversal = await traverseKnowledgeGraph(
+								focal.entityIds,
+								(readFn) => getDbAccessor().withReadDbAsync(readFn, { operation: "memory.graph-traversal" }),
+								agentId,
+								{
 									maxAspectsPerEntity: traversalCfg.maxAspectsPerEntity,
 									maxAttributesPerAspect: traversalCfg.maxAttributesPerAspect,
 									maxDependencyHops: traversalCfg.maxDependencyHops,
@@ -2001,7 +2007,7 @@ export async function hybridRecall(
 									maxTraversalPaths: traversalCfg.maxTraversalPaths,
 									minConfidence: traversalCfg.minConfidence,
 									timeoutMs: traversalCfg.timeoutMs,
-								}),
+								},
 							);
 
 							const tw = traversalCfg.boostWeight;

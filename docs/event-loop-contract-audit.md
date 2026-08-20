@@ -4,15 +4,15 @@ This report is generated from the deterministic migration ledger in `scripts/eve
 
 ## Current inventory
 
-- Exact ledger inventory: 709 sites
+- Exact ledger inventory: 706 sites
 - Synchronous `withWriteTx()` sites: 78
-- Synchronous `withReadDb()` sites: 128
-- Synchronous filesystem/process sites: 503
+- Synchronous `withReadDb()` sites: 120
+- Synchronous filesystem/process sites: 508
 - Compile-visible legacy DB sites remaining: 198
   - `withWriteTx`: 78
   - `withReadDb`: 120
 
-The 709-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call. The 78 synchronous writes and 128 synchronous reads are the complete database-call inventory; 198 compatibility DB operations remain transitional callers for the later migration phase. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
+The 706-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call. The 78 synchronous writes and 120 synchronous reads are the complete database-call inventory; 198 compatibility DB operations remain transitional callers for the later migration phase. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## A3 Slice 2 migration notes
 

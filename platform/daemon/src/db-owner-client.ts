@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type ChildProcess, spawn } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveEmbeddedWorkerPath } from "./native-runtime-assets";
@@ -163,6 +163,27 @@ export interface DbOwnerClientOptions {
 }
 
 const DEFAULT_DB_OWNER_START_TIMEOUT_MS = 15_000;
+export const DB_OWNER_CANCEL_REGISTRY_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
+const CANCEL_REGISTRY_PREFIX = ".db-owner-cancel-";
+
+function sweepStaleCancellationRegistries(directory: string): void {
+	const cutoff = Date.now() - DB_OWNER_CANCEL_REGISTRY_MAX_AGE_MS;
+	let entries: string[];
+	try {
+		entries = readdirSync(directory);
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.startsWith(CANCEL_REGISTRY_PREFIX)) continue;
+		const path = join(directory, entry);
+		try {
+			if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
+		} catch {
+			// Another client may have removed the registry concurrently.
+		}
+	}
+}
 
 function resolveStartupTimeoutMs(options: DbOwnerClientOptions): number {
 	const configured = options.startupTimeoutMs ?? process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS;
@@ -227,8 +248,20 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	let sequence = 0;
 	let input = "";
 	let stderr = "";
-	const cancellationRegistryPath = join(dirname(options.dbPath), `.db-owner-cancel-${process.pid}-${randomUUID()}`);
+	sweepStaleCancellationRegistries(dirname(options.dbPath));
+	const cancellationRegistryPath = join(
+		dirname(options.dbPath),
+		`${CANCEL_REGISTRY_PREFIX}${process.pid}-${randomUUID()}`,
+	);
 	const pending = new Map<string, PendingJob<unknown>>();
+
+	function unlinkCancellationRegistry(): void {
+		try {
+			unlinkSync(cancellationRegistryPath);
+		} catch {
+			// The registry may not have been created or may already be gone.
+		}
+	}
 
 	function recordCancellation(jobId: string): void {
 		try {
@@ -339,6 +372,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		startupReject = null;
 		rejectStartup?.(error);
 		if (!closed) rejectAll(error, dispatchedOnly);
+		unlinkCancellationRegistry();
 		if (retired !== null) {
 			try {
 				retired.kill("SIGKILL");
@@ -653,22 +687,21 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	function cancel(jobId: string): void {
 		const entry = pending.get(jobId);
 		if (entry === undefined || entry.settled) return;
-		const owner = child;
 		const active = activeJobId === jobId;
 		recordCancellation(jobId);
+		if (active) {
+			// Active jobs must finish in the owner so a cancellation that arrives
+			// during SQLite COMMIT can report the durable outcome accurately. The
+			// worker fences the transaction before COMMIT and reads this registry
+			// after COMMIT; queued jobs still use the protocol cancel command.
+			return;
+		}
 		settle(jobId, (job) => {
 			if (!job.settled) {
 				job.settled = true;
 				job.reject(new DbOwnerCancelledError(jobId));
 			}
 		});
-		if (active && owner !== null) {
-			// A synchronous SQLite operation cannot consume the cancel command
-			// until it returns. Retire the owner so SQLite rolls back any active
-			// transaction instead of allowing a stale commit after the abort.
-			retireOwner(new DbOwnerCancelledError(jobId), owner, "dead", true);
-			return;
-		}
 		if (state === "ready" && child !== null)
 			void write(child, { type: "cancel", jobId }).catch(() => {
 				// The exit handler reports a dead owner to other pending jobs.

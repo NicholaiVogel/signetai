@@ -67,10 +67,11 @@ export interface TraversalConfig {
  * connection independently; the direct ReadDb form remains useful for
  * callers that already own a bounded read scope.
  */
-type ReadDbSource = ReadDb | (<T>(fn: (db: ReadDb) => T) => T);
+type ReadDbSource = ReadDb | (<T>(fn: (db: ReadDb) => T) => T) | (<T>(fn: (db: ReadDb) => T) => Promise<T>);
 
-function withReadDb<T>(source: ReadDbSource, fn: (db: ReadDb) => T): T {
-	return typeof source === "function" ? source(fn) : fn(source);
+async function withReadDbAsync<T>(source: ReadDbSource, fn: (db: ReadDb) => T): Promise<T> {
+	if (typeof source !== "function") return fn(source);
+	return await source(fn);
 }
 
 export interface FocalEntityResult {
@@ -402,7 +403,7 @@ async function batchCollectForEntities(
 	const entityPh = entityIds.map(() => "?").join(", ");
 
 	// --- 1. Batch constraints for all entities ---
-	const constraintRows = withReadDb(
+	const constraintRows = await withReadDbAsync(
 		db,
 		(readDb) =>
 			readDb
@@ -457,7 +458,7 @@ async function batchCollectForEntities(
 		aspectArgs = [...entityIds, agentId];
 	}
 
-	const allAspectRows = withReadDb(
+	const allAspectRows = await withReadDbAsync(
 		db,
 		(readDb) =>
 			readDb.prepare(aspectQuery).all(...aspectArgs) as Array<{
@@ -504,7 +505,7 @@ async function batchCollectForEntities(
 		if (config.scope !== undefined) {
 			const scopeClause = config.scope === null ? "AND m.scope IS NULL" : "AND m.scope = ?";
 			const scopeArgs: unknown[] = config.scope === null ? [] : [config.scope];
-			attributeRows = withReadDb(
+			attributeRows = await withReadDbAsync(
 				db,
 				(readDb) =>
 					readDb
@@ -525,7 +526,7 @@ async function batchCollectForEntities(
 					}>,
 			);
 		} else {
-			attributeRows = withReadDb(
+			attributeRows = await withReadDbAsync(
 				db,
 				(readDb) =>
 					readDb
@@ -577,7 +578,7 @@ async function batchCollectForEntities(
 		if (config.scope !== undefined) {
 			const scopeClause = config.scope === null ? "AND m.scope IS NULL" : "AND m.scope = ?";
 			const scopeArgs: unknown[] = config.scope === null ? [] : [config.scope];
-			mentionRows = withReadDb(
+			mentionRows = await withReadDbAsync(
 				db,
 				(readDb) =>
 					readDb
@@ -597,7 +598,7 @@ async function batchCollectForEntities(
 					}>,
 			);
 		} else {
-			mentionRows = withReadDb(
+			mentionRows = await withReadDbAsync(
 				db,
 				(readDb) =>
 					readDb
@@ -660,7 +661,7 @@ export async function traverseKnowledgeGraph(
 	};
 
 	try {
-		if (!withReadDb(db, hasTraversalTables)) return empty;
+		if (!(await withReadDbAsync(db, hasTraversalTables))) return empty;
 
 		const focalIds = sanitizeEntityIds(focalEntityIds);
 		if (focalIds.length === 0) return empty;
@@ -679,7 +680,7 @@ export async function traverseKnowledgeGraph(
 		// --- Phase 2: Dependency expansion + batch collect for hops ---
 		if (!timedOut && phase1.memoryIds.size < budget) {
 			const focalPh = focalIds.map(() => "?").join(", ");
-			const dependencyRows = withReadDb(
+			const dependencyRows = await withReadDbAsync(
 				db,
 				(readDb) =>
 					readDb
