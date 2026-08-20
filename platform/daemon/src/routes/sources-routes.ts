@@ -660,6 +660,8 @@ async function runSourceIndexJob(input: SourceIndexJobInput, job: SourceIndexJob
 			pauseSourceIndexJob(input.source.id, job.id, {
 				pauseReason: paused.pauseReason ?? "provider_unavailable",
 				resumeFrontier: paused.resumeFrontier,
+				scanned: paused.scanned,
+				indexed: paused.indexed,
 			});
 			await recordSourceIndexTelemetryBestEffort(input.recordIndexOperation, {
 				source: input.source,

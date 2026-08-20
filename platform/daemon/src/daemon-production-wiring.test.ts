@@ -36,6 +36,8 @@ describe("daemon production DB owner wiring", () => {
 
 		expect(source).toContain("const syncResult = nativeMemoryBridge?.getLastSyncResult?.();");
 		expect(source).toContain("pauseSourceIndexJob(sourceId, jobId, {");
+		expect(source).toContain("scanned: paused.scanned,");
+		expect(source).toContain("indexed: paused.indexed,");
 		expect(source).toContain('outcome: syncResult?.status === "paused" && paused ? "partial" : "success",');
 		expect(source).toContain('updateFreshness: syncResult?.status === "paused" && paused ? false : undefined,');
 	});

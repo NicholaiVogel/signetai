@@ -314,6 +314,28 @@ When a source artifact is indexed but its embedding provider is unavailable,
 `"embeddings pending - provider down"` while embeddings wait for a bounded
 retry window.
 
+Each source may also expose an `indexJob` while its source scan is queued,
+running, complete, paused, or failed. A paused job is a partial scan stopped
+because the provider is unavailable. Its `partial` field is `true`, and
+`scanned` and `indexed` report the counts reached before the pause, including
+zero when the provider was unavailable before the first file. `pauseReason`
+identifies the cause, and `resumeFrontier` is the file path from which the next
+scan resumes, or `null` when no file was checkpointed. A paused scan does not
+update the source's `lastIndexedAt`.
+
+```json
+{
+  "indexJob": {
+    "status": "paused",
+    "partial": true,
+    "scanned": 2,
+    "indexed": 1,
+    "pauseReason": "provider_unavailable",
+    "resumeFrontier": "/home/user/ObsidianVault/permanent/Next.md"
+  }
+}
+```
+
 <a id="post-api-sources-discord"></a>
 
 ### POST /api/sources/discord

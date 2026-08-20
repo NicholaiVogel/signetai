@@ -96,7 +96,12 @@ export function completeSourceIndexJobFromProgress(sourceId: string, jobId: stri
 export function pauseSourceIndexJob(
 	sourceId: string,
 	jobId: string,
-	input: { readonly pauseReason: string; readonly resumeFrontier: string | null },
+	input: {
+		readonly pauseReason: string;
+		readonly resumeFrontier: string | null;
+		readonly scanned: number;
+		readonly indexed: number;
+	},
 ): void {
 	if (!isCurrentSourceIndexJob(sourceId, jobId)) return;
 	const current = sourceIndexJobs.get(sourceId);
@@ -106,6 +111,8 @@ export function pauseSourceIndexJob(
 		status: "paused",
 		finishedAt: new Date().toISOString(),
 		partial: true,
+		scanned: input.scanned,
+		indexed: input.indexed,
 		pauseReason: input.pauseReason,
 		resumeFrontier: input.resumeFrontier,
 	});

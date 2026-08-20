@@ -5,6 +5,7 @@ import {
 	completeSourceIndexJob,
 	getSourceIndexJob,
 	markSourceIndexJobRunning,
+	pauseSourceIndexJob,
 	updateSourceIndexJobProgress,
 } from "./source-index-progress";
 
@@ -51,5 +52,25 @@ describe("source index progress", () => {
 
 		expect(markSourceIndexJobRunning("source-1", job.id)).toBeUndefined();
 		expect(getSourceIndexJob("source-1")?.status).toBe("complete");
+	});
+
+	test("persists counts when a provider pauses before any progress event", () => {
+		clearSourceIndexProgressForTests();
+		const job = beginSourceIndexJob("source-paused");
+		pauseSourceIndexJob("source-paused", job.id, {
+			pauseReason: "provider_unavailable",
+			resumeFrontier: "/vault/permanent/First.md",
+			scanned: 2,
+			indexed: 1,
+		});
+
+		expect(getSourceIndexJob("source-paused")).toMatchObject({
+			status: "paused",
+			partial: true,
+			scanned: 2,
+			indexed: 1,
+			pauseReason: "provider_unavailable",
+			resumeFrontier: "/vault/permanent/First.md",
+		});
 	});
 });

@@ -2601,6 +2601,8 @@ async function main() {
 									pauseSourceIndexJob(sourceId, jobId, {
 										pauseReason: paused.pauseReason ?? "provider_unavailable",
 										resumeFrontier: paused.resumeFrontier,
+										scanned: paused.scanned,
+										indexed: paused.indexed,
 									});
 								} else {
 									completeSourceIndexJobFromProgress(sourceId, jobId);
