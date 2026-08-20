@@ -5,7 +5,12 @@ import { dlopen, ptr, read } from "bun:ffi";
 import { readdirSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { establishEventLoopHeartbeatBaseline, recordEventLoopHeartbeat, recordEventLoopLag } from "./db-observability";
+import {
+	establishEventLoopHeartbeatBaseline,
+	getEventLoopLiveness,
+	recordEventLoopHeartbeat,
+	recordEventLoopLag,
+} from "./db-observability";
 import { logger } from "./logger";
 import { reportEventLoopLag, tickPressureState } from "./system-pressure";
 
@@ -403,6 +408,7 @@ export function logFdSnapshot(stage: string): ResourceSnapshot {
 
 let eventLoopTimer: ReturnType<typeof setInterval> | null = null;
 let fdPollTimer: ReturnType<typeof setInterval> | null = null;
+let lastLoggedEventLoopLatchId = 0;
 
 /**
  * Periodic event loop lag monitor.
@@ -414,6 +420,7 @@ export function startEventLoopMonitor(intervalMs = 2000): void {
 		clearInterval(eventLoopTimer);
 	}
 	let lastTick = Date.now();
+	lastLoggedEventLoopLatchId = 0;
 	establishEventLoopHeartbeatBaseline(lastTick, intervalMs);
 	eventLoopTimer = setInterval(() => {
 		const now = Date.now();
@@ -422,6 +429,14 @@ export function startEventLoopMonitor(intervalMs = 2000): void {
 		reportEventLoopLag(lag);
 		recordEventLoopLag(lag);
 		recordEventLoopHeartbeat(now, intervalMs);
+		const liveness = getEventLoopLiveness(now);
+		if (liveness.status === "wedged" && liveness.latchId !== lastLoggedEventLoopLatchId) {
+			lastLoggedEventLoopLatchId = liveness.latchId;
+			logger.error("resources", "Event-loop stall latched", undefined, {
+				stallMs: liveness.stallMs,
+				syncDbCallSites: liveness.syncDbCallSites,
+			});
+		}
 		// Advance the pressure state machine on the monitor's own cadence so
 		// reads (isSystemPressureHigh) stay pure and never clear the signal.
 		tickPressureState();

@@ -6,6 +6,13 @@
  * database or retain user data while the event loop is under pressure.
  */
 
+import {
+	getSyncDbAttributionMetrics,
+	getSyncDbCallSitesForWindow,
+	resetSyncDbAttribution,
+	type SyncDbAttributionMetrics,
+} from "./sync-db-attribution";
+
 export type DbOwner = "read" | "write";
 export type DbOperationOutcome = "completed" | "failed" | "cancelled" | "rejected" | "timed_out";
 
@@ -56,6 +63,7 @@ export interface DbRuntimeMetrics {
 	readonly failed: number;
 	readonly completed: number;
 	readonly eventLoopLag: DbPercentiles;
+	readonly syncDb: SyncDbAttributionMetrics;
 }
 
 export type EventLoopHealthStatus = "ok" | "degraded" | "wedged";
@@ -71,6 +79,10 @@ export interface EventLoopLiveness {
 	readonly heartbeatIntervalMs: number;
 	readonly lagP95Ms: number | null;
 	readonly lagP99Ms: number | null;
+	/** Monotonic id for each newly latched wedge, used to avoid duplicate logs. */
+	readonly latchId: number;
+	/** Transitional synchronous DB sites that overlapped the latched stall. */
+	readonly syncDbCallSites: readonly string[];
 }
 
 const MAX_SAMPLES = 512;
@@ -98,6 +110,8 @@ let eventLoopHeartbeatIntervalMs = DEFAULT_EVENT_LOOP_HEARTBEAT_INTERVAL_MS;
 // must be kept separately for a queued liveness request to see it.
 let eventLoopLatchedStatus: EventLoopHealthStatus = "ok";
 let eventLoopLatchedStallMs = 0;
+let eventLoopLatchedSyncDbCallSites: readonly string[] = [];
+let eventLoopLatchId = 0;
 
 function appendBounded<T>(items: T[], value: T): void {
 	items.push(value);
@@ -162,6 +176,7 @@ export function establishEventLoopHeartbeatBaseline(firedAtMs: number, heartbeat
 	eventLoopHeartbeatIntervalMs = heartbeatIntervalMs;
 	eventLoopLatchedStatus = "ok";
 	eventLoopLatchedStallMs = 0;
+	eventLoopLatchedSyncDbCallSites = [];
 }
 
 /** Record a fire from the shared event-loop monitor interval. */
@@ -171,9 +186,15 @@ export function recordEventLoopHeartbeat(firedAtMs: number, heartbeatIntervalMs:
 		// One healthy, on-time fire is the explicit decay rule for a prior wedge.
 		eventLoopLatchedStatus = "ok";
 		eventLoopLatchedStallMs = 0;
+		eventLoopLatchedSyncDbCallSites = [];
 	} else {
+		const wasWedged = eventLoopLatchedStatus === "wedged";
 		eventLoopLatchedStatus = observed.status;
 		eventLoopLatchedStallMs = observed.stallMs;
+		if (observed.status === "wedged") {
+			if (!wasWedged) eventLoopLatchId++;
+			eventLoopLatchedSyncDbCallSites = getSyncDbCallSitesForWindow(eventLoopHeartbeatAtMs, firedAtMs);
+		}
 	}
 	eventLoopHeartbeatAtMs = firedAtMs;
 	eventLoopHeartbeatIntervalMs = heartbeatIntervalMs;
@@ -209,6 +230,7 @@ export function getDbRuntimeMetrics(): DbRuntimeMetrics {
 		failed,
 		completed,
 		eventLoopLag: percentiles(eventLoopLagSamples),
+		syncDb: getSyncDbAttributionMetrics(),
 	};
 }
 
@@ -230,6 +252,8 @@ export function getEventLoopLiveness(nowMs = Date.now()): EventLoopLiveness {
 		heartbeatIntervalMs: eventLoopHeartbeatIntervalMs,
 		lagP95Ms: lag.p95Ms,
 		lagP99Ms: lag.p99Ms,
+		latchId: eventLoopLatchId,
+		syncDbCallSites: eventLoopLatchedSyncDbCallSites,
 	};
 }
 
@@ -242,6 +266,9 @@ export function resetDbObservability(): void {
 	timedOut = 0;
 	failed = 0;
 	completed = 0;
+	eventLoopLatchedSyncDbCallSites = [];
+	eventLoopLatchId = 0;
+	resetSyncDbAttribution();
 	establishEventLoopHeartbeatBaseline(Date.now(), DEFAULT_EVENT_LOOP_HEARTBEAT_INTERVAL_MS);
 	queue = {
 		readDepth: 0,

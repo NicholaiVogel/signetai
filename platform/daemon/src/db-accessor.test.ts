@@ -8,6 +8,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isFtsIndexIncomplete } from "./fts-index-state";
 import {
+	getEventLoopLiveness,
+	recordEventLoopHeartbeat,
+	establishEventLoopHeartbeatBaseline,
+	resetDbObservability,
+} from "./db-observability";
+import {
 	DbSpacePreflightError,
 	DbReadAdmissionCancelledError,
 	DbReadAdmissionRejectedError,
@@ -150,6 +156,33 @@ describe("DbAccessor", () => {
 		});
 		expect(result).toBeTruthy();
 		expect(result?.val).toBe("hello");
+	});
+
+	test("attributes a wedged parent sync call with its file and line", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+
+		const realNow = Date.now;
+		let now = 1_000;
+		Date.now = () => now;
+		try {
+			resetDbObservability();
+			establishEventLoopHeartbeatBaseline(1_000, 2_000);
+			getDbAccessor().withWriteTx((db) => {
+				// Keep this synchronous on purpose: this is the parent-isolate wedge seam.
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+				now = 5_000;
+				db.prepare("SELECT 1").get();
+			});
+
+			recordEventLoopHeartbeat(5_000, 2_000);
+			const liveness = getEventLoopLiveness(5_000);
+			expect(liveness.status).toBe("wedged");
+			expect(liveness.syncDbCallSites.some((site) => site.includes("db-accessor.test.ts:"))).toBe(true);
+		} finally {
+			Date.now = realNow;
+		}
 	});
 
 	test("write statements expose the number of affected rows", () => {
