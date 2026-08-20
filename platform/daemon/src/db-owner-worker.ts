@@ -523,18 +523,24 @@ export function runDbOwnerWorker(): void {
 			const { convertToIncrementalVacuum } = await import("./db-vacuum");
 			const pauseMs = Number.parseInt(process.env.SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS ?? "0", 10);
 			const activeFile = process.env.SIGNET_TEST_DB_OWNER_VACUUM_ACTIVE_FILE;
+			const converted = convertToIncrementalVacuum(db as unknown as import("./db-vacuum").PragmaDb, {
+				dbPath: ownerDbPath,
+				log: () => {},
+				beforeVacuum: () => {
+					if (activeFile) writeFileSync(activeFile, `${Date.now()}\n`);
+					if (Number.isFinite(pauseMs) && pauseMs > 0) {
+						const wait = new Int32Array(new SharedArrayBuffer(4));
+						Atomics.wait(wait, 0, 0, Math.min(pauseMs, 60_000));
+					}
+				},
+			});
+			// Conversion is a non-transactional SQLite operation: once it returns,
+			// VACUUM and the durable marker have completed. An active cancellation
+			// that arrived during the conversion must therefore report completion,
+			// not cancellation after durable changes.
+			if (context !== undefined && converted) context.committed = true;
 			return {
-				converted: convertToIncrementalVacuum(db as unknown as import("./db-vacuum").PragmaDb, {
-					dbPath: ownerDbPath,
-					log: () => {},
-					beforeVacuum: () => {
-						if (activeFile) writeFileSync(activeFile, `${Date.now()}\n`);
-						if (Number.isFinite(pauseMs) && pauseMs > 0) {
-							const wait = new Int32Array(new SharedArrayBuffer(4));
-							Atomics.wait(wait, 0, 0, Math.min(pauseMs, 60_000));
-						}
-					},
-				}),
+				converted,
 			};
 		}
 		if (job.request.kind === "incremental_vacuum") {

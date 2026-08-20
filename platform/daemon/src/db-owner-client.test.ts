@@ -705,6 +705,7 @@ describe("DB owner client", () => {
 		const database = makeDb();
 		directory = database.directory;
 		client = createDbOwnerClient({ dbPath: database.path });
+		const originalClient = client;
 		await client.start();
 		const first = client.submit(
 			{ kind: "sleep", durationMs: 500 },
@@ -726,9 +727,51 @@ describe("DB owner client", () => {
 		await waitFor(() => !processExists(ownerPid));
 		await waitFor(() => client?.health().lanes?.maintenance.state === "dead");
 		await firstResult;
+		const nextClient = createDbOwnerClient({ dbPath: database.path });
+		client = nextClient;
+		try {
+			await nextClient.start();
+			expect(readdirSync(database.directory).filter((entry) => entry.startsWith(".db-owner-cancel-")).length).toBe(0);
+		} finally {
+			await originalClient.close();
+		}
+	});
+
+	test("reports completion when cancellation lands during vacuum conversion", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const activeFile = join(database.directory, "vacuum-conversion-active");
+		const previousPause = process.env.SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS;
+		const previousActiveFile = process.env.SIGNET_TEST_DB_OWNER_VACUUM_ACTIVE_FILE;
+		process.env.SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS = "250";
+		process.env.SIGNET_TEST_DB_OWNER_VACUUM_ACTIVE_FILE = activeFile;
 		client = createDbOwnerClient({ dbPath: database.path });
-		await client.start();
-		expect(readdirSync(database.directory).filter((entry) => entry.startsWith(".db-owner-cancel-")).length).toBe(0);
+		try {
+			await client.start();
+			const conversion = client.submit<{ readonly converted: boolean }>(
+				{ kind: "vacuum_conversion" },
+				{ operation: "maintenance.vacuum-conversion-cancel", lane: "maintenance", deadlineMs: 15 * 60_000 },
+			);
+			await waitFor(() => client?.health().lanes?.maintenance.activeJobId === conversion.job.id);
+			await waitFor(() => existsSync(activeFile));
+			client.cancel(conversion.job.id);
+			expect(await conversion.result).toEqual({ converted: true });
+
+			const verification = new Database(database.path, { readonly: true });
+			expect((verification.prepare("PRAGMA auto_vacuum").get() as { auto_vacuum: number }).auto_vacuum).toBe(2);
+			expect(
+				verification
+					.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_signet_vacuum_converted'")
+					.get(),
+			).toBeDefined();
+			verification.close();
+		} finally {
+			if (previousPause === undefined) Reflect.deleteProperty(process.env, "SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS");
+			else process.env.SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS = previousPause;
+			if (previousActiveFile === undefined)
+				Reflect.deleteProperty(process.env, "SIGNET_TEST_DB_OWNER_VACUUM_ACTIVE_FILE");
+			else process.env.SIGNET_TEST_DB_OWNER_VACUUM_ACTIVE_FILE = previousActiveFile;
+		}
 	});
 
 	test("does not retain cancellation IDs for completed or active jobs", () => {
