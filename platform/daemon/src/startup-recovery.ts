@@ -40,7 +40,6 @@ export interface StartupRecoveryProgress {
 	readonly operation: string;
 	readonly processed: number;
 	readonly batches: number;
-	readonly deadlineKills: number;
 	readonly ownerState: string | null;
 	readonly ownerGeneration: number | null;
 	readonly updatedAt: string;
@@ -63,7 +62,6 @@ const PENDING_INTEGRITY: DatabaseIntegrityStatus = {
 	repairGuidance: null,
 	ownerState: null,
 	ownerGeneration: null,
-	deadlineKills: 0,
 	incrementalProgress: null,
 };
 
@@ -149,7 +147,6 @@ async function runOwnerStartupRecovery(owner: DbOwnerClient): Promise<StartupRec
 			processed,
 			ownerState: health.state,
 			ownerGeneration: health.generation,
-			deadlineKills: health.deadlineKills,
 		});
 	};
 

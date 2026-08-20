@@ -53,7 +53,6 @@ export interface DatabaseIntegrityStatus {
 	readonly repairGuidance: string | null;
 	readonly ownerState: string | null;
 	readonly ownerGeneration: number | null;
-	readonly deadlineKills: number;
 	readonly incrementalProgress: DatabaseIntegrityProgress | null;
 }
 
@@ -87,7 +86,6 @@ let latestStatus: DatabaseIntegrityStatus = {
 	repairGuidance: null,
 	ownerState: null,
 	ownerGeneration: null,
-	deadlineKills: 0,
 	incrementalProgress: null,
 };
 
@@ -135,7 +133,6 @@ function statusWith(
 		repairGuidance,
 		ownerState: health?.state ?? null,
 		ownerGeneration: health?.generation ?? null,
-		deadlineKills: health?.deadlineKills ?? 0,
 		incrementalProgress: null,
 	};
 }
@@ -172,7 +169,6 @@ export function updateDatabaseIntegrityStatus(
 		repairGuidance: state === "corrupt" || state === "unavailable" ? REPAIR_GUIDANCE : null,
 		ownerState: health?.state ?? latestStatus.ownerState,
 		ownerGeneration: health?.generation ?? latestStatus.ownerGeneration,
-		deadlineKills: health?.deadlineKills ?? latestStatus.deadlineKills,
 		incrementalProgress: progress,
 	};
 }
@@ -498,7 +494,6 @@ async function runOwnerDeferredIntegrityCheck(
 			budgetMs: ownerTimeoutMs,
 			ownerState: health.state,
 			ownerGeneration: health.generation,
-			deadlineKills: health.deadlineKills,
 		});
 	}, 1_000);
 	try {
@@ -515,7 +510,6 @@ async function runOwnerDeferredIntegrityCheck(
 			durationMs: latestStatus.durationMs,
 			ownerState: latestStatus.ownerState,
 			ownerGeneration: latestStatus.ownerGeneration,
-			deadlineKills: latestStatus.deadlineKills,
 		});
 		return latestStatus;
 	} catch (error) {
@@ -535,7 +529,6 @@ async function runOwnerDeferredIntegrityCheck(
 			error: message,
 			ownerState: latestStatus.ownerState,
 			ownerGeneration: latestStatus.ownerGeneration,
-			deadlineKills: latestStatus.deadlineKills,
 		});
 		return latestStatus;
 	} finally {

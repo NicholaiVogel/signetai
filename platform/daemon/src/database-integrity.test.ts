@@ -117,7 +117,6 @@ describe("telemetry database integrity recovery (#1360)", () => {
 			expect(result.telemetryCheck.ok).toBe(true);
 			expect(result.ownerState).toBe("ready");
 			expect(result.ownerGeneration).toBe(1);
-			expect(result.deadlineKills).toBe(0);
 		} finally {
 			await owner.close();
 			rmSync(dir, { recursive: true, force: true });
