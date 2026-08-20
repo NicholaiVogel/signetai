@@ -1,11 +1,13 @@
 /**
- * Always-on attribution for transitional synchronous SQLite calls.
+ * Bounded attribution for transitional synchronous SQLite calls.
  *
  * The event-loop monitor runs on the same isolate as SQLite, so a monitor tick
- * cannot observe a synchronous call while it is executing. We therefore retain
- * a bounded interval history and match the observed stall window against calls
- * that overlapped it. The timestamps and site id are deliberately local-only;
- * no SQL, arguments, or user data are retained.
+ * cannot observe a synchronous call while it is executing. We retain a bounded
+ * interval history and match the observed stall window against calls that
+ * overlapped it. Normal calls record only timestamps and a small token. Caller
+ * stack capture is deliberately lazy: it happens only when a call is slow
+ * enough to explain an event-loop stall. No SQL, arguments, or user data are
+ * retained.
  */
 
 export type SyncDbCallKind = "withReadDb" | "withWriteTx";
@@ -38,15 +40,16 @@ export interface SyncDbCallSiteMetrics {
 
 interface SyncDbCallRecord {
 	readonly sequence: number;
-	readonly siteId: string;
 	readonly kind: SyncDbCallKind;
 	readonly startedAtMs: number;
 	endedAtMs: number | null;
 	durationMs: number | null;
+	siteId: string;
 }
 
 const MAX_HISTORY = 256;
 const SLOW_CALL_THRESHOLD_MS = 50;
+const UNKNOWN_SITE = "unknown:0";
 const history: SyncDbCallRecord[] = [];
 const inFlight = new Map<number, SyncDbCallRecord>();
 const siteMetrics = new Map<
@@ -87,13 +90,14 @@ function parseFrame(
 	return { file: normalizeFileName(match[1] ?? ""), line: lineNumber, functionName };
 }
 
-function callerSite(): string {
+/** Resolve the first frame outside the attribution/accessor implementation. */
+function captureCallerSite(): string {
 	const stack = new Error().stack?.split("\n").slice(1) ?? [];
 	for (const frame of stack) {
 		const parsed = parseFrame(frame);
 		if (!parsed) continue;
 		if (
-			parsed.functionName.endsWith("callerSite") ||
+			parsed.functionName.endsWith("captureCallerSite") ||
 			parsed.functionName.endsWith("beginSyncDbCall") ||
 			parsed.functionName.endsWith("endSyncDbCall") ||
 			parsed.functionName.endsWith("withReadDb") ||
@@ -107,23 +111,22 @@ function callerSite(): string {
 		}
 		return `${parsed.file}:${parsed.line}`;
 	}
-	return "unknown:0";
+	return UNKNOWN_SITE;
 }
 
 export function beginSyncDbCall(kind: SyncDbCallKind, startedAtMs = Date.now()): SyncDbCallToken {
-	const siteId = `${kind}@${callerSite()}`;
 	const record: SyncDbCallRecord = {
 		sequence: nextSequence++,
-		siteId,
 		kind,
 		startedAtMs,
 		endedAtMs: null,
 		durationMs: null,
+		siteId: `${kind}@${UNKNOWN_SITE}`,
 	};
 	inFlight.set(record.sequence, record);
 	return {
 		sequence: record.sequence,
-		siteId,
+		siteId: record.siteId,
 		kind,
 		startedAtMs,
 	};
@@ -135,20 +138,31 @@ export function endSyncDbCall(token: SyncDbCallToken, endedAtMs = Date.now()): v
 	inFlight.delete(token.sequence);
 	record.endedAtMs = Math.max(token.startedAtMs, endedAtMs);
 	record.durationMs = record.endedAtMs - token.startedAtMs;
+	const isSlow = record.durationMs >= SLOW_CALL_THRESHOLD_MS;
+	if (isSlow) {
+		// This is the only hot-path escape: normal calls never construct or parse a stack.
+		record.siteId = `${record.kind}@${captureCallerSite()}`;
+	}
 	calls++;
 	totalDurationMs += record.durationMs;
 	maxDurationMs = Math.max(maxDurationMs, record.durationMs);
-	if (record.durationMs >= SLOW_CALL_THRESHOLD_MS) slowCalls++;
-	const site = siteMetrics.get(record.siteId) ?? { calls: 0, slowCalls: 0, totalDurationMs: 0, maxDurationMs: 0 };
-	site.calls++;
-	site.totalDurationMs += record.durationMs;
-	site.maxDurationMs = Math.max(site.maxDurationMs, record.durationMs);
-	if (record.durationMs >= SLOW_CALL_THRESHOLD_MS) site.slowCalls++;
-	siteMetrics.set(record.siteId, site);
-	if (record.siteId.endsWith("@unknown:0")) {
+	if (isSlow) slowCalls++;
+	if (record.siteId.endsWith(`@${UNKNOWN_SITE}`)) {
 		unattributedCalls++;
 		unattributedDurationMs += record.durationMs;
-		if (record.durationMs >= SLOW_CALL_THRESHOLD_MS) unattributedSlowDurationMs += record.durationMs;
+		if (isSlow) unattributedSlowDurationMs += record.durationMs;
+	} else {
+		const site = siteMetrics.get(record.siteId) ?? {
+			calls: 0,
+			slowCalls: 0,
+			totalDurationMs: 0,
+			maxDurationMs: 0,
+		};
+		site.calls++;
+		site.totalDurationMs += record.durationMs;
+		site.maxDurationMs = Math.max(site.maxDurationMs, record.durationMs);
+		if (isSlow) site.slowCalls++;
+		siteMetrics.set(record.siteId, site);
 	}
 	history.push(record);
 	if (history.length > MAX_HISTORY) history.shift();
