@@ -335,8 +335,12 @@ function findLegacyDbAccessSites(sourceRoot: string): {
 							(ts.isStringLiteral(expression.argumentExpression) ||
 								ts.isNoSubstitutionTemplateLiteral(expression.argumentExpression))
 						? expression.argumentExpression.text
-						: null;
-				if (LEGACY_DB_APIS.includes(api as LegacyDbApi)) {
+						: ts.isIdentifier(expression)
+							? expression.text
+							: null;
+				const isLegacyDbMemberAccess =
+					ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression);
+				if (SYNC_APIS.includes(api as SyncApi)) {
 					const position = ts.isPropertyAccessExpression(expression)
 						? expression.name.getStart(sourceFile)
 						: expression.getStart(sourceFile);
@@ -344,18 +348,20 @@ function findLegacyDbAccessSites(sourceRoot: string): {
 					sites.push({
 						path: relativePath,
 						line,
-						api: api as LegacyDbApi,
+						api: api as SyncApi,
 						source: lines[line - 1]?.trim() ?? "",
 						category: "hot-path",
 					});
-					let marked = false;
-					for (let candidate = line - 1; candidate >= Math.max(1, line - MARKER_WINDOW_LINES); candidate--) {
-						if (markerLines.has(candidate)) {
-							marked = true;
-							break;
+					if (isLegacyDbMemberAccess && LEGACY_DB_APIS.includes(api as LegacyDbApi)) {
+						let marked = false;
+						for (let candidate = line - 1; candidate >= Math.max(1, line - MARKER_WINDOW_LINES); candidate--) {
+							if (markerLines.has(candidate)) {
+								marked = true;
+								break;
+							}
 						}
+						if (!marked) unmarked.push({ path: relativePath, line, api: api as LegacyDbApi });
 					}
-					if (!marked) unmarked.push({ path: relativePath, line, api: api as LegacyDbApi });
 				}
 			}
 			ts.forEachChild(node, visit);
@@ -556,7 +562,7 @@ This report is generated from the deterministic migration ledger in \`scripts/ev
   - \`withWriteTx\`: ${legacyDbAccess.withWriteTx}
   - \`withReadDb\`: ${legacyDbAccess.withReadDb}
 
-The ${baselineSites.length.toLocaleString("en-US")}-site inventory excludes test, benchmark, generated, and \`__tests__\` fixtures. The ${counts.get("withWriteTx") ?? 0} synchronous writes and ${counts.get("withReadDb") ?? 0} synchronous reads remain transitional callers for the later migration phase. They are marked with \`@ts-expect-error LEGACY_SYNC_DB_ACCESS\`, so the compiler reports every remaining site without forcing this phase to migrate ${legacyDbAccess.total} database operations.
+The ${baselineSites.length.toLocaleString("en-US")}-site inventory excludes test, benchmark, generated, and \`__tests__\` fixtures and includes every synchronous filesystem, process, and database call. The ${counts.get("withWriteTx") ?? 0} synchronous writes and ${counts.get("withReadDb") ?? 0} synchronous reads are the complete database-call inventory; ${legacyDbAccess.total} compatibility DB operations remain transitional callers for the later migration phase. Those compatibility calls are marked with \`@ts-expect-error LEGACY_SYNC_DB_ACCESS\`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## A3 Slice 2 migration notes
 

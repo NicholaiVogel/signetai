@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveEmbeddedWorkerPath } from "./native-runtime-assets";
@@ -35,6 +36,7 @@ export const MAX_DB_OWNER_MAINTENANCE_JOBS = DB_OWNER_MAX_QUEUE_DEPTH;
 export const MAX_DB_OWNER_WORK_UNITS = DB_OWNER_MAX_WORK_UNITS;
 export const MAX_DB_OWNER_DEADLINE_MS = DB_OWNER_MAX_DEADLINE_MS;
 export const MAX_DB_OWNER_RESULT_BYTES = DB_OWNER_MAX_RESULT_BYTES;
+const dbOwnerWallClockNow = Date.now.bind(Date);
 
 export interface DbOwnerLaneHealth {
 	readonly state: DbOwnerHealthState;
@@ -161,6 +163,27 @@ export interface DbOwnerClientOptions {
 }
 
 const DEFAULT_DB_OWNER_START_TIMEOUT_MS = 15_000;
+export const DB_OWNER_CANCEL_REGISTRY_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
+const CANCEL_REGISTRY_PREFIX = ".db-owner-cancel-";
+
+function sweepStaleCancellationRegistries(directory: string): void {
+	const cutoff = Date.now() - DB_OWNER_CANCEL_REGISTRY_MAX_AGE_MS;
+	let entries: string[];
+	try {
+		entries = readdirSync(directory);
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.startsWith(CANCEL_REGISTRY_PREFIX)) continue;
+		const path = join(directory, entry);
+		try {
+			if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
+		} catch {
+			// Another client may have removed the registry concurrently.
+		}
+	}
+}
 
 function resolveStartupTimeoutMs(options: DbOwnerClientOptions): number {
 	const configured = options.startupTimeoutMs ?? process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS;
@@ -225,14 +248,35 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	let sequence = 0;
 	let input = "";
 	let stderr = "";
+	sweepStaleCancellationRegistries(dirname(options.dbPath));
+	const cancellationRegistryPath = join(
+		dirname(options.dbPath),
+		`${CANCEL_REGISTRY_PREFIX}${process.pid}-${randomUUID()}`,
+	);
 	const pending = new Map<string, PendingJob<unknown>>();
+
+	function unlinkCancellationRegistry(): void {
+		try {
+			unlinkSync(cancellationRegistryPath);
+		} catch {
+			// The registry may not have been created or may already be gone.
+		}
+	}
+
+	function recordCancellation(jobId: string): void {
+		try {
+			appendFileSync(cancellationRegistryPath, `${jobId}\n`);
+		} catch {
+			// The protocol cancel command remains the fallback for queued jobs.
+		}
+	}
 
 	function diagnostic(message: string): string {
 		return stderr.trim().length === 0 ? message : `${message}; child stderr: ${stderr.trim()}`;
 	}
 
 	function currentHealth(): DbOwnerHealth {
-		const now = Date.now();
+		const now = dbOwnerWallClockNow();
 		const jobs = [...pending.values()].filter((entry) => entry.job.id !== activeJobId);
 		const count = (workloadClass: DbOwnerWorkloadClass): number =>
 			jobs.filter((entry) => entry.job.workloadClass === workloadClass).length;
@@ -328,6 +372,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		startupReject = null;
 		rejectStartup?.(error);
 		if (!closed) rejectAll(error, dispatchedOnly);
+		unlinkCancellationRegistry();
 		if (retired !== null) {
 			try {
 				retired.kill("SIGKILL");
@@ -465,6 +510,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 				SIGNET_DB_OWNER_WORKER: "1",
 				...(options.sqlitePath === undefined ? {} : { SIGNET_DB_OWNER_SQLITE_PATH: options.sqlitePath }),
 				...(options.workerRole === "recall" ? { SIGNET_DB_OWNER_RECALL_WORKER: "1" } : {}),
+				SIGNET_DB_OWNER_CANCEL_REGISTRY: cancellationRegistryPath,
 			};
 			// A compiled daemon sets this marker so the native entrypoint dispatches
 			// into the daemon. It must not leak into the worker child: the worker
@@ -589,7 +635,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 				`DB owner ${workloadClass} admission queue is full at ${maxClassJobs} pending jobs`,
 			);
 		}
-		const now = Date.now();
+		const now = dbOwnerWallClockNow();
 		const job: DbOwnerJob = {
 			id: `db-owner-${process.pid}-${++sequence}`,
 			operation: submitOptions.operation,
@@ -641,6 +687,15 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	function cancel(jobId: string): void {
 		const entry = pending.get(jobId);
 		if (entry === undefined || entry.settled) return;
+		const active = activeJobId === jobId;
+		recordCancellation(jobId);
+		if (active) {
+			// Active jobs must finish in the owner so a cancellation that arrives
+			// during SQLite COMMIT can report the durable outcome accurately. The
+			// worker fences the transaction before COMMIT and reads this registry
+			// after COMMIT; queued jobs still use the protocol cancel command.
+			return;
+		}
 		settle(jobId, (job) => {
 			if (!job.settled) {
 				job.settled = true;
@@ -693,6 +748,11 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		}
 		state = "closed";
 		rejectAll(new DbOwnerDiedError("DB owner client closed"));
+		try {
+			unlinkSync(cancellationRegistryPath);
+		} catch {
+			// The registry may not have been created or may already be gone.
+		}
 	}
 
 	async function initialize(agentsDir?: string): Promise<void> {

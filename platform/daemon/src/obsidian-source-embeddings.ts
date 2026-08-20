@@ -52,8 +52,11 @@ export interface IndexObsidianSourceEmbeddingsInput {
 	readonly root: string;
 	readonly filePath: string;
 	readonly content: string;
+	/** Chunks prepared by the killable native-source worker. */
+	readonly chunks?: readonly ObsidianSourceChunk[];
 	readonly embeddingConfig: EmbeddingConfig;
 	readonly fetchEmbedding: SourceEmbeddingFetch;
+	readonly signal?: AbortSignal;
 }
 
 export interface IndexObsidianSourceEmbeddingsResult {
@@ -90,6 +93,7 @@ function providerUnavailableCause(cause: PipelineCauseFamily): boolean {
 export interface PurgeObsidianSourceEmbeddingsInput {
 	readonly sourceId: string;
 	readonly agentId?: string;
+	readonly signal?: AbortSignal;
 }
 
 export interface PurgeObsidianSourceFileEmbeddingsInput {
@@ -97,6 +101,7 @@ export interface PurgeObsidianSourceFileEmbeddingsInput {
 	readonly agentId?: string;
 	readonly root: string;
 	readonly filePath: string;
+	readonly signal?: AbortSignal;
 }
 
 interface MarkdownSection {
@@ -276,8 +281,8 @@ export function buildObsidianSourceChunks(input: {
 export async function indexObsidianSourceEmbeddingsViaOwner(
 	input: IndexObsidianSourceEmbeddingsInput,
 ): Promise<IndexObsidianSourceEmbeddingsResult> {
-	const chunks = buildObsidianSourceChunks(input);
-	const configured = await ownerEmbeddingConfig(input.embeddingConfig);
+	const chunks = input.chunks === undefined ? buildObsidianSourceChunks(input) : [...input.chunks];
+	const configured = await ownerEmbeddingConfig(input.embeddingConfig, input.signal);
 	if (configured.provider === "none") return { chunks: 0, embedded: 0, skipped: 0, providerUnavailable: false };
 	const failureKey = sourceEmbeddingFailureKey(input, configured.model);
 	const providerKey = `${configured.provider}:${configured.model}:${configured.base_url ?? ""}`;
@@ -315,15 +320,16 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 			providerUnavailable: true,
 			retryAfterMs: failureState.retryAt - Date.now(),
 		};
-	const vecAvailable = await ownerVecTableExists();
-	const vecDimensions = vecAvailable ? await ownerVecDimensions() : null;
-	const safetyAvailable = await ownerSafetyTableExists();
+	const vecAvailable = await ownerVecTableExists(input.signal);
+	const vecDimensions = vecAvailable ? await ownerVecDimensions(input.signal) : null;
+	const safetyAvailable = await ownerSafetyTableExists(input.signal);
 	const currentHashes = new Set<string>();
 	let embedded = 0;
 	let skipped = 0;
 	let providerUnavailable = false;
 	let retryAfterMs: number | undefined;
 	for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+		input.signal?.throwIfAborted();
 		const chunk = chunks[chunkIndex];
 		if (!chunk) continue;
 		const contentHash = hash(`${input.agentId}\n${chunk.id}\n${chunk.chunkText}`);
@@ -335,7 +341,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 				[SOURCE_CHUNK_SOURCE_TYPE, LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE, chunk.id, input.agentId],
 				"get",
 			),
-			{ operation: "sources.embeddings.owner.existing", lane: "read" },
+			{ operation: "sources.embeddings.owner.existing", lane: "read", signal: input.signal },
 		);
 		if (existing?.content_hash === contentHash) {
 			if (safetyAvailable)
@@ -343,6 +349,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 					operation: "sources.embeddings.owner.safety",
 					lane: "write",
 					workloadClass: "maintenance",
+					signal: input.signal,
 				});
 			skipped++;
 			continue;
@@ -413,6 +420,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 			lane: "write",
 			workloadClass: "maintenance",
 			estimatedWorkUnits: statements.length,
+			signal: input.signal,
 		});
 		embedded++;
 	}
@@ -426,7 +434,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 				[SOURCE_CHUNK_SOURCE_TYPE, LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE, prefix, prefixUpperBound(prefix), input.agentId],
 				"all",
 			),
-			{ operation: "sources.embeddings.owner.stale", lane: "read" },
+			{ operation: "sources.embeddings.owner.stale", lane: "read", signal: input.signal },
 		);
 		const staleIds = stale
 			.filter((row) => row.source_type === LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE || !currentHashes.has(row.content_hash))
@@ -442,6 +450,7 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 				operation: "sources.embeddings.owner.stale.delete",
 				lane: "write",
 				workloadClass: "maintenance",
+				signal: input.signal,
 			});
 		}
 	}
@@ -461,16 +470,20 @@ export async function purgeObsidianSourceFileEmbeddingsViaOwner(
 	input: PurgeObsidianSourceFileEmbeddingsInput,
 ): Promise<number> {
 	const prefix = `${input.sourceId}:${relPath(normalizePath(input.root).replace(/\/$/, ""), normalizePath(input.filePath))}#`;
-	return await purgeObsidianSourceEmbeddingsByPrefixViaOwner(prefix, input.agentId);
+	return await purgeObsidianSourceEmbeddingsByPrefixViaOwner(prefix, input.agentId, input.signal);
 }
 
 export async function purgeObsidianSourceEmbeddingsViaOwner(
 	input: PurgeObsidianSourceEmbeddingsInput,
 ): Promise<number> {
-	return await purgeObsidianSourceEmbeddingsByPrefixViaOwner(`${input.sourceId}:`, input.agentId);
+	return await purgeObsidianSourceEmbeddingsByPrefixViaOwner(`${input.sourceId}:`, input.agentId, input.signal);
 }
 
-async function purgeObsidianSourceEmbeddingsByPrefixViaOwner(prefix: string, agentId?: string): Promise<number> {
+async function purgeObsidianSourceEmbeddingsByPrefixViaOwner(
+	prefix: string,
+	agentId?: string,
+	signal?: AbortSignal,
+): Promise<number> {
 	const agentWhere = agentId ? " AND agent_id = ?" : "";
 	const args = agentId ? [prefix, prefixUpperBound(prefix), agentId] : [prefix, prefixUpperBound(prefix)];
 	const rows = await dbOwnerQuery<readonly { readonly id: string }[]>(
@@ -479,11 +492,11 @@ async function purgeObsidianSourceEmbeddingsByPrefixViaOwner(prefix: string, age
 			[SOURCE_CHUNK_SOURCE_TYPE, LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE, ...args],
 			"all",
 		),
-		{ operation: "sources.embeddings.owner.purge.read", lane: "read" },
+		{ operation: "sources.embeddings.owner.purge.read", lane: "read", signal },
 	);
 	if (rows.length === 0) return 0;
 	const ids = rows.map((row) => row.id);
-	const vec = await ownerVecTableExists();
+	const vec = await ownerVecTableExists(signal);
 	await dbOwnerBatch(
 		[
 			...(vec
@@ -491,7 +504,7 @@ async function purgeObsidianSourceEmbeddingsByPrefixViaOwner(prefix: string, age
 				: []),
 			ownerStatement(`DELETE FROM embeddings WHERE id IN (${ids.map(() => "?").join(", ")})`, ids),
 		],
-		{ operation: "sources.embeddings.owner.purge.write", lane: "write", workloadClass: "maintenance" },
+		{ operation: "sources.embeddings.owner.purge.write", lane: "write", workloadClass: "maintenance", signal },
 	);
 	return ids.length;
 }
@@ -501,11 +514,11 @@ interface OwnerEmbeddingStateRow {
 	readonly state: string;
 }
 
-async function ownerEmbeddingConfig(configured: EmbeddingConfig): Promise<EmbeddingConfig> {
+async function ownerEmbeddingConfig(configured: EmbeddingConfig, signal?: AbortSignal): Promise<EmbeddingConfig> {
 	if (configured.profile) return configured;
 	const row = await dbOwnerQuery<OwnerEmbeddingStateRow | null>(
 		ownerStatement("SELECT active_profile_json, state FROM embedding_index_state WHERE id = 1", [], "get"),
-		{ operation: "sources.embeddings.owner.config", lane: "read" },
+		{ operation: "sources.embeddings.owner.config", lane: "read", signal },
 	);
 	if (row === null) return configured;
 	try {
@@ -529,27 +542,27 @@ async function ownerEmbeddingConfig(configured: EmbeddingConfig): Promise<Embedd
 	}
 }
 
-async function ownerVecTableExists(): Promise<boolean> {
+async function ownerVecTableExists(signal?: AbortSignal): Promise<boolean> {
 	const row = await dbOwnerQuery<{ readonly name: string } | null>(
 		ownerStatement("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vec_embeddings'", [], "get"),
-		{ operation: "sources.embeddings.owner.vec", lane: "read" },
+		{ operation: "sources.embeddings.owner.vec", lane: "read", signal },
 	);
 	return row !== null;
 }
 
-async function ownerVecDimensions(): Promise<number | null> {
+async function ownerVecDimensions(signal?: AbortSignal): Promise<number | null> {
 	const row = await dbOwnerQuery<{ readonly sql: string } | null>(
 		ownerStatement("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vec_embeddings'", [], "get"),
-		{ operation: "sources.embeddings.owner.vec-dimensions", lane: "read" },
+		{ operation: "sources.embeddings.owner.vec-dimensions", lane: "read", signal },
 	);
 	const match = row?.sql.match(/float\s*\[\s*(\d+)\s*\]/i);
 	return match?.[1] === undefined ? null : Number(match[1]);
 }
 
-async function ownerSafetyTableExists(): Promise<boolean> {
+async function ownerSafetyTableExists(signal?: AbortSignal): Promise<boolean> {
 	const row = await dbOwnerQuery<{ readonly name: string } | null>(
 		ownerStatement("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_content_safety'", [], "get"),
-		{ operation: "sources.embeddings.owner.safety-table", lane: "read" },
+		{ operation: "sources.embeddings.owner.safety-table", lane: "read", signal },
 	);
 	return row !== null;
 }

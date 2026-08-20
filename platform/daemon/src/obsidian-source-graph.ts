@@ -359,6 +359,9 @@ function resolveWikiLinkPath(
 	filePath: string,
 	target: string,
 	index?: ObsidianMarkdownPathIndex,
+	db?: WriteDb,
+	agentId?: string,
+	sourceId?: string,
 ): { path: string; rel: string; found: boolean } {
 	const targetPath = markdownTarget(target);
 	const candidates = [join(dirname(filePath), targetPath), join(root, targetPath)];
@@ -370,6 +373,32 @@ function resolveWikiLinkPath(
 		index?.byRel.get(targetPath) ??
 		(target.includes("/") ? undefined : (index?.byStem.get(target) ?? index?.byNormalizedStem.get(slug(target))));
 	if (indexed) return { path: indexed, rel: relPath(root, indexed), found: true };
+
+	// Owner-side indexing cannot receive the whole discovered source tree for
+	// every file. Resolve the remaining vault-wide basename lookup with one
+	// bounded query against the already-indexed document entities instead.
+	if (db && agentId && sourceId) {
+		const row = db
+			.prepare(
+				`SELECT source_path AS sourcePath
+				   FROM entities
+				  WHERE agent_id = ?
+				    AND source_id = ?
+				    AND source_root = ?
+				    AND source_kind = ?
+				    AND entity_type = 'source_document'
+				    AND (source_path = ? OR source_path LIKE ?)
+				  ORDER BY CASE WHEN source_path = ? THEN 0 ELSE 1 END, source_path ASC
+				  LIMIT 1`,
+			)
+			.get(agentId, sourceId, root, OBSIDIAN_SOURCE_KIND, targetPath, `%/${targetPath}`, targetPath) as
+			| { sourcePath?: string }
+			| undefined;
+		if (row?.sourcePath) {
+			const found = normalizedPath(row.sourcePath);
+			return { path: found, rel: relPath(root, found), found: true };
+		}
+	}
 	const rel = targetPath;
 	return { path: normalizedPath(join(root, rel)), rel, found: false };
 }
@@ -580,7 +609,15 @@ export function applyObsidianSourceStructureInTx(
 		dependenciesTouched++;
 
 	for (const link of wikiLinks(content)) {
-		const targetPath = resolveWikiLinkPath(root, filePath, link, input.markdownPathIndex);
+		const targetPath = resolveWikiLinkPath(
+			root,
+			filePath,
+			link,
+			input.markdownPathIndex,
+			db,
+			input.agentId,
+			input.sourceId,
+		);
 		const target = upsertSourceEntity(db, {
 			id: idFor(input.agentId, input.sourceId, "document", targetPath.rel),
 			name: displayNameForFile(targetPath.path),

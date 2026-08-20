@@ -490,7 +490,7 @@ function isSignetMatcherGroup(group: unknown): boolean {
 }
 
 function hasMissingNodeRuntime(command: string): boolean {
-	const node = command.match(/(?:^|\s)(['\"]?)([^'\"\s]*[\\/]node(?:\.exe)?)(?:\1)(?=\s|$)/i)?.[2];
+	const node = command.match(/(?:^|\s)(['"]?)([^'"\s]*[\\/]node(?:\.exe)?)(?:\1)(?=\s|$)/i)?.[2];
 	return Boolean(node && !existsSync(node));
 }
 
@@ -521,7 +521,7 @@ function hasMissingSignetRuntime(file: HooksFile | null, configPath: string): bo
 		}
 		if (inSignetMcpSection && trimmed.startsWith("[")) break;
 		if (!inSignetMcpSection) continue;
-		const command = trimmed.match(/^command\s*=\s*['\"]([^'\"]+)['\"]/)?.[1];
+		const command = trimmed.match(/^command\s*=\s*['"]([^'"]+)['"]/)?.[1];
 		if (typeof command === "string") return hasMissingNodeRuntime(command);
 	}
 	return false;

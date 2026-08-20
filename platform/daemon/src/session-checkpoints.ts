@@ -100,6 +100,72 @@ export function redactCheckpointRow(row: CheckpointRow): CheckpointRow {
 // Write
 // ============================================================================
 
+export async function writeCheckpointAsync(
+	db: DbAccessor,
+	params: WriteCheckpointParams,
+	maxPerSession: number,
+): Promise<void> {
+	const id = crypto.randomUUID();
+	const now = new Date().toISOString();
+	const digest = redactSecrets(params.digest);
+
+	await db.withWriteTxAsync((wdb) => {
+		wdb
+			.prepare(
+				`INSERT INTO session_checkpoints
+			 (id, session_key, harness, project, project_normalized,
+			  trigger, digest, prompt_count, memory_queries,
+			  recent_remembers, focal_entity_ids, focal_entity_names,
+			  active_aspect_ids, surfaced_constraint_count,
+			  traversal_memory_count, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				id,
+				params.sessionKey,
+				params.harness,
+				params.project ?? null,
+				params.projectNormalized ?? null,
+				params.trigger,
+				digest,
+				params.promptCount,
+				params.memoryQueries.length > 0 ? JSON.stringify(params.memoryQueries) : null,
+				params.recentRemembers.length > 0 ? JSON.stringify(params.recentRemembers.map(redactSecrets)) : null,
+				params.focalEntityIds && params.focalEntityIds.length > 0 ? JSON.stringify(params.focalEntityIds) : null,
+				params.focalEntityNames && params.focalEntityNames.length > 0 ? JSON.stringify(params.focalEntityNames) : null,
+				params.activeAspectIds && params.activeAspectIds.length > 0 ? JSON.stringify(params.activeAspectIds) : null,
+				typeof params.surfacedConstraintCount === "number" ? params.surfacedConstraintCount : null,
+				typeof params.traversalMemoryCount === "number" ? params.traversalMemoryCount : null,
+				now,
+			);
+
+		const count = wdb
+			.prepare("SELECT COUNT(*) as cnt FROM session_checkpoints WHERE session_key = ?")
+			.get(params.sessionKey) as { cnt: number };
+		if (count.cnt > maxPerSession) {
+			const excess = count.cnt - maxPerSession;
+			wdb
+				.prepare(
+					`DELETE FROM session_checkpoints
+				 WHERE id IN (
+					 SELECT id FROM session_checkpoints
+					 WHERE session_key = ?
+					 ORDER BY created_at ASC, rowid ASC
+					 LIMIT ?
+				 )`,
+				)
+				.run(params.sessionKey, excess);
+		}
+	});
+
+	logger.info("checkpoints", "Checkpoint written", {
+		id,
+		sessionKey: params.sessionKey,
+		trigger: params.trigger,
+		promptCount: params.promptCount,
+	});
+}
+
 export function writeCheckpoint(db: DbAccessor, params: WriteCheckpointParams, maxPerSession: number): void {
 	const id = crypto.randomUUID();
 	const now = new Date().toISOString();
@@ -267,6 +333,24 @@ export function getCheckpointsBySession(db: DbAccessor, sessionKey: string): Rea
 	});
 }
 
+/** Async session checkpoint projection for HTTP/background callers. */
+export async function getCheckpointsBySessionAsync(
+	db: DbAccessor,
+	sessionKey: string,
+): Promise<ReadonlyArray<CheckpointRow>> {
+	return await db.withReadDbAsync(
+		(rdb) =>
+			rdb
+				.prepare(
+					`SELECT * FROM session_checkpoints
+					 WHERE session_key = ?
+					 ORDER BY created_at DESC, rowid DESC`,
+				)
+				.all(sessionKey) as unknown as CheckpointRow[],
+		{ operation: "http.checkpoints-by-session" },
+	);
+}
+
 /** Get recent checkpoints for a project (for API). */
 export function getCheckpointsByProject(
 	db: DbAccessor,
@@ -310,6 +394,20 @@ export function pruneCheckpoints(db: DbAccessor, retentionDays: number): number 
 		}
 		return deleted;
 	});
+}
+
+/** Async maintenance variant; checkpoint retention is bulk work, not a bounded HTTP lookup. */
+export async function pruneCheckpointsAsync(db: DbAccessor, retentionDays: number): Promise<number> {
+	const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+	return await db.withWriteTxAsync(
+		(wdb) => {
+			const result = wdb.prepare("DELETE FROM session_checkpoints WHERE created_at < ?").run(cutoff);
+			const deleted = (result as unknown as { changes: number }).changes ?? 0;
+			if (deleted > 0) logger.info("checkpoints", "Pruned old checkpoints", { deleted, retentionDays });
+			return deleted;
+		},
+		{ operation: "maintenance.prune-checkpoints", estimatedWorkUnits: 1 },
+	);
 }
 
 // ============================================================================
@@ -532,12 +630,14 @@ export function queueCheckpointWrite(params: WriteCheckpointParams, maxPerSessio
 	}
 
 	if (flushTimer === null) {
-		flushTimer = setTimeout(flushPendingCheckpoints, FLUSH_DELAY_MS);
+		flushTimer = setTimeout(() => {
+			void flushPendingCheckpoints();
+		}, FLUSH_DELAY_MS);
 	}
 }
 
-/** Flush all pending checkpoint writes immediately. */
-export function flushPendingCheckpoints(): void {
+/** Flush all pending checkpoint writes immediately through async DB admission. */
+export async function flushPendingCheckpoints(): Promise<void> {
 	if (flushTimer !== null) {
 		clearTimeout(flushTimer);
 		flushTimer = null;
@@ -550,7 +650,7 @@ export function flushPendingCheckpoints(): void {
 
 	for (const entry of entries) {
 		try {
-			writeCheckpoint(dbRef, entry.params, entry.maxPerSession);
+			await writeCheckpointAsync(dbRef, entry.params, entry.maxPerSession);
 		} catch (err) {
 			logger.error("checkpoints", "Failed to flush checkpoint", undefined, {
 				sessionKey: entry.params.sessionKey,

@@ -97,15 +97,15 @@ function validateReview(raw: unknown): IncomingReview | null {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
 	const r = raw as Record<string, unknown>;
 
-	const id = parseUUID(r["id"]);
-	const targetType = parseTargetType(r["targetType"]);
-	const targetId = parseStr(r["targetId"], 1, LIMITS.TARGET_ID);
-	const displayName = parseStr(r["displayName"], 1, LIMITS.DISPLAY_NAME);
-	const rating = parseRating(r["rating"]);
-	const title = parseStr(r["title"], LIMITS.TITLE_MIN, LIMITS.TITLE);
-	const body = parseStr(r["body"], LIMITS.BODY_MIN, LIMITS.BODY);
-	const createdAt = parseTimestamp(r["createdAt"]);
-	const updatedAt = parseTimestamp(r["updatedAt"]);
+	const id = parseUUID(r.id);
+	const targetType = parseTargetType(r.targetType);
+	const targetId = parseStr(r.targetId, 1, LIMITS.TARGET_ID);
+	const displayName = parseStr(r.displayName, 1, LIMITS.DISPLAY_NAME);
+	const rating = parseRating(r.rating);
+	const title = parseStr(r.title, LIMITS.TITLE_MIN, LIMITS.TITLE);
+	const body = parseStr(r.body, LIMITS.BODY_MIN, LIMITS.BODY);
+	const createdAt = parseTimestamp(r.createdAt);
+	const updatedAt = parseTimestamp(r.updatedAt);
 
 	if (
 		!id ||
@@ -328,13 +328,13 @@ async function handleSync(
 	if (
 		typeof payload !== "object" ||
 		payload === null ||
-		(payload as Record<string, unknown>)["source"] !== "signet-marketplace" ||
-		(payload as Record<string, unknown>)["type"] !== "reviews-sync"
+		(payload as Record<string, unknown>).source !== "signet-marketplace" ||
+		(payload as Record<string, unknown>).type !== "reviews-sync"
 	) {
 		return json({ error: "invalid sync payload" }, 400, cors);
 	}
 
-	const raw = (payload as Record<string, unknown>)["reviews"];
+	const raw = (payload as Record<string, unknown>).reviews;
 	if (!Array.isArray(raw)) {
 		return json({ error: "'reviews' must be an array" }, 400, cors);
 	}

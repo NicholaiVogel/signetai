@@ -32,6 +32,7 @@ function normalizedSourceRoot(root: string): string {
 export async function readNativeSourceSyncState(
 	agentId: string,
 	source: Pick<NativeMemorySource, "harness" | "root" | "sourceId">,
+	signal?: AbortSignal,
 ): Promise<NativeSourceSyncState | null> {
 	const sourceKey = nativeSourceSyncKey(source);
 	const row = await dbOwnerQuery<NativeSourceSyncStateRow | null>(
@@ -42,7 +43,7 @@ export async function readNativeSourceSyncState(
 			[agentId, sourceKey],
 			"get",
 		),
-		{ operation: "sources.sync-state.read", lane: "read" },
+		{ operation: "sources.sync-state.read", lane: "read", signal },
 	);
 	if (row === null || normalizedSourceRoot(row.source_root) !== normalizedSourceRoot(source.root)) return null;
 	return {
@@ -61,6 +62,7 @@ export async function persistNativeSourceSyncState(input: {
 	readonly status: NativeSourceSyncStatus;
 	readonly checkpointPath?: string;
 	readonly pauseReason?: string | null;
+	readonly signal?: AbortSignal;
 }): Promise<void> {
 	const sourceKey = nativeSourceSyncKey(input.source);
 	const now = new Date().toISOString();
@@ -87,13 +89,14 @@ export async function persistNativeSourceSyncState(input: {
 				],
 			),
 		],
-		{ operation: "sources.sync-state.persist", lane: "write", estimatedWorkUnits: 1 },
+		{ operation: "sources.sync-state.persist", lane: "write", estimatedWorkUnits: 1, signal: input.signal },
 	);
 }
 
 export async function clearNativeSourceSyncCheckpoint(input: {
 	readonly agentId: string;
 	readonly source: Pick<NativeMemorySource, "harness" | "root" | "sourceId">;
+	readonly signal?: AbortSignal;
 }): Promise<void> {
 	const sourceKey = nativeSourceSyncKey(input.source);
 	await dbOwnerBatch(
@@ -105,6 +108,6 @@ export async function clearNativeSourceSyncCheckpoint(input: {
 				[new Date().toISOString(), input.agentId, sourceKey],
 			),
 		],
-		{ operation: "sources.sync-state.complete", lane: "write", estimatedWorkUnits: 1 },
+		{ operation: "sources.sync-state.complete", lane: "write", estimatedWorkUnits: 1, signal: input.signal },
 	);
 }

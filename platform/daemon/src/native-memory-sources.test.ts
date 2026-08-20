@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addObsidianSource, loadSourcesConfig } from "@signet/core";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
+import { dbOwnerQuery, ownerStatement } from "./db-owner-runtime";
 import { resetEmbeddingCircuitBreakers } from "./embedding-circuit-breaker";
 import { resetObsidianSourceEmbeddingBackoff } from "./obsidian-source-embeddings";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
@@ -1722,7 +1723,7 @@ describe("native memory sources", () => {
 	it("streams a large source path set without collecting all files first", async () => {
 		const root = join(dir, "large-vault");
 		mkdirSync(root, { recursive: true });
-		for (let index = 0; index < 128; index++) {
+		for (let index = 0; index < 1_000; index++) {
 			writeFileSync(join(root, `note-${index}.md`), `# Note ${index}\n\nStreaming source note ${index}.`);
 		}
 		let firstFileSeen = false;
@@ -1738,9 +1739,9 @@ describe("native memory sources", () => {
 			},
 		});
 		try {
-			expect(await handle.syncExisting()).toBe(128);
+			expect(await handle.syncExisting()).toBe(1_000);
 			expect(firstFileSeen).toBe(true);
-			expect(indexed).toBe(128);
+			expect(indexed).toBe(1_000);
 		} finally {
 			await handle.close();
 		}
@@ -1812,6 +1813,76 @@ describe("native memory sources", () => {
 		} finally {
 			await handle.close();
 		}
+	});
+
+	it("keeps the source scan off the parent synchronous SQLite surface", async () => {
+		const root = join(dir, "large-source");
+		mkdirSync(root, { recursive: true });
+		for (let index = 0; index < 5; index += 1) {
+			writeFileSync(
+				join(root, `note-${index}.md`),
+				`# Note ${index}\n\nParent-side SQLite must not run during this source scan.\n`,
+			);
+		}
+		const accessor = getDbAccessor() as typeof getDbAccessor extends () => infer T
+			? T & Record<string, unknown>
+			: never;
+		const originalRead = accessor.withReadDb;
+		const originalWrite = accessor.withWriteTx;
+		let parentCrossings = 0;
+		(accessor as Record<string, unknown>).withReadDb = (..._args: unknown[]) => {
+			parentCrossings += 1;
+			throw new Error("parent synchronous SQLite crossed during native source sync");
+		};
+		(accessor as Record<string, unknown>).withWriteTx = (..._args: unknown[]) => {
+			parentCrossings += 1;
+			throw new Error("parent synchronous SQLite crossed during native source sync");
+		};
+		const handle = startNativeMemoryBridge(
+			[obsidianNativeMemorySource(root, "Large source", "obsidian:large-source")],
+			{
+				agentId: "agent-native",
+				pollIntervalMs: 0,
+				sourceGraphEnabled: false,
+			},
+		);
+		try {
+			expect(await handle.syncExisting()).toBe(5);
+			expect(parentCrossings).toBe(0);
+		} finally {
+			(accessor as Record<string, unknown>).withReadDb = originalRead;
+			(accessor as Record<string, unknown>).withWriteTx = originalWrite;
+			await handle.close();
+		}
+	});
+
+	it("kills only the source worker and leaves the DB owner usable", async () => {
+		const root = join(dir, "killable-source");
+		mkdirSync(root, { recursive: true });
+		for (let index = 0; index < 5_000; index += 1) {
+			writeFileSync(
+				join(root, `note-${index}.md`),
+				`# Note ${index}\n\nA source worker kill must not kill the database owner.\n`,
+			);
+		}
+		const handle = startNativeMemoryBridge(
+			[obsidianNativeMemorySource(root, "Killable source", "obsidian:killable-source")],
+			{
+				agentId: "agent-native",
+				pollIntervalMs: 0,
+				maxFilesPerScan: 1,
+			},
+		);
+		const sync = handle.syncExisting();
+		handle.cancel();
+		await expect(sync).rejects.toThrow(/native source (worker|sync)/);
+		expect(
+			await dbOwnerQuery<{ readonly value: number }>(ownerStatement("SELECT 1 AS value", [], "get"), {
+				operation: "test.parent-remains-serviceable",
+				lane: "read",
+			}),
+		).toEqual({ value: 1 });
+		await handle.close();
 	});
 });
 
