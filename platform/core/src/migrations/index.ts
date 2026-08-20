@@ -145,6 +145,7 @@ import { up as memoryHeadRevisions } from "./136-memory-head-revisions";
 import { up as dreamingHeadManifest } from "./137-dreaming-head-manifest";
 import { up as boundedStatusProjections } from "./138-bounded-status-projections";
 import { up as nativeSourceSyncState } from "./139-native-source-sync-state";
+import { up as transcriptRecoveryFrontier } from "./140-transcript-recovery-frontier";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1281,6 +1282,12 @@ export const MIGRATIONS: readonly Migration[] = [
 		name: "native-source-sync-state",
 		up: nativeSourceSyncState,
 		artifacts: { tables: ["native_source_sync_state"] },
+	},
+	{
+		version: 140,
+		name: "transcript-recovery-frontier",
+		up: transcriptRecoveryFrontier,
+		artifacts: { tables: ["transcript_recovery_frontiers"] },
 	},
 ];
 
