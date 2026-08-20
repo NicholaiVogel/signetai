@@ -7,7 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-20
-- Bug fixes: reserve interactive DB-owner capacity; repair DB owner review findings; reserve interactive db-owner capacity.
+- Features: pause native source sync when provider is down.
+- Bug fixes: pause source sync on provider outage; preserve paused source progress counts; report paused source syncs honestly; reserve interactive DB-owner capacity; repair DB owner review findings; reserve interactive db-owner capacity.
 - Docs: align owner deadline semantics.
 
 ### 2026-08-19
@@ -39,6 +40,21 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: enforce strict Biome rules; isolate token cache scopes; cache exact backlog tokens; avoid synchronous backlog encoding; harden macOS FD failures; support macOS FD accounting; gate duplicate removal guidance; restore macOS tray click; materialize core native deps; maintain Dreaming gate paths; cover Dreaming helper paths; isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
 
 ## Release Ledger
+
+## [0.214.0] - 2026-08-20
+
+Release summary: 1 feature and 3 bug fixes.
+Tag range: `v0.213.2..v0.214.0`.
+
+### Features
+
+- **daemon**: pause native source sync when provider is down
+
+### Bug Fixes
+
+- **daemon**: pause source sync on provider outage (#1700)
+- **daemon**: preserve paused source progress counts
+- **daemon**: report paused source syncs honestly
 
 ## [0.213.2] - 2026-08-20
 
