@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-08-20
 - Features: pause native source sync when provider is down.
-- Bug fixes: real ownership isolation — all unbounded SQLite/source work behind the killable boundary (W3.1); classify vacuum conversion as durable; fence db-owner commit cancellation; fence aborted db-owner writes; repair PR 1702 migration and source sync paths; isolate native source sync work; isolate remaining recovery and source DB paths; pause source sync on provider outage; preserve paused source progress counts; report paused source syncs honestly; reserve interactive DB-owner capacity; repair DB owner review findings; reserve interactive db-owner capacity.
+- Bug fixes: correct integrity page/byte accounting and park unverifiable FTS objects in named degraded state; park unchunkable FTS integrity frontier; real ownership isolation — all unbounded SQLite/source work behind the killable boundary (W3.1); classify vacuum conversion as durable; fence db-owner commit cancellation; fence aborted db-owner writes; repair PR 1702 migration and source sync paths; isolate native source sync work; isolate remaining recovery and source DB paths; pause source sync on provider outage; preserve paused source progress counts; report paused source syncs honestly; reserve interactive DB-owner capacity; repair DB owner review findings; reserve interactive db-owner capacity.
 - Docs: refresh event-loop inventory report; align owner deadline semantics.
 
 ### 2026-08-19
@@ -40,6 +40,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: enforce strict Biome rules; isolate token cache scopes; cache exact backlog tokens; avoid synchronous backlog encoding; harden macOS FD failures; support macOS FD accounting; gate duplicate removal guidance; restore macOS tray click; materialize core native deps; maintain Dreaming gate paths; cover Dreaming helper paths; isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
 
 ## Release Ledger
+
+## [0.214.2] - 2026-08-20
+
+Release summary: 2 bug fixes.
+Tag range: `v0.214.1..v0.214.2`.
+
+### Bug Fixes
+
+- **daemon**: correct integrity page/byte accounting and park unverifiable FTS objects in named degraded state (#1703)
+- **daemon**: park unchunkable FTS integrity frontier
 
 ## [0.214.1] - 2026-08-20
 
