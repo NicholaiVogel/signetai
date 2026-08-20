@@ -25,6 +25,15 @@ export interface SyncDbAttributionMetrics {
 	readonly unattributedCalls: number;
 	readonly unattributedDurationMs: number;
 	readonly unattributedSlowDurationMs: number;
+	readonly sites: readonly SyncDbCallSiteMetrics[];
+}
+
+export interface SyncDbCallSiteMetrics {
+	readonly siteId: string;
+	readonly calls: number;
+	readonly slowCalls: number;
+	readonly totalDurationMs: number;
+	readonly maxDurationMs: number;
 }
 
 interface SyncDbCallRecord {
@@ -40,6 +49,7 @@ const MAX_HISTORY = 256;
 const SLOW_CALL_THRESHOLD_MS = 50;
 const history: SyncDbCallRecord[] = [];
 const inFlight = new Map<number, SyncDbCallRecord>();
+const siteMetrics = new Map<string, { calls: number; slowCalls: number; totalDurationMs: number; maxDurationMs: number }>();
 let nextSequence = 1;
 let calls = 0;
 let slowCalls = 0;
@@ -60,12 +70,13 @@ function normalizeFileName(value: string): string {
 	return value;
 }
 
-function parseFrame(line: string): { readonly file: string; readonly line: number } | null {
+function parseFrame(line: string): { readonly file: string; readonly line: number; readonly functionName: string } | null {
 	const match = /(?:\(|\s)((?:file:\/\/)?[^()\s]+):(\d+):\d+\)?$/.exec(line);
 	if (!match) return null;
 	const lineNumber = Number.parseInt(match[2] ?? "", 10);
 	if (!Number.isInteger(lineNumber) || lineNumber <= 0) return null;
-	return { file: normalizeFileName(match[1] ?? ""), line: lineNumber };
+	const functionName = line.replace(/\s+\([^()]+\)$/, "").replace(/^\s*at\s+/, "").trim();
+	return { file: normalizeFileName(match[1] ?? ""), line: lineNumber, functionName };
 }
 
 function callerSite(): string {
@@ -74,6 +85,11 @@ function callerSite(): string {
 		const parsed = parseFrame(frame);
 		if (!parsed) continue;
 		if (
+			parsed.functionName.endsWith("callerSite") ||
+			parsed.functionName.endsWith("beginSyncDbCall") ||
+			parsed.functionName.endsWith("endSyncDbCall") ||
+			parsed.functionName.endsWith("withReadDb") ||
+			parsed.functionName.endsWith("withWriteTx") ||
 			parsed.file.endsWith("/sync-db-attribution.ts") ||
 			parsed.file.endsWith("/db-accessor.ts") ||
 			parsed.file.startsWith("node:") ||
@@ -115,6 +131,12 @@ export function endSyncDbCall(token: SyncDbCallToken, endedAtMs = Date.now()): v
 	totalDurationMs += record.durationMs;
 	maxDurationMs = Math.max(maxDurationMs, record.durationMs);
 	if (record.durationMs >= SLOW_CALL_THRESHOLD_MS) slowCalls++;
+	const site = siteMetrics.get(record.siteId) ?? { calls: 0, slowCalls: 0, totalDurationMs: 0, maxDurationMs: 0 };
+	site.calls++;
+	site.totalDurationMs += record.durationMs;
+	site.maxDurationMs = Math.max(site.maxDurationMs, record.durationMs);
+	if (record.durationMs >= SLOW_CALL_THRESHOLD_MS) site.slowCalls++;
+	siteMetrics.set(record.siteId, site);
 	if (record.siteId.endsWith("@unknown:0")) {
 		unattributedCalls++;
 		unattributedDurationMs += record.durationMs;
@@ -143,12 +165,16 @@ export function getSyncDbAttributionMetrics(): SyncDbAttributionMetrics {
 		unattributedCalls,
 		unattributedDurationMs,
 		unattributedSlowDurationMs,
+		sites: [...siteMetrics.entries()]
+			.map(([siteId, site]) => ({ siteId, ...site }))
+			.sort((a, b) => b.totalDurationMs - a.totalDurationMs),
 	};
 }
 
 export function resetSyncDbAttribution(): void {
 	history.length = 0;
 	inFlight.clear();
+	siteMetrics.clear();
 	nextSequence = 1;
 	calls = 0;
 	slowCalls = 0;
