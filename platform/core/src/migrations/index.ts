@@ -1279,6 +1279,9 @@ export const MIGRATIONS: readonly Migration[] = [
 			tables: ["transcript_capture_status", "memories_duplicate_hash_counts", "memories_diagnostics_state"],
 		},
 	},
+	// 139 tracks provider pause/running lifecycle and its legacy checkpoint.
+	// 141/142 track per-agent/source/phase scan cursors/frontiers; they are a
+	// separate bounded walk concern and intentionally remain a distinct table.
 	{
 		version: 139,
 		name: "native-source-sync-state",

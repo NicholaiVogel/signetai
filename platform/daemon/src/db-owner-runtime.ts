@@ -91,6 +91,8 @@ export interface DbOwnerSqlOptions {
 	readonly workloadClass?: DbOwnerWorkloadClass;
 	readonly deadlineMs?: number;
 	readonly estimatedWorkUnits?: number;
+	/** Aborting abandons the queued/in-flight owner job and suppresses its result. */
+	readonly signal?: AbortSignal;
 }
 
 function submitOptions(options: DbOwnerSqlOptions): DbOwnerSubmitOptions {
@@ -111,14 +113,32 @@ async function submitWithAdmission<Result>(
 	request: Parameters<DbOwnerClient["submit"]>[0],
 	options: DbOwnerSqlOptions,
 ): Promise<Result> {
+	const signal = options.signal;
+	const throwIfAborted = (): void => {
+		if (!signal?.aborted) return;
+		throw signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
+	};
+	throwIfAborted();
 	const submit = submitOptions(options);
 	const deadlineAt = Date.now() + submit.deadlineMs;
 	for (;;) {
 		try {
+			throwIfAborted();
 			const handle = owner.submit<Result>(request, submit);
-			return await owner.awaitResult(handle);
+			// Cancellation may happen synchronously during bridge shutdown, before
+			// the async waiter gets its first turn. Keep the handle rejection
+			// observed while awaitResult still propagates it to the caller.
+			void handle.result.catch(() => {});
+			const onAbort = (): void => handle.cancel();
+			signal?.addEventListener("abort", onAbort, { once: true });
+			try {
+				return await owner.awaitResult(handle);
+			} finally {
+				signal?.removeEventListener("abort", onAbort);
+			}
 		} catch (error) {
 			if (!(error instanceof DbOwnerAdmissionError) || error.code !== "DB_OWNER_QUEUE_FULL") throw error;
+			throwIfAborted();
 			const remainingMs = deadlineAt - Date.now();
 			if (remainingMs <= 0) throw error;
 			await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, remainingMs)));

@@ -740,7 +740,7 @@ async function upsertSourceArtifactRow(
 	frontmatter: Record<string, unknown>,
 	body: string,
 	sourceMtimeMs = statSync(path).mtimeMs,
-	options: { readonly trustSourcePath?: boolean; readonly trustNativeMarker?: boolean } = {},
+	options: { readonly trustSourcePath?: boolean; readonly trustNativeMarker?: boolean; readonly signal?: AbortSignal } = {},
 ): Promise<void> {
 	await dbOwnerSourceArtifactUpsert(
 		{ fields: artifactFieldsFromFrontmatter(path, frontmatter, body, sourceMtimeMs, options) },
@@ -750,6 +750,7 @@ async function upsertSourceArtifactRow(
 			workloadClass: "maintenance",
 			deadlineMs: 30_000,
 			estimatedWorkUnits: 2,
+			signal: options.signal,
 		},
 	);
 }
@@ -768,6 +769,7 @@ export async function indexExternalMemoryArtifact(input: {
 	readonly sourceExternalId?: string | null;
 	readonly sourceParentPath?: string | null;
 	readonly sourceMeta?: Readonly<Record<string, unknown>>;
+	readonly signal?: AbortSignal;
 }): Promise<void> {
 	const capturedAt =
 		input.capturedAt ??
@@ -798,7 +800,7 @@ export async function indexExternalMemoryArtifact(input: {
 		},
 		input.content,
 		input.sourceMtimeMs,
-		{ trustNativeMarker: true, trustSourcePath: true },
+		{ trustNativeMarker: true, trustSourcePath: true, signal: input.signal },
 	);
 }
 
@@ -861,6 +863,7 @@ export async function softDeleteArtifactRowsForPath(
 	path: string,
 	agentId: string | null,
 	deletedAt = new Date().toISOString(),
+	options: { readonly signal?: AbortSignal } = {},
 ): Promise<void> {
 	const sourcePath = relativePath(path);
 	const absolutePath = path.replace(/\\/g, "/");
@@ -898,6 +901,7 @@ export async function softDeleteArtifactRowsForPath(
 		lane: "write",
 		workloadClass: "maintenance",
 		estimatedWorkUnits: 2,
+		signal: options.signal,
 	});
 }
 

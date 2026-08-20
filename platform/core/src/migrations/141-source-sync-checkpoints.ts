@@ -1,4 +1,4 @@
-/** Migration 139: durable native-source scan checkpoints. */
+/** Migration 141: per-agent/source/phase scan cursors; distinct from 139 provider lifecycle state. */
 import type { MigrationDb } from "./index";
 
 export function up(db: MigrationDb): void {

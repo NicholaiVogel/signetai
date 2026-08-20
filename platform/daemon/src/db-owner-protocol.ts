@@ -77,7 +77,6 @@ export interface DbOwnerSourceGraphIndex {
 	readonly root: string;
 	readonly filePath: string;
 	readonly content: string;
-	readonly markdownPaths?: readonly string[];
 }
 
 export interface DbOwnerSourceGraphFilePurge {

@@ -161,7 +161,7 @@ import { flushPendingCheckpoints, initCheckpointFlush, pruneCheckpointsAsync } f
 import { createSessionClaimStore } from "./session-claims";
 import {
 	releaseAllSessions,
-	restorePersistedSessions,
+	restorePersistedSessionsAsync,
 	setSessionClaimStore,
 	setSessionEvictionHandler,
 	startSessionCleanup,
@@ -2070,7 +2070,7 @@ async function main() {
 			maxCheckpointsPerSession: loadMemoryConfig(AGENTS_DIR).pipelineV2.continuity.maxCheckpointsPerSession,
 		}),
 	);
-	const restoredSessions = restorePersistedSessions();
+	const restoredSessions = await restorePersistedSessionsAsync();
 	if (restoredSessions.active > 0 || restoredSessions.expired > 0 || restoredSessions.ended > 0) {
 		logger.info("session-tracker", "Restored durable session lifecycle state", restoredSessions);
 	}

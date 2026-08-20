@@ -5,7 +5,6 @@ import { findSqliteVecExtension } from "@signet/core";
 import {
 	applyObsidianSourceStructureInTx,
 	applyObsidianSourceStructurePurgeInTx,
-	buildObsidianMarkdownPathIndex,
 	purgeObsidianSourceFileStructureInTx,
 } from "./obsidian-source-graph";
 import { indexSourceArtifactStructureInTx, purgeSourceArtifactStructureInTx } from "./source-artifact-graph";
@@ -328,14 +327,7 @@ export function runDbOwnerWorker(): void {
 		try {
 			let result: unknown;
 			if (request.kind === "source_graph_index") {
-				const markdownPathIndex =
-					request.input.markdownPaths === undefined
-						? undefined
-						: buildObsidianMarkdownPathIndex(request.input.root, request.input.markdownPaths);
-				result = applyObsidianSourceStructureInTx(db as unknown as import("./db-accessor").WriteDb, {
-					...request.input,
-					markdownPathIndex,
-				});
+				result = applyObsidianSourceStructureInTx(db as unknown as import("./db-accessor").WriteDb, request.input);
 			} else if (request.kind === "source_graph_file_purge") {
 				result = purgeObsidianSourceFileStructureInTx(db as unknown as import("./db-accessor").WriteDb, request.input);
 			} else {

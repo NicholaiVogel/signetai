@@ -1,4 +1,4 @@
-/** Migration 140: add durable filesystem frontiers to native-source checkpoints. */
+/** Migration 142: add filesystem frontiers to the per-scan checkpoint table from migration 141. */
 import type { MigrationDb } from "./index";
 
 export function up(db: MigrationDb): void {

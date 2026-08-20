@@ -164,7 +164,13 @@ function evictExpiredSession(mapKey: string, claim: SessionClaim, emitEndTelemet
 		claimStore?.markExpired(key, claim.agentId);
 		return;
 	}
-	const isCurrentClaim = (): boolean => sessions.get(mapKey)?.claimId === claim.claimId;
+	// The eviction already removed this claim from the in-memory map. Treat an
+	// absent entry as current, but never let a delayed finalizer touch a newer
+	// replacement claim for the same scoped session.
+	const isCurrentClaim = (): boolean => {
+		const current = sessions.get(mapKey);
+		return current === undefined || current.claimId === claim.claimId;
+	};
 	const applyOutcome = (outcome: SessionEvictionOutcome): void => {
 		if (outcome === "skipped") unfinalizedCount++;
 		if (!isCurrentClaim()) return;
@@ -544,7 +550,7 @@ export function setSessionClaimStore(store: SessionClaimStore | null): void {
  * through the same finalizer as in-process TTL cleanup; ended rows restore the
  * short duplicate-end tombstone without claiming the session again.
  */
-export function restorePersistedSessions(): {
+function restorePersistedSessionRows(rows: readonly PersistedSessionClaim[]): {
 	readonly active: number;
 	readonly expired: number;
 	readonly ended: number;
@@ -554,7 +560,7 @@ export function restorePersistedSessions(): {
 	let active = 0;
 	let expired = 0;
 	let ended = 0;
-	for (const row of claimStore.list()) {
+	for (const row of rows) {
 		const expiresAt = Date.parse(row.expiresAt);
 		if (!Number.isFinite(expiresAt)) {
 			claimStore.markExpired(row.sessionKey, row.agentId);
@@ -600,6 +606,160 @@ export function restorePersistedSessions(): {
 		}
 	}
 	return { active, expired, ended };
+}
+
+async function persistExpiredClaimAsync(sessionKey: string, agentId: string): Promise<void> {
+	if (claimStore?.markExpiredAsync) {
+		await claimStore.markExpiredAsync(sessionKey, agentId);
+		return;
+	}
+	claimStore?.markExpired(sessionKey, agentId);
+}
+
+async function removePersistedClaimAsync(sessionKey: string, agentId: string): Promise<void> {
+	if (claimStore?.removeAsync) {
+		await claimStore.removeAsync(sessionKey, agentId);
+		return;
+	}
+	claimStore?.remove(sessionKey, agentId);
+}
+
+/** Async counterpart used only during startup rehydration. */
+async function evictRestoredSessionAsync(
+	mapKey: string,
+	claim: SessionClaim,
+	emitEndTelemetry = true,
+): Promise<void> {
+	if (!sessions.delete(mapKey)) return;
+	const key = claim.sessionKey;
+	bypassedSessions.delete(mapKey);
+	warnedSessions.delete(mapKey);
+	expiredCount++;
+	logger.warn("session-tracker", "Session evicted (TTL expired)", {
+		sessionKey: key,
+		runtimePath: claim.runtimePath,
+		claimedAt: claim.claimedAt,
+	});
+	if (
+		emitEndTelemetry &&
+		!hasSessionEndTelemetry({ agentId: claim.agentId, harness: claim.harness, sessionKey: key })
+	) {
+		getActiveTelemetry()?.record("session.end", {
+			harness: claim.harness ?? null,
+			reason: "expired",
+			sessionHash: hashSessionKey(key),
+		});
+		markSessionEndTelemetry({ agentId: claim.agentId, harness: claim.harness, sessionKey: key });
+	}
+
+	if (!evictionHandler) {
+		await persistExpiredClaimAsync(key, claim.agentId);
+		return;
+	}
+	const isCurrentClaim = (): boolean => {
+		const current = sessions.get(mapKey);
+		return current === undefined || current.claimId === claim.claimId;
+	};
+	let outcome: SessionEvictionOutcome;
+	try {
+		outcome = await evictionHandler({
+			sessionKey: key,
+			agentId: claim.agentId,
+			runtimePath: claim.runtimePath,
+			harness: claim.harness,
+			claimedAt: claim.claimedAt,
+		});
+	} catch (err) {
+		unfinalizedCount++;
+		if (isCurrentClaim()) await persistExpiredClaimAsync(key, claim.agentId);
+		logger.warn("session-tracker", "Async session eviction handler failed", {
+			sessionKey: key,
+			error: err instanceof Error ? err.message : String(err),
+		});
+		return;
+	}
+	if (outcome === "skipped") unfinalizedCount++;
+	if (!isCurrentClaim()) return;
+	if (outcome === "finalized") await removePersistedClaimAsync(key, claim.agentId);
+	else await persistExpiredClaimAsync(key, claim.agentId);
+}
+
+async function restorePersistedSessionRowsAsync(rows: readonly PersistedSessionClaim[]): Promise<{
+	readonly active: number;
+	readonly expired: number;
+	readonly ended: number;
+}> {
+	if (!claimStore) return { active: 0, expired: 0, ended: 0 };
+	const now = Date.now();
+	let active = 0;
+	let expired = 0;
+	let ended = 0;
+	for (const row of rows) {
+		const expiresAt = Date.parse(row.expiresAt);
+		if (!Number.isFinite(expiresAt)) {
+			await persistExpiredClaimAsync(row.sessionKey, row.agentId);
+			expired++;
+			continue;
+		}
+		const mapKey = scopedSessionKey(row.sessionKey, row.agentId);
+		if (row.state === "ended") {
+			if (expiresAt <= now || !row.endedAt) {
+				await removePersistedClaimAsync(row.sessionKey, row.agentId);
+				continue;
+			}
+			endedSessions.set(mapKey, {
+				agentId: row.agentId,
+				runtimePath: row.runtimePath ?? undefined,
+				endedAt: row.endedAt,
+				expiresAt,
+			});
+			ended++;
+			continue;
+		}
+		if (row.runtimePath === null) {
+			await removePersistedClaimAsync(row.sessionKey, row.agentId);
+			expired++;
+			continue;
+		}
+
+		const claim: SessionClaim = {
+			claimId: Symbol("session-claim"),
+			sessionKey: row.sessionKey,
+			agentId: row.agentId,
+			runtimePath: row.runtimePath,
+			harness: row.harness ?? undefined,
+			claimedAt: row.claimedAt,
+			expiresAt,
+		};
+		sessions.set(mapKey, claim);
+		if (expiresAt <= now || row.state === "expired") {
+			await evictRestoredSessionAsync(mapKey, claim, row.state !== "expired");
+			expired++;
+		} else {
+			active++;
+		}
+	}
+	return { active, expired, ended };
+}
+
+export function restorePersistedSessions(): {
+	readonly active: number;
+	readonly expired: number;
+	readonly ended: number;
+} {
+	if (!claimStore) return { active: 0, expired: 0, ended: 0 };
+	return restorePersistedSessionRows(claimStore.list());
+}
+
+/** Async startup variant: durable claim reads use DB-owner admission. */
+export async function restorePersistedSessionsAsync(): Promise<{
+	readonly active: number;
+	readonly expired: number;
+	readonly ended: number;
+}> {
+	if (!claimStore) return { active: 0, expired: 0, ended: 0 };
+	const rows = claimStore.listAsync ? await claimStore.listAsync() : claimStore.list();
+	return await restorePersistedSessionRowsAsync(rows);
 }
 
 /** Stop periodic cleanup (for graceful shutdown). */

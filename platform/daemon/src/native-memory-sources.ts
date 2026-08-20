@@ -23,6 +23,13 @@ import {
 } from "./db-owner-runtime";
 import { EPISODIC_CAPTURED_AT_FLOOR, timestampMillis } from "./episodic-sources";
 import { logger } from "./logger";
+import { awaitEmbeddingProviderAvailable } from "./embedding-circuit-breaker";
+import {
+	nativeSourceSyncKey,
+	persistNativeSourceSyncState,
+	readNativeSourceSyncState,
+	clearNativeSourceSyncCheckpoint,
+} from "./native-source-sync-state";
 import type { EmbeddingConfig } from "./memory-config";
 import { hashNormalizedBody, indexExternalMemoryArtifact, softDeleteArtifactRowsForPath } from "./memory-lineage";
 import {
@@ -36,8 +43,6 @@ import {
 } from "./obsidian-source-embeddings";
 import {
 	type ObsidianMarkdownPathIndex,
-	addObsidianMarkdownPathIndex,
-	buildObsidianMarkdownPathIndex,
 	sourceIdForObsidianRoot,
 } from "./obsidian-source-graph";
 import {
@@ -64,8 +69,26 @@ export interface NativeMemoryFilePattern {
 	readonly excludeBasenames?: readonly string[];
 }
 
+export interface NativeMemorySyncSourceResult {
+	readonly sourceKey: string;
+	readonly sourceId?: string;
+	readonly status: "complete" | "paused";
+	readonly scanned: number;
+	readonly indexed: number;
+	readonly resumeFrontier: string | null;
+	readonly pauseReason?: string;
+}
+
+export interface NativeMemorySyncResult {
+	readonly status: "complete" | "paused";
+	readonly scanned: number;
+	readonly indexed: number;
+	readonly pausedSources: readonly NativeMemorySyncSourceResult[];
+}
+
 export interface NativeMemoryBridgeHandle {
 	readonly syncExisting: (options?: NativeMemoryBridgeSyncOptions) => Promise<number>;
+	readonly getLastSyncResult: () => NativeMemorySyncResult;
 	/** Kill the active source worker without taking down the parent or DB owner. */
 	readonly cancel: () => void;
 	readonly close: () => Promise<void>;
@@ -73,6 +96,7 @@ export interface NativeMemoryBridgeHandle {
 
 export interface NativeMemoryBridgeSyncOptions {
 	readonly requestResyncIfBusy?: boolean;
+	readonly signal?: AbortSignal;
 }
 
 export interface NativeMemoryBridgeOptions {
@@ -122,6 +146,14 @@ interface IndexedNativeMemory {
 }
 
 const indexed = new Map<string, IndexedNativeMemory>();
+
+interface SharedNativeMemorySourceFlight {
+	readonly promise: Promise<NativeMemorySyncSourceResult>;
+	readonly resolve: (result: NativeMemorySyncSourceResult) => void;
+	readonly reject: (error: unknown) => void;
+}
+
+const sharedNativeMemorySourceFlights = new Map<string, SharedNativeMemorySourceFlight>();
 
 /** Test-only: drop the in-process content-hash cache so scans behave like a fresh daemon. */
 export interface NativeMemorySourcePermissionIssue {
@@ -457,6 +489,10 @@ function sourceStateKey(source: NativeMemorySource, agentId: string): string {
 	return `${agentId}:${source.harness}:${source.root.replace(/\\/g, "/").replace(/\/$/, "")}`;
 }
 
+function sourceFlightKey(source: NativeMemorySource, agentId: string): string {
+	return `${agentId}:${nativeSourceSyncKey(source)}:${normalizedRoot(source.root)}`;
+}
+
 function contentFingerprint(content: string): string {
 	return hashNormalizedBody(content);
 }
@@ -538,7 +574,7 @@ function sleep(ms: number): Promise<void> {
 	return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 }
 
-async function nativeArtifactContentHash(filePath: string, agentId: string): Promise<string | null> {
+async function nativeArtifactContentHash(filePath: string, agentId: string, signal?: AbortSignal): Promise<string | null> {
 	const sourcePath = filePath.replace(/\\/g, "/");
 	try {
 		const row = await dbOwnerQuery<{ readonly source_sha256: string } | null>(
@@ -547,7 +583,7 @@ async function nativeArtifactContentHash(filePath: string, agentId: string): Pro
 				[agentId, sourcePath],
 				"get",
 			),
-			{ operation: "sources.artifact-hash", lane: "read" },
+			{ operation: "sources.artifact-hash", lane: "read", signal },
 		);
 		return row?.source_sha256 ?? null;
 	} catch (error) {
@@ -558,7 +594,7 @@ async function nativeArtifactContentHash(filePath: string, agentId: string): Pro
 	}
 }
 
-async function nativeArtifactCapturedAt(filePath: string, agentId: string): Promise<string | null> {
+async function nativeArtifactCapturedAt(filePath: string, agentId: string, signal?: AbortSignal): Promise<string | null> {
 	const sourcePath = filePath.replace(/\\/g, "/");
 	try {
 		const row = await dbOwnerQuery<{ readonly captured_at: string } | null>(
@@ -567,7 +603,7 @@ async function nativeArtifactCapturedAt(filePath: string, agentId: string): Prom
 				[agentId, sourcePath],
 				"get",
 			),
-			{ operation: "sources.artifact-captured-at", lane: "read" },
+			{ operation: "sources.artifact-captured-at", lane: "read", signal },
 		);
 		return row?.captured_at ?? null;
 	} catch (error) {
@@ -590,6 +626,7 @@ async function healSentinelCapturedAt(
 	agentId: string,
 	harness: string,
 	capturedAt: string,
+	signal?: AbortSignal,
 ): Promise<void> {
 	if (timestampMillis(capturedAt) >= Date.parse(EPISODIC_CAPTURED_AT_FLOOR)) return;
 	try {
@@ -603,7 +640,7 @@ async function healSentinelCapturedAt(
 					[stampedAt, stampedAt, agentId, filePath.replace(/\\/g, "/")],
 				),
 			],
-			{ operation: "sources.artifact-heal", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 1 },
+			{ operation: "sources.artifact-heal", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 1, signal },
 		);
 		logger.warn("watcher", "Healed pre-epoch captured_at on native memory artifact", {
 			harness,
@@ -623,7 +660,12 @@ async function healSentinelCapturedAt(
 	}
 }
 
-async function obsidianGraphExists(agentId: string, sourceId: string, filePath: string): Promise<boolean> {
+async function obsidianGraphExists(
+	agentId: string,
+	sourceId: string,
+	filePath: string,
+	signal?: AbortSignal,
+): Promise<boolean> {
 	try {
 		const row = await dbOwnerQuery<{ readonly "1": number } | null>(
 			ownerStatement(
@@ -636,7 +678,7 @@ async function obsidianGraphExists(agentId: string, sourceId: string, filePath: 
 				[agentId, sourceId, filePath.replace(/\\/g, "/")],
 				"get",
 			),
-			{ operation: "sources.graph-exists", lane: "read" },
+			{ operation: "sources.graph-exists", lane: "read", signal },
 		);
 		return row != null;
 	} catch (error) {
@@ -654,6 +696,7 @@ async function obsidianEmbeddingsExist(input: {
 	readonly filePath: string;
 	readonly content: string;
 	readonly chunks?: readonly ObsidianSourceChunk[];
+	readonly signal?: AbortSignal;
 }): Promise<boolean> {
 	const chunks = input.chunks ?? buildObsidianSourceChunks(input);
 	if (chunks.length === 0) return true;
@@ -672,7 +715,7 @@ async function obsidianEmbeddingsExist(input: {
 				],
 				"all",
 			),
-			{ operation: "sources.embeddings-exists", lane: "read" },
+			{ operation: "sources.embeddings-exists", lane: "read", signal: input.signal },
 		);
 		return new Set(rows.map((row) => row.source_id)).size === chunks.length;
 	} catch (error) {
@@ -707,6 +750,7 @@ async function readNativeSourceSyncCheckpoint(
 	agentId: string,
 	sourceKey: string,
 	phase: string,
+	signal?: AbortSignal,
 ): Promise<NativeSourceSyncCheckpoint> {
 	const rows = await dbOwnerQuery<
 		readonly { readonly cursor: string | null; readonly frontier: string | null; readonly complete: number }[]
@@ -716,7 +760,7 @@ async function readNativeSourceSyncCheckpoint(
 			[agentId, sourceKey, phase],
 			"all",
 		),
-		{ operation: "sources.sync-checkpoint.read", lane: "read" },
+		{ operation: "sources.sync-checkpoint.read", lane: "read", signal },
 	);
 	const row = rows[0];
 	let frontier: readonly string[] | null = null;
@@ -737,6 +781,7 @@ async function writeNativeSourceSyncCheckpoint(
 	phase: string,
 	checkpoint: NativeSourceSyncCheckpoint,
 	scanned: number,
+	signal?: AbortSignal,
 ): Promise<void> {
 	await dbOwnerBatch(
 		[
@@ -761,11 +806,15 @@ async function writeNativeSourceSyncCheckpoint(
 				],
 			),
 		],
-		{ operation: "sources.sync-checkpoint.write", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 1 },
+		{ operation: "sources.sync-checkpoint.write", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 1, signal },
 	);
 }
 
-async function activeNativeArtifactPaths(source: NativeMemorySource, agentId: string): Promise<string[]> {
+async function activeNativeArtifactPaths(
+	source: NativeMemorySource,
+	agentId: string,
+	signal?: AbortSignal,
+): Promise<string[]> {
 	const rootPrefix = `${normalizedRoot(source.root)}/`;
 	try {
 		const rows = await dbOwnerQuery<readonly { readonly source_path: string }[]>(
@@ -789,7 +838,7 @@ async function activeNativeArtifactPaths(source: NativeMemorySource, agentId: st
 				],
 				"all",
 			),
-			{ operation: "sources.active-artifact-paths", lane: "read" },
+			{ operation: "sources.active-artifact-paths", lane: "read", signal },
 		);
 		return rows.map((row) => row.source_path);
 	} catch (error) {
@@ -815,8 +864,10 @@ export async function indexNativeMemoryFile(
 		readonly lineCount?: number;
 		readonly rolloutId?: string;
 		readonly chunks?: readonly ObsidianSourceChunk[];
+		readonly signal?: AbortSignal;
 	} = {},
 ): Promise<boolean> {
+	options.signal?.throwIfAborted();
 	if (!safeRelativePath(source.root, filePath)) return false;
 	const pattern = matchesPattern(source, filePath);
 	if (!pattern) return false;
@@ -905,7 +956,7 @@ export async function indexNativeMemoryFile(
 	const hash = options.contentHash ?? contentFingerprint(content);
 	let persistedHash: string | null;
 	try {
-		persistedHash = await nativeArtifactContentHash(filePath, agentId);
+		persistedHash = await nativeArtifactContentHash(filePath, agentId, options.signal);
 	} catch (error) {
 		logger.error(
 			"watcher",
@@ -926,7 +977,7 @@ export async function indexNativeMemoryFile(
 		options.fetchEmbedding !== undefined;
 	let semanticComplete = true;
 	if (obsidian) {
-		const graphExists = !graphRequested || (await obsidianGraphExists(agentId, sourceId ?? "", filePath));
+		const graphExists = !graphRequested || (await obsidianGraphExists(agentId, sourceId ?? "", filePath, options.signal));
 		const embeddingsExist =
 			!embeddingRequested ||
 			(await obsidianEmbeddingsExist({
@@ -936,6 +987,7 @@ export async function indexNativeMemoryFile(
 				filePath,
 				content,
 				chunks: options.chunks,
+				signal: options.signal,
 			}));
 		semanticComplete = graphExists && embeddingsExist;
 	}
@@ -948,9 +1000,9 @@ export async function indexNativeMemoryFile(
 		// One-shot heal for legacy rows with a corrupt pre-epoch captured_at:
 		// they stay permanently pending otherwise (no watermark can reach
 		// 1980), keeping content passes from ever early-exiting (#1149).
-		const persistedCapturedAt = await nativeArtifactCapturedAt(filePath, agentId);
+		const persistedCapturedAt = await nativeArtifactCapturedAt(filePath, agentId, options.signal);
 		if (persistedCapturedAt !== null) {
-			await healSentinelCapturedAt(filePath, agentId, source.harness, persistedCapturedAt);
+			await healSentinelCapturedAt(filePath, agentId, source.harness, persistedCapturedAt, options.signal);
 		}
 		indexed.set(key, { contentHash: hash });
 		return false;
@@ -986,6 +1038,7 @@ export async function indexNativeMemoryFile(
 							lineCount: options.lineCount ?? sourceLineCount(content),
 							contentHash: hash,
 						})),
+				signal: options.signal,
 			});
 		}
 		let semanticIndexed = false;
@@ -1001,6 +1054,7 @@ export async function indexNativeMemoryFile(
 					chunks: options.chunks,
 					embeddingConfig: options.embeddingConfig,
 					fetchEmbedding: options.fetchEmbedding,
+					signal: options.signal,
 				});
 				options.onEmbeddingStatus?.(embeddingResult.status);
 				embeddingProviderUnavailable = embeddingResult.providerUnavailable;
@@ -1032,15 +1086,13 @@ export async function indexNativeMemoryFile(
 						root: source.root,
 						filePath,
 						content,
-						...(options.markdownPathIndex === undefined
-							? {}
-							: { markdownPaths: [...options.markdownPathIndex.byRel.values()] }),
 					},
 					{
 						operation: "sources.graph.owner.index",
 						lane: "write",
 						workloadClass: "maintenance",
 						estimatedWorkUnits: 10,
+						signal: options.signal,
 					},
 				);
 				semanticIndexed = true;
@@ -1073,9 +1125,10 @@ export async function removeNativeMemoryFile(
 	source: NativeMemorySource,
 	filePath: string,
 	agentId = resolveDaemonAgentId(),
+	signal?: AbortSignal,
 ): Promise<void> {
 	indexed.delete(fingerprintKey(source, filePath, agentId));
-	await softDeleteArtifactRowsForPath(filePath, agentId);
+	await softDeleteArtifactRowsForPath(filePath, agentId, undefined, { signal });
 	if (source.harness === "obsidian") {
 		const sourceId = source.sourceId ?? sourceIdForObsidianRoot(source.root);
 		await purgeObsidianSourceFileEmbeddingsViaOwner({
@@ -1083,6 +1136,7 @@ export async function removeNativeMemoryFile(
 			agentId,
 			root: source.root,
 			filePath,
+			signal,
 		});
 		await dbOwnerSourceGraphFilePurge(
 			{
@@ -1096,6 +1150,7 @@ export async function removeNativeMemoryFile(
 				lane: "write",
 				workloadClass: "maintenance",
 				estimatedWorkUnits: 6,
+				signal,
 			},
 		);
 	}
@@ -1174,6 +1229,44 @@ function sourceCleanupEnabledFor(source: NativeMemorySource, options: NativeMemo
 	return (options.sourceCleanupEnabled ?? true) && (options.shouldCleanupSource?.(source) ?? true);
 }
 
+function sourceNeedsProvider(source: NativeMemorySource, options: NativeMemoryBridgeOptions): boolean {
+	return (
+		source.harness === "obsidian" &&
+		options.embeddingConfig !== undefined &&
+		options.embeddingConfig.provider !== "none" &&
+		options.fetchEmbedding !== undefined
+	);
+}
+
+async function sourceProviderGate(
+	agentId: string,
+	options: Pick<NativeMemoryBridgeOptions, "embeddingConfig" | "fetchEmbedding">,
+	signal?: AbortSignal,
+): Promise<{ readonly available: boolean; readonly retryAfterMs?: number }> {
+	const embeddingConfig = options.embeddingConfig;
+	const fetchEmbedding = options.fetchEmbedding;
+	if (!embeddingConfig || !fetchEmbedding || embeddingConfig.provider === "none") return { available: true };
+	const providerKey = `${embeddingConfig.provider}:${embeddingConfig.model}:${embeddingConfig.base_url ?? ""}`;
+	let providerFailed = false;
+	const result = await awaitEmbeddingProviderAvailable(
+		providerKey,
+		async () => {
+			signal?.throwIfAborted();
+			providerFailed = false;
+			const probe = await fetchEmbedding("", embeddingConfig, "document", {
+				usage: { source: "artifact-index", agentId },
+				onFailure: (cause) => {
+					providerFailed = cause === "provider_unavailable" || cause === "timeout";
+				},
+			});
+			return Boolean(probe?.length) && !providerFailed;
+		},
+		10_000,
+	);
+	signal?.throwIfAborted();
+	return result;
+}
+
 export function startNativeMemoryBridge(
 	sources: readonly NativeMemorySource[] = [
 		codexNativeMemorySource(),
@@ -1186,26 +1279,79 @@ export function startNativeMemoryBridge(
 	const known = new Map<string, Set<string>>();
 	const sourceWorker = createNativeSourceWorker();
 	let cancelRequested = false;
+	let lastSyncResult: NativeMemorySyncResult = { status: "complete", scanned: 0, indexed: 0, pausedSources: [] };
 
-	const runScan = async (): Promise<number> => {
+	const runScan = async (signal: AbortSignal): Promise<number> => {
+		signal.throwIfAborted();
 		let count = 0;
+		let totalScanned = 0;
+		let totalIndexed = 0;
+		const pausedSources: NativeMemorySyncSourceResult[] = [];
 		const yielder = yieldEvery(options.yieldEveryFiles ?? 20);
 		for (const source of activeBridgeSources(sources, options)) {
 			if (options.shouldContinue && !options.shouldContinue(source)) continue;
+			const flightKey = sourceFlightKey(source, agentId);
+			const existingFlight = sharedNativeMemorySourceFlights.get(flightKey);
+			if (existingFlight) {
+				const joined = await existingFlight.promise;
+				count += joined.indexed;
+				totalScanned += joined.scanned;
+				totalIndexed += joined.indexed;
+				if (joined.status === "paused") pausedSources.push(joined);
+				continue;
+			}
+			let resolveFlight!: (result: NativeMemorySyncSourceResult) => void;
+			let rejectFlight!: (error: unknown) => void;
+			const flightPromise = new Promise<NativeMemorySyncSourceResult>((resolve, reject) => {
+				resolveFlight = resolve;
+				rejectFlight = reject;
+			});
+			void flightPromise.catch(() => {});
+			sharedNativeMemorySourceFlights.set(flightKey, { promise: flightPromise, resolve: resolveFlight, reject: rejectFlight });
+		let sourceResult: NativeMemorySyncSourceResult | undefined;
+		let sourceFailure: unknown;
+		try {
 			let changedCount = 0;
 			let scanned = 0;
 			const key = sourceStateKey(source, agentId);
+			const durableKey = nativeSourceSyncKey(source);
+			const syncState = await readNativeSourceSyncState(agentId, source, signal);
+			if (sourceNeedsProvider(source, options)) {
+				const provider = await sourceProviderGate(agentId, options, signal);
+				if (!provider.available) {
+					await persistNativeSourceSyncState({
+						agentId,
+						source,
+						status: "paused",
+						pauseReason: "provider_unavailable",
+						signal,
+					});
+					pausedSources.push({
+						sourceKey: durableKey,
+						sourceId: source.sourceId,
+						status: "paused",
+						scanned: 0,
+						indexed: 0,
+						resumeFrontier: syncState?.checkpointPath ?? null,
+						pauseReason: "provider_unavailable",
+					});
+					sourceResult = pausedSources[pausedSources.length - 1];
+					continue;
+				}
+				if (syncState?.status === "paused") {
+					await persistNativeSourceSyncState({ agentId, source, status: "running", signal });
+				}
+			}
 			const current = new Set<string>();
+			const resumePath = syncState?.status === "paused" ? syncState.checkpointPath : null;
+			let resumeCheckpointPath = resumePath;
 			const rootExists = await pathExists(source.root, source, agentId);
 			const maxFilesPerScan = options.maxFilesPerScan ?? NATIVE_MEMORY_MAX_FILES_PER_SCAN;
 			let scanComplete = true;
+			let sourcePaused = false;
 			if (rootExists) {
 				const fileDelayMs = sourceFileDelayMs(source, options);
-				const markdownPathIndex =
-					source.harness === "obsidian" && (options.sourceGraphEnabled ?? true)
-						? buildObsidianMarkdownPathIndex(source.root, [])
-						: undefined;
-				const checkpoint = await readNativeSourceSyncCheckpoint(agentId, key, "content");
+				const checkpoint = await readNativeSourceSyncCheckpoint(agentId, key, "content", signal);
 				let cursor = checkpoint.complete ? null : checkpoint.cursor;
 				let frontier = checkpoint.complete ? null : checkpoint.frontier;
 				let pageComplete = false;
@@ -1226,24 +1372,28 @@ export function startNativeMemoryBridge(
 							"content",
 							{ cursor: null, frontier: null, complete: true },
 							scanned,
+							signal,
 						);
 						break;
 					}
 					for (const file of page.files) {
 						if (cancelRequested) throw new Error("native source sync cancelled");
+						if (resumePath && file.path.replace(/\\/g, "/") <= resumePath.replace(/\\/g, "/")) {
+							current.add(file.path);
+							continue;
+						}
 						if (scanned >= maxFilesPerScan) break;
-						if (markdownPathIndex) addObsidianMarkdownPathIndex(markdownPathIndex, source.root, file.path);
 						scanned++;
 						let embeddingStatus: string | undefined;
 						const changed = await indexNativeMemoryFile(source, file.path, agentId, {
 							...options,
+							signal,
 							content: file.content,
 							chunks: file.chunks,
 							mtimeMs: file.mtimeMs,
 							contentHash: file.contentHash,
 							lineCount: file.lineCount,
 							rolloutId: file.rolloutId,
-							markdownPathIndex,
 							onEmbeddingStatus: (status) => {
 								embeddingStatus = status;
 								options.onEmbeddingStatus?.(status);
@@ -1263,9 +1413,24 @@ export function startNativeMemoryBridge(
 							changed: changedCount,
 							...(embeddingStatus ? { status: embeddingStatus } : {}),
 						});
+						if (embeddingStatus === "embeddings pending - provider down") {
+							sourcePaused = true;
+							scanComplete = false;
+							await persistNativeSourceSyncState({
+								agentId,
+								source,
+								status: "paused",
+								checkpointPath: resumeCheckpointPath ?? file.path,
+								pauseReason: "provider_unavailable",
+								signal,
+							});
+							break;
+						}
+						resumeCheckpointPath = file.path.replace(/\\/g, "/");
 						await yielder();
 						await sleep(fileDelayMs);
 					}
+					if (sourcePaused) break;
 					cursor = page.nextCursor;
 					frontier = page.frontier;
 					pageComplete = page.complete;
@@ -1275,6 +1440,7 @@ export function startNativeMemoryBridge(
 						"content",
 						{ cursor: pageComplete ? null : cursor, frontier: pageComplete ? null : frontier, complete: pageComplete },
 						scanned,
+						signal,
 					);
 				}
 				scanComplete = pageComplete;
@@ -1286,17 +1452,43 @@ export function startNativeMemoryBridge(
 					});
 				}
 			}
+			totalScanned += scanned;
+			totalIndexed += changedCount;
+			if (sourcePaused) {
+				sourceResult = {
+					sourceKey: durableKey,
+					sourceId: source.sourceId,
+					status: "paused",
+					scanned,
+					indexed: changedCount,
+					resumeFrontier: resumeCheckpointPath,
+					pauseReason: "provider_unavailable",
+				};
+				pausedSources.push(sourceResult);
+			} else if (sourceNeedsProvider(source, options) && rootExists && scanComplete) {
+				await clearNativeSourceSyncCheckpoint({ agentId, source, signal });
+			}
+			if (!sourceResult) {
+				sourceResult = {
+					sourceKey: durableKey,
+					sourceId: source.sourceId,
+					status: "complete",
+					scanned,
+					indexed: changedCount,
+					resumeFrontier: null,
+				};
+			}
 			const cleanupAllowed = sourceCleanupEnabledFor(source, options) && (!rootExists || scanComplete);
 			if (cleanupAllowed) {
 				const currentPaths = new Set([...current].map((file) => file.replace(/\\/g, "/")));
-				for (const file of await activeNativeArtifactPaths(source, agentId)) {
-					if (!currentPaths.has(file.replace(/\\/g, "/"))) await removeNativeMemoryFile(source, file, agentId);
+				for (const file of await activeNativeArtifactPaths(source, agentId, signal)) {
+					if (!currentPaths.has(file.replace(/\\/g, "/"))) await removeNativeMemoryFile(source, file, agentId, signal);
 				}
 			}
 			const previous = known.get(key);
 			if (previous && cleanupAllowed) {
 				for (const file of previous) {
-					if (!current.has(file)) await removeNativeMemoryFile(source, file, agentId);
+					if (!current.has(file)) await removeNativeMemoryFile(source, file, agentId, signal);
 				}
 			}
 			known.set(key, current);
@@ -1308,30 +1500,59 @@ export function startNativeMemoryBridge(
 			) {
 				markSourceIndexed(source.sourceId, undefined, options.agentsDir);
 			}
+		} catch (error) {
+			sourceFailure = error;
+			throw error;
+		} finally {
+			sharedNativeMemorySourceFlights.delete(flightKey);
+			if (sourceFailure !== undefined) rejectFlight(sourceFailure);
+			else if (sourceResult !== undefined) resolveFlight(sourceResult);
 		}
+		}
+		lastSyncResult = {
+			status: pausedSources.length > 0 ? "paused" : "complete",
+			scanned: totalScanned,
+			indexed: totalIndexed,
+			pausedSources,
+		};
 		return count;
 	};
 
 	let syncInFlight: Promise<number> | null = null;
+	let activeController: AbortController | null = null;
+	let bridgeClosed = false;
 	let resyncRequested = false;
 	const syncExisting = async (syncOptions: NativeMemoryBridgeSyncOptions = {}): Promise<number> => {
+		if (bridgeClosed) throw new Error("native source bridge closed");
 		if (syncInFlight) {
 			if (syncOptions.requestResyncIfBusy ?? true) resyncRequested = true;
+			if (syncOptions.signal) {
+				if (syncOptions.signal.aborted) activeController?.abort(syncOptions.signal.reason);
+				else syncOptions.signal.addEventListener("abort", () => activeController?.abort(syncOptions.signal?.reason), { once: true });
+			}
 			return syncInFlight;
 		}
 		cancelRequested = false;
+		const controller = new AbortController();
+		activeController = controller;
+		const forwardAbort = (): void => controller.abort(syncOptions.signal?.reason);
+		if (syncOptions.signal?.aborted) forwardAbort();
+		else syncOptions.signal?.addEventListener("abort", forwardAbort, { once: true });
 		syncInFlight = Promise.resolve()
 			.then(async () => {
 				let total = 0;
 				do {
 					resyncRequested = false;
-					total += await runScan();
+					total += await runScan(controller.signal);
 				} while (resyncRequested);
 				return total;
 			})
 			.finally(() => {
+				syncOptions.signal?.removeEventListener("abort", forwardAbort);
+				activeController = null;
 				syncInFlight = null;
 			});
+		void syncInFlight.catch(() => {});
 		return syncInFlight;
 	};
 	const pollIntervalMs = options.pollIntervalMs ?? 10_000;
@@ -1349,15 +1570,20 @@ export function startNativeMemoryBridge(
 
 	return {
 		syncExisting,
+		getLastSyncResult: () => lastSyncResult,
 		cancel: () => {
 			cancelRequested = true;
+			activeController?.abort(new Error("native source sync cancelled"));
 			sourceWorker.cancel();
 		},
 		async close(): Promise<void> {
+			bridgeClosed = true;
 			if (pollTimer) clearInterval(pollTimer);
+			const inFlight = syncInFlight;
 			cancelRequested = true;
 			sourceWorker.cancel();
-			if (syncInFlight) await syncInFlight.catch(() => 0);
+			if (inFlight) await inFlight.catch(() => 0);
+			if (syncInFlight && syncInFlight !== inFlight) await syncInFlight.catch(() => 0);
 			await sourceWorker.close();
 		},
 	};
