@@ -4407,16 +4407,16 @@
     },
     {
       "path": "telemetry.ts",
-      "line": 492,
+      "line": 551,
       "api": "withWriteTx",
-      "source": "return db.withWriteTx((w: import(\"./db-accessor\").WriteDb) => {",
+      "source": "return db.withWriteTx((w: import(\"./db-accessor\").WriteDb) => resolveInstallIdentity(w, daemonVersion));",
       "category": "hot-path"
     },
     {
       "path": "telemetry.ts",
-      "line": 532,
+      "line": 555,
       "api": "withWriteTx",
-      "source": "return db.withWriteTx((w: import(\"./db-accessor\").WriteDb) => {",
+      "source": "return db.withWriteTx((w: import(\"./db-accessor\").WriteDb) => resolveLegacyInstallIdentity(w));",
       "category": "hot-path"
     },
     {
