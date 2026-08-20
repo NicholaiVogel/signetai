@@ -509,7 +509,11 @@ function resolveInstallIdentity(w: import("./db-accessor").WriteDb, daemonVersio
 		.prepare("SELECT id, last_seen_version FROM telemetry_install ORDER BY created_at ASC LIMIT 1")
 		.get() as { readonly id: string; readonly last_seen_version?: string | null } | null | undefined;
 	return inserted?.id
-		? { id: inserted.id, created: false, ...(inserted.last_seen_version ? { previousVersion: inserted.last_seen_version } : {}) }
+		? {
+				id: inserted.id,
+				created: false,
+				...(inserted.last_seen_version ? { previousVersion: inserted.last_seen_version } : {}),
+			}
 		: { id, created: false };
 }
 
@@ -520,7 +524,9 @@ function resolveLegacyInstallIdentity(w: import("./db-accessor").WriteDb): Insta
 		| undefined;
 	if (existing?.id) return { id: existing.id, created: false };
 	const id = crypto.randomUUID();
-	const result = w.prepare("INSERT OR IGNORE INTO telemetry_install (id, created_at) VALUES (?, ?)").run(id, new Date().toISOString());
+	const result = w
+		.prepare("INSERT OR IGNORE INTO telemetry_install (id, created_at) VALUES (?, ?)")
+		.run(id, new Date().toISOString());
 	if (result.changes > 0) return { id, created: true };
 	const inserted = w.prepare("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1").get() as
 		| { readonly id: string }
@@ -531,10 +537,12 @@ function resolveLegacyInstallIdentity(w: import("./db-accessor").WriteDb): Insta
 
 function getOrCreateInstallId(db: DbAccessor, daemonVersion: string): DeferredInstallIdentity {
 	const fallback = { id: crypto.randomUUID(), created: false } as const;
-	if (db.withWriteTxAsync) {
-		const ready = db
-			.withWriteTxAsync((w) => resolveInstallIdentity(w, daemonVersion))
-			.catch(() => db.withWriteTxAsync!(resolveLegacyInstallIdentity))
+	const withWriteTxAsync = db.withWriteTxAsync;
+	if (withWriteTxAsync) {
+		const runAsync = <T>(fn: (w: import("./db-accessor").WriteDb) => T): Promise<T> =>
+			withWriteTxAsync.call(db, fn) as Promise<T>;
+		const ready = runAsync((w) => resolveInstallIdentity(w, daemonVersion))
+			.catch(() => runAsync(resolveLegacyInstallIdentity))
 			.catch(() => fallback);
 		return { ...fallback, ready };
 	}
@@ -1295,7 +1303,10 @@ export function createTelemetryCollector(
 		queueLogLine(next);
 	}
 
-	const pendingIdentityRecords: Array<{ readonly event: TelemetryEventType; readonly properties: TelemetryProperties }> = [];
+	const pendingIdentityRecords: Array<{
+		readonly event: TelemetryEventType;
+		readonly properties: TelemetryProperties;
+	}> = [];
 	let installIdentityReady = false;
 	function appendAfterInstallIdentity(event: TelemetryEventType, properties: TelemetryProperties): void {
 		if (!installIdentityReady) {
@@ -1653,9 +1664,11 @@ export function createTelemetryCollector(
 		}
 		installIdentityReady = true;
 		emitInstallLifecycle();
-		for (const pending of pendingIdentityRecords.splice(0)) appendBufferedEvent(pending.event, pending.properties, true);
+		for (const pending of pendingIdentityRecords.splice(0))
+			appendBufferedEvent(pending.event, pending.properties, true);
 	};
-	installLifecycleReady = installIdentity.ready?.then(finishInstallIdentity) ?? Promise.resolve().then(() => finishInstallIdentity());
+	installLifecycleReady =
+		installIdentity.ready?.then(finishInstallIdentity) ?? Promise.resolve().then(() => finishInstallIdentity());
 
 	return collector;
 }

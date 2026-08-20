@@ -49,7 +49,10 @@ const MAX_HISTORY = 256;
 const SLOW_CALL_THRESHOLD_MS = 50;
 const history: SyncDbCallRecord[] = [];
 const inFlight = new Map<number, SyncDbCallRecord>();
-const siteMetrics = new Map<string, { calls: number; slowCalls: number; totalDurationMs: number; maxDurationMs: number }>();
+const siteMetrics = new Map<
+	string,
+	{ calls: number; slowCalls: number; totalDurationMs: number; maxDurationMs: number }
+>();
 let nextSequence = 1;
 let calls = 0;
 let slowCalls = 0;
@@ -70,12 +73,17 @@ function normalizeFileName(value: string): string {
 	return value;
 }
 
-function parseFrame(line: string): { readonly file: string; readonly line: number; readonly functionName: string } | null {
+function parseFrame(
+	line: string,
+): { readonly file: string; readonly line: number; readonly functionName: string } | null {
 	const match = /(?:\(|\s)((?:file:\/\/)?[^()\s]+):(\d+):\d+\)?$/.exec(line);
 	if (!match) return null;
 	const lineNumber = Number.parseInt(match[2] ?? "", 10);
 	if (!Number.isInteger(lineNumber) || lineNumber <= 0) return null;
-	const functionName = line.replace(/\s+\([^()]+\)$/, "").replace(/^\s*at\s+/, "").trim();
+	const functionName = line
+		.replace(/\s+\([^()]+\)$/, "")
+		.replace(/^\s*at\s+/, "")
+		.trim();
 	return { file: normalizeFileName(match[1] ?? ""), line: lineNumber, functionName };
 }
 
