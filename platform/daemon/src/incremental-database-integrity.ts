@@ -31,8 +31,9 @@ const DEFAULT_RUN_BUDGET_MS = 5_000;
 const MAX_RUN_BUDGET_MS = 60_000;
 const DEFAULT_WORK_UNITS = 8;
 const MAX_WORK_UNITS = 64;
+const FTS_UNVERIFIABLE_STATUS = "degraded:fts-unverifiable" as const;
 
-export type IncrementalIntegrityPhase = "running" | "complete" | "cancelled" | "timed_out" | "unavailable";
+export type IncrementalIntegrityPhase = "running" | "complete" | "cancelled" | "timed_out" | "unavailable" | "degraded";
 
 export interface IncrementalIntegrityProgress extends DatabaseIntegrityProgress {
 	readonly checkpointKey: string;
@@ -67,13 +68,14 @@ interface Checkpoint {
 	readonly failedTables: number;
 	readonly pagesChecked: number;
 	readonly bytesChecked: number;
-	readonly status: "running" | "complete";
+	readonly status: "running" | "complete" | typeof FTS_UNVERIFIABLE_STATUS;
 }
 
 interface TableRow {
 	readonly name: string;
 	readonly type: "table" | "index" | "view" | "trigger";
 	readonly cursor: string;
+	readonly sql?: string;
 }
 
 interface NumberRow {
@@ -125,6 +127,10 @@ function boundedWorkUnits(value: number | undefined): number {
 
 function escapeIdentifier(value: string): string {
 	return `"${value.replaceAll('"', '""')}"`;
+}
+
+function isUnchunkableFts(object: TableRow): boolean {
+	return object.type === "table" && typeof object.sql === "string" && /\bUSING\s+fts5\s*\(/i.test(object.sql);
 }
 
 function scalar(value: unknown): number {
@@ -187,7 +193,11 @@ async function readCheckpoint(
 		[key],
 		{ deadlineMs, onOwnerMetrics },
 	);
-	if (row === undefined || (row.status !== "running" && row.status !== "complete") || typeof row.cursor !== "string") {
+	if (
+		row === undefined ||
+		(row.status !== "running" && row.status !== "complete" && row.status !== FTS_UNVERIFIABLE_STATUS) ||
+		typeof row.cursor !== "string"
+	) {
 		throw new Error(`integrity checkpoint ${key} is missing or invalid`);
 	}
 	return row;
@@ -241,7 +251,7 @@ async function nextObject(
 	const object = await ownerQueryOne<TableRow>(
 		owner,
 		"integrity.objects.next",
-		`SELECT name, type, name || ':' || type AS cursor FROM sqlite_schema
+		`SELECT name, type, sql, name || ':' || type AS cursor FROM sqlite_schema
 		 WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
 		   AND name <> ? AND (name || ':' || type) > ?
 		   AND type IN ('table', 'index', 'view', 'trigger')
@@ -296,8 +306,11 @@ async function persistTable(
 		cursor: object,
 		checkedTables: checkpoint.checkedTables + 1,
 		failedTables: checkpoint.failedTables + (failed ? 1 : 0),
-		pagesChecked: checkpoint.pagesChecked + metrics.pages,
-		bytesChecked: checkpoint.bytesChecked + metrics.bytes,
+		// PRAGMA page_count is a database-wide snapshot, not per-object work.
+		// Adding it for every table multiplies the database size by the object
+		// count (the 765M-page integrity report was this exact bug).
+		pagesChecked: metrics.pages,
+		bytesChecked: metrics.bytes,
 		status: "running",
 	};
 	await ownerTransaction(
@@ -345,6 +358,31 @@ async function markComplete(
 	);
 }
 
+async function markDegraded(
+	owner: DbOwnerClient,
+	key: string,
+	object: string,
+	checkpoint: Checkpoint,
+	deadlineMs: number,
+	onOwnerMetrics?: OwnerMetricsCallback,
+): Promise<Checkpoint> {
+	const next: Checkpoint = { ...checkpoint, cursor: object, status: FTS_UNVERIFIABLE_STATUS };
+	await ownerTransaction(
+		owner,
+		"integrity.checkpoint.degraded",
+		[
+			ownerRunStatement(
+				`UPDATE ${CHECKPOINT_TABLE}
+				 SET cursor = ?, status = ?, updated_at = ?
+				 WHERE checkpoint_key = ? AND cursor = ? AND status = 'running'`,
+				[next.cursor, next.status, new Date().toISOString(), key, checkpoint.cursor],
+			),
+		],
+		{ deadlineMs, estimatedWorkUnits: 1, onOwnerMetrics },
+	);
+	return next;
+}
+
 function progressFrom(
 	key: string,
 	phase: IncrementalIntegrityPhase,
@@ -355,6 +393,7 @@ function progressFrom(
 	ownerQueueAdmissionMs: number,
 	ownerExecutionMs: number,
 	cancellationReason: string | null,
+	degradationReason: string | null,
 ): IncrementalIntegrityProgress {
 	return {
 		checkpointKey: key,
@@ -369,6 +408,7 @@ function progressFrom(
 		ownerQueueAdmissionMs,
 		ownerExecutionMs,
 		cancellationReason,
+		degradationReason,
 	};
 }
 
@@ -399,6 +439,7 @@ export async function runIncrementalDatabaseIntegrityCheck(
 	};
 	let phase: IncrementalIntegrityPhase = "running";
 	let cancellationReason: string | null = null;
+	let degradationReason: string | null = null;
 	let checkpoint: Checkpoint = {
 		cursor: "",
 		checkedTables: 0,
@@ -421,12 +462,12 @@ export async function runIncrementalDatabaseIntegrityCheck(
 		return Math.min(ownerDeadlineMs, Math.floor(remaining));
 	};
 	const emit = async (phase: IncrementalIntegrityPhase, reason: string | null): Promise<void> => {
-		const remaining = await remainingObjects(
-			options.owner,
-			checkpoint.cursor,
-			remainingBudget(),
-			recordOwnerMetrics,
-		).catch(() => 0);
+		const remaining =
+			phase === "degraded"
+				? 0
+				: await remainingObjects(options.owner, checkpoint.cursor, remainingBudget(), recordOwnerMetrics).catch(
+						() => 0,
+					);
 		const progress = progressFrom(
 			key,
 			phase,
@@ -437,17 +478,18 @@ export async function runIncrementalDatabaseIntegrityCheck(
 			ownerQueueAdmissionMs,
 			ownerExecutionMs,
 			reason,
+			degradationReason,
 		);
 		updateDatabaseIntegrityStatus(progress, errors, options.owner);
 		await options.onProgress?.(progress);
 	};
 	const progressSnapshot = async (): Promise<IncrementalIntegrityProgress> => {
-		const remaining = await remainingObjects(
-			options.owner,
-			checkpoint.cursor,
-			remainingBudget(),
-			recordOwnerMetrics,
-		).catch(() => 0);
+		const remaining =
+			phase === "degraded"
+				? 0
+				: await remainingObjects(options.owner, checkpoint.cursor, remainingBudget(), recordOwnerMetrics).catch(
+						() => 0,
+					);
 		return progressFrom(
 			key,
 			phase,
@@ -458,6 +500,7 @@ export async function runIncrementalDatabaseIntegrityCheck(
 			ownerQueueAdmissionMs,
 			ownerExecutionMs,
 			cancellationReason,
+			degradationReason,
 		);
 	};
 
@@ -465,6 +508,12 @@ export async function runIncrementalDatabaseIntegrityCheck(
 		await ensureCheckpoint(options.owner, key, remainingBudget(), recordOwnerMetrics);
 		checkpoint = await readCheckpoint(options.owner, key, remainingBudget(), recordOwnerMetrics);
 		lastTable = checkpointCursorToLastObject(checkpoint.cursor);
+		if (checkpoint.status === FTS_UNVERIFIABLE_STATUS) {
+			phase = "degraded";
+			degradationReason = FTS_UNVERIFIABLE_STATUS;
+			await emit("degraded", FTS_UNVERIFIABLE_STATUS);
+			return { ...(await progressSnapshot()), errors };
+		}
 		if (checkpoint.status === "complete") {
 			await resetCompleteCheckpoint(options.owner, key, remainingBudget(), recordOwnerMetrics);
 			checkpoint = await readCheckpoint(options.owner, key, remainingBudget(), recordOwnerMetrics);
@@ -494,8 +543,26 @@ export async function runIncrementalDatabaseIntegrityCheck(
 				await emit("complete", null);
 				return { ...(await progressSnapshot()), errors };
 			}
-			await options.onObjectScan?.(table);
 			lastTable = `${table.type}:${table.name}`;
+			if (isUnchunkableFts(table)) {
+				// SQLite's FTS5 integrity-check is one monolithic native operation;
+				// it has no segment/rowid-range cursor. Persist the named park state
+				// instead of re-entering the same virtual table on every slice.
+				await options.onObjectScan?.(table);
+				checkpoint = await markDegraded(
+					options.owner,
+					key,
+					table.cursor,
+					checkpoint,
+					remainingBudget(),
+					recordOwnerMetrics,
+				);
+				phase = "degraded";
+				degradationReason = FTS_UNVERIFIABLE_STATUS;
+				await emit("degraded", FTS_UNVERIFIABLE_STATUS);
+				return { ...(await progressSnapshot()), errors };
+			}
+			await options.onObjectScan?.(table);
 			const row =
 				table.type === "table"
 					? await ownerQueryOne<QuickCheckRow>(
@@ -593,6 +660,7 @@ export async function runIncrementalDatabaseIntegrityCheck(
 				ownerQueueAdmissionMs,
 				ownerExecutionMs,
 				reason,
+				degradationReason,
 			);
 			updateDatabaseIntegrityStatus(progress, [...errors, reason], options.owner);
 			return { ...progress, errors: [...errors, reason] };

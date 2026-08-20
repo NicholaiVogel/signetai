@@ -55,6 +55,7 @@ const PENDING_INTEGRITY: DatabaseIntegrityStatus = {
 	checkedAt: "",
 	state: "unknown",
 	phase: "pending",
+	integrity: null,
 	quickCheck: { ok: false, messages: ["not checked"] },
 	telemetryCheck: { ok: false, messages: ["not checked"] },
 	rebuiltIndexes: [],
