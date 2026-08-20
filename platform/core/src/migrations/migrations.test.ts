@@ -141,9 +141,17 @@ describe("migration framework", () => {
 
 			const applied = db.query("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
 			expect(applied.version).toBe(142);
-			expect(db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_source_sync_state'").get()).toBeTruthy();
-			expect(db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'transcript_recovery_frontiers'").get()).toBeTruthy();
-			expect(db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_sync_checkpoints'").get()).toBeTruthy();
+			expect(
+				db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_source_sync_state'").get(),
+			).toBeTruthy();
+			expect(
+				db
+					.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'transcript_recovery_frontiers'")
+					.get(),
+			).toBeTruthy();
+			expect(
+				db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_sync_checkpoints'").get(),
+			).toBeTruthy();
 			const checkpointColumns = db.query("PRAGMA table_info(source_sync_checkpoints)").all() as Array<{ name: string }>;
 			expect(checkpointColumns.map((column) => column.name)).toContain("frontier");
 			db.close();

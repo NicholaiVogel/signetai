@@ -143,9 +143,7 @@ export function createSessionClaimStore(accessor: DbAccessor): SessionClaimStore
 		},
 		async removeAsync(sessionKey, agentId): Promise<void> {
 			await dbOwnerBatch(
-				[
-					ownerStatement("DELETE FROM session_claims WHERE session_key = ? AND agent_id = ?", [sessionKey, agentId]),
-				],
+				[ownerStatement("DELETE FROM session_claims WHERE session_key = ? AND agent_id = ?", [sessionKey, agentId])],
 				{ operation: "session-claims.restore-remove", lane: "write" },
 			);
 		},

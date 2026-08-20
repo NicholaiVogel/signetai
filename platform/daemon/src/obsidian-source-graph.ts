@@ -391,15 +391,9 @@ function resolveWikiLinkPath(
 				  ORDER BY CASE WHEN source_path = ? THEN 0 ELSE 1 END, source_path ASC
 				  LIMIT 1`,
 			)
-			.get(
-				agentId,
-				sourceId,
-				root,
-				OBSIDIAN_SOURCE_KIND,
-				targetPath,
-				`%/${targetPath}`,
-				targetPath,
-			) as { sourcePath?: string } | undefined;
+			.get(agentId, sourceId, root, OBSIDIAN_SOURCE_KIND, targetPath, `%/${targetPath}`, targetPath) as
+			| { sourcePath?: string }
+			| undefined;
 		if (row?.sourcePath) {
 			const found = normalizedPath(row.sourcePath);
 			return { path: found, rel: relPath(root, found), found: true };

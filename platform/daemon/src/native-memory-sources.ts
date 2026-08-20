@@ -41,10 +41,7 @@ import {
 	purgeObsidianSourceFileEmbeddingsViaOwner,
 	resetObsidianSourceEmbeddingBackoff,
 } from "./obsidian-source-embeddings";
-import {
-	type ObsidianMarkdownPathIndex,
-	sourceIdForObsidianRoot,
-} from "./obsidian-source-graph";
+import { type ObsidianMarkdownPathIndex, sourceIdForObsidianRoot } from "./obsidian-source-graph";
 import {
 	createNativeSourceWorker,
 	type NativeSourceWorkerPage,
@@ -574,7 +571,11 @@ function sleep(ms: number): Promise<void> {
 	return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 }
 
-async function nativeArtifactContentHash(filePath: string, agentId: string, signal?: AbortSignal): Promise<string | null> {
+async function nativeArtifactContentHash(
+	filePath: string,
+	agentId: string,
+	signal?: AbortSignal,
+): Promise<string | null> {
 	const sourcePath = filePath.replace(/\\/g, "/");
 	try {
 		const row = await dbOwnerQuery<{ readonly source_sha256: string } | null>(
@@ -594,7 +595,11 @@ async function nativeArtifactContentHash(filePath: string, agentId: string, sign
 	}
 }
 
-async function nativeArtifactCapturedAt(filePath: string, agentId: string, signal?: AbortSignal): Promise<string | null> {
+async function nativeArtifactCapturedAt(
+	filePath: string,
+	agentId: string,
+	signal?: AbortSignal,
+): Promise<string | null> {
 	const sourcePath = filePath.replace(/\\/g, "/");
 	try {
 		const row = await dbOwnerQuery<{ readonly captured_at: string } | null>(
@@ -640,7 +645,13 @@ async function healSentinelCapturedAt(
 					[stampedAt, stampedAt, agentId, filePath.replace(/\\/g, "/")],
 				),
 			],
-			{ operation: "sources.artifact-heal", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 1, signal },
+			{
+				operation: "sources.artifact-heal",
+				lane: "write",
+				workloadClass: "maintenance",
+				estimatedWorkUnits: 1,
+				signal,
+			},
 		);
 		logger.warn("watcher", "Healed pre-epoch captured_at on native memory artifact", {
 			harness,
@@ -806,7 +817,13 @@ async function writeNativeSourceSyncCheckpoint(
 				],
 			),
 		],
-		{ operation: "sources.sync-checkpoint.write", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 1, signal },
+		{
+			operation: "sources.sync-checkpoint.write",
+			lane: "write",
+			workloadClass: "maintenance",
+			estimatedWorkUnits: 1,
+			signal,
+		},
 	);
 }
 
@@ -977,7 +994,8 @@ export async function indexNativeMemoryFile(
 		options.fetchEmbedding !== undefined;
 	let semanticComplete = true;
 	if (obsidian) {
-		const graphExists = !graphRequested || (await obsidianGraphExists(agentId, sourceId ?? "", filePath, options.signal));
+		const graphExists =
+			!graphRequested || (await obsidianGraphExists(agentId, sourceId ?? "", filePath, options.signal));
 		const embeddingsExist =
 			!embeddingRequested ||
 			(await obsidianEmbeddingsExist({
@@ -1307,207 +1325,216 @@ export function startNativeMemoryBridge(
 				rejectFlight = reject;
 			});
 			void flightPromise.catch(() => {});
-			sharedNativeMemorySourceFlights.set(flightKey, { promise: flightPromise, resolve: resolveFlight, reject: rejectFlight });
-		let sourceResult: NativeMemorySyncSourceResult | undefined;
-		let sourceFailure: unknown;
-		try {
-			let changedCount = 0;
-			let scanned = 0;
-			const key = sourceStateKey(source, agentId);
-			const durableKey = nativeSourceSyncKey(source);
-			const syncState = await readNativeSourceSyncState(agentId, source, signal);
-			if (sourceNeedsProvider(source, options)) {
-				const provider = await sourceProviderGate(agentId, options, signal);
-				if (!provider.available) {
-					await persistNativeSourceSyncState({
-						agentId,
-						source,
-						status: "paused",
-						pauseReason: "provider_unavailable",
-						signal,
-					});
-					pausedSources.push({
-						sourceKey: durableKey,
-						sourceId: source.sourceId,
-						status: "paused",
-						scanned: 0,
-						indexed: 0,
-						resumeFrontier: syncState?.checkpointPath ?? null,
-						pauseReason: "provider_unavailable",
-					});
-					sourceResult = pausedSources[pausedSources.length - 1];
-					continue;
+			sharedNativeMemorySourceFlights.set(flightKey, {
+				promise: flightPromise,
+				resolve: resolveFlight,
+				reject: rejectFlight,
+			});
+			let sourceResult: NativeMemorySyncSourceResult | undefined;
+			let sourceFailure: unknown;
+			try {
+				let changedCount = 0;
+				let scanned = 0;
+				const key = sourceStateKey(source, agentId);
+				const durableKey = nativeSourceSyncKey(source);
+				const syncState = await readNativeSourceSyncState(agentId, source, signal);
+				if (sourceNeedsProvider(source, options)) {
+					const provider = await sourceProviderGate(agentId, options, signal);
+					if (!provider.available) {
+						await persistNativeSourceSyncState({
+							agentId,
+							source,
+							status: "paused",
+							pauseReason: "provider_unavailable",
+							signal,
+						});
+						pausedSources.push({
+							sourceKey: durableKey,
+							sourceId: source.sourceId,
+							status: "paused",
+							scanned: 0,
+							indexed: 0,
+							resumeFrontier: syncState?.checkpointPath ?? null,
+							pauseReason: "provider_unavailable",
+						});
+						sourceResult = pausedSources[pausedSources.length - 1];
+						continue;
+					}
+					if (syncState?.status === "paused") {
+						await persistNativeSourceSyncState({ agentId, source, status: "running", signal });
+					}
 				}
-				if (syncState?.status === "paused") {
-					await persistNativeSourceSyncState({ agentId, source, status: "running", signal });
-				}
-			}
-			const current = new Set<string>();
-			const resumePath = syncState?.status === "paused" ? syncState.checkpointPath : null;
-			let resumeCheckpointPath = resumePath;
-			const rootExists = await pathExists(source.root, source, agentId);
-			const maxFilesPerScan = options.maxFilesPerScan ?? NATIVE_MEMORY_MAX_FILES_PER_SCAN;
-			let scanComplete = true;
-			let sourcePaused = false;
-			if (rootExists) {
-				const fileDelayMs = sourceFileDelayMs(source, options);
-				const checkpoint = await readNativeSourceSyncCheckpoint(agentId, key, "content", signal);
-				let cursor = checkpoint.complete ? null : checkpoint.cursor;
-				let frontier = checkpoint.complete ? null : checkpoint.frontier;
-				let pageComplete = false;
-				while (scanned < maxFilesPerScan && !pageComplete) {
-					const page: NativeSourceWorkerPage = await sourceWorker.scan({
-						source: workerSource(source),
-						cursor,
-						frontier,
-						pageSize: Math.min(100, maxFilesPerScan - scanned),
-					});
-					if (cancelRequested) throw new Error("native source sync cancelled");
-					if (page.files.length === 0 && page.complete) {
-						pageComplete = true;
-						cursor = null;
+				const current = new Set<string>();
+				const resumePath = syncState?.status === "paused" ? syncState.checkpointPath : null;
+				let resumeCheckpointPath = resumePath;
+				const rootExists = await pathExists(source.root, source, agentId);
+				const maxFilesPerScan = options.maxFilesPerScan ?? NATIVE_MEMORY_MAX_FILES_PER_SCAN;
+				let scanComplete = true;
+				let sourcePaused = false;
+				if (rootExists) {
+					const fileDelayMs = sourceFileDelayMs(source, options);
+					const checkpoint = await readNativeSourceSyncCheckpoint(agentId, key, "content", signal);
+					let cursor = checkpoint.complete ? null : checkpoint.cursor;
+					let frontier = checkpoint.complete ? null : checkpoint.frontier;
+					let pageComplete = false;
+					while (scanned < maxFilesPerScan && !pageComplete) {
+						const page: NativeSourceWorkerPage = await sourceWorker.scan({
+							source: workerSource(source),
+							cursor,
+							frontier,
+							pageSize: Math.min(100, maxFilesPerScan - scanned),
+						});
+						if (cancelRequested) throw new Error("native source sync cancelled");
+						if (page.files.length === 0 && page.complete) {
+							pageComplete = true;
+							cursor = null;
+							await writeNativeSourceSyncCheckpoint(
+								agentId,
+								key,
+								"content",
+								{ cursor: null, frontier: null, complete: true },
+								scanned,
+								signal,
+							);
+							break;
+						}
+						for (const file of page.files) {
+							if (cancelRequested) throw new Error("native source sync cancelled");
+							if (resumePath && file.path.replace(/\\/g, "/") <= resumePath.replace(/\\/g, "/")) {
+								current.add(file.path);
+								continue;
+							}
+							if (scanned >= maxFilesPerScan) break;
+							scanned++;
+							let embeddingStatus: string | undefined;
+							const changed = await indexNativeMemoryFile(source, file.path, agentId, {
+								...options,
+								signal,
+								content: file.content,
+								chunks: file.chunks,
+								mtimeMs: file.mtimeMs,
+								contentHash: file.contentHash,
+								lineCount: file.lineCount,
+								rolloutId: file.rolloutId,
+								onEmbeddingStatus: (status) => {
+									embeddingStatus = status;
+									options.onEmbeddingStatus?.(status);
+								},
+							});
+							if (changed) {
+								count++;
+								changedCount++;
+							}
+							current.add(file.path);
+							options.onFileIndexed?.({
+								source,
+								filePath: file.path,
+								indexed: changed,
+								scanned,
+								total: page.total,
+								changed: changedCount,
+								...(embeddingStatus ? { status: embeddingStatus } : {}),
+							});
+							if (embeddingStatus === "embeddings pending - provider down") {
+								sourcePaused = true;
+								scanComplete = false;
+								await persistNativeSourceSyncState({
+									agentId,
+									source,
+									status: "paused",
+									checkpointPath: resumeCheckpointPath ?? file.path,
+									pauseReason: "provider_unavailable",
+									signal,
+								});
+								break;
+							}
+							resumeCheckpointPath = file.path.replace(/\\/g, "/");
+							await yielder();
+							await sleep(fileDelayMs);
+						}
+						if (sourcePaused) break;
+						cursor = page.nextCursor;
+						frontier = page.frontier;
+						pageComplete = page.complete;
 						await writeNativeSourceSyncCheckpoint(
 							agentId,
 							key,
 							"content",
-							{ cursor: null, frontier: null, complete: true },
+							{
+								cursor: pageComplete ? null : cursor,
+								frontier: pageComplete ? null : frontier,
+								complete: pageComplete,
+							},
 							scanned,
 							signal,
 						);
-						break;
 					}
-					for (const file of page.files) {
-						if (cancelRequested) throw new Error("native source sync cancelled");
-						if (resumePath && file.path.replace(/\\/g, "/") <= resumePath.replace(/\\/g, "/")) {
-							current.add(file.path);
-							continue;
-						}
-						if (scanned >= maxFilesPerScan) break;
-						scanned++;
-						let embeddingStatus: string | undefined;
-						const changed = await indexNativeMemoryFile(source, file.path, agentId, {
-							...options,
-							signal,
-							content: file.content,
-							chunks: file.chunks,
-							mtimeMs: file.mtimeMs,
-							contentHash: file.contentHash,
-							lineCount: file.lineCount,
-							rolloutId: file.rolloutId,
-							onEmbeddingStatus: (status) => {
-								embeddingStatus = status;
-								options.onEmbeddingStatus?.(status);
-							},
+					scanComplete = pageComplete;
+					if (!pageComplete && scanned >= maxFilesPerScan) {
+						logger.warn("watcher", "Native memory scan reached its file budget", {
+							harness: source.harness,
+							root: source.root,
+							cap: maxFilesPerScan,
 						});
-						if (changed) {
-							count++;
-							changedCount++;
-						}
-						current.add(file.path);
-						options.onFileIndexed?.({
-							source,
-							filePath: file.path,
-							indexed: changed,
-							scanned,
-							total: page.total,
-							changed: changedCount,
-							...(embeddingStatus ? { status: embeddingStatus } : {}),
-						});
-						if (embeddingStatus === "embeddings pending - provider down") {
-							sourcePaused = true;
-							scanComplete = false;
-							await persistNativeSourceSyncState({
-								agentId,
-								source,
-								status: "paused",
-								checkpointPath: resumeCheckpointPath ?? file.path,
-								pauseReason: "provider_unavailable",
-								signal,
-							});
-							break;
-						}
-						resumeCheckpointPath = file.path.replace(/\\/g, "/");
-						await yielder();
-						await sleep(fileDelayMs);
 					}
-					if (sourcePaused) break;
-					cursor = page.nextCursor;
-					frontier = page.frontier;
-					pageComplete = page.complete;
-					await writeNativeSourceSyncCheckpoint(
-						agentId,
-						key,
-						"content",
-						{ cursor: pageComplete ? null : cursor, frontier: pageComplete ? null : frontier, complete: pageComplete },
+				}
+				totalScanned += scanned;
+				totalIndexed += changedCount;
+				if (sourcePaused) {
+					sourceResult = {
+						sourceKey: durableKey,
+						sourceId: source.sourceId,
+						status: "paused",
 						scanned,
-						signal,
-					);
+						indexed: changedCount,
+						resumeFrontier: resumeCheckpointPath,
+						pauseReason: "provider_unavailable",
+					};
+					pausedSources.push(sourceResult);
+				} else if (sourceNeedsProvider(source, options) && rootExists && scanComplete) {
+					await clearNativeSourceSyncCheckpoint({ agentId, source, signal });
 				}
-				scanComplete = pageComplete;
-				if (!pageComplete && scanned >= maxFilesPerScan) {
-					logger.warn("watcher", "Native memory scan reached its file budget", {
-						harness: source.harness,
-						root: source.root,
-						cap: maxFilesPerScan,
-					});
+				if (!sourceResult) {
+					sourceResult = {
+						sourceKey: durableKey,
+						sourceId: source.sourceId,
+						status: "complete",
+						scanned,
+						indexed: changedCount,
+						resumeFrontier: null,
+					};
 				}
-			}
-			totalScanned += scanned;
-			totalIndexed += changedCount;
-			if (sourcePaused) {
-				sourceResult = {
-					sourceKey: durableKey,
-					sourceId: source.sourceId,
-					status: "paused",
-					scanned,
-					indexed: changedCount,
-					resumeFrontier: resumeCheckpointPath,
-					pauseReason: "provider_unavailable",
-				};
-				pausedSources.push(sourceResult);
-			} else if (sourceNeedsProvider(source, options) && rootExists && scanComplete) {
-				await clearNativeSourceSyncCheckpoint({ agentId, source, signal });
-			}
-			if (!sourceResult) {
-				sourceResult = {
-					sourceKey: durableKey,
-					sourceId: source.sourceId,
-					status: "complete",
-					scanned,
-					indexed: changedCount,
-					resumeFrontier: null,
-				};
-			}
-			const cleanupAllowed = sourceCleanupEnabledFor(source, options) && (!rootExists || scanComplete);
-			if (cleanupAllowed) {
-				const currentPaths = new Set([...current].map((file) => file.replace(/\\/g, "/")));
-				for (const file of await activeNativeArtifactPaths(source, agentId, signal)) {
-					if (!currentPaths.has(file.replace(/\\/g, "/"))) await removeNativeMemoryFile(source, file, agentId, signal);
+				const cleanupAllowed = sourceCleanupEnabledFor(source, options) && (!rootExists || scanComplete);
+				if (cleanupAllowed) {
+					const currentPaths = new Set([...current].map((file) => file.replace(/\\/g, "/")));
+					for (const file of await activeNativeArtifactPaths(source, agentId, signal)) {
+						if (!currentPaths.has(file.replace(/\\/g, "/")))
+							await removeNativeMemoryFile(source, file, agentId, signal);
+					}
 				}
-			}
-			const previous = known.get(key);
-			if (previous && cleanupAllowed) {
-				for (const file of previous) {
-					if (!current.has(file)) await removeNativeMemoryFile(source, file, agentId, signal);
+				const previous = known.get(key);
+				if (previous && cleanupAllowed) {
+					for (const file of previous) {
+						if (!current.has(file)) await removeNativeMemoryFile(source, file, agentId, signal);
+					}
 				}
+				known.set(key, current);
+				if (
+					rootExists &&
+					scanComplete &&
+					source.sourceId &&
+					(!options.shouldContinue || options.shouldContinue(source))
+				) {
+					markSourceIndexed(source.sourceId, undefined, options.agentsDir);
+				}
+			} catch (error) {
+				sourceFailure = error;
+				throw error;
+			} finally {
+				sharedNativeMemorySourceFlights.delete(flightKey);
+				if (sourceFailure !== undefined) rejectFlight(sourceFailure);
+				else if (sourceResult !== undefined) resolveFlight(sourceResult);
 			}
-			known.set(key, current);
-			if (
-				rootExists &&
-				scanComplete &&
-				source.sourceId &&
-				(!options.shouldContinue || options.shouldContinue(source))
-			) {
-				markSourceIndexed(source.sourceId, undefined, options.agentsDir);
-			}
-		} catch (error) {
-			sourceFailure = error;
-			throw error;
-		} finally {
-			sharedNativeMemorySourceFlights.delete(flightKey);
-			if (sourceFailure !== undefined) rejectFlight(sourceFailure);
-			else if (sourceResult !== undefined) resolveFlight(sourceResult);
-		}
 		}
 		lastSyncResult = {
 			status: pausedSources.length > 0 ? "paused" : "complete",
@@ -1528,7 +1555,10 @@ export function startNativeMemoryBridge(
 			if (syncOptions.requestResyncIfBusy ?? true) resyncRequested = true;
 			if (syncOptions.signal) {
 				if (syncOptions.signal.aborted) activeController?.abort(syncOptions.signal.reason);
-				else syncOptions.signal.addEventListener("abort", () => activeController?.abort(syncOptions.signal?.reason), { once: true });
+				else
+					syncOptions.signal.addEventListener("abort", () => activeController?.abort(syncOptions.signal?.reason), {
+						once: true,
+					});
 			}
 			return syncInFlight;
 		}
