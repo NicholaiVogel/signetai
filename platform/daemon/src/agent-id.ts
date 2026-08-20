@@ -65,7 +65,7 @@ export function getAgentScope(agentId: string): AgentScope {
 			const readPolicy = parseReadPolicy("read_policy" in row ? row.read_policy : undefined);
 			const policyGroup = parseScopeValue("policy_group" in row ? row.policy_group : undefined);
 			return { readPolicy, policyGroup };
-		});
+		}, "agent-id.ts:56");
 	} catch {
 		return {
 			readPolicy: "isolated",
@@ -85,7 +85,7 @@ export function ensureAgentRegistered(agentId: string, readPolicy: AgentRosterRe
 				 VALUES (?, ?, ?, NULL, ?, ?)
 				 ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at`,
 			).run(id, id, readPolicy, now, now);
-		});
+		}, "agent-id.ts:82");
 	} catch (err) {
 		console.warn(
 			`[agent-id] Failed to register agent "${id}" (non-fatal):`,

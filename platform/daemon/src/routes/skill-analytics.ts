@@ -118,12 +118,14 @@ export function mountSkillAnalyticsRoutes(app: Hono): void {
 
 		try {
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			const result = getDbAccessor().withReadDb((db: import("../db-accessor").ReadDb) =>
-				querySkillAnalytics(db, {
-					agentId: scoped.agentId,
-					since,
-					limit,
-				}),
+			const result = getDbAccessor().withReadDb(
+				(db: import("../db-accessor").ReadDb) =>
+					querySkillAnalytics(db, {
+						agentId: scoped.agentId,
+						since,
+						limit,
+					}),
+				"routes/skill-analytics.ts:121",
 			);
 			return c.json(result);
 		} catch (error) {

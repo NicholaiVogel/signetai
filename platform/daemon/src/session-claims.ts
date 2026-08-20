@@ -83,7 +83,7 @@ export function createSessionClaimStore(accessor: DbAccessor): SessionClaimStore
 						ended_at = NULL,
 						end_marker = NULL`,
 				).run(claim.sessionKey, claim.agentId, claim.runtimePath, claim.harness, claim.claimedAt, claim.expiresAt);
-			});
+			}, "session-claims.ts:72");
 		},
 		markExpired(sessionKey, agentId): void {
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
@@ -93,7 +93,7 @@ export function createSessionClaimStore(accessor: DbAccessor): SessionClaimStore
 					 SET state = 'expired'
 					 WHERE session_key = ? AND agent_id = ? AND state = 'active'`,
 				).run(sessionKey, agentId);
-			});
+			}, "session-claims.ts:90");
 		},
 		async markExpiredAsync(sessionKey, agentId): Promise<void> {
 			await dbOwnerBatch(
@@ -133,13 +133,13 @@ export function createSessionClaimStore(accessor: DbAccessor): SessionClaimStore
 					claim.endedAt,
 					claim.endMarker,
 				);
-			});
+			}, "session-claims.ts:113");
 		},
 		remove(sessionKey, agentId): void {
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
 			accessor.withWriteTx((db: import("./db-accessor").WriteDb) => {
 				db.prepare("DELETE FROM session_claims WHERE session_key = ? AND agent_id = ?").run(sessionKey, agentId);
-			});
+			}, "session-claims.ts:140");
 		},
 		async removeAsync(sessionKey, agentId): Promise<void> {
 			await dbOwnerBatch(
@@ -149,7 +149,7 @@ export function createSessionClaimStore(accessor: DbAccessor): SessionClaimStore
 		},
 		list(): readonly PersistedSessionClaim[] {
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			return accessor.withReadDb(readClaims);
+			return accessor.withReadDb(readClaims, "session-claims.ts:152");
 		},
 		async listAsync(): Promise<readonly PersistedSessionClaim[]> {
 			const rows = await dbOwnerQuery<readonly SessionClaimRow[]>(

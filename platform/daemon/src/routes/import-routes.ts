@@ -341,7 +341,7 @@ function hasIndexedSource(sourceId: string, agentId: string): boolean {
 			)
 			.get(agentId, sourceId) as { present: number } | null | undefined;
 		return row != null;
-	});
+	}, "routes/import-routes.ts:334");
 }
 
 function persistedImportBytes(value: {

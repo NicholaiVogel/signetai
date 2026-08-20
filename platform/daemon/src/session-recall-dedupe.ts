@@ -203,7 +203,7 @@ export function applyRecallDedupe<T extends RecallDedupeItem>(
 				items,
 				meta: { enabled: true, contextEpoch: epoch, suppressed, repeatedReturned: 0 },
 			};
-		});
+		}, "session-recall-dedupe.ts:149");
 	} catch (error) {
 		logger.warn("memory", "Recall dedupe failed open", {
 			error: error instanceof Error ? error.message : String(error),
@@ -373,7 +373,7 @@ export function advanceRecallContextEpoch(input: {
 			).run(sessionKey, agentId, next, input.reason, input.sourceRef ?? null, new Date().toISOString());
 			const changed = db.prepare("SELECT changes() AS count").get() as { count?: number } | undefined;
 			return { advanced: (changed?.count ?? 0) > 0, contextEpoch: next };
-		});
+		}, "session-recall-dedupe.ts:366");
 	} catch (error) {
 		logger.warn("memory", "Failed to advance recall context epoch", {
 			error: error instanceof Error ? error.message : String(error),

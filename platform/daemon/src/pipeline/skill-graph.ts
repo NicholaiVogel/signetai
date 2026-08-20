@@ -94,7 +94,7 @@ function findSkillEntityId(input: SkillUninstallInput, accessor: DbAccessor): st
 			.prepare("SELECT id FROM entities WHERE name = ? AND agent_id = ? AND entity_type = 'skill' LIMIT 1")
 			.get(input.skillName, agentId) as { id: string } | undefined;
 		return adopted?.id ?? null;
-	});
+	}, "pipeline/skill-graph.ts:80");
 }
 
 function skillMetaIds(input: SkillUninstallInput): readonly string[] {
@@ -283,14 +283,15 @@ export async function installSkillNode(
 				now,
 			);
 		}
-	});
+	}, "pipeline/skill-graph.ts:174");
 
 	// Step 2: Generate embedding from the authored frontmatter
 	let embeddingCreated = false;
 	const embeddingText = buildEmbeddingText(fm);
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	const writeConfig = accessor.withReadDb((db: import("../db-accessor").ReadDb) =>
-		resolveActiveEmbeddingConfig(db, embeddingCfg),
+	const writeConfig = accessor.withReadDb(
+		(db: import("../db-accessor").ReadDb) => resolveActiveEmbeddingConfig(db, embeddingCfg),
+		"pipeline/skill-graph.ts:292",
 	);
 	const embVec = await fetchEmbedding(embeddingText, writeConfig, "document", {
 		usage: { source: "artifact-index", agentId },
@@ -338,7 +339,7 @@ export async function installSkillNode(
 			const actualRow = db.prepare("SELECT id FROM embeddings WHERE content_hash = ?").get(embHash) as { id: string };
 			syncVecInsert(db, actualRow.id, embVec);
 			return true;
-		});
+		}, "pipeline/skill-graph.ts:306");
 	}
 
 	logger.info("pipeline", "Skill node installed", {
@@ -368,7 +369,7 @@ export function uninstallSkillNode(input: SkillUninstallInput, accessor: DbAcces
 					"UPDATE skill_meta SET uninstalled_at = ?, updated_at = ? WHERE entity_id = ? AND agent_id = ? AND uninstalled_at IS NULL",
 				).run(now, now, metaId, agentId);
 			}
-		});
+		}, "pipeline/skill-graph.ts:366");
 		return { removed: false, entityId: null };
 	}
 
@@ -405,7 +406,7 @@ export function uninstallSkillNode(input: SkillUninstallInput, accessor: DbAcces
 			db.prepare("DELETE FROM skill_meta WHERE entity_id = ? AND agent_id = ?").run(metaId, agentId);
 		}
 		db.prepare("DELETE FROM entities WHERE id = ?").run(entityId);
-	});
+	}, "pipeline/skill-graph.ts:377");
 
 	logger.info("pipeline", "Skill node uninstalled", {
 		skill: input.skillName,

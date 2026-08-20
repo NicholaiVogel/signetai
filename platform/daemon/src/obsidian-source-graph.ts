@@ -720,8 +720,9 @@ export function indexObsidianSourceStructure(
 	input: IndexObsidianSourceStructureInput,
 ): IndexObsidianSourceStructureResult {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) =>
-		applyObsidianSourceStructureInTx(db, input),
+	return getDbAccessor().withWriteTx(
+		(db: import("./db-accessor").WriteDb) => applyObsidianSourceStructureInTx(db, input),
+		"obsidian-source-graph.ts:723",
 	);
 }
 
@@ -729,8 +730,9 @@ export function purgeObsidianSourceFileStructure(
 	input: PurgeObsidianSourceFileStructureInput,
 ): PurgeObsidianSourceStructureResult {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) =>
-		purgeObsidianSourceFileStructureInTx(db, input),
+	return getDbAccessor().withWriteTx(
+		(db: import("./db-accessor").WriteDb) => purgeObsidianSourceFileStructureInTx(db, input),
+		"obsidian-source-graph.ts:733",
 	);
 }
 
@@ -812,8 +814,9 @@ export function purgeObsidianSourceStructure(
 	input: PurgeObsidianSourceStructureInput,
 ): PurgeObsidianSourceStructureResult {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) =>
-		applyObsidianSourceStructurePurgeInTx(db, input),
+	return getDbAccessor().withWriteTx(
+		(db: import("./db-accessor").WriteDb) => applyObsidianSourceStructurePurgeInTx(db, input),
+		"obsidian-source-graph.ts:817",
 	);
 }
 

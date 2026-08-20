@@ -121,7 +121,7 @@ export function pipelineQueueBlock(options: { readonly allowSynchronousRead?: bo
 				summary: snapshot.summary,
 				oldestDeadSummaryJob: snapshot.oldestDeadSummaryJob,
 			};
-		});
+		}, "routes/pipeline-routes.ts:117");
 	} catch {
 		return {
 			memory: { ...UNKNOWN_QUEUE_COUNTS_SHAPE },
@@ -510,6 +510,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					limit,
 					offset,
 				}),
+			"routes/pipeline-routes.ts:504",
 		);
 		return c.json({
 			agentId: resolveAgentId({ agentId: scopedAgent.agentId }),

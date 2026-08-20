@@ -393,7 +393,7 @@ export function collectReflectionContext(
 				tags: r.tags ?? "",
 				createdAt: r.created_at,
 			}));
-	});
+	}, "pipeline/reflection-worker.ts:366");
 
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
 	const existingReflections = dbAccessor.withReadDb((db: import("../db-accessor").ReadDb) => {
@@ -411,7 +411,7 @@ export function collectReflectionContext(
 					(row.question === null || scanMemoryContent(row.question).contextEligible),
 			)
 			.map((r) => ({ id: r.id, question: r.question, summary: r.summary, createdAt: r.created_at }));
-	});
+	}, "pipeline/reflection-worker.ts:399");
 
 	return { memories, summaries: [], transcripts: [], graphFacts: [], existingReflections };
 }
@@ -483,7 +483,7 @@ export async function generateDailyBriefInsights(
 				);
 			if (result.changes > 0) ids.push(id);
 		}
-	});
+	}, "pipeline/reflection-worker.ts:461");
 
 	return ids;
 }
@@ -531,7 +531,7 @@ export function startReflectionWorker(
 					 WHERE is_deleted = 0`,
 					)
 					.all() as { agent_id: string | null }[];
-			});
+			}, "pipeline/reflection-worker.ts:527");
 		const agentIds = rows.map((row) => row.agent_id).filter((agentId): agentId is string => !!agentId);
 		return agentIds.length > 0 ? agentIds : ["default"];
 	}

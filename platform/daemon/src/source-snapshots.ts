@@ -143,7 +143,7 @@ export function exportSourceSnapshot(options: ExportSourceSnapshotOptions): Sour
 			artifacts,
 			skipped: { localDiscordArtifacts: skippedLocal },
 		};
-	});
+	}, "source-snapshots.ts:106");
 }
 
 export async function importSourceSnapshot(options: ImportSourceSnapshotOptions): Promise<ImportSourceSnapshotResult> {

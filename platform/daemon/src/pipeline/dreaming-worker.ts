@@ -97,7 +97,10 @@ const AGENT_SCOPE_SNAPSHOT_REFRESH_MS = 30 * 60 * 1000; // 30 min
 /** Dreaming is deferrable work. Yield an entire sweep while live queues are under pressure. */
 export function shouldDeferDreamingSweep(accessor: DbAccessor): boolean {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) => getQueueHealth(db).status !== "healthy");
+	return accessor.withReadDb(
+		(db: import("../db-accessor").ReadDb) => getQueueHealth(db).status !== "healthy",
+		"pipeline/dreaming-worker.ts:100",
+	);
 }
 
 export async function shouldDeferDreamingSweepAsync(
@@ -151,7 +154,7 @@ export function getDreamingWorkerAgentIds(accessor: DbAccessor, defaultAgentId: 
 			if (id) ids.add(id);
 		}
 		return [...ids].sort();
-	});
+	}, "pipeline/dreaming-worker.ts:121");
 }
 
 /**
@@ -191,12 +194,17 @@ export async function selectDreamingCheckMode(
 ): Promise<DreamingMode> {
 	const hasPendingHygieneAttention = scopes.some((scope) =>
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		accessor.withReadDb((db: import("../db-accessor").ReadDb) => hasDreamingAttentionKindInDb(db, scope, ["hygiene"])),
+		accessor.withReadDb(
+			(db: import("../db-accessor").ReadDb) => hasDreamingAttentionKindInDb(db, scope, ["hygiene"]),
+			"pipeline/dreaming-worker.ts:197",
+		),
 	);
 	const hasPendingContentAttention = scopes.some((scope) =>
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		accessor.withReadDb((db: import("../db-accessor").ReadDb) =>
-			hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS),
+		accessor.withReadDb(
+			(db: import("../db-accessor").ReadDb) =>
+				hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS),
+			"pipeline/dreaming-worker.ts:204",
 		),
 	);
 	const backlogs = await Promise.all(scopes.map((scope) => getDreamingEpisodicTokenBacklog(accessor, scope)));

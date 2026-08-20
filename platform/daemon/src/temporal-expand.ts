@@ -301,5 +301,5 @@ export function expandTemporalNode(
 			})),
 			...(transcript ? { transcript } : {}),
 		};
-	});
+	}, "temporal-expand.ts:178");
 }

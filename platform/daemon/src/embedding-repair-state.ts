@@ -131,7 +131,7 @@ export function acquireEmbeddingRepairLease(
 			 WHERE id = 1`,
 		).run(windowStart, batchesStarted, lease.id, iso(now + leaseMs), iso(now));
 		return { allowed: true, lease };
-	});
+	}, "embedding-repair-state.ts:101");
 }
 
 export function readEmbeddingRepairState(accessor: DbAccessor): EmbeddingRepairState | null {
@@ -147,7 +147,7 @@ export function readEmbeddingRepairState(accessor: DbAccessor): EmbeddingRepairS
 			leaseExpiresAt: row.lease_expires_at,
 			lastError: row.last_error,
 		};
-	});
+	}, "embedding-repair-state.ts:139");
 }
 
 export function loadEmbeddingRepairFailures(
@@ -169,7 +169,7 @@ export function loadEmbeddingRepairFailures(
 				failures.set(`${key.id}:${key.contentHash}:${model}`, { attempts: row.attempts, retryAt });
 		}
 		return failures;
-	});
+	}, "embedding-repair-state.ts:160");
 }
 
 export function finishEmbeddingRepairLease(
@@ -245,7 +245,7 @@ export function finishEmbeddingRepairLease(
 			lease.id,
 		);
 		return true;
-	});
+	}, "embedding-repair-state.ts:191");
 }
 
 export function computeRetryBackoffMs(attempts: number, pollMs: number): number {

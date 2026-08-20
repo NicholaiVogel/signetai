@@ -548,11 +548,17 @@ function getOrCreateInstallId(db: DbAccessor, daemonVersion: string): DeferredIn
 	}
 	try {
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-		return db.withWriteTx((w: import("./db-accessor").WriteDb) => resolveInstallIdentity(w, daemonVersion));
+		return db.withWriteTx(
+			(w: import("./db-accessor").WriteDb) => resolveInstallIdentity(w, daemonVersion),
+			"telemetry.ts:551",
+		);
 	} catch {
 		try {
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-			return db.withWriteTx((w: import("./db-accessor").WriteDb) => resolveLegacyInstallIdentity(w));
+			return db.withWriteTx(
+				(w: import("./db-accessor").WriteDb) => resolveLegacyInstallIdentity(w),
+				"telemetry.ts:558",
+			);
 		} catch {
 			return fallback;
 		}
@@ -570,7 +576,7 @@ function getOrCreateInstallId(db: DbAccessor, daemonVersion: string): DeferredIn
 const MAX_CRASH_MESSAGE_CHARS = 400;
 const MAX_CRASH_STACK_FRAMES = 8;
 
-const HOME_PATH_PATTERNS = [/\/home\/[^\/\s]+/g, /\/Users\/[^\/\s]+/g];
+const HOME_PATH_PATTERNS = [/\/home\/[^/\s]+/g, /\/Users\/[^/\s]+/g];
 
 function stripUserPaths(text: string): string {
 	let out = text;

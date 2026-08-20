@@ -66,7 +66,7 @@ const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
 	// Bearer tokens
 	/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi,
 	// API key formats (sk-, pk-, key-, api_key=, etc.)
-	/\b(sk|pk|api[_-]?key|token|secret|password|credential)[_\-]?[=:\s]+\S{8,}/gi,
+	/\b(sk|pk|api[_-]?key|token|secret|password|credential)[_-]?[=:\s]+\S{8,}/gi,
 	// Base64-encoded blobs that look like credentials (32+ chars)
 	/\b[A-Za-z0-9+/]{32,}={0,2}\b/g,
 	// Environment variable references with values
@@ -221,7 +221,7 @@ export function writeCheckpoint(db: DbAccessor, params: WriteCheckpointParams, m
 				)
 				.run(params.sessionKey, excess);
 		}
-	});
+	}, "session-checkpoints.ts:175");
 
 	logger.info("checkpoints", "Checkpoint written", {
 		id,
@@ -300,7 +300,7 @@ export function getLatestCheckpoint(
 			)
 			.get(projectNormalized, cutoff) as unknown as CheckpointRow | null;
 		return row ?? undefined;
-	});
+	}, "session-checkpoints.ts:292");
 }
 
 /** Get the most recent checkpoint for a specific session key. */
@@ -316,7 +316,7 @@ export function getLatestCheckpointBySession(db: DbAccessor, sessionKey: string)
 			)
 			.get(sessionKey) as unknown as CheckpointRow | null;
 		return row ?? undefined;
-	});
+	}, "session-checkpoints.ts:309");
 }
 
 /** Get all checkpoints for a session, newest first. */
@@ -330,7 +330,7 @@ export function getCheckpointsBySession(db: DbAccessor, sessionKey: string): Rea
 				 ORDER BY created_at DESC, rowid DESC`,
 			)
 			.all(sessionKey) as unknown as CheckpointRow[];
-	});
+	}, "session-checkpoints.ts:325");
 }
 
 /** Async session checkpoint projection for HTTP/background callers. */
@@ -367,7 +367,7 @@ export function getCheckpointsByProject(
 				 LIMIT ?`,
 			)
 			.all(projectNormalized, limit) as unknown as CheckpointRow[];
-	});
+	}, "session-checkpoints.ts:361");
 }
 
 // ============================================================================
@@ -393,7 +393,7 @@ export function pruneCheckpoints(db: DbAccessor, retentionDays: number): number 
 			});
 		}
 		return deleted;
-	});
+	}, "session-checkpoints.ts:385");
 }
 
 /** Async maintenance variant; checkpoint retention is bulk work, not a bounded HTTP lookup. */

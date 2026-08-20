@@ -182,7 +182,7 @@ export async function fetchTraversalCandidates(
 						content: row.content,
 					}),
 				);
-			});
+			}, "memory-candidates.ts:150");
 			rows.push(...batchRows);
 			await yieldBetweenBatches();
 		}
@@ -253,7 +253,7 @@ export function getAllScoredCandidates(
 						content: row.content,
 					}),
 				);
-			});
+			}, "memory-candidates.ts:228");
 
 		const scored: ScoredMemory[] = rows
 			.map((r) => ({
@@ -320,7 +320,7 @@ export function getPredictedContextMemories(
 						content: row.transcript,
 					}),
 				);
-			});
+			}, "memory-candidates.ts:306");
 
 		if (transcriptRows.length === 0) return [];
 
@@ -365,11 +365,12 @@ export function getPredictedContextMemories(
 			access_count: number;
 		}> =
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			getDbAccessor().withReadDb((db: import("./db-accessor").ReadDb) =>
-				(
-					db
-						.prepare(
-							`SELECT m.id, m.content, m.type, m.importance, m.tags,
+			getDbAccessor().withReadDb(
+				(db: import("./db-accessor").ReadDb) =>
+					(
+						db
+							.prepare(
+								`SELECT m.id, m.content, m.type, m.importance, m.tags,
 						        m.pinned, m.project, m.created_at,
 						        COALESCE(m.access_count, 0) AS access_count
 						 FROM memories_fts
@@ -380,26 +381,27 @@ export function getPredictedContextMemories(
 						   ${scope.sql}
 						 ORDER BY bm25(memories_fts)
 						 LIMIT ?`,
-						)
-						.all(ftsQuery, project, ...scope.args, limit * 2) as Array<{
-						id: string;
-						content: string;
-						type: string;
-						importance: number;
-						tags: string | null;
-						pinned: number;
-						project: string | null;
-						created_at: string;
-						access_count: number;
-					}>
-				).filter((row) =>
-					isMemoryContentContextEligible(db, {
-						agentId,
-						sourceKind: "memory",
-						sourceId: row.id,
-						content: row.content,
-					}),
-				),
+							)
+							.all(ftsQuery, project, ...scope.args, limit * 2) as Array<{
+							id: string;
+							content: string;
+							type: string;
+							importance: number;
+							tags: string | null;
+							pinned: number;
+							project: string | null;
+							created_at: string;
+							access_count: number;
+						}>
+					).filter((row) =>
+						isMemoryContentContextEligible(db, {
+							agentId,
+							sourceKind: "memory",
+							sourceId: row.id,
+							content: row.content,
+						}),
+					),
+				"memory-candidates.ts:368",
 			);
 
 		const selected: ScoredMemory[] = [];
@@ -446,7 +448,7 @@ export function getRecentMemories(memoryDbPath: string, limit: number, recencyBi
 			return (db.prepare(query).all(limit) as unknown as Array<SimpleMemory>).filter(
 				(row) => scanMemoryContent(row.content).contextEligible,
 			);
-		});
+		}, "memory-candidates.ts:434");
 
 		return rows.map((r) => ({
 			id: r.id,
@@ -481,7 +483,7 @@ export function getMemoriesSince(memoryDbPath: string, sinceMs: number, limit: n
 			`)
 				.all(sinceIso, limit) as unknown as Array<SimpleMemory>;
 			return rows.filter((row) => scanMemoryContent(row.content).contextEligible);
-		});
+		}, "memory-candidates.ts:475");
 
 		return rows.map((r) => ({
 			id: r.id,

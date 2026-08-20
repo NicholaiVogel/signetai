@@ -51,7 +51,9 @@ import {
 import type { DbOwnerHealth } from "./db-owner-client";
 import { observeDbLatency } from "./runtime-pressure";
 import { resetFtsIndexState, setFtsIndexIncomplete } from "./fts-index-state";
-import { beginSyncDbCall, endSyncDbCall } from "./sync-db-attribution";
+import { beginSyncDbCall, endSyncDbCall, type SyncDbCallSiteToken } from "./sync-db-attribution";
+
+export type { SyncDbCallSiteToken } from "./sync-db-attribution";
 
 export { DbSpacePreflightError };
 
@@ -1712,9 +1714,9 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 	}
 
 	return {
-		withWriteTx<T>(fn: (db: WriteDb) => T): T {
+		withWriteTx<T>(fn: (db: WriteDb) => T, siteToken?: SyncDbCallSiteToken): T {
 			if (closed) throw new Error("DbAccessor is closed");
-			const attribution = beginSyncDbCall("withWriteTx");
+			const attribution = beginSyncDbCall("withWriteTx", Date.now(), siteToken);
 			try {
 				return runWriteTx(fn);
 			} finally {
@@ -1795,9 +1797,9 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 			return dbOwnerHealthProvider?.() ?? null;
 		},
 
-		withReadDb<T>(fn: (db: ReadDb) => T): T {
+		withReadDb<T>(fn: (db: ReadDb) => T, siteToken?: SyncDbCallSiteToken): T {
 			if (closed) throw new Error("DbAccessor is closed");
-			const attribution = beginSyncDbCall("withReadDb");
+			const attribution = beginSyncDbCall("withReadDb", Date.now(), siteToken);
 			const startedAt = performance.now();
 			let conn: SqliteDatabase | null = null;
 			let outcome: DbOperationOutcome = "completed";

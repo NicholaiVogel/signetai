@@ -33,7 +33,10 @@ export interface TemporalHit {
 function tableExists(name: string): boolean {
 	try {
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		return getDbAccessor().withReadDb((db: import("./db-accessor").ReadDb) => tableExistsIn(db, name));
+		return getDbAccessor().withReadDb(
+			(db: import("./db-accessor").ReadDb) => tableExistsIn(db, name),
+			"temporal-fallback.ts:36",
+		);
 	} catch (err) {
 		logger.warn("temporal-fallback", "tableExists failed", {
 			table: name,
@@ -176,7 +179,7 @@ function searchFromThreadHeads(params: {
 					content: row.content,
 				}),
 			);
-		});
+		}, "temporal-fallback.ts:153");
 
 		return toHits(rows, params.query, params.project, params.termCount, params.anchorCount, params.limit);
 	} catch (err) {
@@ -233,7 +236,7 @@ function searchFromSessionSummaries(params: {
 					content: row.content,
 				}),
 			);
-		});
+		}, "temporal-fallback.ts:209");
 
 		return toHits(rows, params.query, params.project, params.termCount, params.anchorCount, params.limit);
 	} catch (err) {

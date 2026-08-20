@@ -204,7 +204,7 @@ export function startEmbeddingTracker(
 					trackerCfg.batchSize,
 					new Date(now).toISOString(),
 				) as StaleRow[];
-			});
+			}, "embedding-tracker.ts:200");
 			const persistedFailures = loadEmbeddingRepairFailures(
 				accessor,
 				staleRows.map((row) => ({ id: row.id, contentHash: row.contentHash })),
@@ -291,7 +291,7 @@ export function startEmbeddingTracker(
 							processed++;
 						}
 						return true;
-					});
+					}, "embedding-tracker.ts:271");
 				}
 
 				finishEmbeddingRepairLease(accessor, admission.lease, {

@@ -962,7 +962,7 @@ function sourceStats(source: SignetSourceEntry, agentId: string): SourceStats {
 					source.kind === "obsidian" ? source.root : undefined,
 				),
 			};
-		});
+		}, "routes/sources-routes.ts:906");
 	} catch {
 		return { artifacts: 0, chunks: 0, indexed: 0, hasEligibleUnconsumedEvidence: false };
 	}
@@ -1061,7 +1061,7 @@ function sourceOrphanChunks(source: SignetSourceEntry, agentId: string): number 
 				`${chunkPrefix}\uffff`,
 			) as SourceChunkHealthRow[];
 		return chunks.filter((chunk) => !sourceChunkMatchesLiveArtifact(source, chunk, livePaths)).length;
-	});
+	}, "routes/sources-routes.ts:1045");
 }
 
 function liveSourceArtifactPaths(db: ReadDb, source: SignetSourceEntry, agentId: string): ReadonlySet<string> {
@@ -1192,7 +1192,7 @@ function artifactHealthSummary(
 			latestArtifactAt: stringOrNull(row?.latestArtifactAt),
 			deletedArtifacts: numberOrZero(row?.deletedArtifacts),
 		};
-	});
+	}, "routes/sources-routes.ts:1157");
 }
 
 interface DiscordHealthSummary {
@@ -1251,7 +1251,7 @@ function discordHealthSummary(source: SignetSourceEntry, agentId: string): Disco
 			failures: { total: failures, recoverable },
 			checkpoints: { total: checkpoints, partial, stale },
 		};
-	});
+	}, "routes/sources-routes.ts:1220");
 }
 
 function semanticHealthSummary(source: SignetSourceEntry, agentId: string): SourceHealth["semantic"] {
@@ -1289,7 +1289,7 @@ function semanticHealthSummary(source: SignetSourceEntry, agentId: string): Sour
 			total: entities + aspects + attributes + dependencies + communities,
 			documentEntityId: documentEntity?.id ?? null,
 		};
-	});
+	}, "routes/sources-routes.ts:1259");
 }
 
 function countSourceRows(

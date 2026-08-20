@@ -61,7 +61,7 @@ export function createEmbeddingReranker(accessor: DbAccessor, queryVector: Float
 				map.set(row.source_id, bufferToF32(row.vector));
 			}
 			return map;
-		});
+		}, "pipeline/reranker-embedding.ts:51");
 
 		// Blend original score with full-content cosine similarity
 		const blendWeight = 0.3; // 30% embedding similarity, 70% original score

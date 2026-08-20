@@ -11,6 +11,7 @@
  */
 
 export type SyncDbCallKind = "withReadDb" | "withWriteTx";
+export type SyncDbCallSiteToken = string;
 
 export interface SyncDbCallToken {
 	readonly sequence: number;
@@ -42,6 +43,7 @@ interface SyncDbCallRecord {
 	readonly sequence: number;
 	readonly kind: SyncDbCallKind;
 	readonly startedAtMs: number;
+	readonly hasSiteToken: boolean;
 	endedAtMs: number | null;
 	durationMs: number | null;
 	siteId: string;
@@ -49,9 +51,11 @@ interface SyncDbCallRecord {
 
 const MAX_HISTORY = 256;
 const SLOW_CALL_THRESHOLD_MS = 50;
-const UNKNOWN_SITE = "unknown:0";
+const UNATTRIBUTED_SITE = "unattributed";
+const SITE_TOKEN_PREFIX = "platform/daemon/src/";
 const history: SyncDbCallRecord[] = [];
 const inFlight = new Map<number, SyncDbCallRecord>();
+const siteTokenCache = new Map<SyncDbCallSiteToken, string>();
 const siteMetrics = new Map<
 	string,
 	{ calls: number; slowCalls: number; totalDurationMs: number; maxDurationMs: number }
@@ -111,17 +115,32 @@ function captureCallerSite(): string {
 		}
 		return `${parsed.file}:${parsed.line}`;
 	}
-	return UNKNOWN_SITE;
+	return UNATTRIBUTED_SITE;
 }
 
-export function beginSyncDbCall(kind: SyncDbCallKind, startedAtMs = Date.now()): SyncDbCallToken {
+function resolveSiteToken(siteToken: SyncDbCallSiteToken | undefined): string {
+	if (siteToken === undefined) return UNATTRIBUTED_SITE;
+	const cached = siteTokenCache.get(siteToken);
+	if (cached !== undefined) return cached;
+	if (!/^[^:]+(?:\/[^:]+)*:\d+$/.test(siteToken)) return UNATTRIBUTED_SITE;
+	const resolved = `${SITE_TOKEN_PREFIX}${siteToken}`;
+	siteTokenCache.set(siteToken, resolved);
+	return resolved;
+}
+
+export function beginSyncDbCall(
+	kind: SyncDbCallKind,
+	startedAtMs = Date.now(),
+	siteToken?: SyncDbCallSiteToken,
+): SyncDbCallToken {
 	const record: SyncDbCallRecord = {
 		sequence: nextSequence++,
 		kind,
 		startedAtMs,
+		hasSiteToken: siteToken !== undefined,
 		endedAtMs: null,
 		durationMs: null,
-		siteId: `${kind}@${UNKNOWN_SITE}`,
+		siteId: `${kind}@${resolveSiteToken(siteToken)}`,
 	};
 	inFlight.set(record.sequence, record);
 	return {
@@ -139,7 +158,7 @@ export function endSyncDbCall(token: SyncDbCallToken, endedAtMs = Date.now()): v
 	record.endedAtMs = Math.max(token.startedAtMs, endedAtMs);
 	record.durationMs = record.endedAtMs - token.startedAtMs;
 	const isSlow = record.durationMs >= SLOW_CALL_THRESHOLD_MS;
-	if (isSlow) {
+	if (isSlow && !record.hasSiteToken) {
 		// This is the only hot-path escape: normal calls never construct or parse a stack.
 		record.siteId = `${record.kind}@${captureCallerSite()}`;
 	}
@@ -147,7 +166,7 @@ export function endSyncDbCall(token: SyncDbCallToken, endedAtMs = Date.now()): v
 	totalDurationMs += record.durationMs;
 	maxDurationMs = Math.max(maxDurationMs, record.durationMs);
 	if (isSlow) slowCalls++;
-	if (record.siteId.endsWith(`@${UNKNOWN_SITE}`)) {
+	if (record.siteId.endsWith(`@${UNATTRIBUTED_SITE}`)) {
 		unattributedCalls++;
 		unattributedDurationMs += record.durationMs;
 		if (isSlow) unattributedSlowDurationMs += record.durationMs;
@@ -197,6 +216,7 @@ export function resetSyncDbAttribution(): void {
 	history.length = 0;
 	inFlight.clear();
 	siteMetrics.clear();
+	siteTokenCache.clear();
 	nextSequence = 1;
 	calls = 0;
 	slowCalls = 0;

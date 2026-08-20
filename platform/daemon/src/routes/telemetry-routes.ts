@@ -197,8 +197,10 @@ export function registerTelemetryRoutes(app: Hono): void {
 
 	app.get("/api/analytics/memory-safety", (c) => {
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		const mutationHealth = getDbAccessor().withReadDb((db: import("../db-accessor").ReadDb) =>
-			getDiagnostics(db, providerTracker, getUpdateState(), undefined, getDiagnosticsOptions()),
+		const mutationHealth = getDbAccessor().withReadDb(
+			(db: import("../db-accessor").ReadDb) =>
+				getDiagnostics(db, providerTracker, getUpdateState(), undefined, getDiagnosticsOptions()),
+			"routes/telemetry-routes.ts:200",
 		);
 		const recentMutationErrors = analyticsCollector.getErrors({
 			stage: "mutation",
@@ -240,7 +242,7 @@ export function registerTelemetryRoutes(app: Hono): void {
 					 LIMIT ?`,
 				)
 				.all(limit) as Array<Record<string, unknown>>;
-		});
+		}, "routes/telemetry-routes.ts:221");
 
 		const scoreValues = scores.map((s) => s.score as number).reverse();
 		const trend = scoreValues.length >= 2 ? scoreValues[scoreValues.length - 1] - scoreValues[0] : 0;
@@ -279,6 +281,7 @@ export function registerTelemetryRoutes(app: Hono): void {
 						score: number;
 						created_at: string;
 					}>,
+				"routes/telemetry-routes.ts:265",
 			);
 
 		return c.json({ scores });

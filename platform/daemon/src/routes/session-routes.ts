@@ -165,16 +165,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRoutesDeps): void 
 			(typeof body.session_key === "string" ? body.session_key : undefined);
 
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		const hits = getDbAccessor().withReadDb((db: import("../db-accessor").ReadDb) =>
-			searchSessionTranscripts({
-				db,
-				query,
-				agentId: scopedAgent.agentId,
-				sessionKey,
-				currentSessionKey: rawCurrentSessionKey,
-				project: scopedProject.project,
-				limit,
-			}),
+		const hits = getDbAccessor().withReadDb(
+			(db: import("../db-accessor").ReadDb) =>
+				searchSessionTranscripts({
+					db,
+					query,
+					agentId: scopedAgent.agentId,
+					sessionKey,
+					currentSessionKey: rawCurrentSessionKey,
+					project: scopedProject.project,
+					limit,
+				}),
+			"routes/session-routes.ts:168",
 		);
 		return c.json({ query, hits, count: hits.length });
 	});
@@ -344,8 +346,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRoutesDeps): void 
 		const offset = Number.isFinite(offsetParsed) ? Math.max(offsetParsed, 0) : 0;
 
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		const tableExists = accessor.withReadDb((db: import("../db-accessor").ReadDb) =>
-			db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_summaries'`).get(),
+		const tableExists = accessor.withReadDb(
+			(db: import("../db-accessor").ReadDb) =>
+				db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_summaries'`).get(),
+			"routes/session-routes.ts:349",
 		);
 		if (!tableExists) {
 			return c.json({ summaries: [], total: 0 });
@@ -396,7 +400,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRoutesDeps): void 
 				summaries: enriched,
 				total: countRow?.cnt ?? 0,
 			});
-		});
+		}, "routes/session-routes.ts:359");
 	});
 
 	app.post("/api/sessions/summaries/expand", async (c) => {

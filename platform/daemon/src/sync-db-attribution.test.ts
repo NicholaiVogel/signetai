@@ -3,6 +3,7 @@ import {
 	beginSyncDbCall,
 	endSyncDbCall,
 	getSyncDbAttributionMetrics,
+	getSyncDbCallSitesForWindow,
 	resetSyncDbAttribution,
 } from "./sync-db-attribution";
 
@@ -21,6 +22,23 @@ describe("sync DB attribution", () => {
 			unattributedCalls: 1,
 		});
 		expect(getSyncDbAttributionMetrics().sites).toEqual([]);
+	});
+
+	test("latches the explicit file and line for a never-completing in-flight call", () => {
+		const token = beginSyncDbCall("withReadDb", 1_000, "sync-db-attribution.test.ts:28");
+
+		expect(getSyncDbCallSitesForWindow(1_000, 2_000)).toEqual([
+			"withReadDb@platform/daemon/src/sync-db-attribution.test.ts:28",
+		]);
+		void token;
+	});
+
+	test("keeps an invalid site token explicitly unattributed", () => {
+		const token = beginSyncDbCall("withReadDb", 1_000, "not-a-site");
+		endSyncDbCall(token, 1_051);
+
+		expect(getSyncDbCallSitesForWindow(1_000, 1_051)).toEqual(["withReadDb@unattributed"]);
+		expect(getSyncDbAttributionMetrics().unattributedSlowDurationMs).toBe(51);
 	});
 
 	test("captures a caller only when a slow call needs attribution", () => {
