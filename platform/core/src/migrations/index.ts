@@ -144,6 +144,7 @@ import { up as memoryHeadPublication } from "./135-memory-head-publication";
 import { up as memoryHeadRevisions } from "./136-memory-head-revisions";
 import { up as dreamingHeadManifest } from "./137-dreaming-head-manifest";
 import { up as boundedStatusProjections } from "./138-bounded-status-projections";
+import { up as nativeSourceSyncState } from "./139-native-source-sync-state";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1274,6 +1275,12 @@ export const MIGRATIONS: readonly Migration[] = [
 		artifacts: {
 			tables: ["transcript_capture_status", "memories_duplicate_hash_counts", "memories_diagnostics_state"],
 		},
+	},
+	{
+		version: 139,
+		name: "native-source-sync-state",
+		up: nativeSourceSyncState,
+		artifacts: { tables: ["native_source_sync_state"] },
 	},
 ];
 
