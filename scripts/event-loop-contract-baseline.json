@@ -480,126 +480,126 @@
     },
     {
       "path": "db-accessor.ts",
-      "line": 449,
+      "line": 450,
       "api": "existsSync",
       "source": "if (!existsSync(path)) return null;",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 452,
+      "line": 453,
       "api": "readFileSync",
       "source": "const raw: unknown = JSON.parse(readFileSync(path, \"utf8\"));",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 705,
+      "line": 706,
       "api": "readdirSync",
       "source": ".readdirSync(dir)",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 709,
+      "line": 710,
       "api": "statSync",
       "source": "const stat = deps.statSync(join(dir, f));",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 723,
+      "line": 724,
       "api": "unlinkSync",
       "source": "deps.unlinkSync(join(dir, old.name));",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 734,
+      "line": 735,
       "api": "statfsSync",
       "source": "const stat = deps.statfsSync(path);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 746,
+      "line": 747,
       "api": "statSync",
       "source": "const size = deps.statSync(path).size;",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 776,
+      "line": 777,
       "api": "copyFileSync",
       "source": "deps.copyFileSync(dbPath, probeDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 782,
+      "line": 783,
       "api": "unlinkSync",
       "source": "deps.unlinkSync(probeDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 817,
+      "line": 818,
       "api": "copyFileSync",
       "source": "deps.copyFileSync(dbPath, backupDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 841,
+      "line": 842,
       "api": "copyFileSync",
       "source": "deps.copyFileSync(dbPath, backupDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 881,
+      "line": 882,
       "api": "unlinkSync",
       "source": "deps.unlinkSync(backupDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 890,
+      "line": 891,
       "api": "unlinkSync",
       "source": "else deps.unlinkSync(backupDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 918,
+      "line": 919,
       "api": "unlinkSync",
       "source": "deps.unlinkSync(backupDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 950,
+      "line": 951,
       "api": "existsSync",
       "source": "if (!existsSync(dir)) {",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 951,
+      "line": 952,
       "api": "mkdirSync",
       "source": "mkdirSync(dir, { recursive: true });",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 972,
+      "line": 973,
       "api": "existsSync",
       "source": "if (existsSync(path) && hasPendingMigrations(toMigrationDb(writeConn))) {",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 979,
+      "line": 980,
       "api": "existsSync",
       "source": "if (existsSync(path) && hasPendingMigrations(toMigrationDb(writeConn))) {",
       "category": "hot-path"
@@ -2538,14 +2538,14 @@
     },
     {
       "path": "resource-monitor.ts",
-      "line": 229,
+      "line": 234,
       "api": "readdirSync",
       "source": "const entries = readdirSync(fdDir);",
       "category": "hot-path"
     },
     {
       "path": "resource-monitor.ts",
-      "line": 234,
+      "line": 239,
       "api": "readlinkSync",
       "source": "const target = readlinkSync(join(fdDir, fd));",
       "category": "hot-path"
