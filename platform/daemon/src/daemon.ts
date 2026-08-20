@@ -178,6 +178,7 @@ import {
 	getSourceIndexJob,
 	markSourceIndexInFlight,
 	markSourceIndexJobRunning,
+	pauseSourceIndexJob,
 	updateSourceIndexJobProgress,
 } from "./source-index-progress";
 import {
@@ -2593,8 +2594,17 @@ async function main() {
 					nativeMemoryBridge
 						.syncExisting()
 						.then(() => {
+							const syncResult = nativeMemoryBridge?.getLastSyncResult?.();
 							for (const [sourceId, jobId] of startupSourceJobs) {
-								completeSourceIndexJobFromProgress(sourceId, jobId);
+								const paused = syncResult?.pausedSources.find((result) => result.sourceId === sourceId);
+								if (syncResult?.status === "paused" && paused) {
+									pauseSourceIndexJob(sourceId, jobId, {
+										pauseReason: paused.pauseReason ?? "provider_unavailable",
+										resumeFrontier: paused.resumeFrontier,
+									});
+								} else {
+									completeSourceIndexJobFromProgress(sourceId, jobId);
+								}
 								const source = loadSourcesConfig(AGENTS_DIR).sources.find((entry) => entry.id === sourceId);
 								const job = getSourceIndexJob(sourceId);
 								if (source) {
@@ -2609,7 +2619,13 @@ async function main() {
 												job?.startedAt && job.finishedAt
 													? Math.max(0, Date.parse(job.finishedAt) - Date.parse(job.startedAt))
 													: 0,
-											outcome: "success",
+											outcome: syncResult?.status === "paused" && paused ? "partial" : "success",
+											failureClass:
+												syncResult?.status === "paused" && paused
+													? sourceFailureClass(new Error("network provider unavailable"))
+													: undefined,
+											updateFreshness: syncResult?.status === "paused" && paused ? false : undefined,
+											searchable: syncResult?.status === "paused" && paused ? (job?.indexed ?? 0) > 0 : undefined,
 										}),
 									);
 								}

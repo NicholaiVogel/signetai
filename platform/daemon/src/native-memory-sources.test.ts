@@ -7,6 +7,7 @@ import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { resetEmbeddingCircuitBreakers } from "./embedding-circuit-breaker";
 import { resetObsidianSourceEmbeddingBackoff } from "./obsidian-source-embeddings";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
+import type { NativeMemoryBridgeOptions } from "./native-memory-sources";
 import {
 	claudeCodeNativeMemorySource,
 	codexNativeMemorySource,
@@ -1235,6 +1236,13 @@ describe("native memory sources", () => {
 			expect(await handle.syncExisting()).toBe(0);
 			expect(fetches).toBe(1);
 			expect(indexed).toEqual([]);
+			expect(handle.getLastSyncResult?.()).toMatchObject({
+				status: "paused",
+				indexed: 0,
+				pausedSources: [
+					{ sourceId: "obsidian:provider-down", resumeFrontier: null, pauseReason: "provider_unavailable" },
+				],
+			});
 			expect(
 				await getDbAccessor().withReadDbAsync(
 					(db) =>
@@ -1262,6 +1270,64 @@ describe("native memory sources", () => {
 			expect(indexed).toEqual([]);
 		} finally {
 			await restarted.close();
+		}
+	});
+
+	it("joins a polling bridge scan from a manual bridge without duplicating provider calls", async () => {
+		const root = join(dir, "cross-instance-vault");
+		const file = join(root, "permanent", "Shared.md");
+		mkdirSync(join(root, "permanent"), { recursive: true });
+		writeFileSync(file, "# Shared\n\nOne provider call must serve both the polling and manual bridge instances.\n");
+		const source = obsidianNativeMemorySource(root, "Cross Instance Vault", "obsidian:cross-instance");
+		let releaseEmbedding = () => {};
+		const embeddingGate = new Promise<void>((resolve) => {
+			releaseEmbedding = resolve;
+		});
+		let embeddingStarted = false;
+		let providerCalls = 0;
+		let probeCalls = 0;
+		let embeddingCalls = 0;
+		const embeddingOptions: Pick<NativeMemoryBridgeOptions, "embeddingConfig" | "fetchEmbedding"> = {
+			embeddingConfig: { provider: "native", model: "cross-instance", dimensions: 3, base_url: "", profile: "cross" },
+			fetchEmbedding: async (text: string) => {
+				providerCalls++;
+				if (text.trim().length > 0) {
+					embeddingCalls++;
+					embeddingStarted = true;
+					await embeddingGate;
+				} else {
+					probeCalls++;
+				}
+				return [1, 2, 3];
+			},
+		};
+		const pollingBridge = startNativeMemoryBridge([source], {
+			agentId: "agent-native",
+			pollIntervalMs: 0,
+			...embeddingOptions,
+		});
+		const manualBridge = startNativeMemoryBridge([source], {
+			agentId: "agent-native",
+			pollIntervalMs: 0,
+			...embeddingOptions,
+		});
+		try {
+			const pollingRun = pollingBridge.syncExisting();
+			for (let attempt = 0; attempt < 200 && !embeddingStarted; attempt++) await Bun.sleep(10);
+			expect(embeddingStarted).toBe(true);
+			const manualRun = manualBridge.syncExisting();
+			await Bun.sleep(20);
+			expect(providerCalls).toBe(3); // two availability probes and one file embedding from the polling scan
+			expect(probeCalls).toBe(2);
+			expect(embeddingCalls).toBe(1);
+			releaseEmbedding();
+			expect(await pollingRun).toBe(1);
+			expect(await manualRun).toBe(1);
+			expect(providerCalls).toBe(3);
+		} finally {
+			releaseEmbedding();
+			await pollingBridge.close();
+			await manualBridge.close();
 		}
 	});
 

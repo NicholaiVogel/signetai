@@ -46,6 +46,7 @@ import {
 	isSourceIndexInFlight,
 	markSourceIndexInFlight,
 	markSourceIndexJobRunning,
+	pauseSourceIndexJob,
 	updateSourceIndexJobProgress,
 } from "../source-index-progress";
 import {
@@ -653,6 +654,26 @@ async function runSourceIndexJob(input: SourceIndexJobInput, job: SourceIndexJob
 		});
 		const indexed = await bridge.syncExisting();
 		if (!isCurrentSourceIndexJob(input.source.id, job.id)) return;
+		const syncResult = bridge.getLastSyncResult?.();
+		const paused = syncResult?.pausedSources.find((result) => result.sourceId === input.source.id);
+		if (syncResult?.status === "paused" && paused) {
+			pauseSourceIndexJob(input.source.id, job.id, {
+				pauseReason: paused.pauseReason ?? "provider_unavailable",
+				resumeFrontier: paused.resumeFrontier,
+			});
+			await recordSourceIndexTelemetryBestEffort(input.recordIndexOperation, {
+				source: input.source,
+				agentId,
+				discovered: syncResult.scanned,
+				accepted: syncResult.indexed,
+				durationMs: Date.now() - startedAt,
+				outcome: "partial",
+				failureClass: sourceFailureClass(new Error("network provider unavailable")),
+				searchable: syncResult.indexed > 0,
+				updateFreshness: false,
+			});
+			return;
+		}
 		markSourceIndexed(input.source.id, undefined, input.agentsDir);
 		const progress = getSourceIndexJob(input.source.id);
 		completeSourceIndexJob(input.source.id, job.id, indexed);

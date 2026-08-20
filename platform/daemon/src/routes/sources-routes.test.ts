@@ -13,7 +13,12 @@ import { Hono } from "hono";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "../db-accessor";
 import { dbOwnerBatch, ownerStatement } from "../db-owner-runtime";
 import { hashNormalizedBody } from "../memory-lineage";
-import type { NativeMemoryBridgeHandle, NativeMemoryBridgeOptions, NativeMemorySource } from "../native-memory-sources";
+import type {
+	NativeMemoryBridgeHandle,
+	NativeMemoryBridgeOptions,
+	NativeMemorySource,
+	NativeMemorySyncResult,
+} from "../native-memory-sources";
 import { indexSourceArtifactStructure } from "../source-artifact-graph";
 import {
 	beginSourceIndexJob,
@@ -71,6 +76,7 @@ describe("Sources routes", () => {
 			purged?: number;
 			syncGate?: Promise<void>;
 			syncError?: unknown;
+			pausedSync?: boolean;
 			recordIndexOperation?: (input: SourceIndexTelemetryInput) => Promise<void>;
 			onPurge?: () => void;
 			onSyncStart?: () => void;
@@ -94,6 +100,24 @@ describe("Sources routes", () => {
 				expect(bridgeOptions.fetchEmbedding).toBeDefined();
 				expect(bridgeOptions.sourceCleanupEnabled).toBe(false);
 				expect(bridgeOptions.sourceGraphEnabled).toBe(true);
+				const syncResult: NativeMemorySyncResult = options.pausedSync
+					? {
+							status: "paused",
+							scanned: 2,
+							indexed: 1,
+							pausedSources: [
+								{
+									sourceKey: sources[0]?.sourceId ?? "obsidian:test",
+									sourceId: sources[0]?.sourceId,
+									status: "paused",
+									scanned: 2,
+									indexed: 1,
+									resumeFrontier: join(vault, "permanent", "Note.md"),
+									pauseReason: "provider_unavailable",
+								},
+							],
+						}
+					: { status: "complete", scanned: 1, indexed: options.indexed ?? 1, pausedSources: [] };
 				return {
 					syncExisting: async () => {
 						options.onSyncStart?.();
@@ -109,6 +133,7 @@ describe("Sources routes", () => {
 						});
 						return options.indexed ?? 1;
 					},
+					getLastSyncResult: () => syncResult,
 					close: async () => {},
 				} satisfies NativeMemoryBridgeHandle;
 			},
@@ -420,6 +445,26 @@ describe("Sources routes", () => {
 
 		await waitFor(() => !!loadSourcesConfig(dir).sources[0]?.lastIndexedAt);
 		expect(loadSourcesConfig(dir).sources[0]?.id).toBe(body.source.id);
+	});
+
+	it("reports a provider outage as paused partial progress without stamping freshness", async () => {
+		const app = makeApp({ pausedSync: true });
+		const response = await app.request("/api/sources/obsidian", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ path: vault, name: "Paused Vault" }),
+		});
+		expect(response.status).toBe(202);
+		const body = (await response.json()) as { source: { id: string } };
+		await waitFor(() => getSourceIndexJob(body.source.id)?.status === "paused");
+		expect(loadSourcesConfig(dir).sources[0]?.lastIndexedAt).toBeUndefined();
+		expect(getSourceIndexJob(body.source.id)).toMatchObject({
+			status: "paused",
+			partial: true,
+			indexed: 1,
+			pauseReason: "provider_unavailable",
+			resumeFrontier: join(vault, "permanent", "Note.md"),
+		});
 	});
 
 	it("finalizes a failed index job before lifecycle telemetry failure can reject the job", async () => {

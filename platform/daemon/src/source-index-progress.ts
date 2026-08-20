@@ -1,4 +1,4 @@
-export type SourceIndexJobStatus = "queued" | "running" | "complete" | "error";
+export type SourceIndexJobStatus = "queued" | "running" | "complete" | "paused" | "error";
 
 export interface SourceIndexJob {
 	readonly id: string;
@@ -12,6 +12,9 @@ export interface SourceIndexJob {
 	readonly indexed?: number;
 	readonly currentPath?: string;
 	readonly statusMessage?: string;
+	readonly partial?: boolean;
+	readonly pauseReason?: string;
+	readonly resumeFrontier?: string | null;
 	readonly error?: string;
 }
 
@@ -88,6 +91,24 @@ export function completeSourceIndexJob(sourceId: string, jobId: string, indexed:
 
 export function completeSourceIndexJobFromProgress(sourceId: string, jobId: string): void {
 	completeSourceIndexJob(sourceId, jobId, sourceIndexJobs.get(sourceId)?.indexed ?? 0);
+}
+
+export function pauseSourceIndexJob(
+	sourceId: string,
+	jobId: string,
+	input: { readonly pauseReason: string; readonly resumeFrontier: string | null },
+): void {
+	if (!isCurrentSourceIndexJob(sourceId, jobId)) return;
+	const current = sourceIndexJobs.get(sourceId);
+	if (!current) return;
+	sourceIndexJobs.set(sourceId, {
+		...current,
+		status: "paused",
+		finishedAt: new Date().toISOString(),
+		partial: true,
+		pauseReason: input.pauseReason,
+		resumeFrontier: input.resumeFrontier,
+	});
 }
 
 export function failSourceIndexJob(sourceId: string, jobId: string, error: unknown): void {
