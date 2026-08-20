@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { Database as BunDatabase } from "bun:sqlite";
 import { findSqliteVecExtension } from "@signet/core";
 import {
@@ -93,6 +93,15 @@ export function runDbOwnerWorker(): void {
 	const dbPath = process.env.SIGNET_DB_OWNER_DB_PATH;
 	if (dbPath === undefined) throw new Error("DB owner requires SIGNET_DB_OWNER_DB_PATH");
 	const ownerDbPath = dbPath;
+	const cancellationRegistryPath = process.env.SIGNET_DB_OWNER_CANCEL_REGISTRY;
+	function cancellationRequested(jobId: string): boolean {
+		if (cancellationRegistryPath === undefined) return false;
+		try {
+			return readFileSync(cancellationRegistryPath, "utf8").includes(`${jobId}\n`);
+		} catch {
+			return false;
+		}
+	}
 	const parentPid = process.ppid;
 	const parentWatch = setInterval(() => {
 		// A test harness can disappear without sending the protocol shutdown
@@ -534,15 +543,18 @@ export function runDbOwnerWorker(): void {
 			send({ type: "started", jobId: job.id, workloadClass: job.workloadClass });
 			const startedAt = Date.now();
 			try {
-				if (cancelled.delete(job.id)) {
+				if (cancelled.delete(job.id) || cancellationRequested(job.id)) {
 					result(job.id, "cancelled");
 				} else if (Date.now() >= job.deadlineAt) {
 					result(job.id, "timed_out");
 				} else {
-					result(job.id, "completed", await execute(job), {
-						startedAt,
-						finishedAt: Date.now(),
-					});
+					const value = await execute(job);
+					if (cancellationRequested(job.id)) result(job.id, "cancelled");
+					else
+						result(job.id, "completed", value, {
+							startedAt,
+							finishedAt: Date.now(),
+						});
 				}
 			} catch (error) {
 				send({

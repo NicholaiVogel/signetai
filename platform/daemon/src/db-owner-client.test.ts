@@ -599,6 +599,41 @@ describe("DB owner client", () => {
 		expect(client.health().activeJobId).toBeNull();
 	});
 
+	test("does not commit a stale write after aborting an in-flight owner operation", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const blocker = new Database(database.path);
+		let blockerReleased = false;
+		blocker.exec("BEGIN IMMEDIATE");
+		client = createDbOwnerClient({ dbPath: database.path });
+		try {
+			const write = client.submit<{ readonly changes: number }>(
+				{
+					kind: "query",
+					statement: {
+						sql: "INSERT INTO memories (id, content) VALUES (?, ?)",
+						params: ["stale-after-abort", "must not commit"],
+						result: "run",
+					},
+				},
+				{ operation: "memory.stale-commit-after-abort", lane: "write", deadlineMs: 5_000 },
+			);
+			await waitFor(() => client?.health().lanes?.write.activeJobId === write.job.id);
+			client.cancel(write.job.id);
+			await expect(write.result).rejects.toBeInstanceOf(DbOwnerCancelledError);
+			blocker.exec("ROLLBACK");
+			blockerReleased = true;
+			const rows = await client.submit<readonly { readonly id: string }[]>(
+				{ kind: "query", statement: { sql: "SELECT id FROM memories ORDER BY id", result: "all" } },
+				{ operation: "memory.verify-no-stale-commit", lane: "read", deadlineMs: 1_000 },
+			).result;
+			expect(rows).toEqual([{ id: "m1" }]);
+		} finally {
+			if (!blockerReleased) blocker.exec("ROLLBACK");
+			blocker.close();
+		}
+	});
+
 	test("does not retain cancellation IDs for completed or active jobs", () => {
 		const completedJobs = Array.from({ length: 1_000 }, (_, index) => ({ id: `completed-${index}` }));
 		const activeJob = { id: "active" };

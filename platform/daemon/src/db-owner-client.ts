@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveEmbeddedWorkerPath } from "./native-runtime-assets";
@@ -226,7 +227,16 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	let sequence = 0;
 	let input = "";
 	let stderr = "";
+	const cancellationRegistryPath = join(dirname(options.dbPath), `.db-owner-cancel-${process.pid}-${randomUUID()}`);
 	const pending = new Map<string, PendingJob<unknown>>();
+
+	function recordCancellation(jobId: string): void {
+		try {
+			appendFileSync(cancellationRegistryPath, `${jobId}\n`);
+		} catch {
+			// The protocol cancel command remains the fallback for queued jobs.
+		}
+	}
 
 	function diagnostic(message: string): string {
 		return stderr.trim().length === 0 ? message : `${message}; child stderr: ${stderr.trim()}`;
@@ -466,6 +476,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 				SIGNET_DB_OWNER_WORKER: "1",
 				...(options.sqlitePath === undefined ? {} : { SIGNET_DB_OWNER_SQLITE_PATH: options.sqlitePath }),
 				...(options.workerRole === "recall" ? { SIGNET_DB_OWNER_RECALL_WORKER: "1" } : {}),
+				SIGNET_DB_OWNER_CANCEL_REGISTRY: cancellationRegistryPath,
 			};
 			// A compiled daemon sets this marker so the native entrypoint dispatches
 			// into the daemon. It must not leak into the worker child: the worker
@@ -642,12 +653,22 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	function cancel(jobId: string): void {
 		const entry = pending.get(jobId);
 		if (entry === undefined || entry.settled) return;
+		const owner = child;
+		const active = activeJobId === jobId;
+		recordCancellation(jobId);
 		settle(jobId, (job) => {
 			if (!job.settled) {
 				job.settled = true;
 				job.reject(new DbOwnerCancelledError(jobId));
 			}
 		});
+		if (active && owner !== null) {
+			// A synchronous SQLite operation cannot consume the cancel command
+			// until it returns. Retire the owner so SQLite rolls back any active
+			// transaction instead of allowing a stale commit after the abort.
+			retireOwner(new DbOwnerCancelledError(jobId), owner, "dead", true);
+			return;
+		}
 		if (state === "ready" && child !== null)
 			void write(child, { type: "cancel", jobId }).catch(() => {
 				// The exit handler reports a dead owner to other pending jobs.
@@ -694,6 +715,11 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		}
 		state = "closed";
 		rejectAll(new DbOwnerDiedError("DB owner client closed"));
+		try {
+			unlinkSync(cancellationRegistryPath);
+		} catch {
+			// The registry may not have been created or may already be gone.
+		}
 	}
 
 	async function initialize(agentsDir?: string): Promise<void> {

@@ -335,8 +335,12 @@ function findLegacyDbAccessSites(sourceRoot: string): {
 							(ts.isStringLiteral(expression.argumentExpression) ||
 								ts.isNoSubstitutionTemplateLiteral(expression.argumentExpression))
 						? expression.argumentExpression.text
-						: null;
-				if (LEGACY_DB_APIS.includes(api as LegacyDbApi)) {
+						: ts.isIdentifier(expression)
+							? expression.text
+							: null;
+				const isLegacyDbMemberAccess =
+					ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression);
+				if (SYNC_APIS.includes(api as SyncApi)) {
 					const position = ts.isPropertyAccessExpression(expression)
 						? expression.name.getStart(sourceFile)
 						: expression.getStart(sourceFile);
@@ -344,18 +348,20 @@ function findLegacyDbAccessSites(sourceRoot: string): {
 					sites.push({
 						path: relativePath,
 						line,
-						api: api as LegacyDbApi,
+						api: api as SyncApi,
 						source: lines[line - 1]?.trim() ?? "",
 						category: "hot-path",
 					});
-					let marked = false;
-					for (let candidate = line - 1; candidate >= Math.max(1, line - MARKER_WINDOW_LINES); candidate--) {
-						if (markerLines.has(candidate)) {
-							marked = true;
-							break;
+					if (isLegacyDbMemberAccess && LEGACY_DB_APIS.includes(api as LegacyDbApi)) {
+						let marked = false;
+						for (let candidate = line - 1; candidate >= Math.max(1, line - MARKER_WINDOW_LINES); candidate--) {
+							if (markerLines.has(candidate)) {
+								marked = true;
+								break;
+							}
 						}
+						if (!marked) unmarked.push({ path: relativePath, line, api: api as LegacyDbApi });
 					}
-					if (!marked) unmarked.push({ path: relativePath, line, api: api as LegacyDbApi });
 				}
 			}
 			ts.forEachChild(node, visit);
