@@ -291,6 +291,7 @@ export function registerMiscRoutes(app: Hono): void {
 				db
 					.prepare("SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents WHERE id = ?")
 					.get(name) as unknown as AgentRow,
+			{ siteToken: "routes/misc-routes.ts:289" },
 		);
 		return c.json(created, 201);
 	});
@@ -305,6 +306,7 @@ export function registerMiscRoutes(app: Hono): void {
 				db.prepare("SELECT id, read_policy, policy_group FROM agents WHERE name = ?").get(name) as
 					| { id: string; read_policy: string; policy_group: string | null }
 					| undefined,
+			{ siteToken: "routes/misc-routes.ts:304" },
 		);
 		if (!existing) return c.json({ error: "Agent not found" }, 404);
 		let resolved: ReturnType<typeof resolveAgentMemoryPolicy>;
@@ -337,6 +339,7 @@ export function registerMiscRoutes(app: Hono): void {
 				db
 					.prepare("SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents WHERE id = ?")
 					.get(existing.id) as unknown as AgentRow,
+			{ siteToken: "routes/misc-routes.ts:337" },
 		);
 		return c.json({ ...updated, effective_scope: resolved.effectiveScope });
 	});
@@ -347,6 +350,7 @@ export function registerMiscRoutes(app: Hono): void {
 		const purge = c.req.query("purge") === "true";
 		const agent = await getDbAccessor().withReadDbAsync(
 			async (db) => db.prepare("SELECT id FROM agents WHERE name = ?").get(name) as { id: string } | undefined,
+			{ siteToken: "routes/misc-routes.ts:351" },
 		);
 		if (!agent) return c.json({ error: "Agent not found" }, 404);
 		await runWriteTxAsync(getDbAccessor(), (db) => {
@@ -507,8 +511,9 @@ export function registerMiscRoutes(app: Hono): void {
 	app.get("/api/tasks/:id/stream", async (c) => {
 		const taskId = c.req.param("id");
 
-		const taskExists = await getDbAccessor().withReadDbAsync(async (db) =>
-			db.prepare("SELECT 1 FROM scheduled_tasks WHERE id = ?").get(taskId),
+		const taskExists = await getDbAccessor().withReadDbAsync(
+			async (db) => db.prepare("SELECT 1 FROM scheduled_tasks WHERE id = ?").get(taskId),
+			{ siteToken: "routes/misc-routes.ts:514" },
 		);
 
 		if (!taskExists) {
@@ -603,10 +608,11 @@ export function registerMiscRoutes(app: Hono): void {
 	});
 
 	app.get("/api/tasks", async (c) => {
-		const tasks = await getDbAccessor().withReadDbAsync(async (db) =>
-			db
-				.prepare(
-					`SELECT t.*,
+		const tasks = await getDbAccessor().withReadDbAsync(
+			async (db) =>
+				db
+					.prepare(
+						`SELECT t.*,
 					        r.status AS last_run_status,
 					        r.exit_code AS last_run_exit_code
 					 FROM scheduled_tasks t
@@ -616,8 +622,9 @@ export function registerMiscRoutes(app: Hono): void {
 					     ORDER BY started_at DESC LIMIT 1
 					 )
 					 ORDER BY t.created_at DESC`,
-				)
-				.all(),
+					)
+					.all(),
+			{ siteToken: "routes/misc-routes.ts:611" },
 		);
 
 		return c.json({ tasks, presets: CRON_PRESETS });
@@ -697,23 +704,26 @@ export function registerMiscRoutes(app: Hono): void {
 	app.get("/api/tasks/:id", async (c) => {
 		const taskId = c.req.param("id");
 
-		const task = await getDbAccessor().withReadDbAsync(async (db) =>
-			db.prepare("SELECT * FROM scheduled_tasks WHERE id = ?").get(taskId),
+		const task = await getDbAccessor().withReadDbAsync(
+			async (db) => db.prepare("SELECT * FROM scheduled_tasks WHERE id = ?").get(taskId),
+			{ siteToken: "routes/misc-routes.ts:707" },
 		);
 
 		if (!task) {
 			return c.json({ error: "Task not found" }, 404);
 		}
 
-		const runs = await getDbAccessor().withReadDbAsync(async (db) =>
-			db
-				.prepare(
-					`SELECT * FROM task_runs
+		const runs = await getDbAccessor().withReadDbAsync(
+			async (db) =>
+				db
+					.prepare(
+						`SELECT * FROM task_runs
 					 WHERE task_id = ?
 					 ORDER BY started_at DESC
 					 LIMIT 20`,
-				)
-				.all(taskId),
+					)
+					.all(taskId),
+			{ siteToken: "routes/misc-routes.ts:716" },
 		);
 
 		return c.json({ task, runs });
@@ -723,8 +733,9 @@ export function registerMiscRoutes(app: Hono): void {
 		const taskId = c.req.param("id");
 		const body = await c.req.json();
 
-		const existing = (await getDbAccessor().withReadDbAsync(async (db) =>
-			db.prepare("SELECT * FROM scheduled_tasks WHERE id = ?").get(taskId),
+		const existing = (await getDbAccessor().withReadDbAsync(
+			async (db) => db.prepare("SELECT * FROM scheduled_tasks WHERE id = ?").get(taskId),
+			{ siteToken: "routes/misc-routes.ts:736" },
 		)) as Record<string, unknown> | undefined;
 
 		if (!existing) {
@@ -797,16 +808,18 @@ export function registerMiscRoutes(app: Hono): void {
 		const scoped = resolveScopedAgentId(c, c.req.query("agent_id"));
 		if (scoped.error) return c.json({ error: scoped.error }, 403);
 
-		const task = await getDbAccessor().withReadDbAsync(async (db) =>
-			readScopedTask(db, taskId, scoped.agentId, shouldEnforceAuthScope(c)),
+		const task = await getDbAccessor().withReadDbAsync(
+			async (db) => readScopedTask(db, taskId, scoped.agentId, shouldEnforceAuthScope(c)),
+			{ siteToken: "routes/misc-routes.ts:811" },
 		);
 
 		if (!task) {
 			return c.json({ error: "Task not found" }, 404);
 		}
 
-		const running = await getDbAccessor().withReadDbAsync(async (db) =>
-			db.prepare("SELECT 1 FROM task_runs WHERE task_id = ? AND status = 'running' LIMIT 1").get(taskId),
+		const running = await getDbAccessor().withReadDbAsync(
+			async (db) => db.prepare("SELECT 1 FROM task_runs WHERE task_id = ? AND status = 'running' LIMIT 1").get(taskId),
+			{ siteToken: "routes/misc-routes.ts:820" },
 		);
 
 		if (running) {
@@ -928,23 +941,28 @@ export function registerMiscRoutes(app: Hono): void {
 		const limit = Number(c.req.query("limit") ?? 20);
 		const offset = Number(c.req.query("offset") ?? 0);
 
-		const runs = await getDbAccessor().withReadDbAsync(async (db) =>
-			db
-				.prepare(
-					`SELECT * FROM task_runs
+		const runs = await getDbAccessor().withReadDbAsync(
+			async (db) =>
+				db
+					.prepare(
+						`SELECT * FROM task_runs
 					 WHERE task_id = ?
 					 ORDER BY started_at DESC
 					 LIMIT ? OFFSET ?`,
-				)
-				.all(taskId, limit, offset),
+					)
+					.all(taskId, limit, offset),
+			{ siteToken: "routes/misc-routes.ts:944" },
 		);
 
-		const total = await getDbAccessor().withReadDbAsync(async (db) => {
-			const row = db.prepare("SELECT COUNT(*) as count FROM task_runs WHERE task_id = ?").get(taskId) as {
-				count: number;
-			};
-			return row.count;
-		});
+		const total = await getDbAccessor().withReadDbAsync(
+			async (db) => {
+				const row = db.prepare("SELECT COUNT(*) as count FROM task_runs WHERE task_id = ?").get(taskId) as {
+					count: number;
+				};
+				return row.count;
+			},
+			{ siteToken: "routes/misc-routes.ts:957" },
+		);
 
 		return c.json({ runs, total, hasMore: offset + limit < total });
 	});

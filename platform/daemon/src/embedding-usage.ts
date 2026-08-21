@@ -97,7 +97,7 @@ export function recordEmbeddingUsage(input: {
 						input.tokens,
 					);
 				},
-				{ operation: "embedding.usage", estimatedWorkUnits: 1 },
+				{ siteToken: "embedding-usage.ts:90", operation: "embedding.usage", estimatedWorkUnits: 1 },
 			)
 			.catch((e) => {
 				logger.warn("embedding", "Failed to record embedding usage", {
@@ -130,32 +130,35 @@ export async function readEmbeddingUsageSummary(
 	now: Date = new Date(),
 ): Promise<EmbeddingUsageSummary | null> {
 	try {
-		const summary = await accessor.withReadDbAsync((db: import("./db-accessor").ReadDb) => {
-			const day = todayKey(now);
-			const totals = db
-				.prepare(
-					"SELECT COALESCE(SUM(requests), 0) AS requests, COALESCE(SUM(tokens), 0) AS tokens FROM embedding_usage",
-				)
-				.get() as { requests: number; tokens: number };
-			const today = db
-				.prepare(
-					"SELECT COALESCE(SUM(requests), 0) AS requests, COALESCE(SUM(tokens), 0) AS tokens FROM embedding_usage WHERE day = ?",
-				)
-				.get(day) as { requests: number; tokens: number };
-			const bySource = db
-				.prepare(
-					`SELECT source_kind AS source, SUM(requests) AS requests, SUM(tokens) AS tokens
+		const summary = await accessor.withReadDbAsync(
+			(db: import("./db-accessor").ReadDb) => {
+				const day = todayKey(now);
+				const totals = db
+					.prepare(
+						"SELECT COALESCE(SUM(requests), 0) AS requests, COALESCE(SUM(tokens), 0) AS tokens FROM embedding_usage",
+					)
+					.get() as { requests: number; tokens: number };
+				const today = db
+					.prepare(
+						"SELECT COALESCE(SUM(requests), 0) AS requests, COALESCE(SUM(tokens), 0) AS tokens FROM embedding_usage WHERE day = ?",
+					)
+					.get(day) as { requests: number; tokens: number };
+				const bySource = db
+					.prepare(
+						`SELECT source_kind AS source, SUM(requests) AS requests, SUM(tokens) AS tokens
 					 FROM embedding_usage GROUP BY source_kind ORDER BY tokens DESC`,
-				)
-				.all() as Array<{ source: string; requests: number; tokens: number }>;
-			const byProvider = db
-				.prepare(
-					`SELECT provider, SUM(requests) AS requests, SUM(tokens) AS tokens
+					)
+					.all() as Array<{ source: string; requests: number; tokens: number }>;
+				const byProvider = db
+					.prepare(
+						`SELECT provider, SUM(requests) AS requests, SUM(tokens) AS tokens
 					 FROM embedding_usage GROUP BY provider ORDER BY tokens DESC`,
-				)
-				.all() as Array<{ provider: string; requests: number; tokens: number }>;
-			return { total: totals, today, bySource, byProvider };
-		});
+					)
+					.all() as Array<{ provider: string; requests: number; tokens: number }>;
+				return { total: totals, today, bySource, byProvider };
+			},
+			{ siteToken: "embedding-usage.ts:133" },
+		);
 		cachedEmbeddingUsageSummary = summary;
 		return summary;
 	} catch (e) {

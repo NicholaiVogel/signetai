@@ -265,6 +265,7 @@ function readDatabaseSchemaFromDb(db: ReadDb): DatabaseSchemaResponse {
 
 export async function readDatabaseSchemaAsync(accessor: DbAccessor): Promise<DatabaseSchemaResponse> {
 	return await accessor.withReadDbAsync((db) => readDatabaseSchemaFromDb(db), {
+		siteToken: "routes/database-diagnostics.ts:267",
 		operation: "diagnostics.database.schema",
 	});
 }
@@ -303,6 +304,7 @@ export async function readTableSampleAsync(
 	offset: number,
 ): Promise<DatabaseTableSampleResponse | { readonly error: string; readonly status: 400 | 404 }> {
 	return await accessor.withReadDbAsync((db) => readTableSampleFromDb(db, table, limit, offset), {
+		siteToken: "routes/database-diagnostics.ts:306",
 		operation: "diagnostics.database.sample",
 	});
 }
