@@ -8,6 +8,7 @@ import { getDbAccessor } from "../db-accessor.js";
 import { getVacuumConversionStatusAsync } from "../db-vacuum.js";
 import { type QueueCounts, getQueueDiagnosticsSnapshot } from "../diagnostics-queue.js";
 import { readEmbeddingUsageSummary } from "../embedding-usage";
+import { readEmbeddingIndexMigrationProgress } from "../embedding-index-state";
 import { getInferenceRouterOrNull } from "../inference-router.js";
 import type { BackgroundWorkloadDiagnostics } from "../inference-router.js";
 import { getLlmProvider } from "../llm.js";
@@ -121,7 +122,7 @@ export function pipelineQueueBlock(options: { readonly allowSynchronousRead?: bo
 				summary: snapshot.summary,
 				oldestDeadSummaryJob: snapshot.oldestDeadSummaryJob,
 			};
-		}, "routes/pipeline-routes.ts:117");
+		}, "routes/pipeline-routes.ts:118");
 	} catch {
 		return {
 			memory: { ...UNKNOWN_QUEUE_COUNTS_SHAPE },
@@ -334,6 +335,14 @@ export function registerPipelineRoutes(app: Hono): void {
 		}
 
 		const us = getUpdateState();
+		let embeddingMigration = null;
+		try {
+			embeddingMigration = await getDbAccessor().withReadDbAsync((db) =>
+				readEmbeddingIndexMigrationProgress(db, config.embedding),
+			);
+		} catch {
+			// Database may still be initializing; omit migration visibility.
+		}
 
 		let agentCreatedAt: string | null = null;
 		try {
@@ -422,6 +431,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					? { available: cachedEmbeddingStatus.available }
 					: {}),
 				usage: await readEmbeddingUsageSummary(getDbAccessor()),
+				migration: embeddingMigration,
 			},
 		});
 	});
@@ -510,7 +520,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					limit,
 					offset,
 				}),
-			"routes/pipeline-routes.ts:504",
+			"routes/pipeline-routes.ts:514",
 		);
 		return c.json({
 			agentId: resolveAgentId({ agentId: scopedAgent.agentId }),

@@ -9,6 +9,7 @@ import {
 	ensureEmbeddingIndexState,
 	failEmbeddingIndexBuild,
 	isActiveEmbeddingConfig,
+	readEmbeddingIndexMigrationProgress,
 	readEmbeddingIndexState,
 	resolveActiveEmbeddingConfig,
 } from "./embedding-index-state";
@@ -241,5 +242,96 @@ describe("embedding index state", () => {
 		expect(initial.active.provider).toBe("native");
 		expect(initial.active.dimensions).toBe(768);
 		expect(ensureEmbeddingIndexState(db, malformed)).toEqual(initial);
+	});
+
+	it("surfaces durable migration phase, counts, cursor, and endpoint", () => {
+		const raw = new Database(":memory:");
+		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		raw.exec(
+			`CREATE TABLE embeddings (id TEXT PRIMARY KEY); CREATE TABLE embeddings_staging (id TEXT PRIMARY KEY);
+			 ALTER TABLE embedding_index_state ADD COLUMN migration_phase TEXT;
+			 ALTER TABLE embedding_index_state ADD COLUMN progress_staged INTEGER NOT NULL DEFAULT 0;
+			 ALTER TABLE embedding_index_state ADD COLUMN progress_total INTEGER NOT NULL DEFAULT 0;
+			 ALTER TABLE embedding_index_state ADD COLUMN projection_cursor_last_id TEXT;
+			 ALTER TABLE embedding_index_state ADD COLUMN projection_cursor_slot TEXT;
+			 ALTER TABLE embedding_index_state ADD COLUMN no_progress_ticks INTEGER NOT NULL DEFAULT 0;
+			 ALTER TABLE embedding_index_state ADD COLUMN provider_endpoint TEXT`,
+		);
+		const db = raw as unknown as WriteDb;
+		ensureEmbeddingIndexState(db, config);
+		beginEmbeddingIndexBuild(db, {
+			...config,
+			provider: "ollama",
+			model: "custom-embed",
+			dimensions: 3,
+			base_url: "http://192.168.1.10:11434",
+		});
+		raw.prepare("INSERT INTO embeddings VALUES ('a'), ('b'), ('c')").run();
+		raw.prepare("INSERT INTO embeddings_staging VALUES ('a')").run();
+		raw
+			.prepare(
+				`UPDATE embedding_index_state SET migration_phase = 'projection', progress_staged = 1, progress_total = 3,
+			 projection_cursor_last_id = 'a', projection_cursor_slot = 'staging', provider_endpoint = ? WHERE id = 1`,
+			)
+			.run("http://192.168.1.10:11434");
+
+		expect(
+			readEmbeddingIndexMigrationProgress(db, {
+				...config,
+				base_url: "http://192.168.1.10:11434",
+			}),
+		).toEqual({
+			state: "building",
+			staged: 1,
+			total: 3,
+			phase: "projection",
+			providerEndpoint: "http://192.168.1.10:11434",
+			lastError: null,
+			projectionCursor: { lastId: "a", slot: "staging" },
+		});
+	});
+
+	it("keeps an endpoint-only change ready and normalizes the legacy fingerprint", () => {
+		const raw = new Database(":memory:");
+		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		raw.exec("CREATE TABLE embeddings (id TEXT PRIMARY KEY); CREATE TABLE embeddings_staging (id TEXT PRIMARY KEY);");
+		const db = raw as unknown as WriteDb;
+		const oldConfig: EmbeddingConfig = {
+			provider: "ollama",
+			model: "custom-embed",
+			dimensions: 3,
+			base_url: "http://127.0.0.1:11434",
+		};
+		ensureEmbeddingIndexState(db, oldConfig);
+		const persisted = JSON.parse(
+			(
+				raw.prepare("SELECT active_profile_json FROM embedding_index_state WHERE id = 1").get() as {
+					active_profile_json: string;
+				}
+			).active_profile_json,
+		) as Record<string, unknown>;
+		persisted.fingerprint = JSON.stringify({
+			profile: "custom:ollama:custom-embed",
+			provider: persisted.provider,
+			model: persisted.model,
+			dimensions: persisted.dimensions,
+			baseUrl: oldConfig.base_url,
+		});
+		raw.prepare("UPDATE embedding_index_state SET active_profile_json = ? WHERE id = 1").run(JSON.stringify(persisted));
+
+		const current = { ...oldConfig, base_url: "http://192.168.1.10:11434" };
+		const state = beginEmbeddingIndexBuild(db, current);
+		expect(state.state).toBe("ready");
+		expect(state.staging).toBeNull();
+		expect(isActiveEmbeddingConfig(db, current)).toBe(true);
+		const normalized = JSON.parse(
+			(
+				raw.prepare("SELECT active_profile_json FROM embedding_index_state WHERE id = 1").get() as {
+					active_profile_json: string;
+				}
+			).active_profile_json,
+		) as Record<string, unknown>;
+		expect(normalized.baseUrl).toBe(current.base_url);
+		expect(JSON.parse(String(normalized.fingerprint))).not.toHaveProperty("baseUrl");
 	});
 });

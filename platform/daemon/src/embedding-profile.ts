@@ -57,6 +57,10 @@ export function formatEmbeddingInput(text: string, cfg: EmbeddingConfig, role: E
 /**
  * Stable, secret-free identity for a vector space. A change means existing
  * vectors cannot be queried with new query embeddings and must be rebuilt.
+ *
+ * The transport endpoint is deliberately excluded: two endpoints serving the
+ * same provider/model/format produce the same vector space. Endpoint changes
+ * affect where requests go, not whether durable vectors remain compatible.
  */
 export function embeddingProfileFingerprint(cfg: EmbeddingConfig): string {
 	const profile = resolveEmbeddingProfile(cfg);
@@ -65,6 +69,27 @@ export function embeddingProfileFingerprint(cfg: EmbeddingConfig): string {
 		provider: cfg.provider,
 		model: cfg.model,
 		dimensions: profile.dimensions,
-		baseUrl: cfg.base_url,
 	});
+}
+
+/**
+ * Compare current fingerprints with databases written before endpoint-neutral
+ * fingerprints existed. Old rows contain `baseUrl`; normalizing both shapes
+ * makes that compatibility shim explicit and one-way.
+ */
+export function embeddingProfileFingerprintsEqual(left: string, right: string): boolean {
+	try {
+		const a = JSON.parse(left) as Record<string, unknown>;
+		const b = JSON.parse(right) as Record<string, unknown>;
+		const normalize = (value: Record<string, unknown>): string =>
+			JSON.stringify({
+				profile: value.profile,
+				provider: value.provider,
+				model: value.model,
+				dimensions: value.dimensions,
+			});
+		return normalize(a) === normalize(b);
+	} catch {
+		return left === right;
+	}
 }

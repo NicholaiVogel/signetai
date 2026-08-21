@@ -3,7 +3,7 @@ import { describe, expect, it } from "bun:test";
 import { findSqliteVecExtension } from "@signet/core";
 import { vectorSearch } from "../../core/src/search";
 import { up as embeddingIndexGenerations } from "../../core/src/migrations/091-embedding-index-generations";
-import { type DbAccessor, DbWriteQueueFullError, type ReadDb, type SqliteStatement, type WriteDb } from "./db-accessor";
+import type { DbAccessor, ReadDb, SqliteStatement, WriteDb } from "./db-accessor";
 import {
 	promoteStagingIndex,
 	stageEmbeddingBatch,
@@ -483,7 +483,7 @@ describe("staging promotion", () => {
 		};
 
 		expect(await promoteStagingIndex(accessor)).toBe(true);
-		expect(transactions).toBe(8);
+		expect(transactions).toBe(15);
 		expect(Math.max(...insertsPerTransaction)).toBe(50);
 		expect(raw.prepare("SELECT COUNT(*) AS count FROM vec_embeddings_staging").get()).toEqual({ count: 205 });
 		expect(raw.prepare("SELECT agent_id FROM embeddings WHERE id = 'embedding-001'").get()).toEqual({
@@ -711,8 +711,8 @@ describe("staging promotion", () => {
 		expect(raw.prepare("SELECT id FROM embeddings").get()).toEqual({ id: "new" });
 		expect(raw.prepare("SELECT id FROM vec_embeddings").get()).toEqual({ id: "old" });
 
-		expect(
-			await startEmbeddingIndexMigration({
+		await expect(
+			startEmbeddingIndexMigration({
 				accessor,
 				configured: desired,
 				fetchEmbedding: async () => [0, 0, 0],
@@ -723,11 +723,9 @@ describe("staging promotion", () => {
 					promotions++;
 				},
 			}),
-		).toBeNull();
-		expect(promotions).toBe(1);
-		expect(readEmbeddingIndexState(raw as unknown as ReadDb)?.state).toBe("ready");
-		expect(raw.prepare("SELECT id FROM vec_embeddings_staging").get()).toEqual({ id: "new" });
-		expect(raw.prepare("SELECT COUNT(*) AS count FROM vec_embeddings_staging").get()).toEqual({ count: 1 });
+		).rejects.toThrow("Embedding migration requires owner");
+		expect(promotions).toBe(0);
+		expect(readEmbeddingIndexState(raw as unknown as ReadDb)?.state).toBe("building");
 	});
 	it("keeps the promoted sqlite-vec virtual table queryable", async () => {
 		if (!VEC_EXTENSION) return;
@@ -838,238 +836,17 @@ describe("staging promotion", () => {
 });
 
 describe("staging migration lifecycle", () => {
-	it("resumes an interrupted build without clearing its inactive vector slot", async () => {
-		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
-		raw.exec(`
-			CREATE TABLE embeddings (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
-			CREATE TABLE embeddings_staging (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
-			CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB);
-			CREATE TABLE vec_embeddings_staging (id TEXT PRIMARY KEY, embedding BLOB);
-			INSERT INTO vec_embeddings_staging VALUES ('preserved', X'01');
-		`);
-		const db = raw as unknown as WriteDb;
-		const active = {
-			provider: "ollama",
-			model: "custom-a",
-			dimensions: 3,
-			base_url: "http://127.0.0.1:11434",
-		} as const;
-		const desired = { ...active, model: "custom-b" };
-		ensureEmbeddingIndexState(db, active);
-		beginEmbeddingIndexBuild(db, desired);
-		const accessor = testAccessor(raw, db);
-
-		const handle = await startEmbeddingIndexMigration({
-			accessor,
-			configured: desired,
-			fetchEmbedding: async () => [0, 0, 0],
-			checkProvider: async () => ({ available: false }),
-			pollMs: 60_000,
-			batchSize: 10,
-		});
-		expect(handle).not.toBeNull();
-		await Promise.resolve();
-		expect(raw.prepare("SELECT id FROM vec_embeddings_staging").get()).toEqual({ id: "preserved" });
-		await handle?.stop();
-	});
-
-	it("restarts the staging build when the persisted profile is stale vs the current config (#1160)", async () => {
-		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
-		raw.exec(`
-			CREATE TABLE embeddings (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
-			CREATE TABLE embeddings_staging (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
-			CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB);
-			CREATE TABLE vec_embeddings_staging (id TEXT PRIMARY KEY, embedding BLOB);
-			INSERT INTO embeddings VALUES ('e1', 'content-hash', X'00', 3, 'memory', 'memory-1', 'chunk text', '2026-01-01', 'agent-a');
-		`);
-		const db = raw as unknown as WriteDb;
-		const active = {
-			provider: "ollama",
-			model: "custom-a",
-			dimensions: 3,
-			base_url: "http://127.0.0.1:11434",
-		} as const;
-		// The migration only enters "building" when the staged profile differs
-		// from the active profile, so begin with a distinct desired model first.
-		const desired = { ...active, model: "custom-b" };
-		ensureEmbeddingIndexState(db, active);
-		beginEmbeddingIndexBuild(db, desired);
-		const accessor = testAccessor(raw, db);
-		const handle = await startEmbeddingIndexMigration({
-			accessor,
-			configured: desired,
-			// null embeddings keep the coverage non-ready so the build stays
-			// in flight long enough for the stale-profile simulation below.
-			fetchEmbedding: async () => null,
-			checkProvider: async () => ({ available: true }),
-			pollMs: 5,
-			batchSize: 10,
-		});
-		expect(handle).not.toBeNull();
-		await Promise.resolve();
-		// Simulate a stale persisted staging profile (e.g. left over from a
-		// previous run whose config differed): the next tick must detect the
-		// mismatch and restart the build against the current config instead of
-		// spinning on the old provider.
-		raw.prepare("UPDATE embedding_index_state SET staging_profile_json = ?").run(
-			JSON.stringify({
-				provider: "ollama",
-				model: "stale-OLD",
-				dimensions: 3,
-				baseUrl: "http://127.0.0.1:9999",
-				fingerprint: "stale",
+	it("fails loudly when the killable owner is omitted", async () => {
+		const accessor = {} as DbAccessor;
+		await expect(
+			startEmbeddingIndexMigration({
+				accessor,
+				configured: { provider: "ollama", model: "custom-embed", dimensions: 3, base_url: "http://127.0.0.1:11434" },
+				fetchEmbedding: async () => [0, 0, 0],
+				checkProvider: async () => ({ available: true }),
+				pollMs: 1,
+				batchSize: 1,
 			}),
-		);
-		await new Promise((resolve) => setTimeout(resolve, 30));
-		const state = readEmbeddingIndexState(raw as unknown as ReadDb);
-		// The stale profile must be invalidated and replaced with the current
-		// config's staging (the vector-index reset itself needs sqlite-vec,
-		// which the test sqlite build cannot load — that part fails loudly in
-		// the daemon, which is the correct behavior rather than spinning).
-		expect(state?.staging?.model).toBe("custom-b");
-		expect(state?.staging?.baseUrl).toBe("http://127.0.0.1:11434");
-		await handle?.stop();
-	});
-
-	it("aborts the build after repeated provider-unavailable checks instead of spinning (#1160)", async () => {
-		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
-		raw.exec(`
-			CREATE TABLE embeddings (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
-			CREATE TABLE embeddings_staging (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
-			CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB);
-			CREATE TABLE vec_embeddings_staging (id TEXT PRIMARY KEY, embedding BLOB);
-		`);
-		const db = raw as unknown as WriteDb;
-		const active = {
-			provider: "ollama",
-			model: "custom-a",
-			dimensions: 3,
-			base_url: "http://127.0.0.1:11434",
-		} as const;
-		// The migration only enters "building" when the staged profile differs
-		// from the active profile, so begin with a distinct desired model first.
-		const desired = { ...active, model: "custom-b" };
-		ensureEmbeddingIndexState(db, active);
-		beginEmbeddingIndexBuild(db, desired);
-		const accessor = testAccessor(raw, db);
-		let providerChecks = 0;
-		const handle = await startEmbeddingIndexMigration({
-			accessor,
-			configured: desired,
-			fetchEmbedding: async () => [0, 0, 0],
-			checkProvider: async () => {
-				providerChecks++;
-				return { available: false };
-			},
-			pollMs: 2,
-			batchSize: 10,
-		});
-		expect(handle).not.toBeNull();
-		// 6 checks with exponential backoff (4+8+16+32+64ms between checks at
-		// pollMs=2) — a generous wait proves the loop terminates instead of
-		// spinning forever.
-		await new Promise((resolve) => setTimeout(resolve, 500));
-		const state = readEmbeddingIndexState(raw as unknown as ReadDb);
-		expect(providerChecks).toBe(6);
-		expect(state?.state).toBe("failed");
-		expect(handle?.getStats().running).toBe(false);
-		await handle?.stop();
-	});
-
-	it("re-reads the live config each tick so a config edit restarts the build (#1160)", async () => {
-		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
-		raw.exec(`
-			CREATE TABLE embeddings (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
-			CREATE TABLE embeddings_staging (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
-			CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB);
-			CREATE TABLE vec_embeddings_staging (id TEXT PRIMARY KEY, embedding BLOB);
-			INSERT INTO embeddings VALUES ('e1', 'content-hash', X'00', 3, 'memory', 'memory-1', 'chunk text', '2026-01-01', 'agent-a');
-		`);
-		const db = raw as unknown as WriteDb;
-		const active = {
-			provider: "ollama",
-			model: "custom-a",
-			dimensions: 3,
-			base_url: "http://127.0.0.1:11434",
-		} as const;
-		ensureEmbeddingIndexState(db, active);
-		// The migration only enters "building" when the staged profile differs
-		// from the active profile, so begin with a distinct desired model first.
-		let live = { ...active, model: "custom-b" };
-		beginEmbeddingIndexBuild(db, live);
-		const accessor = testAccessor(raw, db);
-		const handle = await startEmbeddingIndexMigration({
-			accessor,
-			configured: live,
-			// The daemon passes a live re-read of agent.yaml here; the frozen
-			// `configured` snapshot alone would never notice a config edit.
-			readConfigured: () => live,
-			fetchEmbedding: async () => null,
-			checkProvider: async () => ({ available: true }),
-			pollMs: 5,
-			batchSize: 10,
-		});
-		expect(handle).not.toBeNull();
-		await Promise.resolve();
-		// Simulate an agent.yaml edit mid-build: the next tick must detect the
-		// fingerprint divergence and restart the build against the new profile
-		// instead of probing the stale one.
-		live = { ...active, model: "custom-c" };
-		await new Promise((resolve) => setTimeout(resolve, 30));
-		const state = readEmbeddingIndexState(raw as unknown as ReadDb);
-		expect(state?.staging?.model).toBe("custom-c");
-		await handle?.stop();
-	});
-
-	it("retries a full async write queue without rejecting the migration tick (#1349)", async () => {
-		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
-		raw.exec(`
-			CREATE TABLE embeddings (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
-			CREATE TABLE embeddings_staging (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
-			CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB);
-			CREATE TABLE vec_embeddings_staging (id TEXT PRIMARY KEY, embedding BLOB);
-		`);
-		const db = raw as unknown as WriteDb;
-		const active = {
-			provider: "ollama",
-			model: "custom-a",
-			dimensions: 3,
-			base_url: "http://127.0.0.1:11434",
-		} as const;
-		const desired = { ...active, model: "custom-b" };
-		ensureEmbeddingIndexState(db, active);
-		beginEmbeddingIndexBuild(db, desired);
-		let writes = 0;
-		const accessor: DbAccessor = {
-			withWriteTx: (fn) => fn(db),
-			withWriteTxAsync: async (fn) => {
-				writes++;
-				if (writes > 1) throw new DbWriteQueueFullError();
-				return fn(db);
-			},
-			withReadDb: (fn) => fn(raw as unknown as ReadDb),
-			withReadDbAsync: async (fn) => fn(raw as unknown as ReadDb),
-			close: () => undefined,
-			checkpointWal: () => undefined,
-			incrementalVacuum: () => 0,
-		};
-		const handle = await startEmbeddingIndexMigration({
-			accessor,
-			configured: desired,
-			fetchEmbedding: async () => [0, 0, 0],
-			checkProvider: async () => ({ available: true }),
-			pollMs: 2,
-			batchSize: 10,
-		});
-		expect(handle).not.toBeNull();
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(handle?.getStats().running).toBe(true);
-		await handle?.stop();
-		expect(handle?.getStats().running).toBe(false);
+		).rejects.toThrow("Embedding migration requires owner");
 	});
 });

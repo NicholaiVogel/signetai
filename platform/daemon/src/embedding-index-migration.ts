@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { type DbAccessor, DbWriteQueueFullError, type ReadDb, type WriteDb } from "./db-accessor";
 import type { DbOwnerClient } from "./db-owner-client";
 import { ownerBatch, ownerBytesFromHex, ownerReadAll, ownerReadOne, ownerRun } from "./db-owner-sql";
-import { yieldEvery } from "./async-yield";
 import { vectorToBlob } from "./db-helpers";
 import type { EmbeddingFetchOptions } from "./embedding-fetch";
 import {
@@ -11,13 +10,17 @@ import {
 	readEmbeddingIndexState,
 } from "./embedding-index-state";
 import {
-	beginEmbeddingIndexBuild,
-	failEmbeddingIndexBuild,
 	MAX_CONSECUTIVE_PROVIDER_FAILURES,
 	MAX_PROVIDER_BACKOFF_MS,
+	MAX_CONSECUTIVE_NO_PROGRESS_TICKS,
 	persistEmbeddingIndexFailure,
 } from "./embedding-index-state";
-import { embeddingProfileFingerprint, recommendedEmbeddingProfileId, type EmbeddingRole } from "./embedding-profile";
+import {
+	embeddingProfileFingerprint,
+	embeddingProfileFingerprintsEqual,
+	recommendedEmbeddingProfileId,
+	type EmbeddingRole,
+} from "./embedding-profile";
 import { logger } from "./logger";
 import type { EmbeddingConfig } from "./memory-config";
 import type { PipelineCauseFamily } from "./pipeline-operation";
@@ -202,6 +205,87 @@ async function ownerTableExists(owner: DbOwnerClient, name: string): Promise<boo
 	);
 }
 
+async function ownerStateColumns(owner: DbOwnerClient): Promise<Set<string>> {
+	const rows = await ownerReadAll<{ readonly name: string }>(
+		owner,
+		"PRAGMA table_info(embedding_index_state)",
+		[],
+		ownerMaintenanceOptions("embedding-index.state-columns"),
+	);
+	return new Set(rows.map((row) => row.name));
+}
+
+async function ownerUpdateProgress(owner: DbOwnerClient, values: Record<string, unknown>): Promise<void> {
+	const columns = await ownerStateColumns(owner);
+	const entries = Object.entries(values).filter(([column]) => columns.has(column));
+	if (entries.length === 0) return;
+	await ownerRun(
+		owner,
+		`UPDATE embedding_index_state SET ${entries.map(([column]) => `${column} = ?`).join(", ")} WHERE id = 1`,
+		entries.map(([, value]) => value),
+		ownerMaintenanceOptions("embedding-index.progress"),
+	);
+}
+
+async function ownerProjectionCursor(
+	owner: DbOwnerClient,
+): Promise<{ lastId: string | null; slot: "active" | "staging" | null }> {
+	const columns = await ownerStateColumns(owner);
+	if (!columns.has("projection_cursor_last_id")) return { lastId: null, slot: null };
+	const row = await ownerReadOne<{
+		readonly projection_cursor_last_id: string | null;
+		readonly projection_cursor_slot: string | null;
+	}>(
+		owner,
+		"SELECT projection_cursor_last_id, projection_cursor_slot FROM embedding_index_state WHERE id = 1",
+		[],
+		ownerMaintenanceOptions("embedding-index.cursor-read"),
+	);
+	return {
+		lastId: row?.projection_cursor_last_id ?? null,
+		slot:
+			row?.projection_cursor_slot === "active" || row?.projection_cursor_slot === "staging"
+				? row.projection_cursor_slot
+				: null,
+	};
+}
+
+async function updateProgressThroughAccessor(accessor: DbAccessor, values: Record<string, unknown>): Promise<void> {
+	await withQueuedWrite(accessor, (db) => {
+		const columns = new Set(
+			(db.prepare("PRAGMA table_info(embedding_index_state)").all() as Array<{ name?: string }>)
+				.map((row) => row.name)
+				.filter((name): name is string => typeof name === "string"),
+		);
+		const entries = Object.entries(values).filter(([column]) => columns.has(column));
+		if (entries.length === 0) return;
+		db.prepare(
+			`UPDATE embedding_index_state SET ${entries.map(([column]) => `${column} = ?`).join(", ")} WHERE id = 1`,
+		).run(...entries.map(([, value]) => value));
+	});
+}
+
+async function projectionCursorThroughAccessor(
+	accessor: DbAccessor,
+): Promise<{ lastId: string | null; slot: "active" | "staging" | null }> {
+	return accessor.withReadDbAsync(async (db) => {
+		const columns = (db.prepare("PRAGMA table_info(embedding_index_state)").all() as Array<{ name?: string }>).map(
+			(row) => row.name,
+		);
+		if (!columns.includes("projection_cursor_last_id")) return { lastId: null, slot: null };
+		const row = db
+			.prepare("SELECT projection_cursor_last_id, projection_cursor_slot FROM embedding_index_state WHERE id = 1")
+			.get() as { projection_cursor_last_id?: string | null; projection_cursor_slot?: string | null } | undefined;
+		return {
+			lastId: row?.projection_cursor_last_id ?? null,
+			slot:
+				row?.projection_cursor_slot === "active" || row?.projection_cursor_slot === "staging"
+					? row.projection_cursor_slot
+					: null,
+		};
+	});
+}
+
 async function ownerIsVecVirtualTable(owner: DbOwnerClient, name: string): Promise<boolean> {
 	const row = await ownerReadOne<{ readonly sql: string | null }>(
 		owner,
@@ -236,15 +320,16 @@ async function rebuildVectorIndexThroughOwner(
 	dimensions: number,
 	batchSize = VECTOR_REBUILD_BATCH_SIZE,
 	shouldContinue?: () => boolean,
+	resumeLastId: string | null = null,
+	persistCursor?: (lastId: string) => Promise<void>,
 ): Promise<void> {
 	const canCancel = shouldContinue !== undefined;
 	const isRunning = shouldContinue ?? (() => true);
 	const limit = Math.max(1, Math.min(50, Math.floor(batchSize)));
 	const table = vectorTableForSlot(projectionSlot);
-	let lastId: string | null = null;
-	let initialized = false;
+	let lastId: string | null = resumeLastId;
+	let initialized = resumeLastId !== null;
 	let retries = 0;
-	const yieldAfterChunk = yieldEvery(1);
 
 	while (true) {
 		if (!isRunning()) throw new Error("Embedding vector rebuild stopped");
@@ -277,8 +362,8 @@ async function rebuildVectorIndexThroughOwner(
 				requireChanges: false,
 			});
 			lastId = rows[rows.length - 1]?.id ?? null;
+			if (lastId !== null) await persistCursor?.(lastId);
 			retries = 0;
-			await yieldAfterChunk();
 		} catch (error) {
 			if (!isRunning()) throw error;
 			if (!canCancel && retries >= MAX_VECTOR_REBUILD_RETRIES_WITHOUT_CANCELLATION) throw error;
@@ -305,15 +390,25 @@ async function rebuildVectorIndex(
 	batchSize = VECTOR_REBUILD_BATCH_SIZE,
 	shouldContinue?: () => boolean,
 	owner?: DbOwnerClient,
+	resumeLastId: string | null = null,
+	persistCursor?: (lastId: string) => Promise<void>,
 ): Promise<void> {
-	if (owner) return rebuildVectorIndexThroughOwner(owner, projectionSlot, dimensions, batchSize, shouldContinue);
+	if (owner)
+		return rebuildVectorIndexThroughOwner(
+			owner,
+			projectionSlot,
+			dimensions,
+			batchSize,
+			shouldContinue,
+			resumeLastId,
+			persistCursor,
+		);
 	const canCancel = shouldContinue !== undefined;
 	const isRunning = shouldContinue ?? (() => true);
 	const limit = Math.max(1, Math.floor(batchSize));
-	let lastId: string | null = null;
-	let initialized = false;
+	let lastId: string | null = resumeLastId;
+	let initialized = resumeLastId !== null;
 	let retries = 0;
-	const yieldAfterChunk = yieldEvery(1);
 
 	while (true) {
 		if (!isRunning()) throw new Error("Embedding vector rebuild stopped");
@@ -367,8 +462,8 @@ async function rebuildVectorIndex(
 				}
 			});
 			lastId = rows[rows.length - 1]?.id ?? null;
+			if (lastId !== null) await persistCursor?.(lastId);
 			retries = 0;
-			await yieldAfterChunk();
 		} catch (error) {
 			// Dimension mismatches are durable data errors, not transient rebuild
 			// failures. Keep the existing fail-closed behavior for those rows.
@@ -392,7 +487,42 @@ async function completeProjectionRebuild(
 	shouldContinue?: () => boolean,
 	owner?: DbOwnerClient,
 ): Promise<void> {
-	await rebuildVectorIndex(accessor, profile.projectionSlot, profile.dimensions, batchSize, shouldContinue, owner);
+	const cursor = owner ? await ownerProjectionCursor(owner) : await projectionCursorThroughAccessor(accessor);
+	const persistCursor = owner
+		? async (lastId: string) =>
+				await ownerUpdateProgress(owner, {
+					migration_phase: "projection",
+					projection_cursor_last_id: lastId,
+					projection_cursor_slot: profile.projectionSlot ?? "active",
+				})
+		: async (lastId: string) =>
+				await updateProgressThroughAccessor(accessor, {
+					migration_phase: "projection",
+					projection_cursor_last_id: lastId,
+					projection_cursor_slot: profile.projectionSlot ?? "active",
+				});
+	if (owner)
+		await ownerUpdateProgress(owner, {
+			migration_phase: "projection",
+			projection_cursor_slot: profile.projectionSlot ?? "active",
+			provider_endpoint: profile.baseUrl,
+		});
+	else
+		await updateProgressThroughAccessor(accessor, {
+			migration_phase: "projection",
+			projection_cursor_slot: profile.projectionSlot ?? "active",
+			provider_endpoint: profile.baseUrl,
+		});
+	await rebuildVectorIndex(
+		accessor,
+		profile.projectionSlot,
+		profile.dimensions,
+		batchSize,
+		shouldContinue,
+		owner,
+		cursor.lastId,
+		persistCursor,
+	);
 	if (owner) {
 		await ownerBatch(
 			owner,
@@ -412,6 +542,12 @@ async function completeProjectionRebuild(
 			],
 			ownerMaintenanceOptions("embedding-index.promote-complete"),
 		);
+		await ownerUpdateProgress(owner, {
+			migration_phase: null,
+			projection_cursor_last_id: null,
+			projection_cursor_slot: null,
+			no_progress_ticks: 0,
+		});
 		return;
 	}
 	const completed = await withQueuedWrite(accessor, (db) => {
@@ -435,6 +571,12 @@ async function completeProjectionRebuild(
 		return true;
 	});
 	if (!completed) throw new Error("Embedding vector rebuild state changed before completion");
+	await updateProgressThroughAccessor(accessor, {
+		migration_phase: null,
+		projection_cursor_last_id: null,
+		projection_cursor_slot: null,
+		no_progress_ticks: 0,
+	});
 }
 
 export function stagingCoverage(
@@ -868,10 +1010,17 @@ async function promoteStagingIndexThroughOwner(
 ): Promise<boolean> {
 	const state = await ownerReadState(owner);
 	if (state?.state !== "building" || !state.staging || state.staging.projectionRebuild) return false;
-	if (!(await ownerStagingCoverage(owner, state.staging.dimensions, state.staging.fingerprint)).ready) return false;
+	const coverage = await ownerStagingCoverage(owner, state.staging.dimensions, state.staging.fingerprint);
+	if (!coverage.ready) return false;
 	const stagingVectorTable = vectorTableForSlot(state.staging.projectionSlot);
 	const activeVectorTable = vectorTableForSlot(state.active.projectionSlot);
 	if (!(await ownerTableExists(owner, stagingVectorTable))) return false;
+	await ownerUpdateProgress(owner, {
+		migration_phase: "promoting",
+		progress_staged: coverage.staged,
+		progress_total: coverage.active,
+		provider_endpoint: state.staging.baseUrl,
+	});
 	const rebuildVectorIndex =
 		(await ownerIsVecVirtualTable(owner, activeVectorTable)) &&
 		(await ownerIsVecVirtualTable(owner, stagingVectorTable));
@@ -928,22 +1077,46 @@ async function beginEmbeddingIndexBuildThroughOwner(
 		...profileForStorageForOwner(stagingConfig),
 		projectionSlot: current.active.projectionSlot === "staging" ? ("active" as const) : ("staging" as const),
 	};
-	if (current.state === "building" && current.staging?.fingerprint === staging.fingerprint) return current;
-	if (current.active.fingerprint === staging.fingerprint) {
-		if (current.state !== "building") return current;
+	if (
+		current.state === "building" &&
+		current.staging !== null &&
+		embeddingProfileFingerprintsEqual(current.staging.fingerprint, staging.fingerprint)
+	)
+		return current;
+	if (embeddingProfileFingerprintsEqual(current.active.fingerprint, staging.fingerprint)) {
+		const normalizedActive = { ...current.active, fingerprint: staging.fingerprint, baseUrl: cfg.base_url };
+		if (current.state !== "building") {
+			await ownerUpdateProgress(owner, { provider_endpoint: cfg.base_url });
+			await ownerRun(
+				owner,
+				"UPDATE embedding_index_state SET active_profile_json = ? WHERE id = 1",
+				[JSON.stringify(normalizedActive)],
+				ownerMaintenanceOptions("embedding-index.normalize-profile"),
+			);
+			return { active: normalizedActive, staging: null, state: "ready", lastError: null };
+		}
 		await ownerBatch(
 			owner,
 			[
 				{ sql: "DELETE FROM embeddings_staging" },
 				{
-					sql: "UPDATE embedding_index_state SET staging_profile_json = NULL, state = 'ready', last_error = NULL, updated_at = ? WHERE id = 1 AND state = 'building'",
-					params: [new Date().toISOString()],
+					sql: "UPDATE embedding_index_state SET active_profile_json = ?, staging_profile_json = NULL, state = 'ready', last_error = NULL, updated_at = ? WHERE id = 1 AND state = 'building'",
+					params: [JSON.stringify(normalizedActive), new Date().toISOString()],
 					requireChanges: true,
 				},
 			],
 			ownerMaintenanceOptions("embedding-index.abandon"),
 		);
-		return { active: current.active, staging: null, state: "ready", lastError: null };
+		await ownerUpdateProgress(owner, {
+			migration_phase: null,
+			progress_staged: 0,
+			progress_total: 0,
+			projection_cursor_last_id: null,
+			projection_cursor_slot: null,
+			no_progress_ticks: 0,
+			provider_endpoint: cfg.base_url,
+		});
+		return { active: normalizedActive, staging: null, state: "ready", lastError: null };
 	}
 	await ownerBatch(
 		owner,
@@ -957,6 +1130,20 @@ async function beginEmbeddingIndexBuildThroughOwner(
 		],
 		ownerMaintenanceOptions("embedding-index.begin"),
 	);
+	await ownerUpdateProgress(owner, {
+		migration_phase: "staging",
+		progress_staged: 0,
+		progress_total: await ownerReadAll<{ readonly n: number }>(
+			owner,
+			"SELECT COUNT(*) AS n FROM embeddings",
+			[],
+			ownerMaintenanceOptions("embedding-index.progress-total"),
+		).then((rows) => rows[0]?.n ?? 0),
+		projection_cursor_last_id: null,
+		projection_cursor_slot: null,
+		no_progress_ticks: 0,
+		provider_endpoint: cfg.base_url,
+	});
 	return { active: current.active, staging, state: "building", lastError: null };
 }
 
@@ -1070,6 +1257,12 @@ export async function startEmbeddingIndexMigration(input: {
 	// a model-specific retrieval prefix.
 	if (input.configured.provider === "none") return null;
 
+	// Embedding migration owns a long-lived fetch/SQL loop. It must run in the
+	// killable DB owner; an async wrapper around the parent accessor is not a
+	// boundary and is forbidden because it can wedge the daemon isolate.
+	const migrationOwner = input.owner;
+	if (!migrationOwner) throw new Error("Embedding migration requires owner");
+
 	let running = true;
 	let timer: ReturnType<typeof setTimeout> | null = null;
 	let staged = 0;
@@ -1079,28 +1272,23 @@ export async function startEmbeddingIndexMigration(input: {
 	// eventually fail the build (#1160) so a stale/stuck build cannot spin at
 	// ~100% CPU forever retrying an unreachable provider.
 	let consecutiveFailures = 0;
+	let noProgressTicks = 0;
 	let nextDelayMs = input.pollMs;
 	let tickPromise: Promise<void> | null = null;
 
-	const before = input.owner
-		? await ownerReadState(input.owner)
-		: await input.accessor.withReadDbAsync(async (db) => readEmbeddingIndexState(db));
-	const initial = input.owner
-		? await beginEmbeddingIndexBuildThroughOwner(input.owner, input.configured)
-		: await withQueuedWrite(input.accessor, (db) => beginEmbeddingIndexBuild(db, input.configured));
+	const before = await ownerReadState(migrationOwner);
+	const initial = await beginEmbeddingIndexBuildThroughOwner(migrationOwner, input.configured);
 	const staging = initial.staging;
 	if (initial.state !== "building" || !staging) return null;
 	if (staging.projectionRebuild) {
 		try {
-			await completeProjectionRebuild(input.accessor, staging, undefined, undefined, input.owner);
-			if (input.owner)
-				await ownerRun(
-					input.owner,
-					"PRAGMA incremental_vacuum",
-					[],
-					ownerMaintenanceOptions("embedding-index.incremental-vacuum"),
-				);
-			else if (input.accessor.incrementalVacuumAsync) await input.accessor.incrementalVacuumAsync();
+			await completeProjectionRebuild(input.accessor, staging, undefined, undefined, migrationOwner);
+			await ownerRun(
+				migrationOwner,
+				"PRAGMA incremental_vacuum",
+				[],
+				ownerMaintenanceOptions("embedding-index.incremental-vacuum"),
+			);
 			input.onPromoted?.();
 		} catch (error) {
 			logger.warn("embedding", "Interrupted vector projection rebuild remains queued for retry", {
@@ -1109,35 +1297,25 @@ export async function startEmbeddingIndexMigration(input: {
 		}
 		return null;
 	}
-	const resumeExistingBuild = before?.state === "building" && before.staging?.fingerprint === staging.fingerprint;
+	const resumeExistingBuild =
+		before?.state === "building" &&
+		before.staging !== null &&
+		before.staging !== undefined &&
+		embeddingProfileFingerprintsEqual(before.staging.fingerprint, staging.fingerprint);
 	try {
 		if (resumeExistingBuild) {
-			const hasStagingVectorIndex = input.owner
-				? await ownerTableExists(input.owner, vectorTableForSlot(staging.projectionSlot))
-				: await input.accessor.withReadDbAsync(async (db) =>
-						tableExists(db, vectorTableForSlot(staging.projectionSlot)),
-					);
+			const hasStagingVectorIndex = await ownerTableExists(migrationOwner, vectorTableForSlot(staging.projectionSlot));
 			if (!hasStagingVectorIndex) throw new Error("Staging vector index is unavailable while resuming a build");
 		} else {
-			if (input.owner)
-				await resetStagingVectorIndexThroughOwner(input.owner, staging.dimensions, staging.projectionSlot);
-			else
-				await withQueuedWrite(input.accessor, (db) =>
-					resetStagingVectorIndex(db, staging.dimensions, staging.projectionSlot),
-				);
+			await resetStagingVectorIndexThroughOwner(migrationOwner, staging.dimensions, staging.projectionSlot);
 		}
 	} catch (error) {
-		if (input.owner)
-			await ownerRun(
-				input.owner,
-				"UPDATE embedding_index_state SET state = 'failed', last_error = ?, updated_at = ? WHERE id = 1",
-				[error instanceof Error ? error.message : String(error), new Date().toISOString()],
-				ownerMaintenanceOptions("embedding-index.fail"),
-			);
-		else
-			await withQueuedWrite(input.accessor, (db) =>
-				failEmbeddingIndexBuild(db, error instanceof Error ? error.message : String(error)),
-			);
+		await ownerRun(
+			migrationOwner,
+			"UPDATE embedding_index_state SET state = 'failed', last_error = ?, updated_at = ? WHERE id = 1",
+			[error instanceof Error ? error.message : String(error), new Date().toISOString()],
+			ownerMaintenanceOptions("embedding-index.fail"),
+		);
 		return null;
 	}
 
@@ -1145,21 +1323,17 @@ export async function startEmbeddingIndexMigration(input: {
 		if (!running) return;
 		nextDelayMs = input.pollMs;
 		try {
-			const state = input.owner
-				? await ownerReadState(input.owner)
-				: await input.accessor.withReadDbAsync(async (db) => readEmbeddingIndexState(db));
+			const state = await ownerReadState(migrationOwner);
 			if (state?.state !== "building" || !state.staging) return;
 			if (state.staging.projectionRebuild) {
 				try {
-					await completeProjectionRebuild(input.accessor, state.staging, undefined, () => running, input.owner);
-					if (input.owner)
-						await ownerRun(
-							input.owner,
-							"PRAGMA incremental_vacuum",
-							[],
-							ownerMaintenanceOptions("embedding-index.incremental-vacuum"),
-						);
-					else if (input.accessor.incrementalVacuumAsync) await input.accessor.incrementalVacuumAsync();
+					await completeProjectionRebuild(input.accessor, state.staging, undefined, () => running, migrationOwner);
+					await ownerRun(
+						migrationOwner,
+						"PRAGMA incremental_vacuum",
+						[],
+						ownerMaintenanceOptions("embedding-index.incremental-vacuum"),
+					);
 					running = false;
 					input.onPromoted?.();
 				} catch (error) {
@@ -1176,9 +1350,7 @@ export async function startEmbeddingIndexMigration(input: {
 			// from disk each tick): a no-op when nothing changed, a restart when
 			// the config did.
 			const configured = input.readConfigured ? input.readConfigured() : input.configured;
-			const restarted = input.owner
-				? await beginEmbeddingIndexBuildThroughOwner(input.owner, configured)
-				: await withQueuedWrite(input.accessor, (db) => beginEmbeddingIndexBuild(db, configured));
+			const restarted = await beginEmbeddingIndexBuildThroughOwner(migrationOwner, configured);
 			if (restarted.state !== "building" || !restarted.staging) {
 				// The live config now matches the active generation, so begin
 				// abandoned the in-flight build; stop polling until a new build
@@ -1192,16 +1364,11 @@ export async function startEmbeddingIndexMigration(input: {
 					"embedding",
 					"Embedding config changed during migration; restarting the staging build with the current profile",
 				);
-				if (input.owner)
-					await resetStagingVectorIndexThroughOwner(
-						input.owner,
-						currentStaging.dimensions,
-						currentStaging.projectionSlot,
-					);
-				else
-					await withQueuedWrite(input.accessor, (db) =>
-						resetStagingVectorIndex(db, currentStaging.dimensions, currentStaging.projectionSlot),
-					);
+				await resetStagingVectorIndexThroughOwner(
+					migrationOwner,
+					currentStaging.dimensions,
+					currentStaging.projectionSlot,
+				);
 				consecutiveFailures = 0;
 				return;
 			}
@@ -1222,23 +1389,15 @@ export async function startEmbeddingIndexMigration(input: {
 					const nextAttemptAt = new Date(
 						Date.now() + Math.min(input.pollMs * 2 ** Math.min(consecutiveFailures, 6), MAX_PROVIDER_BACKOFF_MS),
 					).toISOString();
-					if (input.owner)
-						await ownerRun(
-							input.owner,
-							"UPDATE embedding_index_state SET state = 'failed', last_error = ?, updated_at = ? WHERE id = 1",
-							[
-								persistEmbeddingIndexFailure(message, { cause: "provider-unavailable", nextAttemptAt }),
-								new Date().toISOString(),
-							],
-							ownerMaintenanceOptions("embedding-index.fail"),
-						);
-					else
-						await withQueuedWrite(input.accessor, (db) =>
-							failEmbeddingIndexBuild(db, message, new Date().toISOString(), {
-								cause: "provider-unavailable",
-								nextAttemptAt,
-							}),
-						);
+					await ownerRun(
+						migrationOwner,
+						"UPDATE embedding_index_state SET state = 'failed', last_error = ?, updated_at = ? WHERE id = 1",
+						[
+							persistEmbeddingIndexFailure(message, { cause: "provider-unavailable", nextAttemptAt }),
+							new Date().toISOString(),
+						],
+						ownerMaintenanceOptions("embedding-index.fail"),
+					);
 					running = false;
 					return;
 				}
@@ -1246,12 +1405,37 @@ export async function startEmbeddingIndexMigration(input: {
 				return;
 			}
 			consecutiveFailures = 0;
-			const result = await stageEmbeddingBatch({ ...input, owner: input.owner });
+			const result = await stageEmbeddingBatch({ ...input, owner: migrationOwner });
 			staged += result.staged;
 			coverage = result.coverage;
+			if (coverage !== null && !coverage.ready && result.staged === 0) {
+				noProgressTicks++;
+			} else {
+				noProgressTicks = 0;
+			}
+			if (coverage !== null) {
+				await ownerUpdateProgress(migrationOwner, {
+					migration_phase: "staging",
+					progress_staged: coverage.staged,
+					progress_total: coverage.active,
+					no_progress_ticks: noProgressTicks,
+					provider_endpoint: providerCfg.base_url,
+				});
+			}
+			if (noProgressTicks >= MAX_CONSECUTIVE_NO_PROGRESS_TICKS) {
+				const message = `Embedding migration made no staging progress for ${noProgressTicks} consecutive ticks`;
+				await ownerRun(
+					migrationOwner,
+					"UPDATE embedding_index_state SET state = 'failed', last_error = ?, updated_at = ? WHERE id = 1",
+					[message, new Date().toISOString()],
+					ownerMaintenanceOptions("embedding-index.no-progress"),
+				);
+				running = false;
+				return;
+			}
 			if (
 				coverage?.ready &&
-				(await promoteStagingIndex(input.accessor, { shouldContinue: () => running, owner: input.owner }))
+				(await promoteStagingIndex(input.accessor, { shouldContinue: () => running, owner: migrationOwner }))
 			) {
 				running = false;
 				input.onPromoted?.();
@@ -1266,16 +1450,10 @@ export async function startEmbeddingIndexMigration(input: {
 				running = false;
 				return;
 			}
-			const owner = input.owner;
-			const pendingProjection = owner
-				? await (async () => {
-						const current = await ownerReadState(owner);
-						return current?.state === "building" && current.staging?.projectionRebuild === true;
-					})()
-				: await input.accessor.withReadDbAsync(async (db) => {
-						const current = readEmbeddingIndexState(db);
-						return current?.state === "building" && current.staging?.projectionRebuild === true;
-					});
+			const pendingProjection = await (async () => {
+				const current = await ownerReadState(migrationOwner);
+				return current?.state === "building" && current.staging?.projectionRebuild === true;
+			})();
 			if (pendingProjection) {
 				logger.warn("embedding", "Vector projection rebuild remains queued for retry", {
 					error: error instanceof Error ? error.message : String(error),
@@ -1285,17 +1463,12 @@ export async function startEmbeddingIndexMigration(input: {
 			consecutiveFailures++;
 			failed++;
 			try {
-				if (input.owner)
-					await ownerRun(
-						input.owner,
-						"UPDATE embedding_index_state SET state = 'failed', last_error = ?, updated_at = ? WHERE id = 1",
-						[error instanceof Error ? error.message : String(error), new Date().toISOString()],
-						ownerMaintenanceOptions("embedding-index.fail"),
-					);
-				else
-					await withQueuedWrite(input.accessor, (db) =>
-						failEmbeddingIndexBuild(db, error instanceof Error ? error.message : String(error)),
-					);
+				await ownerRun(
+					migrationOwner,
+					"UPDATE embedding_index_state SET state = 'failed', last_error = ?, updated_at = ? WHERE id = 1",
+					[error instanceof Error ? error.message : String(error), new Date().toISOString()],
+					ownerMaintenanceOptions("embedding-index.fail"),
+				);
 			} catch (persistError) {
 				logger.warn("embedding", "Failed to persist embedding migration failure", {
 					error: persistError instanceof Error ? persistError.message : String(persistError),
