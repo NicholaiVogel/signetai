@@ -128,6 +128,25 @@ export interface DbOwnerNativeMemoryIndex {
 	readonly sourceParentPath: string | null;
 	readonly sourceMetaJson: string | null;
 	readonly displayName: string;
+	/** Source-worker prepared chunks and configuration for owner-side embedding. */
+	readonly embedding?: {
+		readonly config: {
+			readonly provider: string;
+			readonly model: string;
+			readonly dimensions: number;
+			readonly base_url: string;
+			readonly api_key?: string;
+			readonly profile?: string;
+			readonly warmNative?: boolean;
+			readonly indexGeneration?: string;
+			readonly llamaCppMaxInputTokens?: number;
+			readonly costRates?: readonly unknown[];
+		};
+		readonly chunks: readonly {
+			readonly id: string;
+			readonly chunkText: string;
+		}[];
+	};
 	/** Durable per-file frontier update committed with the artifact transaction. */
 	readonly checkpoint?: {
 		readonly sourceKey: string;

@@ -304,13 +304,17 @@ export async function dbOwnerSourceArtifactIndex(
 export async function dbOwnerSourceNativeMemoryIndex(
 	input: DbOwnerNativeMemoryIndex,
 	options: DbOwnerSqlOptions,
-): Promise<{ readonly artifactChanged: boolean; readonly graphIndexed: boolean }> {
+): Promise<{
+	readonly artifactChanged: boolean;
+	readonly graphIndexed: boolean;
+	readonly embeddingProviderUnavailable: boolean;
+}> {
 	const owner = await getDbOwner();
-	return await submitWithAdmission<{ readonly artifactChanged: boolean; readonly graphIndexed: boolean }>(
-		owner,
-		{ kind: "source_native_memory_index", input },
-		{ ...options, lane: options.lane ?? "write" },
-	);
+	return await submitWithAdmission<{
+		readonly artifactChanged: boolean;
+		readonly graphIndexed: boolean;
+		readonly embeddingProviderUnavailable: boolean;
+	}>(owner, { kind: "source_native_memory_index", input }, { ...options, lane: options.lane ?? "write" });
 }
 
 export async function dbOwnerSourceArtifactPurge(

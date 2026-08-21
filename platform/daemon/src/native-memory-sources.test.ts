@@ -1856,6 +1856,7 @@ describe("native memory sources", () => {
 				pollIntervalMs: 0,
 				sourceFileDelayMs: 0,
 				sourceGraphEnabled: false,
+				workerOwnedIndexing: true,
 			},
 		);
 		try {
@@ -1994,6 +1995,92 @@ describe("native memory sources", () => {
 		}
 		expect(restartedIndexed).toHaveLength(1);
 		expect(restartedIndexed[0]).not.toBe(firstIndexed[0]);
+	});
+
+	it("keeps embedding work and the crash-window frontier in the owner process", async () => {
+		const root = join(dir, "owner-embedding-resume-source");
+		mkdirSync(root, { recursive: true });
+		const firstPath = join(root, "note-a.md");
+		const secondPath = join(root, "note-b.md");
+		writeFileSync(
+			firstPath,
+			"# Owner A\n\nThe first owner-indexed source note has enough content for a durable chunk.\n",
+		);
+		writeFileSync(
+			secondPath,
+			"# Owner B\n\nThe second owner-indexed source note proves restart resumes at the next frontier.\n",
+		);
+		const provider = Bun.serve({
+			port: 0,
+			fetch: () => Response.json({ data: [{ embedding: [1, 2, 3] }] }),
+		});
+		let parentEmbeddingCalls = 0;
+		const source = obsidianNativeMemorySource(root, "Owner embedding source", "obsidian:owner-embedding");
+		const embeddingConfig = {
+			provider: "openai" as const,
+			model: "owner-test",
+			dimensions: 3,
+			base_url: `http://127.0.0.1:${provider.port}/v1`,
+			api_key: "test",
+			indexGeneration: "staging" as const,
+		};
+		const firstIndexed: string[] = [];
+		const first = startNativeMemoryBridge([source], {
+			agentId: "agent-owner-embedding",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 2,
+			sourceGraphEnabled: false,
+			workerOwnedIndexing: true,
+			embeddingConfig,
+			fetchEmbedding: async () => {
+				parentEmbeddingCalls++;
+				return [9, 9, 9];
+			},
+			onFileIndexed: ({ filePath }) => {
+				firstIndexed.push(filePath);
+				if (firstIndexed.length === 1) first.cancel();
+			},
+		});
+		try {
+			await expect(first.syncExisting()).rejects.toThrow(/native source sync cancelled|native source worker/);
+		} finally {
+			await first.close();
+		}
+		expect(parentEmbeddingCalls).toBe(0);
+		expect(firstIndexed).toHaveLength(1);
+		const checkpoint = await dbOwnerQuery<readonly { readonly frontier: string | null; readonly complete: number }[]>(
+			ownerStatement(
+				"SELECT frontier, complete FROM source_sync_checkpoints WHERE agent_id = ? AND source_key = ? AND phase = 'content'",
+				["agent-owner-embedding", `agent-owner-embedding:obsidian:${root}`],
+				"all",
+			),
+			{ operation: "test.owner-embedding.frontier", lane: "read" },
+		);
+		expect(JSON.parse(checkpoint[0]?.frontier ?? "[]")).toHaveLength(1);
+		expect(checkpoint[0]?.complete).toBe(0);
+
+		const restartedIndexed: string[] = [];
+		const restarted = startNativeMemoryBridge([source], {
+			agentId: "agent-owner-embedding",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+			workerOwnedIndexing: true,
+			embeddingConfig,
+			fetchEmbedding: async () => {
+				parentEmbeddingCalls++;
+				return [9, 9, 9];
+			},
+			onFileIndexed: ({ filePath }) => restartedIndexed.push(filePath),
+		});
+		try {
+			expect(await restarted.syncExisting()).toBe(1);
+		} finally {
+			await restarted.close();
+			provider.stop();
+		}
+		expect(restartedIndexed).toEqual([secondPath]);
+		expect(parentEmbeddingCalls).toBe(0);
 	});
 
 	it("kills only the source worker and leaves the DB owner usable", async () => {

@@ -111,6 +111,8 @@ export interface NativeMemoryBridgeOptions {
 	readonly sourceGraphEnabled?: boolean;
 	/** Test and bounded-scan override. Production scans use the 50,000-file cap. */
 	readonly maxFilesPerScan?: number;
+	/** Production native scans route descriptors through the killable DB owner. */
+	readonly workerOwnedIndexing?: boolean;
 	readonly shouldContinue?: (source: NativeMemorySource) => boolean;
 	readonly onEmbeddingStatus?: (status: string | undefined) => void;
 	readonly onFileIndexed?: (event: NativeMemoryFileIndexEvent) => void;
@@ -882,6 +884,7 @@ export async function indexNativeMemoryFile(
 		readonly lineCount?: number;
 		readonly rolloutId?: string;
 		readonly chunks?: readonly ObsidianSourceChunk[];
+		readonly workerOwnedIndexing?: boolean;
 		readonly syncCheckpoint?: {
 			readonly sourceKey: string;
 			readonly scanned: number;
@@ -1074,7 +1077,10 @@ export async function indexNativeMemoryFile(
 				sourceParentPath: externalId ? dirname(externalId).replace(/^\.$/, "") : null,
 				sourceMetaJson: sourceMeta === undefined ? null : JSON.stringify(sourceMeta),
 				displayName: source.displayName,
-				...(options.syncCheckpoint && !embeddingRequested ? { checkpoint: options.syncCheckpoint } : {}),
+				...(options.syncCheckpoint ? { checkpoint: options.syncCheckpoint } : {}),
+				...(options.workerOwnedIndexing && obsidian && sourceId && options.embeddingConfig && options.chunks
+					? { embedding: { config: options.embeddingConfig, chunks: options.chunks } }
+					: {}),
 				...(obsidian && sourceId && graphRequested
 					? {
 							graph: {
@@ -1094,8 +1100,10 @@ export async function indexNativeMemoryFile(
 			},
 		);
 		let semanticIndexed = ownerResult.graphIndexed;
-		let embeddingProviderUnavailable = false;
-		if (obsidian && sourceId) {
+		let embeddingProviderUnavailable = ownerResult.embeddingProviderUnavailable;
+		if (options.workerOwnedIndexing && embeddingProviderUnavailable)
+			options.onEmbeddingStatus?.("embeddings pending - provider down");
+		if (obsidian && sourceId && !options.workerOwnedIndexing) {
 			if (options.embeddingConfig && options.fetchEmbedding) {
 				const embeddingResult = await indexObsidianSourceEmbeddingsViaOwner({
 					agentId,
@@ -1351,7 +1359,7 @@ export function startNativeMemoryBridge(
 				const rootExists = await pathExists(source.root, source, agentId);
 				const dbAvailable = hasDbAccessor();
 				const syncState = rootExists && dbAvailable ? await readNativeSourceSyncState(agentId, source, signal) : null;
-				if (sourceNeedsProvider(source, options)) {
+				if (sourceNeedsProvider(source, options) && !options.workerOwnedIndexing) {
 					const provider = await sourceProviderGate(agentId, options, signal);
 					if (!provider.available) {
 						await persistNativeSourceSyncState({
@@ -1479,16 +1487,6 @@ export function startNativeMemoryBridge(
 									signal,
 								});
 								break;
-							}
-							if (dbAvailable && sourceNeedsProvider(source, options)) {
-								await writeNativeSourceSyncCheckpoint(
-									agentId,
-									key,
-									"content",
-									{ cursor: file.path.replace(/\\/g, "/"), frontier: null, complete: false },
-									scanned,
-									signal,
-								);
 							}
 							resumeCheckpointPath = file.path.replace(/\\/g, "/");
 							await yielder();
