@@ -1,5 +1,6 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { Writable } from "node:stream";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "bun:test";
@@ -24,26 +25,30 @@ async function fixture(): Promise<{
 }
 
 describe("native source worker", () => {
-	it("does not complete a delayed drain early", async () => {
-		const stdin = new EventEmitter() as unknown as NodeJS.WritableStream;
-		let settled = false;
-		const drain = waitForNativeSourceWorkerDrain(stdin).then(() => {
-			settled = true;
+	it("does not complete a scan before a real backpressured command drains", async () => {
+		const { root } = await fixture();
+		const source = {
+			root,
+			files: [
+				{ glob: "**/*.md", kind: "markdown" },
+				...Array.from({ length: 4096 }, (_, index) => ({
+					glob: `never-match-${index}-${"x".repeat(64)}`,
+					kind: "markdown",
+				})),
+			],
+		};
+		type TestStdin = NodeJS.WritableStream & {
+			readonly writableHighWaterMark: number;
+			write: (...args: unknown[]) => boolean;
+		};
+		let stdin!: TestStdin;
+		let commandWritten!: () => void;
+		const command = new Promise<void>((resolve) => {
+			commandWritten = resolve;
 		});
-
-		await Bun.sleep(0);
-		expect(settled).toBe(false);
-		stdin.emit("drain");
-		await drain;
-		expect(settled).toBe(true);
-	});
-
-	it("does not complete a scan before its command drain resolves", async () => {
-		const { source } = await fixture();
-		let release!: () => void;
-		const drain = new Promise<void>((resolve) => {
-			release = resolve;
-		});
+		let commandBytes = 0;
+		let commandWriteReturnedFalse = false;
+		let releaseWrite!: () => void;
 		let scanStarted!: () => void;
 		const started = new Promise<void>((resolve) => {
 			scanStarted = resolve;
@@ -53,12 +58,30 @@ describe("native source worker", () => {
 			resultDelivered = resolve;
 		});
 		const worker = createNativeSourceWorker({
+			wrapStdin: (rawStdin) => {
+				const backpressuredStdin = new Writable({
+					highWaterMark: 1024,
+					write(chunk, _encoding, callback) {
+						rawStdin.write(chunk as string);
+						releaseWrite = callback;
+					},
+				}) as TestStdin;
+				stdin = backpressuredStdin;
+				const write = stdin.write.bind(stdin);
+				stdin.write = ((...args: unknown[]) => {
+					const result = write(...args);
+					const chunk = args[0];
+					if (typeof chunk === "string" && chunk.includes('"type":"scan"')) {
+						commandBytes = Buffer.byteLength(chunk, "utf8");
+						commandWriteReturnedFalse = result === false;
+						commandWritten();
+					}
+					return result;
+				}) as TestStdin["write"];
+				return stdin;
+			},
 			onScanStarted: scanStarted,
 			onScanResult: resultDelivered,
-			writeCommand: async (stdin, command) => {
-				stdin.write(command);
-				await drain;
-			},
 		});
 		let settled = false;
 		try {
@@ -66,15 +89,17 @@ describe("native source worker", () => {
 				settled = true;
 				return page;
 			});
+			await command;
+			expect(commandBytes).toBeGreaterThan(stdin.writableHighWaterMark);
+			expect(commandWriteReturnedFalse).toBe(true);
 			await started;
 			await result;
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect(settled).toBe(false);
-			release();
+			releaseWrite();
 			await scan;
 			expect(settled).toBe(true);
 		} finally {
-			release();
 			await worker.close();
 		}
 	});

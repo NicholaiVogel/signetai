@@ -319,6 +319,8 @@ export interface NativeSourceWorkerHandle {
 
 export function createNativeSourceWorker(
 	options: {
+		/** Test-only seam for exercising backpressure with a real Writable implementation. */
+		readonly wrapStdin?: (stdin: NodeJS.WritableStream) => NodeJS.WritableStream;
 		readonly onScanStarted?: () => void;
 		/** Test-only hook fired when the child has delivered a scan result. */
 		readonly onScanResult?: () => void;
@@ -397,9 +399,10 @@ export function createNativeSourceWorker(
 	}): Promise<NativeSourceWorkerPage> => {
 		await start();
 		const worker = child;
-		const stdin = worker?.stdin;
-		if (worker === null || stdin === null || stdin === undefined)
+		const rawStdin = worker?.stdin;
+		if (worker === null || rawStdin === null || rawStdin === undefined)
 			throw new Error("native source worker is unavailable");
+		const stdin = options.wrapStdin?.(rawStdin) ?? rawStdin;
 		const id = `source-scan-${process.pid}-${++sequence}`;
 		activeId = id;
 		let rejectResult!: (error: Error) => void;
