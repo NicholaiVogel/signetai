@@ -140,7 +140,7 @@ describe("migration framework", () => {
 			runMigrations(db);
 
 			const applied = db.query("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
-			expect(applied.version).toBe(142);
+			expect(applied.version).toBe(143);
 			expect(
 				db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_source_sync_state'").get(),
 			).toBeTruthy();

@@ -18,6 +18,7 @@ import { buildEmbeddingHealth } from "../embedding-health";
 import { stagingCoverage } from "../embedding-index-migration";
 import {
 	isActiveEmbeddingConfig,
+	readEmbeddingIndexMigrationProgress,
 	readEmbeddingIndexState,
 	resolveActiveEmbeddingConfig,
 } from "../embedding-index-state";
@@ -3775,11 +3776,14 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		const tracker = embeddingTrackerHandle?.getStats() ?? null;
 		const index = await getDbAccessor().withReadDbAsync(async (db) => {
 			const state = readEmbeddingIndexState(db);
-			return state?.staging
-				? { ...state, coverage: stagingCoverage(db, state.staging.dimensions, state.staging.fingerprint) }
-				: state;
+			return {
+				index: state?.staging
+					? { ...state, coverage: stagingCoverage(db, state.staging.dimensions, state.staging.fingerprint) }
+					: state,
+				migration: readEmbeddingIndexMigrationProgress(db, config.embedding),
+			};
 		});
-		return c.json({ ...status, tracker, index });
+		return c.json({ ...status, tracker, index: index.index, migration: index.migration });
 	});
 
 	// =========================================================================

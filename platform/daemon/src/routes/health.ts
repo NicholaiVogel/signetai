@@ -16,6 +16,7 @@ import { getAllFeatureFlags } from "../feature-flags";
 import { loadMemoryConfig } from "../memory-config";
 import { getCachedResourceSnapshot } from "../resource-monitor";
 import { getUpdateState } from "../update-system";
+import { readEmbeddingIndexMigrationProgress } from "../embedding-index-state";
 import {
 	AGENTS_DIR,
 	CURRENT_VERSION,
@@ -88,6 +89,7 @@ interface EmbeddingCheck {
 	readonly note?: string;
 	readonly error?: string;
 	readonly checkedAt?: string;
+	readonly migration?: ReturnType<typeof readEmbeddingIndexMigrationProgress>;
 }
 
 /** Embedding gates readiness when a provider is configured; "none" means intentionally disabled. */
@@ -103,9 +105,20 @@ async function checkEmbedding(): Promise<{ ok: boolean; detail: EmbeddingCheck; 
 			reason: `embedding config unavailable: ${msg}`,
 		};
 	}
+	let migration: ReturnType<typeof readEmbeddingIndexMigrationProgress> = null;
+	try {
+		migration = await getDbAccessor().withReadDbAsync((db) => readEmbeddingIndexMigrationProgress(db, cfg));
+	} catch {
+		// The provider probe remains useful while the database is initializing.
+	}
+	const migrationDetail = migration === null ? {} : { migration };
 
 	if (cfg.provider === "none") {
-		return { ok: true, detail: { provider: "none", available: true, note: "disabled" }, reason: null };
+		return {
+			ok: true,
+			detail: { provider: "none", available: true, note: "disabled", ...migrationDetail },
+			reason: null,
+		};
 	}
 
 	try {
@@ -117,21 +130,27 @@ async function checkEmbedding(): Promise<{ ok: boolean; detail: EmbeddingCheck; 
 		if (status.available) {
 			return {
 				ok: true,
-				detail: { provider: status.provider, available: true, checkedAt: status.checkedAt },
+				detail: { provider: status.provider, available: true, checkedAt: status.checkedAt, ...migrationDetail },
 				reason: null,
 			};
 		}
 		const err = status.error ?? "provider unreachable";
 		return {
 			ok: false,
-			detail: { provider: status.provider, available: false, error: err, checkedAt: status.checkedAt },
+			detail: {
+				provider: status.provider,
+				available: false,
+				error: err,
+				checkedAt: status.checkedAt,
+				...migrationDetail,
+			},
 			reason: `embedding provider ${status.provider} unavailable: ${err}`,
 		};
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		return {
 			ok: false,
-			detail: { provider: cfg.provider, available: false, error: msg },
+			detail: { provider: cfg.provider, available: false, error: msg, ...migrationDetail },
 			reason: msg === "embedding check timed out" ? msg : `embedding provider ${cfg.provider} unavailable: ${msg}`,
 		};
 	}

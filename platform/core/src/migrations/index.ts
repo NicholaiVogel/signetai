@@ -148,6 +148,7 @@ import { up as nativeSourceSyncState } from "./139-native-source-sync-state";
 import { up as transcriptRecoveryFrontier } from "./140-transcript-recovery-frontier";
 import { up as sourceSyncCheckpoints } from "./141-source-sync-checkpoints";
 import { up as sourceSyncFrontier } from "./142-source-sync-frontier";
+import { up as embeddingIndexProgress } from "./143-embedding-index-progress";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1305,6 +1306,22 @@ export const MIGRATIONS: readonly Migration[] = [
 		name: "source-sync-frontier",
 		up: sourceSyncFrontier,
 		artifacts: { columns: [{ table: "source_sync_checkpoints", column: "frontier" }] },
+	},
+	{
+		version: 143,
+		name: "embedding-index-progress",
+		up: embeddingIndexProgress,
+		artifacts: {
+			columns: [
+				{ table: "embedding_index_state", column: "migration_phase" },
+				{ table: "embedding_index_state", column: "progress_staged" },
+				{ table: "embedding_index_state", column: "progress_total" },
+				{ table: "embedding_index_state", column: "projection_cursor_last_id" },
+				{ table: "embedding_index_state", column: "projection_cursor_slot" },
+				{ table: "embedding_index_state", column: "no_progress_ticks" },
+				{ table: "embedding_index_state", column: "provider_endpoint" },
+			],
+		},
 	},
 ];
 
