@@ -56,6 +56,13 @@ export interface IndexObsidianSourceEmbeddingsInput {
 	readonly chunks?: readonly ObsidianSourceChunk[];
 	readonly embeddingConfig: EmbeddingConfig;
 	readonly fetchEmbedding: SourceEmbeddingFetch;
+	readonly checkpoint?: {
+		readonly sourceKey: string;
+		readonly scanned: number;
+		readonly cursor: string | null;
+		readonly frontier: readonly string[] | null;
+		readonly complete: boolean;
+	};
 	readonly signal?: AbortSignal;
 }
 
@@ -439,12 +446,37 @@ export async function indexObsidianSourceEmbeddingsViaOwner(
 		const staleIds = stale
 			.filter((row) => row.source_type === LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE || !currentHashes.has(row.content_hash))
 			.map((row) => row.id);
-		if (staleIds.length > 0) {
+		const checkpointStatement =
+			input.checkpoint === undefined
+				? null
+				: ownerStatement(
+						`INSERT INTO source_sync_checkpoints
+						 (agent_id, source_key, phase, cursor, frontier, scanned, complete, updated_at)
+						 VALUES (?, ?, 'content', ?, ?, ?, ?, datetime('now'))
+						 ON CONFLICT(agent_id, source_key, phase) DO UPDATE SET
+						 cursor = excluded.cursor,
+						 frontier = excluded.frontier,
+						 scanned = excluded.scanned,
+						 complete = excluded.complete,
+						 updated_at = excluded.updated_at`,
+						[
+							input.agentId,
+							input.checkpoint.sourceKey,
+							input.checkpoint.cursor,
+							input.checkpoint.frontier === null ? null : JSON.stringify(input.checkpoint.frontier),
+							input.checkpoint.scanned,
+							input.checkpoint.complete ? 1 : 0,
+						],
+					);
+		if (staleIds.length > 0 || checkpointStatement !== null) {
 			const statements = [
 				...(vecAvailable
 					? [ownerStatement(`DELETE FROM vec_embeddings WHERE id IN (${staleIds.map(() => "?").join(", ")})`, staleIds)]
 					: []),
-				ownerStatement(`DELETE FROM embeddings WHERE id IN (${staleIds.map(() => "?").join(", ")})`, staleIds),
+				...(staleIds.length > 0
+					? [ownerStatement(`DELETE FROM embeddings WHERE id IN (${staleIds.map(() => "?").join(", ")})`, staleIds)]
+					: []),
+				...(checkpointStatement === null ? [] : [checkpointStatement]),
 			];
 			await dbOwnerBatch(statements, {
 				operation: "sources.embeddings.owner.stale.delete",
@@ -596,7 +628,7 @@ export async function indexObsidianSourceEmbeddings(
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
 	const embeddingConfig = getDbAccessor().withReadDb(
 		(db: import("./db-accessor").ReadDb) => resolveActiveEmbeddingConfig(db, input.embeddingConfig),
-		"obsidian-source-embeddings.ts:597",
+		"obsidian-source-embeddings.ts:629",
 	);
 	if (embeddingConfig.provider === "none") return { chunks: 0, embedded: 0, skipped: 0, providerUnavailable: false };
 	const chunks = buildObsidianSourceChunks(input);
@@ -638,7 +670,7 @@ export async function indexObsidianSourceEmbeddings(
 						sourceId: existingChunk.id,
 						content: chunk.chunkText,
 					}),
-				"obsidian-source-embeddings.ts:633",
+				"obsidian-source-embeddings.ts:665",
 			);
 			skipped++;
 			await yielder();
@@ -648,7 +680,7 @@ export async function indexObsidianSourceEmbeddings(
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
 		const writeConfig = getDbAccessor().withReadDb(
 			(db: import("./db-accessor").ReadDb) => resolveActiveEmbeddingConfig(db, input.embeddingConfig),
-			"obsidian-source-embeddings.ts:649",
+			"obsidian-source-embeddings.ts:681",
 		);
 		let failureCause: PipelineCauseFamily = "provider_unavailable";
 		const vector = await input.fetchEmbedding(chunk.chunkText, writeConfig, "document", {
@@ -727,7 +759,7 @@ export async function indexObsidianSourceEmbeddings(
 				| undefined;
 			syncVecInsert(db, stored?.id ?? embId, vector);
 			return true;
-		}, "obsidian-source-embeddings.ts:683");
+		}, "obsidian-source-embeddings.ts:715");
 		if (!stored) {
 			skipped++;
 			await yielder();
@@ -765,7 +797,7 @@ export async function indexObsidianSourceEmbeddings(
 				const stmt = db.prepare("DELETE FROM embeddings WHERE id = ?");
 				for (const id of staleIds) stmt.run(id);
 			}
-		}, "obsidian-source-embeddings.ts:744");
+		}, "obsidian-source-embeddings.ts:776");
 
 	return {
 		chunks: chunks.length,
@@ -794,7 +826,7 @@ function existingChunkEmbedding(agentId: string, chunkId: string): { id: string;
 					"SELECT id, content_hash FROM embeddings WHERE source_type IN (?, ?) AND source_id = ? AND agent_id = ? LIMIT 1",
 				)
 				.get(SOURCE_CHUNK_SOURCE_TYPE, LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE, chunkId, agentId),
-		"obsidian-source-embeddings.ts:790",
+		"obsidian-source-embeddings.ts:822",
 	) as { id: string; content_hash: string } | undefined;
 	return row ?? null;
 }
@@ -835,7 +867,7 @@ function purgeEmbeddingsBySourceIdPrefix(prefix: string, agentId?: string): numb
 			changes += result.changes;
 		}
 		return changes;
-	}, "obsidian-source-embeddings.ts:813");
+	}, "obsidian-source-embeddings.ts:845");
 }
 
 function prefixUpperBound(prefix: string): string {

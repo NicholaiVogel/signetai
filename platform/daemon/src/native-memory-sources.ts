@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { lstat, readFile, stat } from "node:fs/promises";
 
 import { homedir } from "node:os";
@@ -113,6 +112,8 @@ export interface NativeMemoryBridgeOptions {
 	readonly maxFilesPerScan?: number;
 	/** Production native scans route descriptors through the killable DB owner. */
 	readonly workerOwnedIndexing?: boolean;
+	/** Test-only event hook used to kill a source worker during traversal. */
+	readonly onSourceWorkerScanStarted?: () => void;
 	readonly shouldContinue?: (source: NativeMemorySource) => boolean;
 	readonly onEmbeddingStatus?: (status: string | undefined) => void;
 	readonly onFileIndexed?: (event: NativeMemoryFileIndexEvent) => void;
@@ -308,7 +309,11 @@ function claudeCodeRoot(): string {
 }
 
 function sourceIdForCodexRoot(root: string): string {
-	return `codex_native_memory:${createHash("sha256").update(normalizedRoot(root)).digest("hex").slice(0, 16)}`;
+	return `codex_native_memory:${normalizedRoot(root)}`;
+}
+
+function sourceIdForHermesRoot(root: string): string {
+	return `hermes_native_memory:${normalizedRoot(root)}`;
 }
 
 function hermesProfileRoot(root: string): string {
@@ -325,10 +330,6 @@ function hermesProfileId(root: string): string {
 		if (profile.length > 0 && !profile.includes("/")) return profile;
 	}
 	return basename(normalized) === ".hermes" ? "default" : basename(normalized);
-}
-
-function sourceIdForHermesRoot(root: string): string {
-	return `hermes_native_memory:${createHash("sha256").update(normalizedRoot(root)).digest("hex").slice(0, 16)}`;
 }
 
 export function codexNativeMemorySource(root = codexRoot()): NativeMemorySource {
@@ -743,6 +744,7 @@ async function obsidianEmbeddingsExist(input: {
 function workerSource(source: NativeMemorySource): NativeSourceWorkerSource {
 	return {
 		root: source.root,
+		sourceRoot: source.sourceRoot,
 		harness: source.harness,
 		sourceId: source.sourceId,
 		files: source.files.map((pattern) => ({
@@ -884,6 +886,7 @@ export async function indexNativeMemoryFile(
 		readonly lineCount?: number;
 		readonly rolloutId?: string;
 		readonly chunks?: readonly ObsidianSourceChunk[];
+		readonly sourceId?: string;
 		readonly workerOwnedIndexing?: boolean;
 		readonly syncCheckpoint?: {
 			readonly sourceKey: string;
@@ -1004,7 +1007,9 @@ export async function indexNativeMemoryFile(
 	}
 	const obsidian = source.harness === "obsidian" && pattern.kind === "source_obsidian_markdown";
 	const hermes = source.harness === "hermes-agent";
-	const sourceId = obsidian ? (source.sourceId ?? sourceIdForObsidianRoot(source.root)) : (source.sourceId ?? null);
+	const sourceId = obsidian
+		? (options.sourceId ?? source.sourceId ?? sourceIdForObsidianRoot(source.root))
+		: (options.sourceId ?? source.sourceId ?? null);
 	const graphRequested = obsidian && (options.sourceGraphEnabled ?? true);
 	const embeddingRequested =
 		obsidian &&
@@ -1077,7 +1082,9 @@ export async function indexNativeMemoryFile(
 				sourceParentPath: externalId ? dirname(externalId).replace(/^\.$/, "") : null,
 				sourceMetaJson: sourceMeta === undefined ? null : JSON.stringify(sourceMeta),
 				displayName: source.displayName,
-				...(options.syncCheckpoint ? { checkpoint: options.syncCheckpoint } : {}),
+				...(options.syncCheckpoint && !(workerDescriptor && embeddingRequested && !options.workerOwnedIndexing)
+					? { checkpoint: options.syncCheckpoint }
+					: {}),
 				...(options.workerOwnedIndexing && obsidian && sourceId && options.embeddingConfig && options.chunks
 					? { embedding: { config: options.embeddingConfig, chunks: options.chunks } }
 					: {}),
@@ -1112,6 +1119,7 @@ export async function indexNativeMemoryFile(
 					filePath,
 					content,
 					chunks: options.chunks,
+					checkpoint: options.syncCheckpoint,
 					embeddingConfig: options.embeddingConfig,
 					fetchEmbedding: options.fetchEmbedding,
 					signal: options.signal,
@@ -1314,7 +1322,9 @@ export function startNativeMemoryBridge(
 ): NativeMemoryBridgeHandle {
 	const agentId = resolveBridgeAgentId(options.agentId);
 	const known = new Map<string, Set<string>>();
-	const sourceWorker = createNativeSourceWorker();
+	const sourceWorker = createNativeSourceWorker({
+		onScanStarted: () => options.onSourceWorkerScanStarted?.(),
+	});
 	let cancelRequested = false;
 	let lastSyncResult: NativeMemorySyncResult = { status: "complete", scanned: 0, indexed: 0, pausedSources: [] };
 
@@ -1425,6 +1435,7 @@ export function startNativeMemoryBridge(
 							}
 							break;
 						}
+						const pageScannedBefore = scanned;
 						for (const [fileIndex, file] of page.files.entries()) {
 							if (cancelRequested) throw new Error("native source sync cancelled");
 							if (resumePath && file.path.replace(/\\/g, "/") <= resumePath.replace(/\\/g, "/")) {
@@ -1441,6 +1452,7 @@ export function startNativeMemoryBridge(
 								chunks: file.chunks,
 								mtimeMs: file.mtimeMs,
 								contentHash: file.contentHash,
+								sourceId: file.sourceId,
 								lineCount: file.lineCount,
 								rolloutId: file.rolloutId,
 								syncCheckpoint: {
@@ -1496,7 +1508,7 @@ export function startNativeMemoryBridge(
 						cursor = page.nextCursor;
 						frontier = page.frontier;
 						pageComplete = page.complete;
-						if (dbAvailable) {
+						if (dbAvailable && scanned === pageScannedBefore) {
 							await writeNativeSourceSyncCheckpoint(
 								agentId,
 								key,

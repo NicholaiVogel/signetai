@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
-import { createNativeSourceWorker } from "./native-memory-source-worker";
+import { createNativeSourceWorker, NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES } from "./native-memory-source-worker";
 
 async function fixture(): Promise<{
 	readonly root: string;
@@ -75,5 +75,31 @@ describe("native source worker", () => {
 		});
 		await worker.close();
 		expect(page.files[0]?.chunks?.length).toBe(1);
+	});
+
+	it("derives Codex source IDs in the isolated worker", async () => {
+		const { root } = await fixture();
+		const worker = createNativeSourceWorker();
+		const page = await worker.scan({
+			source: { root, harness: "codex", files: [{ glob: "**/*.md", kind: "markdown" }] },
+			cursor: null,
+			pageSize: 1,
+		});
+		await worker.close();
+		expect(page.files[0]?.sourceId).toMatch(/^codex_native_memory:[0-9a-f]{16}$/);
+	});
+
+	it(`rejects a descriptor larger than the ${NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES}-byte IPC bound`, async () => {
+		const root = await mkdtemp(join(tmpdir(), "signet-native-source-worker-bound-"));
+		await writeFile(join(root, "huge.md"), "x".repeat(NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES + 1024));
+		const worker = createNativeSourceWorker();
+		await expect(
+			worker.scan({
+				source: { root, files: [{ glob: "**/*.md", kind: "markdown" }] },
+				cursor: null,
+				pageSize: 1,
+			}),
+		).rejects.toThrow(/IPC limit/);
+		await worker.close();
 	});
 });
