@@ -8,7 +8,8 @@ import {
 	purgeObsidianSourceFileStructureInTx,
 } from "./obsidian-source-graph";
 import { indexSourceArtifactStructureInTx, purgeSourceArtifactStructureInTx } from "./source-artifact-graph";
-import { upsertMemoryArtifactInTx } from "./memory-lineage";
+import { upsertMemoryArtifactInTx, type MemoryArtifactUpsertFields } from "./memory-lineage";
+import { NATIVE_MEMORY_BRIDGE_SOURCE_NODE_ID } from "./native-memory-constants";
 import { applySourceSnapshotImportInTx } from "./source-snapshots";
 import type {
 	DbOwnerCommand,
@@ -18,6 +19,7 @@ import type {
 	DbOwnerParameter,
 	DbOwnerRecallPayload,
 	DbOwnerStatement,
+	DbOwnerNativeMemoryIndex,
 } from "./db-owner-protocol";
 import {
 	DB_OWNER_MAX_DEADLINE_MS,
@@ -389,6 +391,91 @@ export function runDbOwnerWorker(): void {
 		}
 	}
 
+	function nativeMemoryArtifactFields(input: DbOwnerNativeMemoryIndex): MemoryArtifactUpsertFields {
+		const sourcePath = input.sourcePath.replace(/\\/g, "/");
+		const capturedAt = Number.isFinite(input.sourceMtimeMs)
+			? new Date(input.sourceMtimeMs).toISOString()
+			: new Date().toISOString();
+		return {
+			agentId: input.agentId,
+			sourcePath,
+			sourceSha256: input.sourceHash,
+			sourceKind: input.sourceKind,
+			sessionId: `native:${input.harness}:${sourcePath}`,
+			sessionKey: `native:${input.harness}`,
+			sessionToken: `native:${input.harness}`,
+			project: null,
+			harness: input.harness,
+			capturedAt,
+			startedAt: capturedAt,
+			endedAt: capturedAt,
+			manifestPath: null,
+			sourceNodeId: NATIVE_MEMORY_BRIDGE_SOURCE_NODE_ID,
+			memorySentence: `Indexed ${input.harness} native memory from ${sourcePath.split("/").at(-1) ?? sourcePath}.`,
+			memorySentenceQuality: "fallback",
+			content: input.content,
+			updatedAt: new Date().toISOString(),
+			sourceMtimeMs: input.sourceMtimeMs,
+			sourceId: input.sourceId,
+			sourceRoot: input.sourceRoot,
+			sourceExternalId: input.sourceExternalId,
+			sourceParentPath: input.sourceParentPath,
+			sourceMetaJson: input.sourceMetaJson,
+		};
+	}
+
+	function executeNativeMemoryIndex(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "source_native_memory_index" }>,
+		context?: JobExecutionContext,
+	): { readonly artifactChanged: boolean; readonly graphIndexed: boolean } {
+		const input = request.input;
+		const sourcePath = input.sourcePath.replace(/\\/g, "/");
+		const existing = db
+			.prepare(
+				"SELECT source_sha256 FROM memory_artifacts WHERE agent_id = ? AND source_path = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
+			)
+			.get(input.agentId, sourcePath) as { source_sha256: string } | null | undefined;
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			upsertMemoryArtifactInTx(db as unknown as BunDatabase, nativeMemoryArtifactFields(input));
+			if (input.graph !== undefined) {
+				applyObsidianSourceStructureInTx(db as unknown as import("./db-accessor").WriteDb, {
+					agentId: input.agentId,
+					sourceId: input.graph.sourceId,
+					sourceName: input.graph.sourceName,
+					root: input.graph.root,
+					filePath: sourcePath,
+					content: input.content,
+				});
+			}
+			if (input.checkpoint !== undefined) {
+				db.prepare(
+					`INSERT INTO source_sync_checkpoints
+					 (agent_id, source_key, phase, cursor, frontier, scanned, complete, updated_at)
+					 VALUES (?, ?, 'content', ?, NULL, ?, 0, datetime('now'))
+					 ON CONFLICT(agent_id, source_key, phase) DO UPDATE SET
+					 cursor = excluded.cursor,
+					 frontier = excluded.frontier,
+					 scanned = excluded.scanned,
+					 complete = excluded.complete,
+					 updated_at = excluded.updated_at`,
+				).run(input.agentId, input.checkpoint.sourceKey, sourcePath, input.checkpoint.scanned);
+			}
+			commit(context);
+			return {
+				artifactChanged: existing?.source_sha256 !== input.sourceHash,
+				graphIndexed: input.graph !== undefined,
+			};
+		} catch (error) {
+			try {
+				db.exec("ROLLBACK");
+			} catch {
+				// Preserve the original error.
+			}
+			throw error;
+		}
+	}
+
 	function executeSourceArtifactIndex(
 		request: Extract<DbOwnerJob["request"], { readonly kind: "source_artifact_index" }>,
 		context?: JobExecutionContext,
@@ -518,6 +605,7 @@ export function runDbOwnerWorker(): void {
 		)
 			return executeSourceGraph(job.request, context);
 		if (job.request.kind === "source_artifact_index") return executeSourceArtifactIndex(job.request, context);
+		if (job.request.kind === "source_native_memory_index") return executeNativeMemoryIndex(job.request, context);
 		if (job.request.kind === "source_artifact_purge") return executeSourceArtifactPurge(job.request, context);
 		if (job.request.kind === "vacuum_conversion") {
 			const { convertToIncrementalVacuum } = await import("./db-vacuum");

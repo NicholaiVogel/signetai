@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -175,7 +175,8 @@ describe("dataless / EDEADLK native artifact reads (#1161)", () => {
 
 			resetNativeMemoryIndexCache();
 			statError = () => null;
-			readdirError = (path) => (path === dir ? permissionError() : null);
+			readdirError = () => null;
+			chmodSync(dir, 0o000);
 			const readdirBridge = startNativeMemoryBridge([source], { agentId: "agent-readdir", pollIntervalMs: 0 });
 			await readdirBridge.syncExisting();
 			await readdirBridge.syncExisting();
@@ -188,6 +189,7 @@ describe("dataless / EDEADLK native artifact reads (#1161)", () => {
 		} finally {
 			logger.warn = originalWarn;
 			Object.defineProperty(process, "platform", { value: originalPlatform });
+			chmodSync(dir, 0o700);
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});

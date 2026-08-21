@@ -39,6 +39,7 @@ export interface NativeSourceWorkerPage {
 	readonly total: number;
 	readonly complete: boolean;
 	readonly frontier: readonly string[];
+	readonly permissionDeniedPaths: readonly string[];
 }
 
 interface ScanCommand {
@@ -122,6 +123,7 @@ async function scan(command: ScanCommand): Promise<NativeSourceWorkerPage> {
 	const pageSize = Math.max(1, Math.min(100, Math.trunc(command.pageSize)));
 	const frontier = [...(command.frontier ?? [command.source.root])];
 	const files: NativeSourceWorkerFile[] = [];
+	const permissionDeniedPaths: string[] = [];
 	while (frontier.length > 0 && files.length < pageSize) {
 		const path = frontier.pop();
 		if (path === undefined) break;
@@ -141,6 +143,7 @@ async function scan(command: ScanCommand): Promise<NativeSourceWorkerPage> {
 			const kind = matchesPattern(command.source, path);
 			if (kind === null) continue;
 			const content = await readFile(path, "utf8");
+			if (!content.trim()) continue;
 			const chunks =
 				command.source.harness === "obsidian" &&
 				command.source.sourceId !== undefined &&
@@ -160,7 +163,14 @@ async function scan(command: ScanCommand): Promise<NativeSourceWorkerPage> {
 				...contentMetadata(content),
 				...(chunks === undefined ? {} : { chunks }),
 			});
-		} catch {
+		} catch (error) {
+			if (
+				typeof error === "object" &&
+				error !== null &&
+				((error as NodeJS.ErrnoException).code === "EACCES" || (error as NodeJS.ErrnoException).code === "EPERM")
+			) {
+				permissionDeniedPaths.push(path);
+			}
 			// Files and directories can disappear while a source is being edited.
 		}
 	}
@@ -171,6 +181,7 @@ async function scan(command: ScanCommand): Promise<NativeSourceWorkerPage> {
 		total: files.length,
 		complete: frontier.length === 0,
 		frontier,
+		permissionDeniedPaths,
 	};
 }
 

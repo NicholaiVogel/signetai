@@ -6,6 +6,7 @@ import { addObsidianSource, loadSourcesConfig } from "@signet/core";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { dbOwnerQuery, ownerStatement } from "./db-owner-runtime";
 import { resetEmbeddingCircuitBreakers } from "./embedding-circuit-breaker";
+import { logger } from "./logger";
 import { resetObsidianSourceEmbeddingBackoff } from "./obsidian-source-embeddings";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
 import type { NativeMemoryBridgeOptions } from "./native-memory-sources";
@@ -1815,14 +1816,17 @@ describe("native memory sources", () => {
 		}
 	});
 
-	it("keeps the source scan off the parent synchronous SQLite surface", async () => {
+	it("keeps a 200-file mixed-size source scan off parent sync surfaces", async () => {
 		const root = join(dir, "large-source");
 		mkdirSync(root, { recursive: true });
-		for (let index = 0; index < 5; index += 1) {
-			writeFileSync(
-				join(root, `note-${index}.md`),
-				`# Note ${index}\n\nParent-side SQLite must not run during this source scan.\n`,
-			);
+		for (let index = 0; index < 200; index += 1) {
+			const content =
+				index % 3 === 0
+					? `# Small ${index}\n\nSmall native memory note ${index}.\n`
+					: index % 3 === 1
+						? `# Medium ${index}\n\n${"Medium native memory content. ".repeat(5)}\n`
+						: `# Large ${index}\n\n${"Large native memory content. ".repeat(15)}\n`;
+			writeFileSync(join(root, `note-${index}.md`), content);
 		}
 		const accessor = getDbAccessor() as typeof getDbAccessor extends () => infer T
 			? T & Record<string, unknown>
@@ -1838,23 +1842,42 @@ describe("native memory sources", () => {
 			parentCrossings += 1;
 			throw new Error("parent synchronous SQLite crossed during native source sync");
 		};
+		const criticalWarnings: string[] = [];
+		const originalWarn = logger.warn;
+		const originalInfo = logger.info;
+		logger.warn = ((_category: unknown, message: unknown) => {
+			if (/critical|event.?loop|block/i.test(String(message))) criticalWarnings.push(String(message));
+		}) as typeof logger.warn;
+		logger.info = (() => {}) as typeof logger.info;
 		const handle = startNativeMemoryBridge(
 			[obsidianNativeMemorySource(root, "Large source", "obsidian:large-source")],
 			{
 				agentId: "agent-native",
 				pollIntervalMs: 0,
+				sourceFileDelayMs: 0,
 				sourceGraphEnabled: false,
 			},
 		);
 		try {
-			expect(await handle.syncExisting()).toBe(5);
+			expect(await handle.syncExisting()).toBe(200);
 			expect(parentCrossings).toBe(0);
+			const implementation = readFileSync(new URL("./native-memory-sources.ts", import.meta.url), "utf8");
+			const indexingPath = implementation.slice(
+				implementation.indexOf("export async function indexNativeMemoryFile"),
+				implementation.indexOf("export async function removeNativeMemoryFile"),
+			);
+			expect(indexingPath).not.toMatch(/\b(?:readFileSync|statSync|lstatSync)\b/);
+			// This is the runtime attribution shim: warnings are inspected by
+			// category/message rather than inferred from elapsed wall-clock time.
+			expect(criticalWarnings).toEqual([]);
 		} finally {
+			logger.warn = originalWarn;
+			logger.info = originalInfo;
 			(accessor as Record<string, unknown>).withReadDb = originalRead;
 			(accessor as Record<string, unknown>).withWriteTx = originalWrite;
 			await handle.close();
 		}
-	});
+	}, 5_000);
 
 	it("kills only the source worker and leaves the DB owner usable", async () => {
 		const root = join(dir, "killable-source");

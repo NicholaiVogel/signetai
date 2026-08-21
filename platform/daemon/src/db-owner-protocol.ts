@@ -109,6 +109,37 @@ export interface DbOwnerSourceArtifactIndex {
 	readonly content: string;
 }
 
+/**
+ * The source/index owner receives a descriptor produced by the killable source
+ * worker. The parent never reads, hashes, or normalizes the file; this owner
+ * performs the artifact upsert and optional graph projection in one boundary.
+ */
+export interface DbOwnerNativeMemoryIndex {
+	readonly agentId: string;
+	readonly sourcePath: string;
+	readonly sourceHash: string;
+	readonly sourceKind: string;
+	readonly harness: string;
+	readonly content: string;
+	readonly sourceMtimeMs: number;
+	readonly sourceId: string | null;
+	readonly sourceRoot: string | null;
+	readonly sourceExternalId: string | null;
+	readonly sourceParentPath: string | null;
+	readonly sourceMetaJson: string | null;
+	readonly displayName: string;
+	/** Durable per-file frontier update committed with the artifact transaction. */
+	readonly checkpoint?: {
+		readonly sourceKey: string;
+		readonly scanned: number;
+	};
+	readonly graph?: {
+		readonly sourceId: string;
+		readonly sourceName: string;
+		readonly root: string;
+	};
+}
+
 export interface DbOwnerSourceArtifactFields {
 	readonly agentId: string;
 	readonly sourcePath: string;
@@ -161,6 +192,7 @@ export type DbOwnerRequest =
 	| { readonly kind: "source_graph_file_purge"; readonly input: DbOwnerSourceGraphFilePurge }
 	| { readonly kind: "source_graph_purge"; readonly input: DbOwnerSourceGraphPurge }
 	| { readonly kind: "source_artifact_index"; readonly input: DbOwnerSourceArtifactIndex }
+	| { readonly kind: "source_native_memory_index"; readonly input: DbOwnerNativeMemoryIndex }
 	| { readonly kind: "source_artifact_purge"; readonly input: DbOwnerSourceArtifactPurge }
 	| { readonly kind: "source_artifact_upsert"; readonly input: DbOwnerSourceArtifactUpsert }
 	| { readonly kind: "source_artifact_upsert_batch"; readonly input: readonly DbOwnerSourceArtifactUpsert[] }

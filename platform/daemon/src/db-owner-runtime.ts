@@ -15,6 +15,7 @@ import type {
 	DbOwnerSourceGraphPurge,
 	DbOwnerSourceSnapshotImport,
 	DbOwnerSourceArtifactIndex,
+	DbOwnerNativeMemoryIndex,
 	DbOwnerSourceArtifactPurge,
 	DbOwnerSourceArtifactUpsert,
 	DbOwnerStatement,
@@ -296,6 +297,18 @@ export async function dbOwnerSourceArtifactIndex(
 	return await submitWithAdmission<unknown>(
 		owner,
 		{ kind: "source_artifact_index", input },
+		{ ...options, lane: options.lane ?? "write" },
+	);
+}
+
+export async function dbOwnerSourceNativeMemoryIndex(
+	input: DbOwnerNativeMemoryIndex,
+	options: DbOwnerSqlOptions,
+): Promise<{ readonly artifactChanged: boolean; readonly graphIndexed: boolean }> {
+	const owner = await getDbOwner();
+	return await submitWithAdmission<{ readonly artifactChanged: boolean; readonly graphIndexed: boolean }>(
+		owner,
+		{ kind: "source_native_memory_index", input },
 		{ ...options, lane: options.lane ?? "write" },
 	);
 }

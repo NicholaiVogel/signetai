@@ -17,11 +17,12 @@ import {
 	dbOwnerBatch,
 	dbOwnerQuery,
 	dbOwnerSourceGraphFilePurge,
-	dbOwnerSourceGraphIndex,
 	dbOwnerSourceGraphPurge,
+	dbOwnerSourceNativeMemoryIndex,
 	ownerStatement,
 } from "./db-owner-runtime";
 import { EPISODIC_CAPTURED_AT_FLOOR, timestampMillis } from "./episodic-sources";
+import { hasDbAccessor } from "./db-accessor";
 import { logger } from "./logger";
 import { awaitEmbeddingProviderAvailable } from "./embedding-circuit-breaker";
 import {
@@ -31,7 +32,7 @@ import {
 	clearNativeSourceSyncCheckpoint,
 } from "./native-source-sync-state";
 import type { EmbeddingConfig } from "./memory-config";
-import { hashNormalizedBody, indexExternalMemoryArtifact, softDeleteArtifactRowsForPath } from "./memory-lineage";
+import { hashNormalizedBody, softDeleteArtifactRowsForPath } from "./memory-lineage";
 import {
 	type SourceEmbeddingFetch,
 	type ObsidianSourceChunk,
@@ -881,6 +882,7 @@ export async function indexNativeMemoryFile(
 		readonly lineCount?: number;
 		readonly rolloutId?: string;
 		readonly chunks?: readonly ObsidianSourceChunk[];
+		readonly syncCheckpoint?: { readonly sourceKey: string; readonly scanned: number };
 		readonly signal?: AbortSignal;
 	} = {},
 ): Promise<boolean> {
@@ -888,6 +890,10 @@ export async function indexNativeMemoryFile(
 	if (!safeRelativePath(source.root, filePath)) return false;
 	const pattern = matchesPattern(source, filePath);
 	if (!pattern) return false;
+	// Source-worker pages carry the complete descriptor. This fast path is the
+	// production bridge boundary: the parent forwards content/hash/mtime to the
+	// owner and does not perform file reads or preflight indexing queries.
+	const workerDescriptor = options.content !== undefined && options.contentHash !== undefined;
 
 	const key = fingerprintKey(source, filePath, agentId);
 	const cooldownUntil = readFailureBackoffUntil.get(key);
@@ -965,23 +971,27 @@ export async function indexNativeMemoryFile(
 	}
 	readFailureBackoffUntil.delete(key);
 	permissionDeniedPaths.delete(key);
-	if (!content.trim()) {
+	if (!workerDescriptor && !content.trim()) {
 		await removeNativeMemoryFile(source, filePath, agentId);
 		return false;
 	}
 
 	const hash = options.contentHash ?? contentFingerprint(content);
 	let persistedHash: string | null;
-	try {
-		persistedHash = await nativeArtifactContentHash(filePath, agentId, options.signal);
-	} catch (error) {
-		logger.error(
-			"watcher",
-			"Cannot read native memory artifact persistence state",
-			error instanceof Error ? error : new Error(String(error)),
-			{ path: filePath },
-		);
-		return false;
+	if (workerDescriptor) {
+		persistedHash = null;
+	} else {
+		try {
+			persistedHash = await nativeArtifactContentHash(filePath, agentId, options.signal);
+		} catch (error) {
+			logger.error(
+				"watcher",
+				"Cannot read native memory artifact persistence state",
+				error instanceof Error ? error : new Error(String(error)),
+				{ path: filePath },
+			);
+			return false;
+		}
 	}
 	const obsidian = source.harness === "obsidian" && pattern.kind === "source_obsidian_markdown";
 	const hermes = source.harness === "hermes-agent";
@@ -993,7 +1003,7 @@ export async function indexNativeMemoryFile(
 		options.embeddingConfig !== undefined &&
 		options.fetchEmbedding !== undefined;
 	let semanticComplete = true;
-	if (obsidian) {
+	if (obsidian && !workerDescriptor) {
 		const graphExists =
 			!graphRequested || (await obsidianGraphExists(agentId, sourceId ?? "", filePath, options.signal));
 		const embeddingsExist =
@@ -1010,11 +1020,11 @@ export async function indexNativeMemoryFile(
 		semanticComplete = graphExists && embeddingsExist;
 	}
 	const cached = indexed.get(key);
-	if (cached?.contentHash === hash) {
+	if (!workerDescriptor && cached?.contentHash === hash) {
 		if (persistedHash === hash && semanticComplete) return false;
 		indexed.delete(key);
 	}
-	if (persistedHash === hash && semanticComplete) {
+	if (!workerDescriptor && persistedHash === hash && semanticComplete) {
 		// One-shot heal for legacy rows with a corrupt pre-epoch captured_at:
 		// they stay permanently pending otherwise (no watermark can reach
 		// 1980), keeping content passes from ever early-exiting (#1149).
@@ -1027,14 +1037,27 @@ export async function indexNativeMemoryFile(
 	}
 
 	try {
-		const artifactChanged = persistedHash !== hash;
-		if (artifactChanged) {
-			const provenanceRoot = source.sourceRoot ?? source.root;
-			const externalId =
-				obsidian || source.harness === "codex" || hermes ? sourceRelativePath(provenanceRoot, filePath) : null;
-			await indexExternalMemoryArtifact({
+		const provenanceRoot = source.sourceRoot ?? source.root;
+		const externalId =
+			obsidian || source.harness === "codex" || hermes ? sourceRelativePath(provenanceRoot, filePath) : null;
+		const sourceMeta = obsidian
+			? {
+					provider: "obsidian",
+					displayName: source.displayName,
+				}
+			: (codexSourceMeta(source, filePath, {
+					lineCount: options.lineCount ?? sourceLineCount(content),
+					rolloutId: options.rolloutId,
+				}) ??
+				hermesSourceMeta(source, filePath, {
+					lineCount: options.lineCount ?? sourceLineCount(content),
+					contentHash: hash,
+				}));
+		const ownerResult = await dbOwnerSourceNativeMemoryIndex(
+			{
 				agentId,
 				sourcePath: filePath,
+				sourceHash: hash,
 				sourceKind: pattern.kind,
 				harness: source.harness,
 				content,
@@ -1043,23 +1066,28 @@ export async function indexNativeMemoryFile(
 				sourceRoot: obsidian || source.harness === "codex" || hermes ? normalizedRoot(provenanceRoot) : null,
 				sourceExternalId: externalId,
 				sourceParentPath: externalId ? dirname(externalId).replace(/^\.$/, "") : null,
-				sourceMeta: obsidian
+				sourceMetaJson: sourceMeta === undefined ? null : JSON.stringify(sourceMeta),
+				displayName: source.displayName,
+				...(options.syncCheckpoint && !embeddingRequested ? { checkpoint: options.syncCheckpoint } : {}),
+				...(obsidian && sourceId && graphRequested
 					? {
-							provider: "obsidian",
-							displayName: source.displayName,
+							graph: {
+								sourceId,
+								sourceName: source.displayName,
+								root: source.root,
+							},
 						}
-					: (codexSourceMeta(source, filePath, {
-							lineCount: options.lineCount ?? sourceLineCount(content),
-							rolloutId: options.rolloutId,
-						}) ??
-						hermesSourceMeta(source, filePath, {
-							lineCount: options.lineCount ?? sourceLineCount(content),
-							contentHash: hash,
-						})),
+					: {}),
+			},
+			{
+				operation: "sources.native-memory.owner.index",
+				lane: "write",
+				workloadClass: "maintenance",
+				estimatedWorkUnits: Math.max(1, Math.ceil(content.length / 1024)),
 				signal: options.signal,
-			});
-		}
-		let semanticIndexed = false;
+			},
+		);
+		let semanticIndexed = ownerResult.graphIndexed;
 		let embeddingProviderUnavailable = false;
 		if (obsidian && sourceId) {
 			if (options.embeddingConfig && options.fetchEmbedding) {
@@ -1092,39 +1120,16 @@ export async function indexNativeMemoryFile(
 				}
 				semanticIndexed = !embeddingProviderUnavailable;
 			}
-			// A provider outage is source-scoped: persist the artifact, but do not
-			// submit graph work that would amplify every retry before the embedding
-			// gate's source-level backoff expires.
-			if (!embeddingProviderUnavailable && (options.sourceGraphEnabled ?? true)) {
-				await dbOwnerSourceGraphIndex(
-					{
-						agentId,
-						sourceId,
-						sourceName: source.displayName,
-						root: source.root,
-						filePath,
-						content,
-					},
-					{
-						operation: "sources.graph.owner.index",
-						lane: "write",
-						workloadClass: "maintenance",
-						estimatedWorkUnits: 10,
-						signal: options.signal,
-					},
-				);
-				semanticIndexed = true;
-			}
 		}
 		indexed.set(key, { contentHash: hash });
-		if (artifactChanged) {
+		if (ownerResult.artifactChanged) {
 			logger.info("watcher", "Indexed native memory artifact", {
 				harness: source.harness,
 				kind: pattern.kind,
 				path: filePath,
 			});
 		}
-		return artifactChanged || semanticIndexed;
+		return ownerResult.artifactChanged || semanticIndexed;
 	} catch (err) {
 		logger.error(
 			"watcher",
@@ -1337,7 +1342,9 @@ export function startNativeMemoryBridge(
 				let scanned = 0;
 				const key = sourceStateKey(source, agentId);
 				const durableKey = nativeSourceSyncKey(source);
-				const syncState = await readNativeSourceSyncState(agentId, source, signal);
+				const rootExists = await pathExists(source.root, source, agentId);
+				const dbAvailable = hasDbAccessor();
+				const syncState = rootExists && dbAvailable ? await readNativeSourceSyncState(agentId, source, signal) : null;
 				if (sourceNeedsProvider(source, options)) {
 					const provider = await sourceProviderGate(agentId, options, signal);
 					if (!provider.available) {
@@ -1367,13 +1374,14 @@ export function startNativeMemoryBridge(
 				const current = new Set<string>();
 				const resumePath = syncState?.status === "paused" ? syncState.checkpointPath : null;
 				let resumeCheckpointPath = resumePath;
-				const rootExists = await pathExists(source.root, source, agentId);
 				const maxFilesPerScan = options.maxFilesPerScan ?? NATIVE_MEMORY_MAX_FILES_PER_SCAN;
 				let scanComplete = true;
 				let sourcePaused = false;
 				if (rootExists) {
 					const fileDelayMs = sourceFileDelayMs(source, options);
-					const checkpoint = await readNativeSourceSyncCheckpoint(agentId, key, "content", signal);
+					const checkpoint = dbAvailable
+						? await readNativeSourceSyncCheckpoint(agentId, key, "content", signal)
+						: { cursor: null, frontier: null, complete: true };
 					let cursor = checkpoint.complete ? null : checkpoint.cursor;
 					let frontier = checkpoint.complete ? null : checkpoint.frontier;
 					let pageComplete = false;
@@ -1384,18 +1392,23 @@ export function startNativeMemoryBridge(
 							frontier,
 							pageSize: Math.min(100, maxFilesPerScan - scanned),
 						});
+						for (const path of page.permissionDeniedPaths) {
+							recordNativeMemoryPermissionDenied(source, path, agentId);
+						}
 						if (cancelRequested) throw new Error("native source sync cancelled");
 						if (page.files.length === 0 && page.complete) {
 							pageComplete = true;
 							cursor = null;
-							await writeNativeSourceSyncCheckpoint(
-								agentId,
-								key,
-								"content",
-								{ cursor: null, frontier: null, complete: true },
-								scanned,
-								signal,
-							);
+							if (dbAvailable) {
+								await writeNativeSourceSyncCheckpoint(
+									agentId,
+									key,
+									"content",
+									{ cursor: null, frontier: null, complete: true },
+									scanned,
+									signal,
+								);
+							}
 							break;
 						}
 						for (const file of page.files) {
@@ -1416,6 +1429,7 @@ export function startNativeMemoryBridge(
 								contentHash: file.contentHash,
 								lineCount: file.lineCount,
 								rolloutId: file.rolloutId,
+								syncCheckpoint: { sourceKey: key, scanned },
 								onEmbeddingStatus: (status) => {
 									embeddingStatus = status;
 									options.onEmbeddingStatus?.(status);
@@ -1448,6 +1462,16 @@ export function startNativeMemoryBridge(
 								});
 								break;
 							}
+							if (dbAvailable && sourceNeedsProvider(source, options)) {
+								await writeNativeSourceSyncCheckpoint(
+									agentId,
+									key,
+									"content",
+									{ cursor: file.path.replace(/\\/g, "/"), frontier: null, complete: false },
+									scanned,
+									signal,
+								);
+							}
 							resumeCheckpointPath = file.path.replace(/\\/g, "/");
 							await yielder();
 							await sleep(fileDelayMs);
@@ -1456,18 +1480,20 @@ export function startNativeMemoryBridge(
 						cursor = page.nextCursor;
 						frontier = page.frontier;
 						pageComplete = page.complete;
-						await writeNativeSourceSyncCheckpoint(
-							agentId,
-							key,
-							"content",
-							{
-								cursor: pageComplete ? null : cursor,
-								frontier: pageComplete ? null : frontier,
-								complete: pageComplete,
-							},
-							scanned,
-							signal,
-						);
+						if (dbAvailable) {
+							await writeNativeSourceSyncCheckpoint(
+								agentId,
+								key,
+								"content",
+								{
+									cursor: pageComplete ? null : cursor,
+									frontier: pageComplete ? null : frontier,
+									complete: pageComplete,
+								},
+								scanned,
+								signal,
+							);
+						}
 					}
 					scanComplete = pageComplete;
 					if (!pageComplete && scanned >= maxFilesPerScan) {
@@ -1504,7 +1530,10 @@ export function startNativeMemoryBridge(
 						resumeFrontier: null,
 					};
 				}
-				const cleanupAllowed = sourceCleanupEnabledFor(source, options) && (!rootExists || scanComplete);
+				const cleanupAllowed =
+					sourceCleanupEnabledFor(source, options) &&
+					(!rootExists || scanComplete) &&
+					nativeMemorySourcePermissionHealth(source, agentId).status !== "denied";
 				if (cleanupAllowed) {
 					const currentPaths = new Set([...current].map((file) => file.replace(/\\/g, "/")));
 					for (const file of await activeNativeArtifactPaths(source, agentId, signal)) {
