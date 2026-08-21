@@ -76,6 +76,31 @@ const NATIVE_SOURCE_WORKER_SCAN_DEADLINE_MS = 30_000;
 /** Maximum UTF-8 JSON size for either side of the worker IPC channel. */
 export const NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 
+export function waitForNativeSourceWorkerDrain(stdin: NodeJS.WritableStream): Promise<void> {
+	return new Promise<void>((resolve, reject) => {
+		const cleanup = (): void => {
+			stdin.off("drain", onDrain);
+			stdin.off("error", onError);
+			stdin.off("close", onClose);
+		};
+		const onDrain = (): void => {
+			cleanup();
+			resolve();
+		};
+		const onError = (error: Error): void => {
+			cleanup();
+			reject(error);
+		};
+		const onClose = (): void => {
+			cleanup();
+			reject(new Error("native source worker stdin closed before drain"));
+		};
+		stdin.once("drain", onDrain);
+		stdin.once("error", onError);
+		stdin.once("close", onClose);
+	});
+}
+
 function nativeSourceId(source: NativeSourceWorkerSource): string | undefined {
 	if (source.sourceId !== undefined) return source.sourceId;
 	if (source.harness === "codex")
@@ -293,7 +318,13 @@ export interface NativeSourceWorkerHandle {
 }
 
 export function createNativeSourceWorker(
-	options: { readonly onScanStarted?: () => void } = {},
+	options: {
+		readonly onScanStarted?: () => void;
+		/** Test-only hook fired when the child has delivered a scan result. */
+		readonly onScanResult?: () => void;
+		/** Test-only seam for exercising command backpressure. */
+		readonly writeCommand?: (stdin: NodeJS.WritableStream, command: string) => Promise<void>;
+	} = {},
 ): NativeSourceWorkerHandle {
 	let child: ChildProcess | null = null;
 	let startPromise: Promise<void> | null = null;
@@ -327,8 +358,10 @@ export function createNativeSourceWorker(
 						pending.delete(event.id);
 						activeId = null;
 						if (job.timer) clearTimeout(job.timer);
-						if (event.type === "result") job.resolve(event.result);
-						else job.reject(new Error(event.message));
+						if (event.type === "result") {
+							options.onScanResult?.();
+							job.resolve(event.result);
+						} else job.reject(new Error(event.message));
 					}
 				}
 			});
@@ -369,53 +402,39 @@ export function createNativeSourceWorker(
 			throw new Error("native source worker is unavailable");
 		const id = `source-scan-${process.pid}-${++sequence}`;
 		activeId = id;
-		return await new Promise<NativeSourceWorkerPage>((resolve, reject) => {
-			const timer = setTimeout(() => {
+		let rejectResult!: (error: Error) => void;
+		let timer!: ReturnType<typeof setTimeout>;
+		const result = new Promise<NativeSourceWorkerPage>((resolve, reject) => {
+			rejectResult = reject;
+			timer = setTimeout(() => {
 				if (!pending.delete(id)) return;
 				activeId = null;
 				worker.kill("SIGKILL");
 				reject(new Error(`native source worker scan exceeded ${NATIVE_SOURCE_WORKER_SCAN_DEADLINE_MS}ms`));
 			}, NATIVE_SOURCE_WORKER_SCAN_DEADLINE_MS);
 			pending.set(id, { resolve, reject, timer });
-			const command = `${JSON.stringify({ type: "scan", id, ...inputValue, frontier: inputValue.frontier ?? undefined })}\n`;
-			if (Buffer.byteLength(command, "utf8") > NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES) {
-				pending.delete(id);
-				activeId = null;
-				clearTimeout(timer);
-				reject(
-					new Error(
-						`native source worker command exceeds the ${NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES}-byte IPC limit`,
-					),
-				);
-				return;
-			}
-			try {
-				if (stdin.write(command)) return;
-			} catch (error) {
-				pending.delete(id);
-				activeId = null;
-				clearTimeout(timer);
-				reject(error);
-				return;
-			}
-			void new Promise<void>((resolve, reject) => {
-				const onDrain = (): void => {
-					stdin.off("error", onError);
-					resolve();
-				};
-				const onError = (error: Error): void => {
-					stdin.off("drain", onDrain);
-					reject(error);
-				};
-				stdin.once("drain", onDrain);
-				stdin.once("error", onError);
-			}).catch((error: unknown) => {
-				if (!pending.delete(id)) return;
-				activeId = null;
-				clearTimeout(timer);
-				reject(error);
-			});
 		});
+		const command = `${JSON.stringify({ type: "scan", id, ...inputValue, frontier: inputValue.frontier ?? undefined })}\n`;
+		if (Buffer.byteLength(command, "utf8") > NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES) {
+			pending.delete(id);
+			clearTimeout(timer);
+			activeId = null;
+			rejectResult(
+				new Error(`native source worker command exceeds the ${NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES}-byte IPC limit`),
+			);
+			return await result;
+		}
+		try {
+			if (options.writeCommand) await options.writeCommand(stdin, command);
+			else if (!stdin.write(command)) await waitForNativeSourceWorkerDrain(stdin);
+		} catch (error: unknown) {
+			if (pending.delete(id)) {
+				clearTimeout(timer);
+				activeId = null;
+				rejectResult(error instanceof Error ? error : new Error(String(error)));
+			}
+		}
+		return await result;
 	};
 	return {
 		scan,

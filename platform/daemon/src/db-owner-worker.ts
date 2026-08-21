@@ -557,6 +557,9 @@ export function runDbOwnerWorker(): void {
 		const sourcePath = input.sourcePath.replace(/\\/g, "/");
 		const embeddingResult = await executeNativeMemoryEmbeddings(input, db);
 
+		const checkpoint = embeddingResult.providerUnavailable
+			? (input.checkpointOnProviderFailure ?? input.checkpoint)
+			: input.checkpoint;
 		const existing = db
 			.prepare(
 				"SELECT source_sha256 FROM memory_artifacts WHERE agent_id = ? AND source_path = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
@@ -575,7 +578,7 @@ export function runDbOwnerWorker(): void {
 					content: input.content,
 				});
 			}
-			if (input.checkpoint !== undefined) {
+			if (checkpoint !== undefined) {
 				db.prepare(
 					`INSERT INTO source_sync_checkpoints
 					 (agent_id, source_key, phase, cursor, frontier, scanned, complete, updated_at)
@@ -588,11 +591,11 @@ export function runDbOwnerWorker(): void {
 					 updated_at = excluded.updated_at`,
 				).run(
 					input.agentId,
-					input.checkpoint.sourceKey,
-					sourcePath,
-					input.checkpoint.frontier === null ? null : JSON.stringify(input.checkpoint.frontier),
-					input.checkpoint.scanned,
-					input.checkpoint.complete ? 1 : 0,
+					checkpoint.sourceKey,
+					checkpoint.cursor,
+					checkpoint.frontier === null ? null : JSON.stringify(checkpoint.frontier),
+					checkpoint.scanned,
+					checkpoint.complete ? 1 : 0,
 				);
 			}
 			commit(context);

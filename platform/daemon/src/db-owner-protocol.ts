@@ -155,6 +155,17 @@ export interface DbOwnerNativeMemoryIndex {
 		readonly frontier: readonly string[] | null;
 		readonly complete: boolean;
 	};
+	/**
+	 * Retry frontier selected atomically when owner-side embedding reports that
+	 * the provider is unavailable partway through this descriptor.
+	 */
+	readonly checkpointOnProviderFailure?: {
+		readonly sourceKey: string;
+		readonly scanned: number;
+		readonly cursor: string | null;
+		readonly frontier: readonly string[] | null;
+		readonly complete: boolean;
+	};
 	readonly graph?: {
 		readonly sourceId: string;
 		readonly sourceName: string;

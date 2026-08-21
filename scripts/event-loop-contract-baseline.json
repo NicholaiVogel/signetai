@@ -697,21 +697,21 @@
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 718,
+      "line": 721,
       "api": "writeFileSync",
       "source": "writeFileSync(startedMarker, \"started\\n\");",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 719,
+      "line": 722,
       "api": "existsSync",
       "source": "while (!existsSync(releaseMarker)) await new Promise((resolve) => setTimeout(resolve, 5));",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 753,
+      "line": 756,
       "api": "writeFileSync",
       "source": "if (activeFile) writeFileSync(activeFile, `${Date.now()}\\n`);",
       "category": "hot-path"
@@ -1642,7 +1642,7 @@
     },
     {
       "path": "native-memory-source-worker.ts",
-      "line": 281,
+      "line": 306,
       "api": "existsSync",
       "source": "return [existsSync(bundled) ? bundled : join(directory, \"native-memory-source-worker.ts\")];",
       "category": "hot-path"

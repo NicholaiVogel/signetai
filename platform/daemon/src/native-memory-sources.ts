@@ -895,6 +895,7 @@ export async function indexNativeMemoryFile(
 			readonly frontier: readonly string[] | null;
 			readonly complete: boolean;
 		};
+		readonly syncCheckpointOnProviderFailure?: NativeSourceSyncCheckpoint;
 		readonly signal?: AbortSignal;
 	} = {},
 ): Promise<boolean> {
@@ -1084,6 +1085,17 @@ export async function indexNativeMemoryFile(
 				displayName: source.displayName,
 				...(options.syncCheckpoint && !(workerDescriptor && embeddingRequested && !options.workerOwnedIndexing)
 					? { checkpoint: options.syncCheckpoint }
+					: {}),
+				...(options.syncCheckpoint && options.syncCheckpointOnProviderFailure && options.workerOwnedIndexing
+					? {
+							checkpointOnProviderFailure: {
+								sourceKey: options.syncCheckpoint.sourceKey,
+								scanned: options.syncCheckpoint.scanned,
+								cursor: options.syncCheckpointOnProviderFailure.cursor,
+								frontier: options.syncCheckpointOnProviderFailure.frontier,
+								complete: options.syncCheckpointOnProviderFailure.complete,
+							},
+						}
 					: {}),
 				...(options.workerOwnedIndexing && obsidian && sourceId && options.embeddingConfig && options.chunks
 					? { embedding: { config: options.embeddingConfig, chunks: options.chunks } }
@@ -1445,6 +1457,17 @@ export function startNativeMemoryBridge(
 							if (scanned >= maxFilesPerScan) break;
 							scanned++;
 							let embeddingStatus: string | undefined;
+							const retryCheckpoint: NativeSourceSyncCheckpoint = {
+								cursor,
+								frontier: [
+									...page.frontier,
+									...page.files
+										.slice(fileIndex)
+										.map((next) => next.path)
+										.reverse(),
+								],
+								complete: false,
+							};
 							const changed = await indexNativeMemoryFile(source, file.path, agentId, {
 								...options,
 								signal,
@@ -1468,6 +1491,7 @@ export function startNativeMemoryBridge(
 									],
 									complete: page.complete && fileIndex === page.files.length - 1,
 								},
+								syncCheckpointOnProviderFailure: retryCheckpoint,
 								onEmbeddingStatus: (status) => {
 									embeddingStatus = status;
 									options.onEmbeddingStatus?.(status);
@@ -1490,11 +1514,21 @@ export function startNativeMemoryBridge(
 							if (embeddingStatus === "embeddings pending - provider down") {
 								sourcePaused = true;
 								scanComplete = false;
+								if (dbAvailable && !options.workerOwnedIndexing) {
+									await writeNativeSourceSyncCheckpoint(
+										agentId,
+										key,
+										"content",
+										retryCheckpoint,
+										Math.max(0, scanned - 1),
+										signal,
+									);
+								}
 								await persistNativeSourceSyncState({
 									agentId,
 									source,
 									status: "paused",
-									checkpointPath: resumeCheckpointPath ?? file.path,
+									...(resumeCheckpointPath === null ? {} : { checkpointPath: resumeCheckpointPath }),
 									pauseReason: "provider_unavailable",
 									signal,
 								});

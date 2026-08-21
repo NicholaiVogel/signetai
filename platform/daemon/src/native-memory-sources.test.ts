@@ -7,7 +7,7 @@ import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { dbOwnerQuery, ownerStatement } from "./db-owner-runtime";
 import { resetEmbeddingCircuitBreakers } from "./embedding-circuit-breaker";
 import { logger } from "./logger";
-import { resetObsidianSourceEmbeddingBackoff } from "./obsidian-source-embeddings";
+import { buildObsidianSourceChunks, resetObsidianSourceEmbeddingBackoff } from "./obsidian-source-embeddings";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
 import type { NativeMemoryBridgeOptions } from "./native-memory-sources";
 import {
@@ -1424,6 +1424,87 @@ describe("native memory sources", () => {
 		} finally {
 			await recovered.close();
 		}
+	});
+
+	it("leaves a provider-failed descriptor pending for restart after a mid-batch failure", async () => {
+		const root = join(dir, "mid-batch-provider-vault");
+		const file = join(root, "permanent", "Pending.md");
+		mkdirSync(join(root, "permanent"), { recursive: true });
+		const content =
+			"# First section\n\nThe first chunk completes before the provider fails. It contains enough source text to be embedded independently.\n\n" +
+			"## Second section\n\nThe second chunk fails during the same descriptor and must remain pending for the next daemon run.\n";
+		writeFileSync(file, content);
+		const source = obsidianNativeMemorySource(root, "Mid-batch Provider Vault", "obsidian:mid-batch-provider");
+		const chunks = buildObsidianSourceChunks({ sourceId: source.sourceId ?? "", root, filePath: file, content });
+		expect(chunks.length).toBeGreaterThan(1);
+		let failSecondChunk = true;
+		const calls: string[] = [];
+		const provider = Bun.serve({
+			port: 0,
+			fetch: async (request) => {
+				const body = (await request.json()) as { readonly input?: string | readonly string[] };
+				const text = typeof body.input === "string" ? body.input : (body.input?.join("\n") ?? "");
+				calls.push(text);
+				if (failSecondChunk && text.includes("Second section"))
+					return new Response("provider unavailable", { status: 503 });
+				return Response.json({ data: [{ embedding: [1, 2, 3] }] });
+			},
+		});
+		const makeHandle = () =>
+			startNativeMemoryBridge([source], {
+				agentId: "agent-mid-batch-provider",
+				pollIntervalMs: 0,
+				maxFilesPerScan: 1,
+				sourceGraphEnabled: false,
+				workerOwnedIndexing: true,
+				embeddingConfig: {
+					provider: "openai",
+					model: "mid-batch",
+					dimensions: 3,
+					base_url: `http://127.0.0.1:${provider.port}/v1`,
+					api_key: "test",
+				},
+				fetchEmbedding: async (text) => {
+					calls.push(`parent:${text}`);
+					return [9, 9, 9];
+				},
+			});
+
+		const first = makeHandle();
+		try {
+			expect(await first.syncExisting()).toBe(1);
+		} finally {
+			await first.close();
+		}
+
+		const checkpointRows = await dbOwnerQuery<
+			readonly { readonly cursor: string | null; readonly frontier: string | null; readonly complete: number }[]
+		>(
+			ownerStatement(
+				"SELECT cursor, frontier, complete FROM source_sync_checkpoints WHERE agent_id = ? AND source_key = ? AND phase = 'content'",
+				["agent-mid-batch-provider", `agent-mid-batch-provider:obsidian:${root}`],
+				"all",
+			),
+			{ operation: "test.mid-batch-provider.checkpoint", lane: "read" },
+		);
+		const checkpoint = checkpointRows[0] ?? null;
+		expect(checkpoint).not.toBeNull();
+		expect(checkpoint?.cursor).toBeNull();
+		expect(JSON.parse(checkpoint?.frontier ?? "[]")).toContain(file);
+		expect(checkpoint?.complete).toBe(0);
+
+		failSecondChunk = false;
+		resetEmbeddingCircuitBreakers();
+		resetObsidianSourceEmbeddingBackoff();
+		const callsBeforeRecovery = calls.length;
+		const recovered = makeHandle();
+		try {
+			expect(await recovered.syncExisting()).toBe(0);
+		} finally {
+			await recovered.close();
+		}
+		expect(calls.slice(callsBeforeRecovery).some((text) => text.includes("Second section"))).toBe(true);
+		provider.stop();
 	});
 
 	it("purges all artifacts below a disconnected Obsidian source root", async () => {
