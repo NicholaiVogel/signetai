@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-21
-- Bug fixes: amputate parent-side native-memory indexing behind killable boundary with transactional resumable frontier; preserve provider retry frontiers; close native source frontier crash windows; type native embedding protocol; isolate native source embeddings; persist native source traversal frontier; move native memory indexing behind owner boundary; remove secondary parent sync paths + recovery child exit-0 protocol; remove secondary sync paths; parent sync attribution with in-flight latch naming + telemetry conversion; preserve in-flight sync DB attribution; lazily capture sync DB attribution; refresh event-loop source ledger; refresh sync access ledger for telemetry fallback; satisfy attribution boundary checks; move startup telemetry write behind owner; attribute transitional sync db stalls.
+- Bug fixes: endpoint-neutral fingerprint + reachable building-state recovery + owner-bound resumable embedding migration; recover endpoint-only embedding builds; make embedding migration owner-bound and resumable; amputate parent-side native-memory indexing behind killable boundary with transactional resumable frontier; preserve provider retry frontiers; close native source frontier crash windows; type native embedding protocol; isolate native source embeddings; persist native source traversal frontier; move native memory indexing behind owner boundary; remove secondary parent sync paths + recovery child exit-0 protocol; remove secondary sync paths; parent sync attribution with in-flight latch naming + telemetry conversion; preserve in-flight sync DB attribution; lazily capture sync DB attribution; refresh event-loop source ledger; refresh sync access ledger for telemetry fallback; satisfy attribution boundary checks; move startup telemetry write behind owner; attribute transitional sync db stalls.
 
 ### 2026-08-20
 - Features: pause native source sync when provider is down.
@@ -40,6 +40,17 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: document deferred accessor cleanup; align Kimi Code nav; add Kimi Code support.
 
 ## Release Ledger
+
+## [0.214.6] - 2026-08-21
+
+Release summary: 3 bug fixes.
+Tag range: `v0.214.5..v0.214.6`.
+
+### Bug Fixes
+
+- **daemon**: endpoint-neutral fingerprint + reachable building-state recovery + owner-bound resumable embedding migration (#1708)
+- recover endpoint-only embedding builds
+- make embedding migration owner-bound and resumable
 
 ## [0.214.5] - 2026-08-21
 
