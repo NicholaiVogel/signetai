@@ -334,4 +334,74 @@ describe("embedding index state", () => {
 		expect(normalized.baseUrl).toBe(current.base_url);
 		expect(JSON.parse(String(normalized.fingerprint))).not.toHaveProperty("baseUrl");
 	});
+
+	it("recovers an endpoint-only mid-promotion build without deleting active recall", () => {
+		const raw = new Database(":memory:");
+		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		raw.exec(`
+			CREATE TABLE memories (id TEXT PRIMARY KEY, embedding_model TEXT);
+			CREATE TABLE embeddings (id TEXT PRIMARY KEY);
+			CREATE TABLE embeddings_staging (id TEXT PRIMARY KEY);
+			CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY);
+			CREATE TABLE vec_embeddings_staging (id TEXT PRIMARY KEY);
+		`);
+		const db = raw as unknown as WriteDb;
+		const oldConfig: EmbeddingConfig = {
+			provider: "ollama",
+			model: "custom-embed",
+			dimensions: 3,
+			base_url: "http://127.0.0.1:11434",
+		};
+		const currentConfig = { ...oldConfig, base_url: "http://192.168.1.10:11434" };
+		ensureEmbeddingIndexState(db, oldConfig);
+		const active = JSON.parse(
+			(
+				raw.prepare("SELECT active_profile_json FROM embedding_index_state WHERE id = 1").get() as {
+					active_profile_json: string;
+				}
+			).active_profile_json,
+		) as Record<string, unknown>;
+		active.fingerprint = JSON.stringify({
+			profile: "custom:ollama:custom-embed",
+			provider: oldConfig.provider,
+			model: oldConfig.model,
+			dimensions: oldConfig.dimensions,
+			baseUrl: oldConfig.base_url,
+		});
+		const staging = {
+			...active,
+			fingerprint: JSON.stringify({
+				profile: "custom:ollama:custom-embed",
+				provider: oldConfig.provider,
+				model: oldConfig.model,
+				dimensions: oldConfig.dimensions,
+			}),
+			baseUrl: currentConfig.base_url,
+			projectionSlot: "staging",
+			projectionRebuild: true,
+		};
+		raw
+			.prepare(
+				"UPDATE embedding_index_state SET active_profile_json = ?, staging_profile_json = ?, state = 'building' WHERE id = 1",
+			)
+			.run(JSON.stringify(active), JSON.stringify(staging));
+		// Model the state after promotion's durable swap: the old active pair
+		// remains the only recall-safe projection while the new projection rebuilds.
+		raw.exec(`
+			INSERT INTO embeddings VALUES ('new');
+			INSERT INTO embeddings_staging VALUES ('old');
+			INSERT INTO vec_embeddings VALUES ('old');
+			INSERT INTO vec_embeddings_staging VALUES ('new');
+		`);
+
+		const recovered = beginEmbeddingIndexBuild(db, currentConfig);
+
+		expect(recovered.state).toBe("ready");
+		expect(recovered.staging).toBeNull();
+		expect(raw.prepare("SELECT id FROM embeddings").get()).toEqual({ id: "old" });
+		expect(raw.prepare("SELECT COUNT(*) AS count FROM embeddings_staging").get()).toEqual({ count: 0 });
+		expect(raw.prepare("SELECT id FROM vec_embeddings").get()).toEqual({ id: "old" });
+		expect(raw.prepare("SELECT COUNT(*) AS count FROM vec_embeddings_staging").get()).toEqual({ count: 0 });
+		expect(readEmbeddingIndexState(db)?.active.baseUrl).toBe(currentConfig.base_url);
+	});
 });

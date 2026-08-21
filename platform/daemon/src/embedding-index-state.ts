@@ -336,25 +336,8 @@ export function beginEmbeddingIndexBuild(
 		...profileForStorage(stagingConfig),
 		projectionSlot: current.active.projectionSlot === "staging" ? ("active" as const) : ("staging" as const),
 	};
-	if (
-		current.state === "building" &&
-		current.staging &&
-		embeddingProfileFingerprintsEqual(current.staging.fingerprint, staging.fingerprint)
-	) {
-		return current;
-	}
-	const failure = parseFailure(current.lastError);
-	if (
-		current.state === "failed" &&
-		current.staging !== null &&
-		current.staging !== undefined &&
-		embeddingProfileFingerprintsEqual(current.staging.fingerprint, staging.fingerprint) &&
-		failure?.cause === "provider-unavailable" &&
-		failure.nextAttemptAt !== undefined &&
-		now < failure.nextAttemptAt
-	)
-		return current;
-	if (embeddingProfileFingerprintsEqual(current.active.fingerprint, staging.fingerprint)) {
+	const activeMatchesTarget = embeddingProfileFingerprintsEqual(current.active.fingerprint, staging.fingerprint);
+	if (activeMatchesTarget) {
 		// Compatibility shim for v91-v142 rows whose fingerprint included the
 		// endpoint. Rewrite the persisted profile in place; this resolves an old
 		// stuck `building` latch without re-embedding the corpus.
@@ -372,6 +355,16 @@ export function beginEmbeddingIndexBuild(
 		// flipped back to the active profile mid-build, #1160), abandon it
 		// instead of promoting a generation the config no longer wants.
 		if (current.state === "building") {
+			if (current.staging?.projectionRebuild === true) {
+				// Promotion has already swapped durable slots. Restore the old
+				// active pair before clearing the interrupted build; deleting
+				// embeddings_staging first would destroy active recall.
+				const projectionTable = staging.projectionSlot === "staging" ? "vec_embeddings_staging" : "vec_embeddings";
+				db.exec("ALTER TABLE embeddings RENAME TO embeddings_next");
+				db.exec("ALTER TABLE embeddings_staging RENAME TO embeddings");
+				db.exec("ALTER TABLE embeddings_next RENAME TO embeddings_staging");
+				db.exec(`DELETE FROM ${projectionTable}`);
+			}
 			db.exec("DELETE FROM embeddings_staging");
 			db.prepare(
 				`UPDATE embedding_index_state
@@ -404,6 +397,24 @@ export function beginEmbeddingIndexBuild(
 			provider_endpoint: cfg.base_url,
 		});
 		return { active: normalizedActive, staging: null, state: "ready", lastError: null };
+	}
+	const failure = parseFailure(current.lastError);
+	if (
+		current.state === "failed" &&
+		current.staging !== null &&
+		current.staging !== undefined &&
+		embeddingProfileFingerprintsEqual(current.staging.fingerprint, staging.fingerprint) &&
+		failure?.cause === "provider-unavailable" &&
+		failure.nextAttemptAt !== undefined &&
+		now < failure.nextAttemptAt
+	)
+		return current;
+	if (
+		current.state === "building" &&
+		current.staging &&
+		embeddingProfileFingerprintsEqual(current.staging.fingerprint, staging.fingerprint)
+	) {
+		return current;
 	}
 
 	db.exec("DELETE FROM embeddings_staging");

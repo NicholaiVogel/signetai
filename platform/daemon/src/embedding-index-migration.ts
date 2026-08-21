@@ -1077,13 +1077,8 @@ async function beginEmbeddingIndexBuildThroughOwner(
 		...profileForStorageForOwner(stagingConfig),
 		projectionSlot: current.active.projectionSlot === "staging" ? ("active" as const) : ("staging" as const),
 	};
-	if (
-		current.state === "building" &&
-		current.staging !== null &&
-		embeddingProfileFingerprintsEqual(current.staging.fingerprint, staging.fingerprint)
-	)
-		return current;
-	if (embeddingProfileFingerprintsEqual(current.active.fingerprint, staging.fingerprint)) {
+	const activeMatchesTarget = embeddingProfileFingerprintsEqual(current.active.fingerprint, staging.fingerprint);
+	if (activeMatchesTarget) {
 		const normalizedActive = { ...current.active, fingerprint: staging.fingerprint, baseUrl: cfg.base_url };
 		if (current.state !== "building") {
 			await ownerUpdateProgress(owner, { provider_endpoint: cfg.base_url });
@@ -1095,18 +1090,31 @@ async function beginEmbeddingIndexBuildThroughOwner(
 			);
 			return { active: normalizedActive, staging: null, state: "ready", lastError: null };
 		}
-		await ownerBatch(
-			owner,
-			[
-				{ sql: "DELETE FROM embeddings_staging" },
-				{
-					sql: "UPDATE embedding_index_state SET active_profile_json = ?, staging_profile_json = NULL, state = 'ready', last_error = NULL, updated_at = ? WHERE id = 1 AND state = 'building'",
-					params: [JSON.stringify(normalizedActive), new Date().toISOString()],
-					requireChanges: true,
-				},
-			],
-			ownerMaintenanceOptions("embedding-index.abandon"),
-		);
+		const projectionRebuild = current.staging?.projectionRebuild === true;
+		const statements: Array<{
+			readonly sql: string;
+			readonly params?: readonly unknown[];
+			readonly requireChanges?: boolean;
+		}> = projectionRebuild
+			? [
+					// Promotion swaps the durable slots before rebuilding the new
+					// projection. Roll that swap back so the old projection remains
+					// paired with the old embeddings while abandoning an endpoint-only
+					// build; deleting embeddings_staging before this swap would delete
+					// the only durable copy used for active recall.
+					{ sql: "ALTER TABLE embeddings RENAME TO embeddings_next" },
+					{ sql: "ALTER TABLE embeddings_staging RENAME TO embeddings" },
+					{ sql: "ALTER TABLE embeddings_next RENAME TO embeddings_staging" },
+					{ sql: `DELETE FROM ${vectorTableForSlot(current.staging?.projectionSlot)}` },
+					{ sql: "DELETE FROM embeddings_staging" },
+				]
+			: [{ sql: "DELETE FROM embeddings_staging" }];
+		statements.push({
+			sql: "UPDATE embedding_index_state SET active_profile_json = ?, staging_profile_json = NULL, state = 'ready', last_error = NULL, updated_at = ? WHERE id = 1 AND state = 'building'",
+			params: [JSON.stringify(normalizedActive), new Date().toISOString()],
+			requireChanges: true,
+		});
+		await ownerBatch(owner, statements, ownerMaintenanceOptions("embedding-index.abandon"));
 		await ownerUpdateProgress(owner, {
 			migration_phase: null,
 			progress_staged: 0,
@@ -1118,6 +1126,12 @@ async function beginEmbeddingIndexBuildThroughOwner(
 		});
 		return { active: normalizedActive, staging: null, state: "ready", lastError: null };
 	}
+	if (
+		current.state === "building" &&
+		current.staging !== null &&
+		embeddingProfileFingerprintsEqual(current.staging.fingerprint, staging.fingerprint)
+	)
+		return current;
 	await ownerBatch(
 		owner,
 		[
