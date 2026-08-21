@@ -6,7 +6,8 @@ import { addObsidianSource, loadSourcesConfig } from "@signet/core";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { dbOwnerQuery, ownerStatement } from "./db-owner-runtime";
 import { resetEmbeddingCircuitBreakers } from "./embedding-circuit-breaker";
-import { resetObsidianSourceEmbeddingBackoff } from "./obsidian-source-embeddings";
+import { logger } from "./logger";
+import { buildObsidianSourceChunks, resetObsidianSourceEmbeddingBackoff } from "./obsidian-source-embeddings";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
 import type { NativeMemoryBridgeOptions } from "./native-memory-sources";
 import {
@@ -1425,6 +1426,87 @@ describe("native memory sources", () => {
 		}
 	});
 
+	it("leaves a provider-failed descriptor pending for restart after a mid-batch failure", async () => {
+		const root = join(dir, "mid-batch-provider-vault");
+		const file = join(root, "permanent", "Pending.md");
+		mkdirSync(join(root, "permanent"), { recursive: true });
+		const content =
+			"# First section\n\nThe first chunk completes before the provider fails. It contains enough source text to be embedded independently.\n\n" +
+			"## Second section\n\nThe second chunk fails during the same descriptor and must remain pending for the next daemon run.\n";
+		writeFileSync(file, content);
+		const source = obsidianNativeMemorySource(root, "Mid-batch Provider Vault", "obsidian:mid-batch-provider");
+		const chunks = buildObsidianSourceChunks({ sourceId: source.sourceId ?? "", root, filePath: file, content });
+		expect(chunks.length).toBeGreaterThan(1);
+		let failSecondChunk = true;
+		const calls: string[] = [];
+		const provider = Bun.serve({
+			port: 0,
+			fetch: async (request) => {
+				const body = (await request.json()) as { readonly input?: string | readonly string[] };
+				const text = typeof body.input === "string" ? body.input : (body.input?.join("\n") ?? "");
+				calls.push(text);
+				if (failSecondChunk && text.includes("Second section"))
+					return new Response("provider unavailable", { status: 503 });
+				return Response.json({ data: [{ embedding: [1, 2, 3] }] });
+			},
+		});
+		const makeHandle = () =>
+			startNativeMemoryBridge([source], {
+				agentId: "agent-mid-batch-provider",
+				pollIntervalMs: 0,
+				maxFilesPerScan: 1,
+				sourceGraphEnabled: false,
+				workerOwnedIndexing: true,
+				embeddingConfig: {
+					provider: "openai",
+					model: "mid-batch",
+					dimensions: 3,
+					base_url: `http://127.0.0.1:${provider.port}/v1`,
+					api_key: "test",
+				},
+				fetchEmbedding: async (text) => {
+					calls.push(`parent:${text}`);
+					return [9, 9, 9];
+				},
+			});
+
+		const first = makeHandle();
+		try {
+			expect(await first.syncExisting()).toBe(1);
+		} finally {
+			await first.close();
+		}
+
+		const checkpointRows = await dbOwnerQuery<
+			readonly { readonly cursor: string | null; readonly frontier: string | null; readonly complete: number }[]
+		>(
+			ownerStatement(
+				"SELECT cursor, frontier, complete FROM source_sync_checkpoints WHERE agent_id = ? AND source_key = ? AND phase = 'content'",
+				["agent-mid-batch-provider", `agent-mid-batch-provider:obsidian:${root}`],
+				"all",
+			),
+			{ operation: "test.mid-batch-provider.checkpoint", lane: "read" },
+		);
+		const checkpoint = checkpointRows[0] ?? null;
+		expect(checkpoint).not.toBeNull();
+		expect(checkpoint?.cursor).toBeNull();
+		expect(JSON.parse(checkpoint?.frontier ?? "[]")).toContain(file);
+		expect(checkpoint?.complete).toBe(0);
+
+		failSecondChunk = false;
+		resetEmbeddingCircuitBreakers();
+		resetObsidianSourceEmbeddingBackoff();
+		const callsBeforeRecovery = calls.length;
+		const recovered = makeHandle();
+		try {
+			expect(await recovered.syncExisting()).toBe(0);
+		} finally {
+			await recovered.close();
+		}
+		expect(calls.slice(callsBeforeRecovery).some((text) => text.includes("Second section"))).toBe(true);
+		provider.stop();
+	});
+
 	it("purges all artifacts below a disconnected Obsidian source root", async () => {
 		const root = join(dir, "vault");
 		const source = obsidianNativeMemorySource(root, "Research Vault");
@@ -1815,14 +1897,17 @@ describe("native memory sources", () => {
 		}
 	});
 
-	it("keeps the source scan off the parent synchronous SQLite surface", async () => {
+	it("keeps a 200-file mixed-size source scan off parent sync surfaces", async () => {
 		const root = join(dir, "large-source");
 		mkdirSync(root, { recursive: true });
-		for (let index = 0; index < 5; index += 1) {
-			writeFileSync(
-				join(root, `note-${index}.md`),
-				`# Note ${index}\n\nParent-side SQLite must not run during this source scan.\n`,
-			);
+		for (let index = 0; index < 200; index += 1) {
+			const content =
+				index % 3 === 0
+					? `# Small ${index}\n\nSmall native memory note ${index}.\n`
+					: index % 3 === 1
+						? `# Medium ${index}\n\n${"Medium native memory content. ".repeat(5)}\n`
+						: `# Large ${index}\n\n${"Large native memory content. ".repeat(15)}\n`;
+			writeFileSync(join(root, `note-${index}.md`), content);
 		}
 		const accessor = getDbAccessor() as typeof getDbAccessor extends () => infer T
 			? T & Record<string, unknown>
@@ -1838,22 +1923,312 @@ describe("native memory sources", () => {
 			parentCrossings += 1;
 			throw new Error("parent synchronous SQLite crossed during native source sync");
 		};
+		const criticalWarnings: string[] = [];
+		const originalWarn = logger.warn;
+		const originalInfo = logger.info;
+		logger.warn = ((_category: unknown, message: unknown) => {
+			if (/critical|event.?loop|block/i.test(String(message))) criticalWarnings.push(String(message));
+		}) as typeof logger.warn;
+		logger.info = (() => {}) as typeof logger.info;
 		const handle = startNativeMemoryBridge(
 			[obsidianNativeMemorySource(root, "Large source", "obsidian:large-source")],
 			{
 				agentId: "agent-native",
 				pollIntervalMs: 0,
+				sourceFileDelayMs: 0,
 				sourceGraphEnabled: false,
+				workerOwnedIndexing: true,
 			},
 		);
 		try {
-			expect(await handle.syncExisting()).toBe(5);
+			expect(await handle.syncExisting()).toBe(200);
 			expect(parentCrossings).toBe(0);
+			const implementation = readFileSync(new URL("./native-memory-sources.ts", import.meta.url), "utf8");
+			const indexingPath = implementation.slice(
+				implementation.indexOf("export async function indexNativeMemoryFile"),
+				implementation.indexOf("export async function removeNativeMemoryFile"),
+			);
+			expect(indexingPath).not.toMatch(/\b(?:readFileSync|statSync|lstatSync|createHash)\b/);
+			expect(implementation).not.toContain('from "node:crypto"');
+			// This is the runtime attribution shim: warnings are inspected by
+			// category/message rather than inferred from elapsed wall-clock time.
+			expect(criticalWarnings).toEqual([]);
 		} finally {
+			logger.warn = originalWarn;
+			logger.info = originalInfo;
 			(accessor as Record<string, unknown>).withReadDb = originalRead;
 			(accessor as Record<string, unknown>).withWriteTx = originalWrite;
 			await handle.close();
 		}
+	}, 5_000);
+
+	it("resumes from the committed per-file worker frontier after a capped scan", async () => {
+		const root = join(dir, "resume-frontier-source");
+		mkdirSync(root, { recursive: true });
+		for (let index = 0; index < 3; index += 1) {
+			writeFileSync(join(root, `note-${index}.md`), `# Resume ${index}\n\nfrontier ${index}\n`);
+		}
+		const source = obsidianNativeMemorySource(root, "Resume source", "obsidian:resume-frontier");
+		const first = startNativeMemoryBridge([source], {
+			agentId: "agent-resume-frontier",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+		});
+		try {
+			expect(await first.syncExisting()).toBe(1);
+		} finally {
+			await first.close();
+		}
+
+		const checkpointRows = await dbOwnerQuery<
+			readonly { readonly cursor: string | null; readonly frontier: string | null; readonly complete: number }[]
+		>(
+			ownerStatement(
+				"SELECT cursor, frontier, complete FROM source_sync_checkpoints WHERE agent_id = ? AND source_key = ? AND phase = 'content'",
+				["agent-resume-frontier", `agent-resume-frontier:obsidian:${root}`],
+				"all",
+			),
+			{ operation: "test.resume-frontier.checkpoint", lane: "read" },
+		);
+		const checkpoint = checkpointRows[0] ?? null;
+		expect(checkpoint?.cursor).toContain("note-");
+		expect(JSON.parse(checkpoint?.frontier ?? "[]")).not.toContain(root);
+		expect(checkpoint?.complete).toBe(0);
+
+		const second = startNativeMemoryBridge([source], {
+			agentId: "agent-resume-frontier",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+		});
+		try {
+			expect(await second.syncExisting()).toBe(1);
+		} finally {
+			await second.close();
+		}
+		const artifactRows = await dbOwnerQuery<readonly { readonly count: number }[]>(
+			ownerStatement(
+				"SELECT COUNT(*) AS count FROM memory_artifacts WHERE agent_id = ?",
+				["agent-resume-frontier"],
+				"all",
+			),
+			{ operation: "test.resume-frontier.artifacts", lane: "read" },
+		);
+		const artifactCount = artifactRows[0]?.count ?? 0;
+		expect(artifactCount).toBe(2);
+	});
+
+	it("resumes from the durable frontier after the source worker is killed during traversal", async () => {
+		const root = join(dir, "killed-resume-source");
+		mkdirSync(root, { recursive: true });
+		for (let index = 0; index < 3; index += 1) {
+			writeFileSync(join(root, `note-${index}.md`), `# Killed ${index}\n\nworker resume ${index}\n`);
+		}
+		const source = obsidianNativeMemorySource(root, "Killed resume source", "obsidian:killed-resume");
+		const firstIndexed: string[] = [];
+		let scanStarts = 0;
+		const first = startNativeMemoryBridge([source], {
+			agentId: "agent-killed-resume",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+			onSourceWorkerScanStarted: () => {
+				scanStarts += 1;
+				// The first scan commits note-0. The second scan is killed from
+				// the worker-start event, before its descriptor is returned.
+				if (scanStarts === 2) first.cancel();
+			},
+			onFileIndexed: ({ filePath }) => firstIndexed.push(filePath),
+		});
+		expect(await first.syncExisting()).toBe(1);
+		await expect(first.syncExisting()).rejects.toThrow(/native source sync cancelled|native source worker/);
+		await first.close();
+		expect(firstIndexed).toHaveLength(1);
+
+		const checkpointRows = await dbOwnerQuery<
+			readonly { readonly frontier: string | null; readonly complete: number }[]
+		>(
+			ownerStatement(
+				"SELECT frontier, complete FROM source_sync_checkpoints WHERE agent_id = ? AND source_key = ? AND phase = 'content'",
+				["agent-killed-resume", `agent-killed-resume:obsidian:${root}`],
+				"all",
+			),
+			{ operation: "test.native-memory-resume-checkpoint", lane: "read" },
+		);
+		const checkpoint = checkpointRows[0] ?? null;
+		expect(checkpoint).not.toBeNull();
+		const frontier: unknown = JSON.parse(checkpoint?.frontier ?? "null");
+		expect(Array.isArray(frontier)).toBe(true);
+		expect(frontier).toHaveLength(2);
+		expect(frontier).not.toContain(root);
+		expect(checkpoint?.complete).toBe(0);
+
+		const restartedIndexed: string[] = [];
+		const restarted = startNativeMemoryBridge([source], {
+			agentId: "agent-killed-resume",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+			onFileIndexed: ({ filePath }) => restartedIndexed.push(filePath),
+		});
+		try {
+			expect(await restarted.syncExisting()).toBe(1);
+		} finally {
+			await restarted.close();
+		}
+		expect(restartedIndexed).toHaveLength(1);
+		expect(restartedIndexed[0]).not.toBe(firstIndexed[0]);
+	});
+
+	it("keeps the provider-enabled frontier resumable when traversal is killed", async () => {
+		const root = join(dir, "provider-frontier-source");
+		mkdirSync(root, { recursive: true });
+		const firstPath = join(root, "note-a.md");
+		const secondPath = join(root, "note-b.md");
+		writeFileSync(firstPath, "# Provider A\n\nProvider frontier first descriptor.\n");
+		writeFileSync(secondPath, "# Provider B\n\nProvider frontier next descriptor.\n");
+		const provider = Bun.serve({
+			port: 0,
+			fetch: () => Response.json({ data: [{ embedding: [1, 2, 3] }] }),
+		});
+		const embeddingConfig = {
+			provider: "openai" as const,
+			model: "provider-frontier-test",
+			dimensions: 3,
+			base_url: `http://127.0.0.1:${provider.port}/v1`,
+			api_key: "test",
+			indexGeneration: "staging" as const,
+		};
+		const source = obsidianNativeMemorySource(root, "Provider frontier source", "obsidian:provider-frontier");
+		let scanStarts = 0;
+		const firstIndexed: string[] = [];
+		const first = startNativeMemoryBridge([source], {
+			agentId: "agent-provider-frontier",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+			workerOwnedIndexing: false,
+			embeddingConfig,
+			fetchEmbedding: async () => [9, 9, 9],
+			onSourceWorkerScanStarted: () => {
+				scanStarts += 1;
+				if (scanStarts === 2) first.cancel();
+			},
+			onFileIndexed: ({ filePath }) => firstIndexed.push(filePath),
+		});
+		try {
+			expect(await first.syncExisting()).toBe(1);
+			await expect(first.syncExisting()).rejects.toThrow(/native source sync cancelled|native source worker/);
+		} finally {
+			await first.close();
+		}
+		expect(firstIndexed).toEqual([firstPath]);
+
+		const restartedIndexed: string[] = [];
+		const restarted = startNativeMemoryBridge([source], {
+			agentId: "agent-provider-frontier",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+			workerOwnedIndexing: false,
+			embeddingConfig,
+			fetchEmbedding: async () => [9, 9, 9],
+			onFileIndexed: ({ filePath }) => restartedIndexed.push(filePath),
+		});
+		try {
+			expect(await restarted.syncExisting()).toBe(1);
+		} finally {
+			await restarted.close();
+			provider.stop();
+		}
+		expect(restartedIndexed).toEqual([secondPath]);
+	});
+
+	it("keeps embedding work and the crash-window frontier in the owner process", async () => {
+		const root = join(dir, "owner-embedding-resume-source");
+		mkdirSync(root, { recursive: true });
+		const firstPath = join(root, "note-a.md");
+		const secondPath = join(root, "note-b.md");
+		writeFileSync(
+			firstPath,
+			"# Owner A\n\nThe first owner-indexed source note has enough content for a durable chunk.\n",
+		);
+		writeFileSync(
+			secondPath,
+			"# Owner B\n\nThe second owner-indexed source note proves restart resumes at the next frontier.\n",
+		);
+		const provider = Bun.serve({
+			port: 0,
+			fetch: () => Response.json({ data: [{ embedding: [1, 2, 3] }] }),
+		});
+		let parentEmbeddingCalls = 0;
+		const source = obsidianNativeMemorySource(root, "Owner embedding source", "obsidian:owner-embedding");
+		const embeddingConfig = {
+			provider: "openai" as const,
+			model: "owner-test",
+			dimensions: 3,
+			base_url: `http://127.0.0.1:${provider.port}/v1`,
+			api_key: "test",
+			indexGeneration: "staging" as const,
+		};
+		const firstIndexed: string[] = [];
+		const first = startNativeMemoryBridge([source], {
+			agentId: "agent-owner-embedding",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 2,
+			sourceGraphEnabled: false,
+			workerOwnedIndexing: true,
+			embeddingConfig,
+			fetchEmbedding: async () => {
+				parentEmbeddingCalls++;
+				return [9, 9, 9];
+			},
+			onFileIndexed: ({ filePath }) => {
+				firstIndexed.push(filePath);
+				if (firstIndexed.length === 1) first.cancel();
+			},
+		});
+		try {
+			await expect(first.syncExisting()).rejects.toThrow(/native source sync cancelled|native source worker/);
+		} finally {
+			await first.close();
+		}
+		expect(parentEmbeddingCalls).toBe(0);
+		expect(firstIndexed).toHaveLength(1);
+		const checkpoint = await dbOwnerQuery<readonly { readonly frontier: string | null; readonly complete: number }[]>(
+			ownerStatement(
+				"SELECT frontier, complete FROM source_sync_checkpoints WHERE agent_id = ? AND source_key = ? AND phase = 'content'",
+				["agent-owner-embedding", `agent-owner-embedding:obsidian:${root}`],
+				"all",
+			),
+			{ operation: "test.owner-embedding.frontier", lane: "read" },
+		);
+		expect(JSON.parse(checkpoint[0]?.frontier ?? "[]")).toHaveLength(1);
+		expect(checkpoint[0]?.complete).toBe(0);
+
+		const restartedIndexed: string[] = [];
+		const restarted = startNativeMemoryBridge([source], {
+			agentId: "agent-owner-embedding",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+			workerOwnedIndexing: true,
+			embeddingConfig,
+			fetchEmbedding: async () => {
+				parentEmbeddingCalls++;
+				return [9, 9, 9];
+			},
+			onFileIndexed: ({ filePath }) => restartedIndexed.push(filePath),
+		});
+		try {
+			expect(await restarted.syncExisting()).toBe(1);
+		} finally {
+			await restarted.close();
+			provider.stop();
+		}
+		expect(restartedIndexed).toEqual([secondPath]);
+		expect(parentEmbeddingCalls).toBe(0);
 	});
 
 	it("kills only the source worker and leaves the DB owner usable", async () => {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { Database as BunDatabase } from "bun:sqlite";
@@ -8,7 +9,9 @@ import {
 	purgeObsidianSourceFileStructureInTx,
 } from "./obsidian-source-graph";
 import { indexSourceArtifactStructureInTx, purgeSourceArtifactStructureInTx } from "./source-artifact-graph";
-import { upsertMemoryArtifactInTx } from "./memory-lineage";
+import { upsertMemoryArtifactInTx, type MemoryArtifactUpsertFields } from "./memory-lineage";
+import { upsertMemoryContentSafetyInTx } from "./memory-content-safety";
+import { NATIVE_MEMORY_BRIDGE_SOURCE_NODE_ID } from "./native-memory-constants";
 import { applySourceSnapshotImportInTx } from "./source-snapshots";
 import type {
 	DbOwnerCommand,
@@ -18,7 +21,10 @@ import type {
 	DbOwnerParameter,
 	DbOwnerRecallPayload,
 	DbOwnerStatement,
+	DbOwnerNativeMemoryIndex,
 } from "./db-owner-protocol";
+import type { EmbeddingConfig } from "./memory-config";
+import { vectorToBlob } from "./db-helpers";
 import {
 	DB_OWNER_MAX_DEADLINE_MS,
 	DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS,
@@ -389,6 +395,225 @@ export function runDbOwnerWorker(): void {
 		}
 	}
 
+	function nativeMemoryArtifactFields(input: DbOwnerNativeMemoryIndex): MemoryArtifactUpsertFields {
+		const sourcePath = input.sourcePath.replace(/\\/g, "/");
+		const capturedAt = Number.isFinite(input.sourceMtimeMs)
+			? new Date(input.sourceMtimeMs).toISOString()
+			: new Date().toISOString();
+		return {
+			agentId: input.agentId,
+			sourcePath,
+			sourceSha256: input.sourceHash,
+			sourceKind: input.sourceKind,
+			sessionId: `native:${input.harness}:${sourcePath}`,
+			sessionKey: `native:${input.harness}`,
+			sessionToken: `native:${input.harness}`,
+			project: null,
+			harness: input.harness,
+			capturedAt,
+			startedAt: capturedAt,
+			endedAt: capturedAt,
+			manifestPath: null,
+			sourceNodeId: NATIVE_MEMORY_BRIDGE_SOURCE_NODE_ID,
+			memorySentence: `Indexed ${input.harness} native memory from ${sourcePath.split("/").at(-1) ?? sourcePath}.`,
+			memorySentenceQuality: "fallback",
+			content: input.content,
+			updatedAt: new Date().toISOString(),
+			sourceMtimeMs: input.sourceMtimeMs,
+			sourceId: input.sourceId,
+			sourceRoot: input.sourceRoot,
+			sourceExternalId: input.sourceExternalId,
+			sourceParentPath: input.sourceParentPath,
+			sourceMetaJson: input.sourceMetaJson,
+		};
+	}
+
+	interface NativeMemoryEmbeddingResult {
+		readonly embedded: number;
+		readonly skipped: number;
+		readonly providerUnavailable: boolean;
+	}
+
+	async function executeNativeMemoryEmbeddings(
+		input: DbOwnerNativeMemoryIndex,
+		database: SqliteDatabase,
+	): Promise<NativeMemoryEmbeddingResult> {
+		const embedding = input.embedding;
+		if (embedding === undefined || input.sourceId === null || embedding.config.provider === "none")
+			return { embedded: 0, skipped: 0, providerUnavailable: false };
+		const { fetchEmbedding } = await import("./embedding-fetch");
+		const vecSchema = database
+			.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vec_embeddings'")
+			.get() as { sql?: string } | null;
+		const vecAvailable = vecSchema !== null;
+		const vecDimensions = vecSchema?.sql?.match(/float\\s*\\[\\s*(\\d+)\\s*\\]/i)?.[1];
+		const currentHashes = new Set<string>();
+		let embedded = 0;
+		let skipped = 0;
+		for (const chunk of embedding.chunks) {
+			const contentHash = createHash("sha256")
+				.update(`${input.agentId}\n${chunk.id}\n${chunk.chunkText}`)
+				.digest("hex");
+			const embeddingId = createHash("sha256")
+				.update(`source_chunk:${input.agentId}:${chunk.id}`)
+				.digest("hex")
+				.slice(0, 32);
+			currentHashes.add(contentHash);
+			const existing = database
+				.prepare(
+					"SELECT id, content_hash FROM embeddings WHERE source_type IN (?, ?) AND source_id = ? AND agent_id = ? LIMIT 1",
+				)
+				.get("source_chunk", "obsidian_chunk", chunk.id, input.agentId) as { id: string; content_hash: string } | null;
+			if (existing?.content_hash === contentHash) {
+				upsertMemoryContentSafetyInTx(database as unknown as import("./db-accessor").WriteDb, {
+					agentId: input.agentId,
+					sourceKind: "source_chunk",
+					sourceId: embeddingId,
+					content: chunk.chunkText,
+				});
+				skipped++;
+				continue;
+			}
+			let failureCause = "provider_unavailable";
+			const vector = await fetchEmbedding(chunk.chunkText, embedding.config as EmbeddingConfig, "document", {
+				usage: { source: "artifact-index", agentId: input.agentId },
+				onFailure: (cause) => {
+					failureCause = cause;
+				},
+			});
+			if (vector === null || vector.length === 0) {
+				if (failureCause === "provider_unavailable" || failureCause === "timeout")
+					return {
+						embedded,
+						skipped: embedding.chunks.length - embedded,
+						providerUnavailable: true,
+					};
+				skipped++;
+				continue;
+			}
+			if (existing !== null) {
+				if (vecAvailable) database.prepare("DELETE FROM vec_embeddings WHERE id = ?").run(existing.id);
+				database.prepare("DELETE FROM embeddings WHERE id = ?").run(existing.id);
+			}
+			database
+				.prepare(
+					`INSERT INTO embeddings
+					 (id, content_hash, vector, dimensions, source_type, source_id, chunk_text, created_at, agent_id)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+					 ON CONFLICT(content_hash) DO UPDATE SET vector = excluded.vector, dimensions = excluded.dimensions,
+					 source_type = excluded.source_type, source_id = excluded.source_id, chunk_text = excluded.chunk_text,
+					 created_at = excluded.created_at, agent_id = excluded.agent_id`,
+				)
+				.run(
+					embeddingId,
+					contentHash,
+					vectorToBlob(vector),
+					vector.length,
+					"source_chunk",
+					chunk.id,
+					chunk.chunkText,
+					new Date().toISOString(),
+					input.agentId,
+				);
+			upsertMemoryContentSafetyInTx(database as unknown as import("./db-accessor").WriteDb, {
+				agentId: input.agentId,
+				sourceKind: "source_chunk",
+				sourceId: embeddingId,
+				content: chunk.chunkText,
+			});
+			if (vecAvailable && vecDimensions === String(vector.length))
+				database
+					.prepare("INSERT OR REPLACE INTO vec_embeddings (id, embedding) VALUES (?, ?)")
+					.run(embeddingId, vectorToBlob(vector));
+			embedded++;
+		}
+		const prefix = `${input.sourceId}:${input.sourceExternalId ?? input.sourcePath}#`;
+		const stale = database
+			.prepare(
+				"SELECT id, content_hash, source_type FROM embeddings WHERE source_type IN (?, ?) AND source_id LIKE ? AND agent_id = ?",
+			)
+			.all("source_chunk", "obsidian_chunk", `${prefix}%`, input.agentId) as Array<{
+			id: string;
+			content_hash: string;
+			source_type: string;
+		}>;
+		for (const row of stale) {
+			if (row.source_type === "obsidian_chunk" || currentHashes.has(row.content_hash)) continue;
+			if (vecAvailable) database.prepare("DELETE FROM vec_embeddings WHERE id = ?").run(row.id);
+			database.prepare("DELETE FROM embeddings WHERE id = ?").run(row.id);
+		}
+		return { embedded, skipped, providerUnavailable: false };
+	}
+
+	async function executeNativeMemoryIndex(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "source_native_memory_index" }>,
+		context?: JobExecutionContext,
+	): Promise<{
+		readonly artifactChanged: boolean;
+		readonly graphIndexed: boolean;
+		readonly embeddingProviderUnavailable: boolean;
+	}> {
+		const input = request.input;
+		const sourcePath = input.sourcePath.replace(/\\/g, "/");
+		const embeddingResult = await executeNativeMemoryEmbeddings(input, db);
+
+		const checkpoint = embeddingResult.providerUnavailable
+			? (input.checkpointOnProviderFailure ?? input.checkpoint)
+			: input.checkpoint;
+		const existing = db
+			.prepare(
+				"SELECT source_sha256 FROM memory_artifacts WHERE agent_id = ? AND source_path = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1",
+			)
+			.get(input.agentId, sourcePath) as { source_sha256: string } | null | undefined;
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			upsertMemoryArtifactInTx(db as unknown as BunDatabase, nativeMemoryArtifactFields(input));
+			if (input.graph !== undefined) {
+				applyObsidianSourceStructureInTx(db as unknown as import("./db-accessor").WriteDb, {
+					agentId: input.agentId,
+					sourceId: input.graph.sourceId,
+					sourceName: input.graph.sourceName,
+					root: input.graph.root,
+					filePath: sourcePath,
+					content: input.content,
+				});
+			}
+			if (checkpoint !== undefined) {
+				db.prepare(
+					`INSERT INTO source_sync_checkpoints
+					 (agent_id, source_key, phase, cursor, frontier, scanned, complete, updated_at)
+					 VALUES (?, ?, 'content', ?, ?, ?, ?, datetime('now'))
+					 ON CONFLICT(agent_id, source_key, phase) DO UPDATE SET
+					 cursor = excluded.cursor,
+					 frontier = excluded.frontier,
+					 scanned = excluded.scanned,
+					 complete = excluded.complete,
+					 updated_at = excluded.updated_at`,
+				).run(
+					input.agentId,
+					checkpoint.sourceKey,
+					checkpoint.cursor,
+					checkpoint.frontier === null ? null : JSON.stringify(checkpoint.frontier),
+					checkpoint.scanned,
+					checkpoint.complete ? 1 : 0,
+				);
+			}
+			commit(context);
+			return {
+				artifactChanged: existing?.source_sha256 !== input.sourceHash,
+				graphIndexed: input.graph !== undefined,
+				embeddingProviderUnavailable: embeddingResult.providerUnavailable,
+			};
+		} catch (error) {
+			try {
+				db.exec("ROLLBACK");
+			} catch {
+				// Preserve the original error.
+			}
+			throw error;
+		}
+	}
+
 	function executeSourceArtifactIndex(
 		request: Extract<DbOwnerJob["request"], { readonly kind: "source_artifact_index" }>,
 		context?: JobExecutionContext,
@@ -518,6 +743,7 @@ export function runDbOwnerWorker(): void {
 		)
 			return executeSourceGraph(job.request, context);
 		if (job.request.kind === "source_artifact_index") return executeSourceArtifactIndex(job.request, context);
+		if (job.request.kind === "source_native_memory_index") return executeNativeMemoryIndex(job.request, context);
 		if (job.request.kind === "source_artifact_purge") return executeSourceArtifactPurge(job.request, context);
 		if (job.request.kind === "vacuum_conversion") {
 			const { convertToIncrementalVacuum } = await import("./db-vacuum");

@@ -16,6 +16,7 @@ export interface NativeSourceWorkerPattern {
 
 export interface NativeSourceWorkerSource {
 	readonly root: string;
+	readonly sourceRoot?: string;
 	readonly files: readonly NativeSourceWorkerPattern[];
 	readonly harness?: string;
 	readonly sourceId?: string;
@@ -27,6 +28,8 @@ export interface NativeSourceWorkerFile {
 	readonly mtimeMs: number;
 	readonly kind: string;
 	readonly contentHash: string;
+	/** Source identity is derived in the isolated worker, never in the parent. */
+	readonly sourceId?: string;
 	readonly lineCount: number;
 	readonly rolloutId?: string;
 	readonly chunks?: readonly ObsidianSourceChunk[];
@@ -39,6 +42,7 @@ export interface NativeSourceWorkerPage {
 	readonly total: number;
 	readonly complete: boolean;
 	readonly frontier: readonly string[];
+	readonly permissionDeniedPaths: readonly string[];
 }
 
 interface ScanCommand {
@@ -54,6 +58,7 @@ type WorkerCommand = ScanCommand | { readonly type: "cancel"; readonly id: strin
 
 type WorkerEvent =
 	| { readonly type: "ready"; readonly pid: number }
+	| { readonly type: "scan_started"; readonly id: string }
 	| {
 			readonly type: "result";
 			readonly id: string;
@@ -68,6 +73,45 @@ interface PendingScan {
 }
 
 const NATIVE_SOURCE_WORKER_SCAN_DEADLINE_MS = 30_000;
+/** Maximum UTF-8 JSON size for either side of the worker IPC channel. */
+export const NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
+
+export function waitForNativeSourceWorkerDrain(stdin: NodeJS.WritableStream): Promise<void> {
+	return new Promise<void>((resolve, reject) => {
+		const cleanup = (): void => {
+			stdin.off("drain", onDrain);
+			stdin.off("error", onError);
+			stdin.off("close", onClose);
+		};
+		const onDrain = (): void => {
+			cleanup();
+			resolve();
+		};
+		const onError = (error: Error): void => {
+			cleanup();
+			reject(error);
+		};
+		const onClose = (): void => {
+			cleanup();
+			reject(new Error("native source worker stdin closed before drain"));
+		};
+		stdin.once("drain", onDrain);
+		stdin.once("error", onError);
+		stdin.once("close", onClose);
+	});
+}
+
+function nativeSourceId(source: NativeSourceWorkerSource): string | undefined {
+	if (source.sourceId !== undefined) return source.sourceId;
+	if (source.harness === "codex")
+		return `codex_native_memory:${createHash("sha256").update(source.root.replace(/\\/g, "/")).digest("hex").slice(0, 16)}`;
+	if (source.harness === "hermes-agent")
+		return `hermes_native_memory:${createHash("sha256")
+			.update((source.sourceRoot ?? source.root).replace(/\\/g, "/"))
+			.digest("hex")
+			.slice(0, 16)}`;
+	return undefined;
+}
 
 function matchSegment(glob: string, value: string): boolean {
 	if (glob === "*") return value.length > 0;
@@ -122,6 +166,7 @@ async function scan(command: ScanCommand): Promise<NativeSourceWorkerPage> {
 	const pageSize = Math.max(1, Math.min(100, Math.trunc(command.pageSize)));
 	const frontier = [...(command.frontier ?? [command.source.root])];
 	const files: NativeSourceWorkerFile[] = [];
+	const permissionDeniedPaths: string[] = [];
 	while (frontier.length > 0 && files.length < pageSize) {
 		const path = frontier.pop();
 		if (path === undefined) break;
@@ -141,6 +186,7 @@ async function scan(command: ScanCommand): Promise<NativeSourceWorkerPage> {
 			const kind = matchesPattern(command.source, path);
 			if (kind === null) continue;
 			const content = await readFile(path, "utf8");
+			if (!content.trim()) continue;
 			const chunks =
 				command.source.harness === "obsidian" &&
 				command.source.sourceId !== undefined &&
@@ -152,15 +198,43 @@ async function scan(command: ScanCommand): Promise<NativeSourceWorkerPage> {
 							content,
 						})
 					: undefined;
-			files.push({
+			const descriptor: NativeSourceWorkerFile = {
 				path,
 				content,
 				mtimeMs: info.mtimeMs,
 				kind,
 				...contentMetadata(content),
+				...(nativeSourceId(command.source) === undefined ? {} : { sourceId: nativeSourceId(command.source) }),
 				...(chunks === undefined ? {} : { chunks }),
-			});
-		} catch {
+			};
+			const candidate = {
+				files: [...files, descriptor],
+				nextCursor: descriptor.path,
+				scanned: files.length + 1,
+				total: files.length + 1,
+				complete: frontier.length === 0,
+				frontier,
+				permissionDeniedPaths,
+			};
+			const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
+			if (files.length > 0 && candidateBytes > NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES) {
+				frontier.push(path);
+				break;
+			}
+			if (candidateBytes > NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES)
+				throw new Error(
+					`native source worker descriptor exceeds the ${NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES}-byte IPC limit`,
+				);
+			files.push(descriptor);
+		} catch (error) {
+			if (error instanceof Error && error.message.includes("IPC limit")) throw error;
+			if (
+				typeof error === "object" &&
+				error !== null &&
+				((error as NodeJS.ErrnoException).code === "EACCES" || (error as NodeJS.ErrnoException).code === "EPERM")
+			) {
+				permissionDeniedPaths.push(path);
+			}
 			// Files and directories can disappear while a source is being edited.
 		}
 	}
@@ -171,6 +245,7 @@ async function scan(command: ScanCommand): Promise<NativeSourceWorkerPage> {
 		total: files.length,
 		complete: frontier.length === 0,
 		frontier,
+		permissionDeniedPaths,
 	};
 }
 
@@ -183,7 +258,12 @@ export function runNativeSourceWorker(): void {
 	const canceled = new Set<string>();
 	let input = "";
 	const send = (event: WorkerEvent): void => {
-		process.stdout.write(`${JSON.stringify(event)}\n`);
+		const serialized = JSON.stringify(event);
+		if (Buffer.byteLength(serialized, "utf8") > NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES)
+			throw new Error(
+				`native source worker message exceeds the ${NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES}-byte IPC limit`,
+			);
+		process.stdout.write(`${serialized}\n`);
 	};
 	send({ type: "ready", pid: process.pid });
 	process.stdin.setEncoding("utf8");
@@ -194,6 +274,7 @@ export function runNativeSourceWorker(): void {
 		for (const line of lines) {
 			if (!line) continue;
 			const command = JSON.parse(line) as WorkerCommand;
+			if (command.type === "scan") send({ type: "scan_started", id: command.id });
 			if (command.type === "shutdown") {
 				clearInterval(parentWatch);
 				process.exit(0);
@@ -236,7 +317,17 @@ export interface NativeSourceWorkerHandle {
 	readonly close: () => Promise<void>;
 }
 
-export function createNativeSourceWorker(): NativeSourceWorkerHandle {
+export function createNativeSourceWorker(
+	options: {
+		/** Test-only seam for exercising backpressure with a real Writable implementation. */
+		readonly wrapStdin?: (stdin: NodeJS.WritableStream) => NodeJS.WritableStream;
+		readonly onScanStarted?: () => void;
+		/** Test-only hook fired when the child has delivered a scan result. */
+		readonly onScanResult?: () => void;
+		/** Test-only seam for exercising command backpressure. */
+		readonly writeCommand?: (stdin: NodeJS.WritableStream, command: string) => Promise<void>;
+	} = {},
+): NativeSourceWorkerHandle {
 	let child: ChildProcess | null = null;
 	let startPromise: Promise<void> | null = null;
 	let sequence = 0;
@@ -262,14 +353,17 @@ export function createNativeSourceWorker(): NativeSourceWorkerHandle {
 					if (!line) continue;
 					const event = JSON.parse(line) as WorkerEvent;
 					if (event.type === "ready") resolve();
+					if (event.type === "scan_started") options.onScanStarted?.();
 					if (event.type === "result" || event.type === "error") {
 						const job = pending.get(event.id);
 						if (!job) continue;
 						pending.delete(event.id);
 						activeId = null;
 						if (job.timer) clearTimeout(job.timer);
-						if (event.type === "result") job.resolve(event.result);
-						else job.reject(new Error(event.message));
+						if (event.type === "result") {
+							options.onScanResult?.();
+							job.resolve(event.result);
+						} else job.reject(new Error(event.message));
 					}
 				}
 			});
@@ -305,23 +399,45 @@ export function createNativeSourceWorker(): NativeSourceWorkerHandle {
 	}): Promise<NativeSourceWorkerPage> => {
 		await start();
 		const worker = child;
-		const stdin = worker?.stdin;
-		if (worker === null || stdin === null || stdin === undefined)
+		const rawStdin = worker?.stdin;
+		if (worker === null || rawStdin === null || rawStdin === undefined)
 			throw new Error("native source worker is unavailable");
+		const stdin = options.wrapStdin?.(rawStdin) ?? rawStdin;
 		const id = `source-scan-${process.pid}-${++sequence}`;
 		activeId = id;
-		return await new Promise<NativeSourceWorkerPage>((resolve, reject) => {
-			const timer = setTimeout(() => {
+		let rejectResult!: (error: Error) => void;
+		let timer!: ReturnType<typeof setTimeout>;
+		const result = new Promise<NativeSourceWorkerPage>((resolve, reject) => {
+			rejectResult = reject;
+			timer = setTimeout(() => {
 				if (!pending.delete(id)) return;
 				activeId = null;
 				worker.kill("SIGKILL");
 				reject(new Error(`native source worker scan exceeded ${NATIVE_SOURCE_WORKER_SCAN_DEADLINE_MS}ms`));
 			}, NATIVE_SOURCE_WORKER_SCAN_DEADLINE_MS);
 			pending.set(id, { resolve, reject, timer });
-			stdin.write(
-				`${JSON.stringify({ type: "scan", id, ...inputValue, frontier: inputValue.frontier ?? undefined })}\n`,
-			);
 		});
+		const command = `${JSON.stringify({ type: "scan", id, ...inputValue, frontier: inputValue.frontier ?? undefined })}\n`;
+		if (Buffer.byteLength(command, "utf8") > NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES) {
+			pending.delete(id);
+			clearTimeout(timer);
+			activeId = null;
+			rejectResult(
+				new Error(`native source worker command exceeds the ${NATIVE_SOURCE_WORKER_MAX_MESSAGE_BYTES}-byte IPC limit`),
+			);
+			return await result;
+		}
+		try {
+			if (options.writeCommand) await options.writeCommand(stdin, command);
+			else if (!stdin.write(command)) await waitForNativeSourceWorkerDrain(stdin);
+		} catch (error: unknown) {
+			if (pending.delete(id)) {
+				clearTimeout(timer);
+				activeId = null;
+				rejectResult(error instanceof Error ? error : new Error(String(error)));
+			}
+		}
+		return await result;
 	};
 	return {
 		scan,

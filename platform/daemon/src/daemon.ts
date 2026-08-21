@@ -2588,6 +2588,7 @@ async function main() {
 						sourceCleanupEnabled: true,
 						shouldCleanupSource: (source) => source.harness !== "obsidian",
 						sourceGraphEnabled: true,
+						workerOwnedIndexing: true,
 						...resolveEmbeddingBridgeOptions(memoryCfg.embedding, fetchEmbedding),
 						onFileIndexed: (event) => {
 							const sourceId = event.source.sourceId;

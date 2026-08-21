@@ -655,56 +655,56 @@
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 112,
+      "line": 118,
       "api": "readFileSync",
       "source": "return readFileSync(cancellationRegistryPath, \"utf8\").includes(`${jobId}\\n`);",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 137,
+      "line": 143,
       "api": "writeFileSync",
       "source": "writeFileSync(startupStarted, \"started\\n\");",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 139,
+      "line": 145,
       "api": "existsSync",
       "source": "while (!existsSync(startupRelease)) Atomics.wait(signal, 0, 0, 5);",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 145,
+      "line": 151,
       "api": "existsSync",
       "source": "if (sqlitePath !== undefined && existsSync(sqlitePath) && typeof Database.setCustomSQLite === \"function\") {",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 174,
+      "line": 180,
       "api": "writeFileSync",
       "source": "if (commitMarker !== undefined) writeFileSync(commitMarker, \"started\\n\");",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 496,
+      "line": 721,
       "api": "writeFileSync",
       "source": "writeFileSync(startedMarker, \"started\\n\");",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 497,
+      "line": 722,
       "api": "existsSync",
       "source": "while (!existsSync(releaseMarker)) await new Promise((resolve) => setTimeout(resolve, 5));",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 530,
+      "line": 756,
       "api": "writeFileSync",
       "source": "if (activeFile) writeFileSync(activeFile, `${Date.now()}\\n`);",
       "category": "hot-path"
@@ -1635,7 +1635,7 @@
     },
     {
       "path": "native-memory-source-worker.ts",
-      "line": 225,
+      "line": 306,
       "api": "existsSync",
       "source": "return [existsSync(bundled) ? bundled : join(directory, \"native-memory-source-worker.ts\")];",
       "category": "hot-path"
@@ -1789,49 +1789,49 @@
     },
     {
       "path": "obsidian-source-embeddings.ts",
-      "line": 597,
+      "line": 629,
       "api": "withReadDb",
       "source": "const embeddingConfig = getDbAccessor().withReadDb(",
       "category": "hot-path"
     },
     {
       "path": "obsidian-source-embeddings.ts",
-      "line": 633,
+      "line": 665,
       "api": "withWriteTx",
       "source": "getDbAccessor().withWriteTx(",
       "category": "hot-path"
     },
     {
       "path": "obsidian-source-embeddings.ts",
-      "line": 649,
+      "line": 681,
       "api": "withReadDb",
       "source": "const writeConfig = getDbAccessor().withReadDb(",
       "category": "hot-path"
     },
     {
       "path": "obsidian-source-embeddings.ts",
-      "line": 683,
+      "line": 715,
       "api": "withWriteTx",
       "source": "const stored = getDbAccessor().withWriteTx((db: import(\"./db-accessor\").WriteDb) => {",
       "category": "hot-path"
     },
     {
       "path": "obsidian-source-embeddings.ts",
-      "line": 744,
+      "line": 776,
       "api": "withWriteTx",
       "source": "getDbAccessor().withWriteTx((db: import(\"./db-accessor\").WriteDb) => {",
       "category": "hot-path"
     },
     {
       "path": "obsidian-source-embeddings.ts",
-      "line": 790,
+      "line": 822,
       "api": "withReadDb",
       "source": "const row = getDbAccessor().withReadDb(",
       "category": "hot-path"
     },
     {
       "path": "obsidian-source-embeddings.ts",
-      "line": 813,
+      "line": 845,
       "api": "withWriteTx",
       "source": "return getDbAccessor().withWriteTx((db: import(\"./db-accessor\").WriteDb) => {",
       "category": "hot-path"
