@@ -140,7 +140,6 @@ export interface DbOwnerNativeMemoryIndex {
 			readonly warmNative?: boolean;
 			readonly indexGeneration?: string;
 			readonly llamaCppMaxInputTokens?: number;
-			readonly costRates?: readonly unknown[];
 		};
 		readonly chunks: readonly {
 			readonly id: string;
