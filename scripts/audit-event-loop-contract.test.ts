@@ -34,14 +34,14 @@ test("the ledger reports legacy DB markers and rejects new call sites", () => {
 			join(root, "legacy.ts"),
 			[
 				"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site",
-				"getDbAccessor().withReadDb((db) => db);",
+				'getDbAccessor().withReadDb((db) => db, "legacy.ts:2");',
 				"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site",
-				"getDbAccessor().withWriteTx((db) => db);",
+				'getDbAccessor().withWriteTx((db) => db, "legacy.ts:4");',
 			].join("\n"),
 		);
 		writeFileSync(
 			join(root, "new-call.ts"),
-			"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site\ngetDbAccessor().withReadDb((db) => db);\n",
+			'// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site\ngetDbAccessor().withReadDb((db) => db, "new-call.ts:2");\n',
 		);
 		const result = runAudit({
 			sourceRoot: root,
@@ -50,14 +50,14 @@ test("the ledger reports legacy DB markers and rejects new call sites", () => {
 					path: "legacy.ts",
 					line: 2,
 					api: "withReadDb",
-					source: "getDbAccessor().withReadDb((db) => db);",
+					source: 'getDbAccessor().withReadDb((db) => db, "legacy.ts:2");',
 					category: "hot-path",
 				},
 				{
 					path: "legacy.ts",
 					line: 4,
 					api: "withWriteTx",
-					source: "getDbAccessor().withWriteTx((db) => db);",
+					source: 'getDbAccessor().withWriteTx((db) => db, "legacy.ts:4");',
 					category: "hot-path",
 				},
 			],
@@ -93,6 +93,22 @@ test("the ledger rejects a replacement call at the same path and API", () => {
 		expect(result.violations[0]?.path).toBe("legacy.ts");
 		expect(occurrenceKeys(result.sites)).not.toEqual(occurrenceKeys(baseline));
 		expect(findStaleBaselineSites(result.sites, baseline)).toHaveLength(1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a marked legacy DB call without a site token fails the attribution coverage rule", () => {
+	const root = mkdtempSync(join(tmpdir(), "signet-legacy-site-token-"));
+	try {
+		writeFileSync(
+			join(root, "missing-token.ts"),
+			"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site\ngetDbAccessor().withReadDb((db) => db);\n",
+		);
+		const result = runAudit({ sourceRoot: root });
+		const violation = result.violations.find((item) => item.kind === "missing-legacy-db-site-token");
+		expect(violation?.path).toBe("missing-token.ts");
+		expect(violation?.message).toContain('"missing-token.ts:2"');
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -357,7 +373,7 @@ test("a marker above the call line keeps the site marked, a distant marker does 
 			join(root, "placement.ts"),
 			[
 				"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site",
-				"getDbAccessor().withReadDb((db) => db);",
+				'getDbAccessor().withReadDb((db) => db, "placement.ts:2");',
 				"const unrelated = 1;",
 				"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site",
 				"const gap = 2;",

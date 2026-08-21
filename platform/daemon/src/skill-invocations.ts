@@ -90,7 +90,7 @@ export function recordSkillInvocation(record: SkillInvocationRecord): void {
 					   )`,
 				).run(now, now, record.agentId, record.agentId, skill);
 			}
-		});
+		}, "skill-invocations.ts:50");
 	} catch (err) {
 		logger.warn("skills", "Failed to record skill invocation", err instanceof Error ? err : undefined);
 	}

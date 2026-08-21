@@ -521,7 +521,10 @@ export function reconcileOntologyContradictions(
 	params: ReconcileOntologyContradictionsParams,
 ): number {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return accessor.withWriteTx((db: import("./db-accessor").WriteDb) => reconcileOntologyContradictionsInTx(db, params));
+	return accessor.withWriteTx(
+		(db: import("./db-accessor").WriteDb) => reconcileOntologyContradictionsInTx(db, params),
+		"ontology-contradictions.ts:524",
+	);
 }
 
 export function listOntologyContradictions(
@@ -579,7 +582,7 @@ export function listOntologyContradictions(
 			limit,
 			offset,
 		};
-	});
+	}, "ontology-contradictions.ts:538");
 }
 
 export function getOntologyContradiction(
@@ -594,7 +597,7 @@ export function getOntologyContradiction(
 				WHERE c.id = ? AND c.agent_id = ?`)
 			.get(params.id, params.agentId) as ContradictionRow | undefined | null;
 		return row == null ? null : rowToContradiction(row);
-	});
+	}, "ontology-contradictions.ts:594");
 }
 
 export function parseOntologyContradictionStatus(

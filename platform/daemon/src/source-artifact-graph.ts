@@ -118,7 +118,7 @@ function safeDecodeURIComponent(value: string): string {
 
 function displayNameFromPath(path: string): string {
 	const clean = canonicalSegment(path);
-	const tail = clean.split(/[\/#]/).filter(Boolean).at(-1);
+	const tail = clean.split(/[/#]/).filter(Boolean).at(-1);
 	return tail ? safeDecodeURIComponent(tail).replace(/\.[a-z0-9]+$/i, "") : path;
 }
 
@@ -301,8 +301,9 @@ export function purgeSourceArtifactStructure(
 	input: PurgeSourceArtifactStructureInput,
 ): PurgeSourceArtifactStructureResult {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) =>
-		purgeSourceArtifactStructureInTx(db, input),
+	return getDbAccessor().withWriteTx(
+		(db: import("./db-accessor").WriteDb) => purgeSourceArtifactStructureInTx(db, input),
+		"source-artifact-graph.ts:304",
 	);
 }
 
@@ -324,8 +325,9 @@ export function indexSourceArtifactStructure(
 ): IndexSourceArtifactStructureResult {
 	const now = new Date().toISOString();
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) =>
-		indexSourceArtifactStructureInTx(db, input, now),
+	return getDbAccessor().withWriteTx(
+		(db: import("./db-accessor").WriteDb) => indexSourceArtifactStructureInTx(db, input, now),
+		"source-artifact-graph.ts:328",
 	);
 }
 

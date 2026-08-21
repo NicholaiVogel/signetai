@@ -99,7 +99,7 @@ export function registerReflectionRoutes(app: Hono, deps: ReflectionRouteDeps = 
 				return db
 					.prepare("SELECT * FROM daily_reflections WHERE agent_id = ? AND date = ? ORDER BY created_at DESC LIMIT ?")
 					.all(agentId, date, limit) as ReflectionRow[];
-			});
+			}, "routes/reflection-routes.ts:98");
 
 			const reflections = rows.map(formatReflection);
 			return c.json({ reflection: reflections[0] ?? null, reflections });
@@ -126,7 +126,7 @@ export function registerReflectionRoutes(app: Hono, deps: ReflectionRouteDeps = 
                  LIMIT ?`,
 					)
 					.all(agentId, limit) as ReflectionRow[];
-			});
+			}, "routes/reflection-routes.ts:118");
 
 			return c.json({ reflections: rows.map(formatReflection) });
 		} catch (e) {
@@ -175,7 +175,7 @@ export function registerReflectionRoutes(app: Hono, deps: ReflectionRouteDeps = 
 					`SELECT * FROM daily_reflections WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY created_at DESC`,
 				)
 				.all(...ids) as ReflectionRow[];
-		});
+		}, "routes/reflection-routes.ts:172");
 
 		logger.info("reflections", "Generated daily brief questions", { agentId, date, count: rows.length });
 		const reflections = rows.map(formatReflection);
@@ -208,7 +208,7 @@ export function registerReflectionRoutes(app: Hono, deps: ReflectionRouteDeps = 
 				return db.prepare("SELECT * FROM daily_reflections WHERE id = ? AND agent_id = ?").get(id, agentId) as
 					| ReflectionRow
 					| undefined;
-			});
+			}, "routes/reflection-routes.ts:207");
 
 			if (!existing) {
 				return c.json({ error: "Reflection not found" }, 404);
@@ -256,7 +256,7 @@ export function registerReflectionRoutes(app: Hono, deps: ReflectionRouteDeps = 
 					agentId,
 					createdAt: now,
 				});
-			});
+			}, "routes/reflection-routes.ts:225");
 
 			if (!claimed) {
 				return c.json({ error: "Already answered" }, 409);

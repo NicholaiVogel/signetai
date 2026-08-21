@@ -68,6 +68,15 @@ export interface UnmarkedLegacyDbAccessViolation {
 	readonly message: string;
 }
 
+/** A marked legacy DB call without its static in-flight attribution token. */
+export interface MissingLegacyDbSiteTokenViolation {
+	readonly kind: "missing-legacy-db-site-token";
+	readonly path: string;
+	readonly line: number;
+	readonly api: LegacyDbApi;
+	readonly message: string;
+}
+
 /** Committed marker-count snapshot; the ratchet fails when the live count grows past it. */
 export interface LegacyDbCountBaseline {
 	readonly version: 1;
@@ -88,7 +97,12 @@ export interface RatchetOutcome {
 
 export interface AuditResult {
 	readonly sites: readonly AuditSite[];
-	readonly violations: readonly (ImportBoundaryViolation | LegacyDbAccessViolation | UnmarkedLegacyDbAccessViolation)[];
+	readonly violations: readonly (
+		| ImportBoundaryViolation
+		| LegacyDbAccessViolation
+		| UnmarkedLegacyDbAccessViolation
+		| MissingLegacyDbSiteTokenViolation
+	)[];
 	readonly legacyDbAccess: LegacyDbAccessCounts;
 }
 
@@ -313,12 +327,15 @@ function findImportBoundaryViolations(
 function findLegacyDbAccessSites(sourceRoot: string): {
 	readonly sites: AuditSite[];
 	readonly unmarked: UnmarkedCallSite[];
+	readonly missingSiteTokens: MissingLegacyDbSiteTokenViolation[];
 } {
 	const sites: AuditSite[] = [];
 	const unmarked: UnmarkedCallSite[] = [];
+	const missingSiteTokens: MissingLegacyDbSiteTokenViolation[] = [];
 	for (const path of walk(sourceRoot)) {
 		const source = readFileSync(path, "utf8");
 		const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+		const bindings = staticStringBindings(sourceFile);
 		const lines = source.split("\n");
 		const markerLines = new Set<number>();
 		for (let index = 0; index < lines.length; index++) {
@@ -361,6 +378,20 @@ function findLegacyDbAccessSites(sourceRoot: string): {
 							}
 						}
 						if (!marked) unmarked.push({ path: relativePath, line, api: api as LegacyDbApi });
+						if (marked) {
+							const tokenArgument = node.arguments[1];
+							const token = tokenArgument === undefined ? null : staticStringValue(tokenArgument, bindings);
+							const expected = `${relativePath}:${line}`;
+							if (token !== expected) {
+								missingSiteTokens.push({
+									kind: "missing-legacy-db-site-token",
+									path: relativePath,
+									line,
+									api: api as LegacyDbApi,
+									message: `${relativePath}:${line} ${api}() must pass its static site token ${JSON.stringify(expected)}; unattributed in-flight DB calls are not allowed`,
+								});
+							}
+						}
 					}
 				}
 			}
@@ -368,7 +399,7 @@ function findLegacyDbAccessSites(sourceRoot: string): {
 		};
 		visit(sourceFile);
 	}
-	return { sites, unmarked };
+	return { sites, unmarked, missingSiteTokens };
 }
 
 /** A synchronous DB call site with no LEGACY_SYNC_DB_ACCESS marker within the marker window. */
@@ -519,7 +550,7 @@ export function writeCountBaseline(
 }
 
 export function runAudit(options: AuditOptions): AuditResult {
-	const { sites, unmarked } = findLegacyDbAccessSites(options.sourceRoot);
+	const { sites, unmarked, missingSiteTokens } = findLegacyDbAccessSites(options.sourceRoot);
 	const baselineSites = options.baselineSites ?? [];
 	return {
 		sites,
@@ -527,6 +558,7 @@ export function runAudit(options: AuditOptions): AuditResult {
 			...findImportBoundaryViolations(options.sourceRoot, new Set(options.allowedSyncCompatImporters ?? [])),
 			...findNewLegacyDbAccessViolations(sites, baselineSites),
 			...findUnmarkedLegacyDbAccess(unmarked),
+			...missingSiteTokens,
 		],
 		legacyDbAccess: countLegacyDbAccess(options.sourceRoot),
 	};

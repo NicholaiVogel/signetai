@@ -139,7 +139,7 @@ function acquireHeadLease(agentId: string, owner: string, ttlMs: number): LeaseR
 					hash: active.content_hash,
 				},
 			};
-		});
+		}, "memory-head.ts:82");
 	} catch {
 		return { ok: false, error: "memory head db unavailable", code: "unavailable" };
 	}
@@ -158,7 +158,7 @@ function finalizeHeadWrite(agentId: string, token: string, content: string, revi
 				)
 				.run(content, hashContent(content), revision, new Date().toISOString(), agentId, token);
 			return countChanges(result) === 1;
-		});
+		}, "memory-head.ts:151");
 	} catch {
 		return false;
 	}
@@ -173,7 +173,7 @@ function releaseHeadLease(agentId: string, token: string): void {
 				 SET lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL
 				 WHERE agent_id = ? AND lease_token = ?`,
 			).run(agentId, token);
-		});
+		}, "memory-head.ts:170");
 	} catch {
 		// best effort
 	}

@@ -1187,7 +1187,7 @@ export async function explainOntologyClaim(
 			},
 			latencyMs: Math.round((performance.now() - started) * 100) / 100,
 		};
-	});
+	}, "ontology-claim-trace.ts:1063");
 }
 
 export type { TraceAssertion, TraceEvidence, TracePremise, TraceVersion, ReverseTraceItem };

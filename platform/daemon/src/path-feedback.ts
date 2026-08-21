@@ -705,5 +705,5 @@ export function recordPathFeedback(
 		}
 
 		return { accepted, propagated, cooccurrenceUpdated, dependenciesUpdated };
-	});
+	}, "path-feedback.ts:611");
 }

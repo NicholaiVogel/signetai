@@ -594,8 +594,9 @@ export async function indexObsidianSourceEmbeddings(
 	// Source watchers outlive a config edit. Keep their writes compatible with
 	// active recall while the requested profile is built in the inactive slot.
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	const embeddingConfig = getDbAccessor().withReadDb((db: import("./db-accessor").ReadDb) =>
-		resolveActiveEmbeddingConfig(db, input.embeddingConfig),
+	const embeddingConfig = getDbAccessor().withReadDb(
+		(db: import("./db-accessor").ReadDb) => resolveActiveEmbeddingConfig(db, input.embeddingConfig),
+		"obsidian-source-embeddings.ts:597",
 	);
 	if (embeddingConfig.provider === "none") return { chunks: 0, embedded: 0, skipped: 0, providerUnavailable: false };
 	const chunks = buildObsidianSourceChunks(input);
@@ -629,13 +630,15 @@ export async function indexObsidianSourceEmbeddings(
 		const existingChunk = existingChunkEmbedding(input.agentId, chunk.id);
 		if (existingChunk?.content_hash === contentHash) {
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-			getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) =>
-				upsertMemoryContentSafetyInTx(db, {
-					agentId: input.agentId,
-					sourceKind: "source_chunk",
-					sourceId: existingChunk.id,
-					content: chunk.chunkText,
-				}),
+			getDbAccessor().withWriteTx(
+				(db: import("./db-accessor").WriteDb) =>
+					upsertMemoryContentSafetyInTx(db, {
+						agentId: input.agentId,
+						sourceKind: "source_chunk",
+						sourceId: existingChunk.id,
+						content: chunk.chunkText,
+					}),
+				"obsidian-source-embeddings.ts:633",
 			);
 			skipped++;
 			await yielder();
@@ -643,8 +646,9 @@ export async function indexObsidianSourceEmbeddings(
 			continue;
 		}
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		const writeConfig = getDbAccessor().withReadDb((db: import("./db-accessor").ReadDb) =>
-			resolveActiveEmbeddingConfig(db, input.embeddingConfig),
+		const writeConfig = getDbAccessor().withReadDb(
+			(db: import("./db-accessor").ReadDb) => resolveActiveEmbeddingConfig(db, input.embeddingConfig),
+			"obsidian-source-embeddings.ts:649",
 		);
 		let failureCause: PipelineCauseFamily = "provider_unavailable";
 		const vector = await input.fetchEmbedding(chunk.chunkText, writeConfig, "document", {
@@ -723,7 +727,7 @@ export async function indexObsidianSourceEmbeddings(
 				| undefined;
 			syncVecInsert(db, stored?.id ?? embId, vector);
 			return true;
-		});
+		}, "obsidian-source-embeddings.ts:683");
 		if (!stored) {
 			skipped++;
 			await yielder();
@@ -761,7 +765,7 @@ export async function indexObsidianSourceEmbeddings(
 				const stmt = db.prepare("DELETE FROM embeddings WHERE id = ?");
 				for (const id of staleIds) stmt.run(id);
 			}
-		});
+		}, "obsidian-source-embeddings.ts:744");
 
 	return {
 		chunks: chunks.length,
@@ -783,12 +787,14 @@ function sleep(ms: number): Promise<void> {
 
 function existingChunkEmbedding(agentId: string, chunkId: string): { id: string; content_hash: string } | null {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	const row = getDbAccessor().withReadDb((db: import("./db-accessor").ReadDb) =>
-		db
-			.prepare(
-				"SELECT id, content_hash FROM embeddings WHERE source_type IN (?, ?) AND source_id = ? AND agent_id = ? LIMIT 1",
-			)
-			.get(SOURCE_CHUNK_SOURCE_TYPE, LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE, chunkId, agentId),
+	const row = getDbAccessor().withReadDb(
+		(db: import("./db-accessor").ReadDb) =>
+			db
+				.prepare(
+					"SELECT id, content_hash FROM embeddings WHERE source_type IN (?, ?) AND source_id = ? AND agent_id = ? LIMIT 1",
+				)
+				.get(SOURCE_CHUNK_SOURCE_TYPE, LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE, chunkId, agentId),
+		"obsidian-source-embeddings.ts:790",
 	) as { id: string; content_hash: string } | undefined;
 	return row ?? null;
 }
@@ -829,7 +835,7 @@ function purgeEmbeddingsBySourceIdPrefix(prefix: string, agentId?: string): numb
 			changes += result.changes;
 		}
 		return changes;
-	});
+	}, "obsidian-source-embeddings.ts:813");
 }
 
 function prefixUpperBound(prefix: string): string {

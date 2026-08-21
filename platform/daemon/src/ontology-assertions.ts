@@ -303,7 +303,7 @@ export function createEpistemicAssertion(
 	input: CreateEpistemicAssertionInput,
 ): EpistemicAssertion {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return accessor.withWriteTx((db: WriteDb) => insertAssertion(db, input));
+	return accessor.withWriteTx((db: WriteDb) => insertAssertion(db, input), "ontology-assertions.ts:306");
 }
 
 export function createEpistemicAssertionsInTx(
@@ -380,7 +380,7 @@ export function listEpistemicAssertions(
 			)
 			.get(...args) as { count: number } | undefined;
 		return { items: rows.map(rowToAssertion), count: count?.count ?? rows.length };
-	});
+	}, "ontology-assertions.ts:325");
 }
 
 export function getEpistemicAssertion(
@@ -399,7 +399,7 @@ export function getEpistemicAssertion(
 			)
 			.get(params.id, observerId) as Record<string, unknown> | undefined;
 		return row ? rowToAssertion(row) : null;
-	});
+	}, "ontology-assertions.ts:391");
 }
 
 export function linkEpistemicAssertionClaim(
@@ -427,7 +427,7 @@ export function linkEpistemicAssertionClaim(
 			)
 			.get(params.id, params.agentId) as Record<string, unknown>;
 		return rowToAssertion(row);
-	});
+	}, "ontology-assertions.ts:410");
 }
 
 export function archiveEpistemicAssertion(
@@ -455,7 +455,7 @@ export function archiveEpistemicAssertion(
 			)
 			.get(params.id, params.agentId) as Record<string, unknown>;
 		return rowToAssertion(row);
-	});
+	}, "ontology-assertions.ts:438");
 }
 
 export function supersedeEpistemicAssertion(
@@ -496,5 +496,5 @@ export function supersedeEpistemicAssertion(
 			 WHERE id = ? AND agent_id = ?`,
 		).run(new Date().toISOString(), input.oldAssertionId, input.agentId);
 		return next;
-	});
+	}, "ontology-assertions.ts:466");
 }

@@ -332,7 +332,10 @@ export function ensureVacuumConversionState(db: PragmaDb): VacuumConversionStatu
 /** Read durable conversion state for status and readiness diagnostics. */
 export function getVacuumConversionStatus(accessor: DbAccessor): VacuumConversionStatus {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("./db-accessor").ReadDb) => readStatusFromDb(toPragmaReadDb(db)));
+	return accessor.withReadDb(
+		(db: import("./db-accessor").ReadDb) => readStatusFromDb(toPragmaReadDb(db)),
+		"db-vacuum.ts:335",
+	);
 }
 
 /** Async durable conversion-state lookup for background workers. */

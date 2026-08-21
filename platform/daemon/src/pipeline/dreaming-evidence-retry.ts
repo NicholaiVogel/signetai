@@ -148,7 +148,7 @@ export function collectRejectedDreamingEvidence(
 			}
 		}
 		return [...candidates.values()];
-	});
+	}, "pipeline/dreaming-evidence-retry.ts:131");
 }
 
 export function recordRejectedDreamingEvidenceInTx(
@@ -301,5 +301,5 @@ export function autoRequeueRepairedDreamingEvidence(
 			affected += 1;
 		}
 		return affected;
-	});
+	}, "pipeline/dreaming-evidence-retry.ts:253");
 }

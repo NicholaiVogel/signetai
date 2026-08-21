@@ -1139,7 +1139,7 @@ function recordMcpInvocation(record: McpInvocationRecord): void {
 				record.success ? 1 : 0,
 				record.errorText ?? null,
 			);
-		});
+		}, "routes/marketplace.ts:1128");
 	} catch (err) {
 		logger.warn("skills", "Failed to record MCP invocation", err instanceof Error ? err : undefined);
 	}

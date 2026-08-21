@@ -13,7 +13,10 @@ export function persistImportedSourceOutcome(input: {
 	readonly outcome: ImportExtractionOutcome;
 }): void {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) => persistImportedSourceOutcomeInTx(db, input));
+	getDbAccessor().withWriteTx(
+		(db: import("./db-accessor").WriteDb) => persistImportedSourceOutcomeInTx(db, input),
+		"imported-source-outcome.ts:16",
+	);
 }
 
 export function persistImportedSourceOutcomeInTx(
@@ -71,7 +74,7 @@ export function readImportedSourceOutcome(sourceId: string, agentId: string): Im
 			)
 			.get(agentId, sourceId) as { source_meta_json: string | null } | null | undefined;
 		return parseImportExtractionOutcome(parseJsonObject(row?.source_meta_json ?? null)?.importExtraction);
-	});
+	}, "imported-source-outcome.ts:62");
 }
 
 function parseImportExtractionOutcome(value: unknown): ImportExtractionOutcome | undefined {

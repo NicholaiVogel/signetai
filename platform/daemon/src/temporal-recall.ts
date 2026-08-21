@@ -763,7 +763,7 @@ function collectTemporalRows(intent: ParsedTemporalIntent, params: TemporalRecal
 		}
 
 		return rows;
-	});
+	}, "temporal-recall.ts:442");
 }
 
 export function resolveTemporalRecall(params: TemporalRecallParams): TemporalRecallResult {

@@ -668,8 +668,9 @@ export async function buildEntityPromptContext({
 	if (!existsSync(memoryDbPath)) return { lines: [], memories: [], memoryCount: 0, engine: "no-entity" };
 	if (!hasDbAccessor()) return { lines: [], memories: [], memoryCount: 0, engine: "no-entity" };
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	const matches: PromptEntityMatch[] = getDbAccessor().withReadDb((db: import("./db-accessor").ReadDb) =>
-		resolvePromptEntityMatches(db, agentId, userMessage),
+	const matches: PromptEntityMatch[] = getDbAccessor().withReadDb(
+		(db: import("./db-accessor").ReadDb) => resolvePromptEntityMatches(db, agentId, userMessage),
+		"prompt-entity-context.ts:671",
 	);
 	if (matches.length === 0) return { lines: [], memories: [], memoryCount: 0, engine: "no-entity" };
 
@@ -724,7 +725,7 @@ export async function buildEntityPromptContext({
 			memoryCount: selected.length,
 			engine: selected.length > 0 ? "entity-context" : "no-aspect-hit",
 		};
-	});
+	}, "prompt-entity-context.ts:698");
 }
 
 export function buildEntityContextInject(
