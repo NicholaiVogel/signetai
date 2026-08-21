@@ -452,14 +452,21 @@ export function runDbOwnerWorker(): void {
 				db.prepare(
 					`INSERT INTO source_sync_checkpoints
 					 (agent_id, source_key, phase, cursor, frontier, scanned, complete, updated_at)
-					 VALUES (?, ?, 'content', ?, NULL, ?, 0, datetime('now'))
+					 VALUES (?, ?, 'content', ?, ?, ?, ?, datetime('now'))
 					 ON CONFLICT(agent_id, source_key, phase) DO UPDATE SET
 					 cursor = excluded.cursor,
 					 frontier = excluded.frontier,
 					 scanned = excluded.scanned,
 					 complete = excluded.complete,
 					 updated_at = excluded.updated_at`,
-				).run(input.agentId, input.checkpoint.sourceKey, sourcePath, input.checkpoint.scanned);
+				).run(
+					input.agentId,
+					input.checkpoint.sourceKey,
+					sourcePath,
+					input.checkpoint.frontier === null ? null : JSON.stringify(input.checkpoint.frontier),
+					input.checkpoint.scanned,
+					input.checkpoint.complete ? 1 : 0,
+				);
 			}
 			commit(context);
 			return {

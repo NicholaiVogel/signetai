@@ -1879,6 +1879,123 @@ describe("native memory sources", () => {
 		}
 	}, 5_000);
 
+	it("resumes from the committed per-file worker frontier after a capped scan", async () => {
+		const root = join(dir, "resume-frontier-source");
+		mkdirSync(root, { recursive: true });
+		for (let index = 0; index < 3; index += 1) {
+			writeFileSync(join(root, `note-${index}.md`), `# Resume ${index}\n\nfrontier ${index}\n`);
+		}
+		const source = obsidianNativeMemorySource(root, "Resume source", "obsidian:resume-frontier");
+		const first = startNativeMemoryBridge([source], {
+			agentId: "agent-resume-frontier",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+		});
+		try {
+			expect(await first.syncExisting()).toBe(1);
+		} finally {
+			await first.close();
+		}
+
+		const checkpointRows = await dbOwnerQuery<
+			readonly { readonly cursor: string | null; readonly frontier: string | null; readonly complete: number }[]
+		>(
+			ownerStatement(
+				"SELECT cursor, frontier, complete FROM source_sync_checkpoints WHERE agent_id = ? AND source_key = ? AND phase = 'content'",
+				["agent-resume-frontier", `agent-resume-frontier:obsidian:${root}`],
+				"all",
+			),
+			{ operation: "test.resume-frontier.checkpoint", lane: "read" },
+		);
+		const checkpoint = checkpointRows[0] ?? null;
+		expect(checkpoint?.cursor).toContain("note-");
+		expect(JSON.parse(checkpoint?.frontier ?? "[]")).not.toContain(root);
+		expect(checkpoint?.complete).toBe(0);
+
+		const second = startNativeMemoryBridge([source], {
+			agentId: "agent-resume-frontier",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+		});
+		try {
+			expect(await second.syncExisting()).toBe(1);
+		} finally {
+			await second.close();
+		}
+		const artifactRows = await dbOwnerQuery<readonly { readonly count: number }[]>(
+			ownerStatement(
+				"SELECT COUNT(*) AS count FROM memory_artifacts WHERE agent_id = ?",
+				["agent-resume-frontier"],
+				"all",
+			),
+			{ operation: "test.resume-frontier.artifacts", lane: "read" },
+		);
+		const artifactCount = artifactRows[0]?.count ?? 0;
+		expect(artifactCount).toBe(2);
+	});
+
+	it("resumes from the durable frontier after the source worker is killed", async () => {
+		const root = join(dir, "killed-resume-source");
+		mkdirSync(root, { recursive: true });
+		for (let index = 0; index < 3; index += 1) {
+			writeFileSync(join(root, `note-${index}.md`), `# Killed ${index}\n\nworker resume ${index}\n`);
+		}
+		const source = obsidianNativeMemorySource(root, "Killed resume source", "obsidian:killed-resume");
+		const firstIndexed: string[] = [];
+		const first = startNativeMemoryBridge([source], {
+			agentId: "agent-killed-resume",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 3,
+			sourceGraphEnabled: false,
+			onFileIndexed: ({ filePath }) => {
+				firstIndexed.push(filePath);
+				if (firstIndexed.length === 1) first.cancel();
+			},
+		});
+		await expect(first.syncExisting()).rejects.toThrow(/native source sync cancelled|native source worker/);
+		await first.close();
+		expect(firstIndexed).toHaveLength(1);
+
+		const checkpointRows = await dbOwnerQuery<
+			readonly { readonly frontier: string | null; readonly complete: number }[]
+		>(
+			ownerStatement(
+				"SELECT frontier, complete FROM source_sync_checkpoints WHERE agent_id = ? AND source_key = ? AND phase = 'content'",
+				["agent-killed-resume", `agent-killed-resume:obsidian:${root}`],
+				"all",
+			),
+			{
+				operation: "test.native-memory-resume-checkpoint",
+				lane: "read",
+			},
+		);
+		const checkpoint = checkpointRows[0] ?? null;
+		expect(checkpoint).not.toBeNull();
+		const frontier: unknown = JSON.parse(checkpoint?.frontier ?? "null");
+		expect(Array.isArray(frontier)).toBe(true);
+		expect(frontier).toHaveLength(2);
+		expect(frontier).not.toContain(root);
+		expect(checkpoint?.complete).toBe(0);
+
+		const restartedIndexed: string[] = [];
+		const restarted = startNativeMemoryBridge([source], {
+			agentId: "agent-killed-resume",
+			pollIntervalMs: 0,
+			maxFilesPerScan: 1,
+			sourceGraphEnabled: false,
+			onFileIndexed: ({ filePath }) => restartedIndexed.push(filePath),
+		});
+		try {
+			expect(await restarted.syncExisting()).toBe(1);
+		} finally {
+			await restarted.close();
+		}
+		expect(restartedIndexed).toHaveLength(1);
+		expect(restartedIndexed[0]).not.toBe(firstIndexed[0]);
+	});
+
 	it("kills only the source worker and leaves the DB owner usable", async () => {
 		const root = join(dir, "killable-source");
 		mkdirSync(root, { recursive: true });

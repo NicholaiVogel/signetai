@@ -882,7 +882,13 @@ export async function indexNativeMemoryFile(
 		readonly lineCount?: number;
 		readonly rolloutId?: string;
 		readonly chunks?: readonly ObsidianSourceChunk[];
-		readonly syncCheckpoint?: { readonly sourceKey: string; readonly scanned: number };
+		readonly syncCheckpoint?: {
+			readonly sourceKey: string;
+			readonly scanned: number;
+			readonly cursor: string | null;
+			readonly frontier: readonly string[] | null;
+			readonly complete: boolean;
+		};
 		readonly signal?: AbortSignal;
 	} = {},
 ): Promise<boolean> {
@@ -1411,7 +1417,7 @@ export function startNativeMemoryBridge(
 							}
 							break;
 						}
-						for (const file of page.files) {
+						for (const [fileIndex, file] of page.files.entries()) {
 							if (cancelRequested) throw new Error("native source sync cancelled");
 							if (resumePath && file.path.replace(/\\/g, "/") <= resumePath.replace(/\\/g, "/")) {
 								current.add(file.path);
@@ -1429,7 +1435,19 @@ export function startNativeMemoryBridge(
 								contentHash: file.contentHash,
 								lineCount: file.lineCount,
 								rolloutId: file.rolloutId,
-								syncCheckpoint: { sourceKey: key, scanned },
+								syncCheckpoint: {
+									sourceKey: key,
+									scanned,
+									cursor: file.path.replace(/\\/g, "/"),
+									frontier: [
+										...page.frontier,
+										...page.files
+											.slice(fileIndex + 1)
+											.map((next) => next.path)
+											.reverse(),
+									],
+									complete: page.complete && fileIndex === page.files.length - 1,
+								},
 								onEmbeddingStatus: (status) => {
 									embeddingStatus = status;
 									options.onEmbeddingStatus?.(status);

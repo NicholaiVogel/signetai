@@ -132,6 +132,10 @@ export interface DbOwnerNativeMemoryIndex {
 	readonly checkpoint?: {
 		readonly sourceKey: string;
 		readonly scanned: number;
+		/** Traversal state immediately after this descriptor's file. */
+		readonly cursor: string | null;
+		readonly frontier: readonly string[] | null;
+		readonly complete: boolean;
 	};
 	readonly graph?: {
 		readonly sourceId: string;
