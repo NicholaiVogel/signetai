@@ -81,6 +81,12 @@ export interface TranscriptRecoveryWorkerHandle {
 	readonly childPid: number | null;
 }
 
+type TranscriptRecoveryWorkerOptions = TranscriptRecoveryScanOptions & {
+	readonly intervalMs?: number;
+	/** Test-only child entrypoint used to exercise the stdio/close protocol deterministically. */
+	readonly childPath?: string;
+};
+
 function defaultRoots(): TranscriptRecoveryRoots {
 	const home = homedir();
 	return {
@@ -534,7 +540,7 @@ export function startTranscriptRecoveryWorker(
 	dbAccessor: DbAccessor,
 	basePath: string,
 	agentId: string,
-	options: TranscriptRecoveryScanOptions & { readonly intervalMs?: number } = {},
+	options: TranscriptRecoveryWorkerOptions = {},
 ): TranscriptRecoveryWorkerHandle {
 	let stopped = false;
 	let running = false;
@@ -556,8 +562,14 @@ export function startTranscriptRecoveryWorker(
 		const childName = fileURLToPath(import.meta.url).endsWith(".ts")
 			? "transcript-recovery-child.ts"
 			: "transcript-recovery-child.js";
-		const childPath = join(dirname(fileURLToPath(import.meta.url)), childName);
-		const { intervalMs: _intervalMs, signal: _signal, execution: _execution, ...scanOptions } = options;
+		const childPath = options.childPath ?? join(dirname(fileURLToPath(import.meta.url)), childName);
+		const {
+			intervalMs: _intervalMs,
+			signal: _signal,
+			execution: _execution,
+			childPath: _childPath,
+			...scanOptions
+		} = options;
 		const child = spawn(process.execPath, [childPath], {
 			env: {
 				...process.env,

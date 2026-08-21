@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { DbOwnerDiedError } from "./db-owner-client";
 import { deriveSessionEndFallbackId } from "./session-end-recovery";
+import { logger } from "./logger";
 import { markSessionTranscriptCompleted, upsertSessionTranscript } from "./session-transcripts";
 import { enqueueTranscriptCaptureJob, runTranscriptCaptureOnce } from "./transcript-capture-worker";
 import { normalizeSessionTranscript } from "./transcript-normalization";
@@ -502,27 +503,48 @@ describe("transcript recovery worker", () => {
 	});
 
 	it("accepts a result written immediately before the recovery child exits", async () => {
-		const transcriptPath = join(claudeRoot, "-repo", "immediate-exit.jsonl");
-		writeSettled(
-			transcriptPath,
-			JSON.stringify({ sessionId: "immediate-exit", message: { role: "user", content: "child result" } }),
+		const childPath = join(dir, "immediate-exit-child.js");
+		const result = {
+			discovered: 1,
+			examined: 1,
+			enqueued: 1,
+			deduplicated: 0,
+			skippedRecent: 0,
+			skippedOversized: 0,
+			skippedUnchanged: 0,
+			skippedInvalid: 0,
+		};
+		writeFileSync(
+			childPath,
+			`process.stdout.write(${JSON.stringify(`${JSON.stringify({ type: "result", result })}\n`)}); process.exit(0);`,
 		);
+		const infoMessages: string[] = [];
+		const warnMessages: string[] = [];
+		const originalInfo = logger.info;
+		const originalWarn = logger.warn;
+		logger.info = ((category, message) => {
+			infoMessages.push(`${category}:${message}`);
+		}) as typeof logger.info;
+		logger.warn = ((category, message) => {
+			warnMessages.push(`${category}:${message}`);
+		}) as typeof logger.warn;
 
 		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
 			roots: { claudeCode: claudeRoot, codex: codexRoot },
 			intervalMs: 60_000,
+			childPath,
 		});
 		try {
 			for (let attempt = 0; attempt < 200; attempt++) {
-				const job = getDbAccessor().withReadDb((db) =>
-					db.prepare("SELECT id FROM transcript_capture_jobs WHERE transcript_path = ?").get(transcriptPath),
-				);
-				if (job) return;
-				await new Promise((resolve) => setTimeout(resolve, 5));
+				if (infoMessages.includes("transcripts:Transcript recovery scan complete")) break;
+				await Bun.sleep(5);
 			}
-			throw new Error("recovery child result was not accepted before the test deadline");
+			expect(infoMessages).toContain("transcripts:Transcript recovery scan complete");
+			expect(warnMessages).toEqual([]);
 		} finally {
 			await handle.stop();
+			logger.info = originalInfo;
+			logger.warn = originalWarn;
 		}
 	});
 
