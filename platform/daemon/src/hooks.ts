@@ -152,7 +152,6 @@ import { assembleInheritedContextBlock, resolveParentSession } from "./subagent-
 import { awaitPressureClear, isSystemPressureHigh } from "./system-pressure";
 import { getActiveTelemetry } from "./telemetry";
 import { searchTemporalFallback } from "./temporal-fallback";
-import { writeTranscriptAudit } from "./transcript-audit";
 import * as transcriptCapture from "./transcript-capture";
 import {
 	enqueueTranscriptCaptureJob,
@@ -1718,23 +1717,6 @@ export async function handleUserPromptSubmit(
 				});
 			} catch (error) {
 				deps.logger.warn("hooks", "Prompt JSONL transcript append failed", {
-					error: error instanceof Error ? error.message : String(error),
-					sessionKey: req.sessionKey,
-				});
-			}
-		}
-
-		if (rawTranscript) {
-			try {
-				writeTranscriptAudit({
-					basePath: getAgentsDir(),
-					agentId,
-					sessionId: req.sessionKey,
-					sessionKey: req.sessionKey,
-					rawTranscript,
-				});
-			} catch (error) {
-				deps.logger.warn("hooks", "Prompt transcript audit write failed", {
 					error: error instanceof Error ? error.message : String(error),
 					sessionKey: req.sessionKey,
 				});

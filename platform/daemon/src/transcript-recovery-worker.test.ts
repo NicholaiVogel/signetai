@@ -5,10 +5,15 @@ import { dirname, join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { DbOwnerDiedError } from "./db-owner-client";
 import { deriveSessionEndFallbackId } from "./session-end-recovery";
+import { logger } from "./logger";
 import { markSessionTranscriptCompleted, upsertSessionTranscript } from "./session-transcripts";
 import { enqueueTranscriptCaptureJob, runTranscriptCaptureOnce } from "./transcript-capture-worker";
 import { normalizeSessionTranscript } from "./transcript-normalization";
-import { runTranscriptRecoveryScan, startTranscriptRecoveryWorker } from "./transcript-recovery-worker";
+import {
+	runTranscriptRecoveryScan,
+	parseTranscriptRecoveryResult,
+	startTranscriptRecoveryWorker,
+} from "./transcript-recovery-worker";
 
 let dir = "";
 let claudeRoot = "";
@@ -31,6 +36,22 @@ async function scan(nowMs = Date.now()) {
 }
 
 describe("transcript recovery worker", () => {
+	it("parses a buffered child result after the child has closed", () => {
+		const result = {
+			discovered: 1,
+			examined: 1,
+			enqueued: 1,
+			deduplicated: 0,
+			skippedRecent: 0,
+			skippedOversized: 0,
+			skippedUnchanged: 0,
+			skippedInvalid: 0,
+		};
+		expect(parseTranscriptRecoveryResult(`logger output\n${JSON.stringify({ type: "result", result })}\n`)).toEqual(
+			result,
+		);
+	});
+
 	beforeEach(() => {
 		previousSignetPath = process.env.SIGNET_PATH;
 		previousRecoveryHoldFile = process.env.SIGNET_TRANSCRIPT_RECOVERY_TEST_HOLD_FILE;
@@ -479,6 +500,52 @@ describe("transcript recovery worker", () => {
 		});
 		await handle.stop();
 		expect(handle.running).toBe(false);
+	});
+
+	it("accepts a result written immediately before the recovery child exits", async () => {
+		const childPath = join(dir, "immediate-exit-child.js");
+		const result = {
+			discovered: 1,
+			examined: 1,
+			enqueued: 1,
+			deduplicated: 0,
+			skippedRecent: 0,
+			skippedOversized: 0,
+			skippedUnchanged: 0,
+			skippedInvalid: 0,
+		};
+		writeFileSync(
+			childPath,
+			`process.stdout.write(${JSON.stringify(`${JSON.stringify({ type: "result", result })}\n`)}); process.exit(0);`,
+		);
+		const infoMessages: string[] = [];
+		const warnMessages: string[] = [];
+		const originalInfo = logger.info;
+		const originalWarn = logger.warn;
+		logger.info = ((category, message) => {
+			infoMessages.push(`${category}:${message}`);
+		}) as typeof logger.info;
+		logger.warn = ((category, message) => {
+			warnMessages.push(`${category}:${message}`);
+		}) as typeof logger.warn;
+
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 60_000,
+			childPath,
+		});
+		try {
+			for (let attempt = 0; attempt < 200; attempt++) {
+				if (infoMessages.includes("transcripts:Transcript recovery scan complete")) break;
+				await Bun.sleep(5);
+			}
+			expect(infoMessages).toContain("transcripts:Transcript recovery scan complete");
+			expect(warnMessages).toEqual([]);
+		} finally {
+			await handle.stop();
+			logger.info = originalInfo;
+			logger.warn = originalWarn;
+		}
 	});
 
 	it("cancels a scan waiting for DB admission", async () => {

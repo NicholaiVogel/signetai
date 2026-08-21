@@ -72,29 +72,31 @@ function skillEntityId(agentId: string, name: string): string {
 	return `skill:${agentId}:${name}`;
 }
 
-function findSkillEntityId(input: SkillUninstallInput, accessor: DbAccessor): string | null {
+async function findSkillEntityId(input: SkillUninstallInput, accessor: DbAccessor): Promise<string | null> {
 	const agentId = input.agentId ?? "default";
 	const canonicalId = skillEntityId(agentId, input.skillName);
 
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) => {
-		if (input.entityId) {
-			const explicit = db
-				.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ?")
-				.get(input.entityId, agentId) as { id: string } | undefined;
-			if (explicit) return explicit.id;
-		}
+	return await accessor.withReadDbAsync(
+		(db: import("../db-accessor").ReadDb) => {
+			if (input.entityId) {
+				const explicit = db
+					.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ?")
+					.get(input.entityId, agentId) as { id: string } | undefined;
+				if (explicit) return explicit.id;
+			}
 
-		const canonical = db.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ?").get(canonicalId, agentId) as
-			| { id: string }
-			| undefined;
-		if (canonical) return canonical.id;
+			const canonical = db.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ?").get(canonicalId, agentId) as
+				| { id: string }
+				| undefined;
+			if (canonical) return canonical.id;
 
-		const adopted = db
-			.prepare("SELECT id FROM entities WHERE name = ? AND agent_id = ? AND entity_type = 'skill' LIMIT 1")
-			.get(input.skillName, agentId) as { id: string } | undefined;
-		return adopted?.id ?? null;
-	}, "pipeline/skill-graph.ts:80");
+			const adopted = db
+				.prepare("SELECT id FROM entities WHERE name = ? AND agent_id = ? AND entity_type = 'skill' LIMIT 1")
+				.get(input.skillName, agentId) as { id: string } | undefined;
+			return adopted?.id ?? null;
+		},
+		{ operation: "pipeline.skill-graph.find" },
+	);
 }
 
 function skillMetaIds(input: SkillUninstallInput): readonly string[] {
@@ -170,89 +172,27 @@ export async function installSkillNode(
 	const fm = input.frontmatter;
 
 	// Step 1: Create entity + skill_meta in a write transaction
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	accessor.withWriteTx((db: import("../db-accessor").WriteDb) => {
-		// Check if entity already exists by id or name (idempotent)
-		const existing = db
-			.prepare("SELECT id FROM entities WHERE id = ? OR (name = ? AND agent_id = ?)")
-			.get(entityId, fm.name, agentId) as { id: string } | undefined;
+	await accessor.withWriteTxAsync(
+		(db: import("../db-accessor").WriteDb) => {
+			const existing = db
+				.prepare("SELECT id FROM entities WHERE id = ? OR (name = ? AND agent_id = ?)")
+				.get(entityId, fm.name, agentId) as { id: string } | undefined;
 
-		if (existing) {
-			// If matched by name (collision), adopt that entity's id
-			if (existing.id !== entityId) {
-				entityId = existing.id;
-			}
-			// Update existing entity
-			db.prepare(`UPDATE entities SET entity_type = 'skill', description = ?, updated_at = ? WHERE id = ?`).run(
-				fm.description,
-				now,
-				entityId,
-			);
-
-			// Upsert skill_meta (may not exist if entity was from extraction)
-			db.prepare(
-				`INSERT INTO skill_meta
-				 (entity_id, agent_id, version, author, license, source,
-				  role, triggers, tags, permissions, enriched,
-				  installed_at, importance, decay_rate, fs_path)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-				 ON CONFLICT(entity_id) DO UPDATE SET
-					version = excluded.version, author = excluded.author,
-					license = excluded.license, source = excluded.source,
-					role = excluded.role, triggers = excluded.triggers,
-					tags = excluded.tags, permissions = excluded.permissions,
-					enriched = excluded.enriched, fs_path = excluded.fs_path,
-					uninstalled_at = NULL, updated_at = ?`,
-			).run(
-				entityId,
-				agentId,
-				fm.version ?? null,
-				fm.author ?? null,
-				fm.license ?? null,
-				input.source,
-				fm.role ?? "utility",
-				fm.triggers ? JSON.stringify(fm.triggers) : null,
-				fm.tags ? JSON.stringify(fm.tags) : null,
-				fm.permissions ? JSON.stringify(fm.permissions) : null,
-				0,
-				now,
-				procCfg.importanceOnInstall,
-				procCfg.decayRate,
-				input.fsPath,
-				now,
-			);
-		} else {
-			// Insert new entity (catch name UNIQUE collision from extraction pipeline)
-			try {
-				db.prepare(
-					`INSERT INTO entities
-					 (id, name, canonical_name, entity_type, agent_id, description, mentions, created_at, updated_at)
-					 VALUES (?, ?, ?, 'skill', ?, ?, 0, ?, ?)`,
-				).run(entityId, fm.name, fm.name.toLowerCase(), agentId, fm.description, now, now);
-			} catch (e) {
-				const msg = e instanceof Error ? e.message : String(e);
-				if (!msg.includes("UNIQUE constraint")) throw e;
-
-				// Name collision — an extracted entity already owns this name.
-				// Claim it as a skill entity and reuse its id.
-				const collision = db
-					.prepare("SELECT id FROM entities WHERE name = ? AND agent_id = ? LIMIT 1")
-					.get(fm.name, agentId) as { id: string } | undefined;
-
-				if (!collision) throw e;
-
+			if (existing) {
+				// If matched by name (collision), adopt that entity's id
+				if (existing.id !== entityId) {
+					entityId = existing.id;
+				}
+				// Update existing entity
 				db.prepare(`UPDATE entities SET entity_type = 'skill', description = ?, updated_at = ? WHERE id = ?`).run(
 					fm.description,
 					now,
-					collision.id,
+					entityId,
 				);
-				entityId = collision.id;
-			}
 
-			// Upsert skill_meta. Reconciler startup, periodic passes, and watcher
-			// can overlap; avoid UNIQUE(entity_id) races under concurrent installs.
-			db.prepare(
-				`INSERT INTO skill_meta
+				// Upsert skill_meta (may not exist if entity was from extraction)
+				db.prepare(
+					`INSERT INTO skill_meta
 				 (entity_id, agent_id, version, author, license, source,
 				  role, triggers, tags, permissions, enriched,
 				  installed_at, importance, decay_rate, fs_path)
@@ -264,34 +204,96 @@ export async function installSkillNode(
 					tags = excluded.tags, permissions = excluded.permissions,
 					enriched = excluded.enriched, fs_path = excluded.fs_path,
 					uninstalled_at = NULL, updated_at = ?`,
-			).run(
-				entityId,
-				agentId,
-				fm.version ?? null,
-				fm.author ?? null,
-				fm.license ?? null,
-				input.source,
-				fm.role ?? "utility",
-				fm.triggers ? JSON.stringify(fm.triggers) : null,
-				fm.tags ? JSON.stringify(fm.tags) : null,
-				fm.permissions ? JSON.stringify(fm.permissions) : null,
-				0,
-				now,
-				procCfg.importanceOnInstall,
-				procCfg.decayRate,
-				input.fsPath,
-				now,
-			);
-		}
-	}, "pipeline/skill-graph.ts:174");
+				).run(
+					entityId,
+					agentId,
+					fm.version ?? null,
+					fm.author ?? null,
+					fm.license ?? null,
+					input.source,
+					fm.role ?? "utility",
+					fm.triggers ? JSON.stringify(fm.triggers) : null,
+					fm.tags ? JSON.stringify(fm.tags) : null,
+					fm.permissions ? JSON.stringify(fm.permissions) : null,
+					0,
+					now,
+					procCfg.importanceOnInstall,
+					procCfg.decayRate,
+					input.fsPath,
+					now,
+				);
+			} else {
+				// Insert new entity (catch name UNIQUE collision from extraction pipeline)
+				try {
+					db.prepare(
+						`INSERT INTO entities
+					 (id, name, canonical_name, entity_type, agent_id, description, mentions, created_at, updated_at)
+					 VALUES (?, ?, ?, 'skill', ?, ?, 0, ?, ?)`,
+					).run(entityId, fm.name, fm.name.toLowerCase(), agentId, fm.description, now, now);
+				} catch (e) {
+					const msg = e instanceof Error ? e.message : String(e);
+					if (!msg.includes("UNIQUE constraint")) throw e;
+
+					// Name collision — an extracted entity already owns this name.
+					// Claim it as a skill entity and reuse its id.
+					const collision = db
+						.prepare("SELECT id FROM entities WHERE name = ? AND agent_id = ? LIMIT 1")
+						.get(fm.name, agentId) as { id: string } | undefined;
+
+					if (!collision) throw e;
+
+					db.prepare(`UPDATE entities SET entity_type = 'skill', description = ?, updated_at = ? WHERE id = ?`).run(
+						fm.description,
+						now,
+						collision.id,
+					);
+					entityId = collision.id;
+				}
+
+				// Upsert skill_meta. Reconciler startup, periodic passes, and watcher
+				// can overlap; avoid UNIQUE(entity_id) races under concurrent installs.
+				db.prepare(
+					`INSERT INTO skill_meta
+				 (entity_id, agent_id, version, author, license, source,
+				  role, triggers, tags, permissions, enriched,
+				  installed_at, importance, decay_rate, fs_path)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(entity_id) DO UPDATE SET
+					version = excluded.version, author = excluded.author,
+					license = excluded.license, source = excluded.source,
+					role = excluded.role, triggers = excluded.triggers,
+					tags = excluded.tags, permissions = excluded.permissions,
+					enriched = excluded.enriched, fs_path = excluded.fs_path,
+					uninstalled_at = NULL, updated_at = ?`,
+				).run(
+					entityId,
+					agentId,
+					fm.version ?? null,
+					fm.author ?? null,
+					fm.license ?? null,
+					input.source,
+					fm.role ?? "utility",
+					fm.triggers ? JSON.stringify(fm.triggers) : null,
+					fm.tags ? JSON.stringify(fm.tags) : null,
+					fm.permissions ? JSON.stringify(fm.permissions) : null,
+					0,
+					now,
+					procCfg.importanceOnInstall,
+					procCfg.decayRate,
+					input.fsPath,
+					now,
+				);
+			}
+		},
+		{ operation: "pipeline.skill-graph.install-metadata" },
+	);
 
 	// Step 2: Generate embedding from the authored frontmatter
 	let embeddingCreated = false;
 	const embeddingText = buildEmbeddingText(fm);
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	const writeConfig = accessor.withReadDb(
+	const writeConfig = await accessor.withReadDbAsync(
 		(db: import("../db-accessor").ReadDb) => resolveActiveEmbeddingConfig(db, embeddingCfg),
-		"pipeline/skill-graph.ts:292",
+		{ operation: "pipeline.skill-graph.install-embedding-config" },
 	);
 	const embVec = await fetchEmbedding(embeddingText, writeConfig, "document", {
 		usage: { source: "artifact-index", agentId },
@@ -302,29 +304,29 @@ export async function installSkillNode(
 		const blob = vectorToBlob(embVec);
 		const embHash = skillEmbeddingHash(entityId, input.frontmatter);
 
-		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-		embeddingCreated = accessor.withWriteTx((db: import("../db-accessor").WriteDb) => {
-			if (!isActiveEmbeddingConfig(db, writeConfig)) return false;
-			// Remove any old skill embeddings
-			const oldEmbs = db
-				.prepare(`SELECT id FROM embeddings WHERE source_type = 'skill' AND source_id = ?`)
-				.all(entityId) as Array<{ id: string }>;
+		embeddingCreated = await accessor.withWriteTxAsync(
+			(db: import("../db-accessor").WriteDb) => {
+				if (!isActiveEmbeddingConfig(db, writeConfig)) return false;
+				// Remove any old skill embeddings
+				const oldEmbs = db
+					.prepare(`SELECT id FROM embeddings WHERE source_type = 'skill' AND source_id = ?`)
+					.all(entityId) as Array<{ id: string }>;
 
-			if (oldEmbs.length > 0) {
-				if (
-					!syncVecDeleteByEmbeddingIds(
-						db,
-						oldEmbs.map((e) => e.id),
-					)
-				) {
-					throw new Error("failed to reconcile vec_embeddings before replacing skill embedding");
+				if (oldEmbs.length > 0) {
+					if (
+						!syncVecDeleteByEmbeddingIds(
+							db,
+							oldEmbs.map((e) => e.id),
+						)
+					) {
+						throw new Error("failed to reconcile vec_embeddings before replacing skill embedding");
+					}
+					db.prepare(`DELETE FROM embeddings WHERE source_type = 'skill' AND source_id = ?`).run(entityId);
 				}
-				db.prepare(`DELETE FROM embeddings WHERE source_type = 'skill' AND source_id = ?`).run(entityId);
-			}
 
-			// Insert new embedding (ON CONFLICT may keep the existing row id)
-			db.prepare(
-				`INSERT INTO embeddings
+				// Insert new embedding (ON CONFLICT may keep the existing row id)
+				db.prepare(
+					`INSERT INTO embeddings
 				 (id, content_hash, vector, dimensions, source_type, source_id, chunk_text, created_at)
 				 VALUES (?, ?, ?, ?, 'skill', ?, ?, ?)
 				 ON CONFLICT(content_hash) DO UPDATE SET
@@ -332,14 +334,16 @@ export async function installSkillNode(
 				   dimensions = excluded.dimensions,
 				   source_id = excluded.source_id,
 				   chunk_text = excluded.chunk_text`,
-			).run(embId, embHash, blob, embVec.length, entityId, embeddingText, now);
+				).run(embId, embHash, blob, embVec.length, entityId, embeddingText, now);
 
-			// Query back the actual row id — on conflict SQLite keeps the
-			// existing id, not the one we generated above.
-			const actualRow = db.prepare("SELECT id FROM embeddings WHERE content_hash = ?").get(embHash) as { id: string };
-			syncVecInsert(db, actualRow.id, embVec);
-			return true;
-		}, "pipeline/skill-graph.ts:306");
+				// Query back the actual row id — on conflict SQLite keeps the
+				// existing id, not the one we generated above.
+				const actualRow = db.prepare("SELECT id FROM embeddings WHERE content_hash = ?").get(embHash) as { id: string };
+				syncVecInsert(db, actualRow.id, embVec);
+				return true;
+			},
+			{ operation: "pipeline.skill-graph.install-embedding" },
+		);
 	}
 
 	logger.info("pipeline", "Skill node installed", {
@@ -355,58 +359,65 @@ export async function installSkillNode(
 // Uninstall: remove entity + skill_meta + embeddings + relations
 // ---------------------------------------------------------------------------
 
-export function uninstallSkillNode(input: SkillUninstallInput, accessor: DbAccessor): SkillUninstallResult {
+export async function uninstallSkillNode(
+	input: SkillUninstallInput,
+	accessor: DbAccessor,
+): Promise<SkillUninstallResult> {
 	const agentId = input.agentId ?? "default";
-	const entityId = findSkillEntityId(input, accessor);
+	const entityId = await findSkillEntityId(input, accessor);
 	const metaIds = skillMetaIds(input);
 
 	if (!entityId) {
 		const now = new Date().toISOString();
-		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-		accessor.withWriteTx((db: import("../db-accessor").WriteDb) => {
-			for (const metaId of metaIds) {
-				db.prepare(
-					"UPDATE skill_meta SET uninstalled_at = ?, updated_at = ? WHERE entity_id = ? AND agent_id = ? AND uninstalled_at IS NULL",
-				).run(now, now, metaId, agentId);
-			}
-		}, "pipeline/skill-graph.ts:366");
+		await accessor.withWriteTxAsync(
+			(db: import("../db-accessor").WriteDb) => {
+				for (const metaId of metaIds) {
+					db.prepare(
+						"UPDATE skill_meta SET uninstalled_at = ?, updated_at = ? WHERE entity_id = ? AND agent_id = ? AND uninstalled_at IS NULL",
+					).run(now, now, metaId, agentId);
+				}
+			},
+			{ operation: "pipeline.skill-graph.uninstall-metadata" },
+		);
 		return { removed: false, entityId: null };
 	}
 
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	accessor.withWriteTx((db: import("../db-accessor").WriteDb) => {
-		// 1. Remove skill relation edges
-		db.prepare(
-			`DELETE FROM relations
+	await accessor.withWriteTxAsync(
+		(db: import("../db-accessor").WriteDb) => {
+			// 1. Remove skill relation edges
+			db.prepare(
+				`DELETE FROM relations
 			 WHERE source_entity_id = ? OR target_entity_id = ?`,
-		).run(entityId, entityId);
+			).run(entityId, entityId);
 
-		// 2. Remove skill mention links
-		db.prepare("DELETE FROM memory_entity_mentions WHERE entity_id = ?").run(entityId);
+			// 2. Remove skill mention links
+			db.prepare("DELETE FROM memory_entity_mentions WHERE entity_id = ?").run(entityId);
 
-		// 3. Remove embeddings + vec sync
-		const embRows = db
-			.prepare(`SELECT id FROM embeddings WHERE source_type = 'skill' AND source_id = ?`)
-			.all(entityId) as Array<{ id: string }>;
+			// 3. Remove embeddings + vec sync
+			const embRows = db
+				.prepare(`SELECT id FROM embeddings WHERE source_type = 'skill' AND source_id = ?`)
+				.all(entityId) as Array<{ id: string }>;
 
-		if (embRows.length > 0) {
-			if (
-				!syncVecDeleteByEmbeddingIds(
-					db,
-					embRows.map((e) => e.id),
-				)
-			) {
-				throw new Error("failed to reconcile vec_embeddings before uninstalling skill");
+			if (embRows.length > 0) {
+				if (
+					!syncVecDeleteByEmbeddingIds(
+						db,
+						embRows.map((e) => e.id),
+					)
+				) {
+					throw new Error("failed to reconcile vec_embeddings before uninstalling skill");
+				}
+				db.prepare(`DELETE FROM embeddings WHERE source_type = 'skill' AND source_id = ?`).run(entityId);
 			}
-			db.prepare(`DELETE FROM embeddings WHERE source_type = 'skill' AND source_id = ?`).run(entityId);
-		}
 
-		// 4. Hard-delete skill_meta + entity in same transaction
-		for (const metaId of metaIds) {
-			db.prepare("DELETE FROM skill_meta WHERE entity_id = ? AND agent_id = ?").run(metaId, agentId);
-		}
-		db.prepare("DELETE FROM entities WHERE id = ?").run(entityId);
-	}, "pipeline/skill-graph.ts:377");
+			// 4. Hard-delete skill_meta + entity in same transaction
+			for (const metaId of metaIds) {
+				db.prepare("DELETE FROM skill_meta WHERE entity_id = ? AND agent_id = ?").run(metaId, agentId);
+			}
+			db.prepare("DELETE FROM entities WHERE id = ?").run(entityId);
+		},
+		{ operation: "pipeline.skill-graph.uninstall" },
+	);
 
 	logger.info("pipeline", "Skill node uninstalled", {
 		skill: input.skillName,

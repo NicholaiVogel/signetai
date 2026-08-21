@@ -14,13 +14,13 @@ describe("transcript audit sizing (#1163)", () => {
 		expect(capTranscriptAuditContent("small transcript")).toBe("small transcript");
 	});
 
-	it("archives by renaming the latest instead of writing the content twice", () => {
+	it("archives by renaming the latest instead of writing the content twice", async () => {
 		const root = mkdtempSync(join(tmpdir(), "signet-audit-"));
 		try {
 			// 10MB raw — well over the 8MB cap — so a duplicated write would
 			// leave ~20MB of audit files for one session.
 			const big = "y".repeat(10 * 1024 * 1024);
-			const result = writeTranscriptAudit({
+			const result = await writeTranscriptAudit({
 				basePath: root,
 				agentId: "default",
 				sessionId: "sess-1",
@@ -46,10 +46,10 @@ describe("transcript audit sizing (#1163)", () => {
 		}
 	});
 
-	it("keeps the rolling latest file when no archive timestamp is supplied", () => {
+	it("keeps the rolling latest file when no archive timestamp is supplied", async () => {
 		const root = mkdtempSync(join(tmpdir(), "signet-audit-"));
 		try {
-			const result = writeTranscriptAudit({
+			const result = await writeTranscriptAudit({
 				basePath: root,
 				agentId: "default",
 				sessionId: "sess-2",

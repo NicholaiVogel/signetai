@@ -320,7 +320,7 @@ describe("cross-agent messages", () => {
 });
 
 describe("ACP delivery reconciliation", () => {
-	it("marks a committed ACP row indeterminate if the process dies before claiming it", () => {
+	it("marks a committed ACP row indeterminate if the process dies before claiming it", async () => {
 		const message = createAgentMessage({
 			fromAgentId: "alpha",
 			content: "queued before crash",
@@ -330,13 +330,13 @@ describe("ACP delivery reconciliation", () => {
 			acpTargetAgentName: "helper",
 		});
 
-		expect(reconcileAcpDeliveries(undefined, Date.parse(message.createdAt) + 31_000)).toBe(1);
+		expect(await reconcileAcpDeliveries(undefined, Date.parse(message.createdAt) + 31_000)).toBe(1);
 		const recovered = listAgentMessages({ agentId: "alpha", includeSent: true })[0];
 		expect(recovered?.deliveryState).toBe("indeterminate");
 		expect(recovered?.deliveryError).toBe("ACP relay was queued but never started");
 	});
 
-	it("uses a lease so a second daemon cannot reconcile an active relay", () => {
+	it("uses a lease so a second daemon cannot reconcile an active relay", async () => {
 		const message = createAgentMessage({
 			fromAgentId: "alpha",
 			content: "lease me",
@@ -346,7 +346,7 @@ describe("ACP delivery reconciliation", () => {
 			acpTargetAgentName: "helper",
 		});
 		const first = claimAcpMessageDelivery({ messageId: message.id, agentId: "alpha", nowMs: 1_000 });
-		expect(() => reconcileAcpDeliveries(undefined, 80_000)).not.toThrow();
+		expect(await reconcileAcpDeliveries(undefined, 80_000)).toBe(0);
 		expect(() => claimAcpMessageDelivery({ messageId: message.id, agentId: "alpha", nowMs: 20_000 })).toThrow(
 			"already active",
 		);
@@ -356,7 +356,7 @@ describe("ACP delivery reconciliation", () => {
 		);
 	});
 
-	it("marks a fetch-complete but locally-uncommitted relay indeterminate and retries with the same idempotency key", () => {
+	it("marks a fetch-complete but locally-uncommitted relay indeterminate and retries with the same idempotency key", async () => {
 		const message = createAgentMessage({
 			fromAgentId: "alpha",
 			content: "recover me",
@@ -366,7 +366,7 @@ describe("ACP delivery reconciliation", () => {
 			acpTargetAgentName: "helper",
 		});
 		const first = claimAcpMessageDelivery({ messageId: message.id, agentId: "alpha", nowMs: 1_000 });
-		expect(reconcileAcpDeliveries(undefined, 200_000)).toBe(1);
+		expect(await reconcileAcpDeliveries(undefined, 200_000)).toBe(1);
 		const indeterminate = listAgentMessages({ agentId: "alpha", includeSent: true })[0];
 		expect(indeterminate?.deliveryState).toBe("indeterminate");
 		expect(indeterminate?.deliveryStatus).toBe("queued");

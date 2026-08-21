@@ -17,7 +17,6 @@ import {
 	readdirSync,
 	renameSync,
 	rmSync,
-	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -29,7 +28,7 @@ import * as yauzl from "yauzl";
 import type { AuthMode } from "../auth/index.js";
 import { type DbAccessor, getDbAccessor } from "../db-accessor.js";
 import { logger } from "../logger.js";
-import { type EmbeddingConfig, type PipelineV2Config, loadMemoryConfig } from "../memory-config.js";
+import { type EmbeddingConfig, loadMemoryConfig } from "../memory-config.js";
 import { uninstallSkillNode } from "../pipeline/skill-graph.js";
 import { type ReconcilerDeps, reconcileSkillFile, withSkillReconciliationLock } from "../pipeline/skill-reconciler.js";
 
@@ -818,8 +817,8 @@ async function onSkillUninstalling(skillName: string): Promise<void> {
 	const accessor = getAccessorSafe();
 	if (!accessor) return;
 
-	await withSkillReconciliationLock(getAgentsDir(), skillName, () => {
-		const result = uninstallSkillNode({ skillName }, accessor);
+	await withSkillReconciliationLock(getAgentsDir(), skillName, async () => {
+		const result = await uninstallSkillNode({ skillName }, accessor);
 		if (result.removed) {
 			logger.info("skills", "Graph node removed for skill", {
 				skill: skillName,

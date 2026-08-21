@@ -227,7 +227,7 @@ async function leaseJob(dbAccessor: DbAccessor): Promise<TranscriptCaptureJobRow
 
 async function processTranscriptCaptureJob(basePath: string, job: TranscriptCaptureJobRow): Promise<void> {
 	if (job.rawTranscript) {
-		writeTranscriptAudit({
+		await writeTranscriptAudit({
 			basePath,
 			agentId: job.agentId,
 			sessionId: job.sessionId,
