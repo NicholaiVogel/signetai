@@ -22,9 +22,12 @@ import {
 	MAX_READ_CONNECTIONS,
 	MAX_WRITE_QUEUE,
 	backupBeforeMigration,
+	backupBeforeMigrationAsync,
 	closeDbAccessor,
 	getDbAccessor,
+	hasPendingMigrationBackup,
 	initDbAccessor,
+	pruneMigrationBackupsAfterIntegrity,
 	readVecEmbeddingDimensions,
 	resolveCustomSqlitePath,
 	resolveSqliteAgentsDir,
@@ -57,7 +60,7 @@ describe("DbAccessor", () => {
 		initDbAccessor(dbPath);
 		const acc = getDbAccessor();
 		expect(acc).toBeTruthy();
-		expect(readdirSync(join(dbPath, "..")).filter((name) => name.includes(".bak-v"))).toEqual([]);
+		expect(readdirSync(join(dbPath, "..")).filter((name) => name.includes(".bak-v"))).toHaveLength(1);
 	});
 
 	test("keeps large deferred FTS backfills off the initialization path", () => {
@@ -303,7 +306,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:293");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:296");
 	});
 
 	test("write statements expose the number of affected rows", () => {
@@ -744,6 +747,44 @@ describe("DbAccessor", () => {
 
 		expect(operations).toContain("unlink:test.db.bak-v65-7000");
 		expect(files.has("test.db.bak-v65-7000")).toBe(false);
+	});
+	test("resumes a chunked migration backup from its durable cursor", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("chunked migration backup resume fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const backupPath = `${dbPath}.bak-v71-8000`;
+		const offset = 12;
+		writeFileSync(backupPath, source.subarray(0, offset));
+		writeFileSync(
+			`${backupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: backupPath,
+				offset,
+			}),
+		);
+
+		await expect(backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 71)).resolves.toBe(backupPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(existsSync(`${backupPath}.cursor.json`)).toBe(false);
+	});
+	test("prunes the retained migration backup only after integrity passes", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, "database");
+		const backupPath = `${dbPath}.bak-v72-9000`;
+		writeFileSync(backupPath, "database");
+		writeFileSync(`${backupPath}.cursor.json`, "stale cursor");
+
+		expect(hasPendingMigrationBackup(dbPath)).toBe(true);
+		pruneMigrationBackupsAfterIntegrity(dbPath);
+		expect(hasPendingMigrationBackup(dbPath)).toBe(false);
+		expect(existsSync(backupPath)).toBe(false);
+		expect(existsSync(`${backupPath}.cursor.json`)).toBe(false);
 	});
 });
 

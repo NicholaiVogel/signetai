@@ -53,7 +53,9 @@ import {
 	closeDbAccessor,
 	getDbAccessor,
 	getVectorRuntimeStatus,
+	hasPendingMigrationBackup,
 	initDbAccessorLite,
+	pruneMigrationBackupsAfterIntegrity,
 	resolveSqliteRuntimeConfig,
 	registerDbOwnerHealthProvider,
 	type WriteDb,
@@ -732,7 +734,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:735" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:737" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -775,7 +777,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:757" },
+			{ siteToken: "daemon.ts:759" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -852,7 +854,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:848" },
+			{ siteToken: "daemon.ts:850" },
 		);
 	} catch {
 		return false;
@@ -1476,7 +1478,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1462", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1464", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1544,7 +1546,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1545", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1547", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2257,11 +2259,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2253", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2255", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2263",
+								siteToken: "daemon.ts:2265",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2502,6 +2504,7 @@ async function main() {
 			writeDaemonLifecycle(AGENTS_DIR, buildLifecycleRecord("running"));
 			vacuumConversionHandle = startVacuumConversionWorker(getDbAccessor(), { owner: dbOwnerClient ?? undefined });
 			const owner = dbOwnerClient;
+			const migrationBackupPending = hasPendingMigrationBackup(MEMORY_DB);
 			if (owner === null) throw new Error("DB owner is unavailable for incremental integrity maintenance");
 			const runIntegritySlice = async (): Promise<void> => {
 				const result = await runIncrementalDatabaseIntegrityCheck({
@@ -2515,6 +2518,10 @@ async function main() {
 					},
 				});
 				logger.info("startup-recovery", "Incremental database integrity slice complete", { ...result });
+				if (migrationBackupPending && result.phase === "complete" && result.failedObjects === 0) {
+					pruneMigrationBackupsAfterIntegrity(MEMORY_DB);
+					logger.info("startup-recovery", "Post-ready migration integrity passed; rollback backup pruned");
+				}
 				if (result.phase === "unavailable" || result.failedObjects > 0) {
 					logger.error("startup-recovery", "Incremental database integrity found a problem", undefined, {
 						phase: result.phase,
