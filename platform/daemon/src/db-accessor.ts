@@ -831,21 +831,11 @@ function preflightMigrationBackupSpace(dbPath: string, deps: MigrationBackupDeps
 		requiredBytes: dbBytes + MIGRATION_BACKUP_SPACE_MARGIN_BYTES,
 	} as DbSpaceMetrics;
 	if (freeBytes === null) {
-		const probeDest = `${dbPath}.space-probe-${deps.now()}`;
-		try {
-			// A degenerate statfs reading is not reliable. Copy the actual database
-			// before proceeding so this outcome is authorized by a real write.
-			deps.copyFileSync(dbPath, probeDest);
-			return { ...metrics, freeBytes: dbBytes };
-		} catch (err) {
-			throw new DbSpacePreflightError("migration_backup", metrics, err);
-		} finally {
-			try {
-				deps.unlinkSync(probeDest);
-			} catch {
-				// Best effort cleanup of the preflight probe.
-			}
-		}
+		// A degenerate statfs reading is not a license to proceed. Unbounded
+		// copy-probing inside admission would violate the startup deadline, and
+		// an unknown free-space figure cannot satisfy the space margin, so the
+		// honest outcome is refusal with the metrics we do have.
+		throw new DbSpacePreflightError("migration_backup", metrics);
 	}
 	if (freeBytes < metrics.requiredBytes) throw new DbSpacePreflightError("migration_backup", metrics);
 	return metrics;
@@ -1052,7 +1042,18 @@ async function copyMigrationBackupChunks(
 		while (offset < sourceSize) {
 			const result = await source.read(buffer, 0, Math.min(buffer.length, sourceSize - offset), offset);
 			if (result.bytesRead === 0) throw new Error(`Migration backup source ended at ${offset} of ${sourceSize} bytes`);
-			await destination.write(buffer, 0, result.bytesRead, offset);
+			let chunkOffset = 0;
+			while (chunkOffset < result.bytesRead) {
+				const written = await destination.write(
+					buffer,
+					chunkOffset,
+					result.bytesRead - chunkOffset,
+					offset + chunkOffset,
+				);
+				if (written.bytesWritten === 0)
+					throw new Error(`Migration backup write stalled at ${offset + chunkOffset} of ${sourceSize} bytes`);
+				chunkOffset += written.bytesWritten;
+			}
 			offset += result.bytesRead;
 			await destination.sync();
 			await writeMigrationBackupCursor({
@@ -1086,13 +1087,15 @@ function prepareMigrationBackup(
 		// Non-fatal — backup still useful even with WAL.
 	}
 
-	// Check space before pruning or copying. A failed preflight must not remove
-	// the only retained backup that the operator may need for recovery.
-	const space = preflightMigrationBackupSpace(dbPath, deps);
-
-	// Make room for the incoming backup only after the preflight has passed.
-	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, deps);
-	return space;
+	// Prune stale backups first so their bytes count as reclaimable headroom in
+	// the preflight. At most one backup is ever retained at this point: a
+	// resumable in-progress backup for the current attempt (kept via its cursor),
+	// or nothing. A stale completed backup from a prior release is not a
+	// rollback point for the migration about to run — the migration is already
+	// recorded in schema_migrations — so pruning it before preflight cannot
+	// destroy the operator's only recovery path.
+	pruneMigrationBackups(dbPath, 0, deps);
+	return preflightMigrationBackupSpace(dbPath, deps);
 }
 
 function migrationBackupDestination(dbPath: string, schemaVersion: number, deps: MigrationBackupDeps): string {
