@@ -2521,6 +2521,17 @@ async function main() {
 				if (migrationBackupPending && result.phase === "complete" && result.failedObjects === 0) {
 					pruneMigrationBackupsAfterIntegrity(MEMORY_DB);
 					logger.info("startup-recovery", "Post-ready migration integrity passed; rollback backup pruned");
+				} else if (migrationBackupPending && result.phase === "degraded") {
+					// Honest deferred retention: an FTS-table park (degraded:fts-unverifiable)
+					// means the integrity cycle can never reach "complete" on this database,
+					// so the rollback backup stays retained by design. Surface that state
+					// instead of retaining silently — the operator decides whether to run the
+					// explicit full verification and free the backup.
+					logger.warn(
+						"startup-recovery",
+						"Migration rollback backup retained: integrity cycle parked degraded; full verification unavailable",
+						{ backupPath: MEMORY_DB, phase: result.phase, reason: result.errors },
+					);
 				}
 				if (result.phase === "unavailable" || result.failedObjects > 0) {
 					logger.error("startup-recovery", "Incremental database integrity found a problem", undefined, {

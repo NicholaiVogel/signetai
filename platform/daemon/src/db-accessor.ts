@@ -995,7 +995,14 @@ async function probeMigrationBackupThroughput(dbPath: string, sourceSize: number
 		const buffer = Buffer.allocUnsafe(Math.min(MIGRATION_BACKUP_CHUNK_BYTES, sourceSize));
 		const startedAt = performance.now();
 		const result = await source.read(buffer, 0, buffer.length, 0);
-		await probe.write(buffer, 0, result.bytesRead, 0);
+		let probeWritten = 0;
+		while (probeWritten < result.bytesRead) {
+			const written = await probe.write(buffer, probeWritten, result.bytesRead - probeWritten, probeWritten);
+			if (written.bytesWritten === 0) {
+				throw new Error("Migration backup throughput probe write stalled");
+			}
+			probeWritten += written.bytesWritten;
+		}
 		await probe.sync();
 		const elapsedMs = Math.max(1, performance.now() - startedAt);
 		const bytesPerMs = result.bytesRead / elapsedMs;
@@ -1152,7 +1159,41 @@ export function pruneMigrationBackupsAfterIntegrity(dbPath: string): void {
 	}
 }
 
-function verifyMigrationArtifacts(writeConn: SqliteDatabase): void {
+/**
+ * Rowid high-water mark of the migration audit log, read before migrations run.
+ * The audit table is an append-only autoincrement log, so rows above this mark
+ * are exactly the migrations this startup applied.
+ */
+function migrationAuditHighWaterMark(writeConn: SqliteDatabase): number {
+	try {
+		const row = writeConn.prepare("SELECT MAX(id) AS maxId FROM schema_migrations_audit").get() as
+			| { maxId?: unknown }
+			| undefined;
+		const maxId = Number(row?.maxId);
+		return Number.isFinite(maxId) && maxId > 0 ? maxId : 0;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * Versions applied by this startup's migration run, scoped by the audit
+ * high-water mark captured before migrations ran.
+ */
+function appliedMigrationVersions(writeConn: SqliteDatabase, auditHighWaterMark: number): Set<number> {
+	try {
+		const rows = writeConn
+			.prepare("SELECT version FROM schema_migrations_audit WHERE id > ?")
+			.all(auditHighWaterMark) as ReadonlyArray<{ version?: unknown }>;
+		return new Set(rows.map((row) => Number(row.version)).filter((v) => Number.isFinite(v)));
+	} catch {
+		// Audit table missing or unreadable: verify every migration so this
+		// fails loudly rather than silently skipping artifact verification.
+		return new Set(MIGRATIONS.map((m) => m.version));
+	}
+}
+
+function verifyMigrationArtifacts(writeConn: SqliteDatabase, auditHighWaterMark: number): void {
 	const version = readCurrentSchemaVersion(writeConn);
 	if (version !== LATEST_SCHEMA_VERSION) {
 		throw new Error(
@@ -1160,7 +1201,14 @@ function verifyMigrationArtifacts(writeConn: SqliteDatabase): void {
 		);
 	}
 	const missing: string[] = [];
+	// Only migrations applied during this startup are verified here. Core
+	// migration logic deliberately accepts legacy inline-migrated v1 databases
+	// whose baseline artifacts (conversations, embeddings) were never created;
+	// verifying all migrations unconditionally would reject that supported
+	// shape. Earlier versions were verified by the startup that applied them.
+	const appliedVersions = appliedMigrationVersions(writeConn, auditHighWaterMark);
 	for (const migration of MIGRATIONS) {
+		if (!appliedVersions.has(migration.version)) continue;
 		for (const table of migration.artifacts?.tables ?? []) {
 			const row = writeConn.prepare("SELECT 1 AS present FROM sqlite_schema WHERE name = ? LIMIT 1").get(table);
 			if (row === undefined) missing.push(`table ${table} (migration ${migration.version})`);
@@ -1243,11 +1291,13 @@ function finishDbAccessorInit(
 ): void {
 	// Run schema migrations — this is the sole schema authority.
 	// Failures here are fatal: the daemon must not start on bad schema.
+	const auditHighWaterMark = migrationAuditHighWaterMark(writeConn);
 	runMigrations(toMigrationDb(writeConn));
 	if (migrationBackup !== null && migrationBackup !== undefined) {
-		// Startup only checks bounded schema artifacts. The retained rollback point
-		// is pruned by post-ready incremental integrity maintenance after it passes.
-		verifyMigrationArtifacts(writeConn);
+		// Startup only checks bounded schema artifacts for the migrations this
+		// run applied. The retained rollback point is pruned by post-ready
+		// incremental integrity maintenance after it passes.
+		verifyMigrationArtifacts(writeConn, auditHighWaterMark);
 	}
 
 	// Record one-time conversion state only after migrations have succeeded.
