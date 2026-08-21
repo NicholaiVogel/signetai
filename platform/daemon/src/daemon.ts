@@ -1159,14 +1159,15 @@ function stopStaleSessionSweeper(): void {
 function startAcpDeliveryReconciliation(): void {
 	if (acpDeliveryReconciliationTimer !== null) return;
 	acpDeliveryReconciliationTimer = setInterval(() => {
-		try {
-			const reconciled = reconcileAcpDeliveries();
-			if (reconciled > 0) logger.info("daemon", "Reconciled abandoned ACP delivery attempts", { reconciled });
-		} catch (error) {
-			logger.warn("daemon", "ACP delivery reconciliation failed", {
-				error: error instanceof Error ? error.message : String(error),
+		void reconcileAcpDeliveries()
+			.then((reconciled) => {
+				if (reconciled > 0) logger.info("daemon", "Reconciled abandoned ACP delivery attempts", { reconciled });
+			})
+			.catch((error) => {
+				logger.warn("daemon", "ACP delivery reconciliation failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
 			});
-		}
 	}, ACP_DELIVERY_RECONCILIATION_INTERVAL_MS);
 	acpDeliveryReconciliationTimer.unref?.();
 	logger.debug("watcher", "Started ACP delivery reconciliation", {

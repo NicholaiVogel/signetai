@@ -2239,8 +2239,8 @@ memory:
 		expect(audit).toContain("README.md");
 	});
 
-	test.serial("sanitizes transcript audit filenames to stay within the audit directory", () => {
-		const result = writeTranscriptAudit({
+	test.serial("sanitizes transcript audit filenames to stay within the audit directory", async () => {
+		const result = await writeTranscriptAudit({
 			basePath: TEST_DIR,
 			agentId: "default",
 			sessionId: "sess-audit-safe",
@@ -2259,9 +2259,9 @@ memory:
 		expect(finalPath).not.toContain("/tmp/evil");
 	});
 
-	test.serial("uses the full raw transcript hash when audit ids are missing", () => {
+	test.serial("uses the full raw transcript hash when audit ids are missing", async () => {
 		const rawTranscript = "User: audit me\nAssistant: on it";
-		const result = writeTranscriptAudit({
+		const result = await writeTranscriptAudit({
 			basePath: TEST_DIR,
 			agentId: "agent-a",
 			sessionId: "",

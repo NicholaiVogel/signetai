@@ -61,6 +61,18 @@ export interface TranscriptRecoveryScanResult {
 	readonly skippedInvalid: number;
 }
 
+export function parseTranscriptRecoveryResult(output: string): TranscriptRecoveryScanResult | null {
+	for (const line of output.split("\n")) {
+		try {
+			const event = JSON.parse(line) as { type?: string; result?: TranscriptRecoveryScanResult };
+			if (event.type === "result" && event.result !== undefined) return event.result;
+		} catch {
+			// Logger output is not part of the child protocol.
+		}
+	}
+	return null;
+}
+
 export interface TranscriptRecoveryWorkerHandle {
 	stop(): Promise<void>;
 	nudge(): void;
@@ -564,24 +576,20 @@ export function startTranscriptRecoveryWorker(
 			};
 			child.stdout?.setEncoding("utf8");
 			child.stdout?.on("data", (chunk: string) => {
+				// Buffer the complete protocol until the stdio streams close. The
+				// child may write its result and exit in the same turn; resolving from
+				// `data` or rejecting from `exit` races the final stdout delivery.
 				output += chunk;
-				for (const line of output.split("\\n").slice(0, -1)) {
-					try {
-						const event = JSON.parse(line) as { type?: string; result?: TranscriptRecoveryScanResult };
-						if (event.type === "result" && event.result !== undefined)
-							settle(() => resolve(event.result as TranscriptRecoveryScanResult));
-					} catch {
-						// Logger output is not part of the child protocol.
-					}
-				}
-				output = output.slice(output.lastIndexOf("\\n") + 1);
 			});
 			child.on("error", (error) => settle(() => reject(error)));
-			child.on("exit", (code, signal) => {
-				if (!settled) {
-					const detail = signal === null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`;
-					settle(() => reject(new Error(`Transcript recovery child exited with ${detail}`)));
+			child.on("close", (code, signal) => {
+				const result = parseTranscriptRecoveryResult(output);
+				if (result !== null) {
+					settle(() => resolve(result));
+					return;
 				}
+				const detail = signal === null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`;
+				settle(() => reject(new Error(`Transcript recovery child exited with ${detail}`)));
 			});
 		});
 	};

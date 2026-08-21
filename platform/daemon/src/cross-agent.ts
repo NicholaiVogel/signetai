@@ -877,14 +877,17 @@ export function updateAgentMessageDelivery(
 	return updated;
 }
 
-export function reconcileAcpDeliveries(accessor: DbAccessor = getDbAccessor(), nowMs = Date.now()): number {
+export async function reconcileAcpDeliveries(
+	accessor: DbAccessor = getDbAccessor(),
+	nowMs = Date.now(),
+): Promise<number> {
 	const now = new Date(nowMs).toISOString();
 	const pendingCutoff = new Date(nowMs - ACP_PENDING_GRACE_MS).toISOString();
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return accessor.withWriteTx((db: import("./db-accessor").WriteDb) => {
-		const result = db
-			.prepare(
-				`UPDATE cross_agent_messages
+	return await accessor.withWriteTxAsync(
+		(db: import("./db-accessor").WriteDb) => {
+			const result = db
+				.prepare(
+					`UPDATE cross_agent_messages
 				 SET delivery_state = 'indeterminate', delivery_status = 'queued',
 				     delivery_error = CASE
 				       WHEN delivery_state = 'in_flight' THEN 'ACP relay interrupted; remote outcome is unknown'
@@ -895,10 +898,12 @@ export function reconcileAcpDeliveries(accessor: DbAccessor = getDbAccessor(), n
 				 WHERE delivery_path = 'acp'
 				   AND ((delivery_state = 'in_flight' AND delivery_lease_expires_at <= ?)
 				     OR (delivery_state = 'pending' AND delivery_updated_at <= ?))`,
-			)
-			.run(now, now, pendingCutoff);
-		return result.changes;
-	}, "cross-agent.ts:884");
+				)
+				.run(now, now, pendingCutoff);
+			return result.changes;
+		},
+		{ operation: "cross-agent.reconcile-acp-deliveries" },
+	);
 }
 
 export function listAgentMessagePage(options: ListAgentMessageOptions = {}): AgentMessagePage {
@@ -935,7 +940,7 @@ export function listAgentMessagePage(options: ListAgentMessageOptions = {}): Age
 			offset,
 			hasMore: offset + items.length < total,
 		};
-	}, "cross-agent.ts:914");
+	}, "cross-agent.ts:919");
 }
 
 export function listAgentMessages(options: ListAgentMessageOptions = {}): AgentMessage[] {
@@ -992,7 +997,7 @@ export function acknowledgeAgentMessage(input: AcknowledgeAgentMessageInput): Ac
 		const acknowledgedAt = receipt?.acknowledged_at;
 		if (!acknowledgedAt) throw new Error("Failed to persist cross-agent acknowledgement");
 		return { messageId, agentId, acknowledgedAt, alreadyAcknowledged: false };
-	}, "cross-agent.ts:953");
+	}, "cross-agent.ts:958");
 }
 
 export function subscribeCrossAgentEvents(subscriber: (event: CrossAgentEvent) => void): () => void {
@@ -1028,5 +1033,5 @@ export function resetCrossAgentStateForTest(): void {
 	getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) => {
 		db.prepare("DELETE FROM cross_agent_message_receipts").run();
 		db.prepare("DELETE FROM cross_agent_messages").run();
-	}, "cross-agent.ts:1028");
+	}, "cross-agent.ts:1033");
 }

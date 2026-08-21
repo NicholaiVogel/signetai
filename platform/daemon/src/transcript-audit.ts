@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveDefaultBasePath } from "@signet/core";
 
@@ -44,25 +44,23 @@ export interface TranscriptAuditWrite {
 	readonly finalPath?: string;
 }
 
-export function writeTranscriptAudit(params: {
+export async function writeTranscriptAudit(params: {
 	readonly basePath?: string;
 	readonly agentId: string;
 	readonly sessionId: string;
 	readonly sessionKey: string | null;
 	readonly rawTranscript: string;
 	readonly capturedAt?: string;
-}): TranscriptAuditWrite | null {
+}): Promise<TranscriptAuditWrite | null> {
 	if (params.rawTranscript.trim().length === 0) return null;
 
 	const dir = getTranscriptAuditDir(params.basePath ?? process.env.SIGNET_PATH ?? resolveDefaultBasePath());
-	if (!existsSync(dir)) {
-		mkdirSync(dir, { recursive: true });
-	}
+	await mkdir(dir, { recursive: true });
 
 	const token = resolveAuditToken(params.agentId, params.sessionId, params.sessionKey, params.rawTranscript);
 	const content = capTranscriptAuditContent(params.rawTranscript);
 	const latestPath = buildAuditPath(dir, `${token}--latest.log`);
-	writeFileSync(latestPath, content, "utf8");
+	await writeFile(latestPath, content, "utf8");
 
 	if (!params.capturedAt) {
 		return { latestPath };
@@ -72,11 +70,11 @@ export function writeTranscriptAudit(params: {
 	// Archive the latest by renaming it — the content is never written twice;
 	// the next capture recreates the rolling latest file.
 	try {
-		renameSync(latestPath, finalPath);
+		await rename(latestPath, finalPath);
 	} catch {
 		// The archive matters more than avoiding the copy; fall back to a
 		// direct write of the (already capped) content.
-		writeFileSync(finalPath, content, "utf8");
+		await writeFile(finalPath, content, "utf8");
 	}
 	return { latestPath, finalPath };
 }

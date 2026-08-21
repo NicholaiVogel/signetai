@@ -8,7 +8,11 @@ import { deriveSessionEndFallbackId } from "./session-end-recovery";
 import { markSessionTranscriptCompleted, upsertSessionTranscript } from "./session-transcripts";
 import { enqueueTranscriptCaptureJob, runTranscriptCaptureOnce } from "./transcript-capture-worker";
 import { normalizeSessionTranscript } from "./transcript-normalization";
-import { runTranscriptRecoveryScan, startTranscriptRecoveryWorker } from "./transcript-recovery-worker";
+import {
+	runTranscriptRecoveryScan,
+	parseTranscriptRecoveryResult,
+	startTranscriptRecoveryWorker,
+} from "./transcript-recovery-worker";
 
 let dir = "";
 let claudeRoot = "";
@@ -31,6 +35,22 @@ async function scan(nowMs = Date.now()) {
 }
 
 describe("transcript recovery worker", () => {
+	it("parses a buffered child result after the child has closed", () => {
+		const result = {
+			discovered: 1,
+			examined: 1,
+			enqueued: 1,
+			deduplicated: 0,
+			skippedRecent: 0,
+			skippedOversized: 0,
+			skippedUnchanged: 0,
+			skippedInvalid: 0,
+		};
+		expect(parseTranscriptRecoveryResult(`logger output\n${JSON.stringify({ type: "result", result })}\n`)).toEqual(
+			result,
+		);
+	});
+
 	beforeEach(() => {
 		previousSignetPath = process.env.SIGNET_PATH;
 		previousRecoveryHoldFile = process.env.SIGNET_TRANSCRIPT_RECOVERY_TEST_HOLD_FILE;
@@ -479,6 +499,31 @@ describe("transcript recovery worker", () => {
 		});
 		await handle.stop();
 		expect(handle.running).toBe(false);
+	});
+
+	it("accepts a result written immediately before the recovery child exits", async () => {
+		const transcriptPath = join(claudeRoot, "-repo", "immediate-exit.jsonl");
+		writeSettled(
+			transcriptPath,
+			JSON.stringify({ sessionId: "immediate-exit", message: { role: "user", content: "child result" } }),
+		);
+
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 60_000,
+		});
+		try {
+			for (let attempt = 0; attempt < 200; attempt++) {
+				const job = getDbAccessor().withReadDb((db) =>
+					db.prepare("SELECT id FROM transcript_capture_jobs WHERE transcript_path = ?").get(transcriptPath),
+				);
+				if (job) return;
+				await new Promise((resolve) => setTimeout(resolve, 5));
+			}
+			throw new Error("recovery child result was not accepted before the test deadline");
+		} finally {
+			await handle.stop();
+		}
 	});
 
 	it("cancels a scan waiting for DB admission", async () => {
