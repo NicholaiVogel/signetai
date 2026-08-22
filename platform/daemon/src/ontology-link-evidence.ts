@@ -89,8 +89,9 @@ export async function getOntologyLinkEvidence(
 ): Promise<OntologyLinkEvidenceResult> {
 	const dependency = await getEntityDependencyById(accessor, params);
 	if (dependency === null) throw new OntologyLinkEvidenceError("Link not found", 404);
-	const items = await accessor.withReadDbAsync(async (db) =>
-		linkEvidenceRefs(dependency).map((ref) => resolveOntologyEvidenceRef(db, params.agentId, ref)),
+	const items = await accessor.withReadDbAsync(
+		async (db) => linkEvidenceRefs(dependency).map((ref) => resolveOntologyEvidenceRef(db, params.agentId, ref)),
+		{ siteToken: "ontology-link-evidence.ts:92" },
 	);
 	return {
 		dependency,

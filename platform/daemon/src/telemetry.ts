@@ -483,71 +483,84 @@ export function telemetryReportedVersion(version: string, deployment: TelemetryD
  * desktop, and npm installs alike; the wrapper postinstall ping misses bun
  * and desktop entirely).
  */
-function getOrCreateInstallId(
-	db: DbAccessor,
-	daemonVersion: string,
-): { readonly id: string; readonly created: boolean; readonly previousVersion?: string } {
+type InstallIdentity = { readonly id: string; readonly created: boolean; readonly previousVersion?: string };
+type DeferredInstallIdentity = InstallIdentity & { readonly ready?: Promise<InstallIdentity> };
+
+function resolveInstallIdentity(w: import("./db-accessor").WriteDb, daemonVersion: string): InstallIdentity {
+	const existing = w
+		.prepare("SELECT id, last_seen_version FROM telemetry_install ORDER BY created_at ASC LIMIT 1")
+		.get() as { readonly id: string; readonly last_seen_version?: string | null } | null | undefined;
+	if (existing?.id) {
+		if (!existing.last_seen_version) {
+			w.prepare("UPDATE telemetry_install SET last_seen_version = ? WHERE id = ?").run(daemonVersion, existing.id);
+		}
+		return {
+			id: existing.id,
+			created: false,
+			...(existing.last_seen_version ? { previousVersion: existing.last_seen_version } : {}),
+		};
+	}
+	const id = crypto.randomUUID();
+	const result = w
+		.prepare("INSERT OR IGNORE INTO telemetry_install (id, created_at, last_seen_version) VALUES (?, ?, ?)")
+		.run(id, new Date().toISOString(), daemonVersion);
+	if (result.changes > 0) return { id, created: true };
+	const inserted = w
+		.prepare("SELECT id, last_seen_version FROM telemetry_install ORDER BY created_at ASC LIMIT 1")
+		.get() as { readonly id: string; readonly last_seen_version?: string | null } | null | undefined;
+	return inserted?.id
+		? {
+				id: inserted.id,
+				created: false,
+				...(inserted.last_seen_version ? { previousVersion: inserted.last_seen_version } : {}),
+			}
+		: { id, created: false };
+}
+
+function resolveLegacyInstallIdentity(w: import("./db-accessor").WriteDb): InstallIdentity {
+	const existing = w.prepare("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1").get() as
+		| { readonly id: string }
+		| null
+		| undefined;
+	if (existing?.id) return { id: existing.id, created: false };
+	const id = crypto.randomUUID();
+	const result = w
+		.prepare("INSERT OR IGNORE INTO telemetry_install (id, created_at) VALUES (?, ?)")
+		.run(id, new Date().toISOString());
+	if (result.changes > 0) return { id, created: true };
+	const inserted = w.prepare("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1").get() as
+		| { readonly id: string }
+		| null
+		| undefined;
+	return inserted?.id ? { id: inserted.id, created: false } : { id, created: false };
+}
+
+function getOrCreateInstallId(db: DbAccessor, daemonVersion: string): DeferredInstallIdentity {
+	const fallback = { id: crypto.randomUUID(), created: false } as const;
+	const withWriteTxAsync = db.withWriteTxAsync;
+	if (withWriteTxAsync) {
+		const runAsync = <T>(fn: (w: import("./db-accessor").WriteDb) => T): Promise<T> =>
+			withWriteTxAsync.call(db, fn) as Promise<T>;
+		const ready = runAsync((w) => resolveInstallIdentity(w, daemonVersion))
+			.catch(() => runAsync(resolveLegacyInstallIdentity))
+			.catch(() => fallback);
+		return { ...fallback, ready };
+	}
 	try {
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-		return db.withWriteTx((w: import("./db-accessor").WriteDb) => {
-			const existing = w
-				.prepare("SELECT id, last_seen_version FROM telemetry_install ORDER BY created_at ASC LIMIT 1")
-				.get() as { readonly id: string; readonly last_seen_version?: string | null } | null | undefined;
-			if (existing?.id) {
-				if (!existing.last_seen_version) {
-					// Establish a baseline for installs upgraded from pre-117
-					// schemas without fabricating a transition event.
-					w.prepare("UPDATE telemetry_install SET last_seen_version = ? WHERE id = ?").run(daemonVersion, existing.id);
-				}
-				return {
-					id: existing.id,
-					created: false,
-					...(existing.last_seen_version ? { previousVersion: existing.last_seen_version } : {}),
-				};
-			}
-
-			const id = crypto.randomUUID();
-			const result = w
-				.prepare("INSERT OR IGNORE INTO telemetry_install (id, created_at, last_seen_version) VALUES (?, ?, ?)")
-				.run(id, new Date().toISOString(), daemonVersion);
-			if (result.changes > 0) return { id, created: true };
-
-			const inserted = w
-				.prepare("SELECT id, last_seen_version FROM telemetry_install ORDER BY created_at ASC LIMIT 1")
-				.get() as { readonly id: string; readonly last_seen_version?: string | null } | null | undefined;
-			return inserted?.id
-				? {
-						id: inserted.id,
-						created: false,
-						...(inserted.last_seen_version ? { previousVersion: inserted.last_seen_version } : {}),
-					}
-				: { id, created: false };
-		});
+		return db.withWriteTx(
+			(w: import("./db-accessor").WriteDb) => resolveInstallIdentity(w, daemonVersion),
+			"telemetry.ts:551",
+		);
 	} catch {
-		// Test harnesses and partially upgraded workspaces can still expose the
-		// pre-117 telemetry_install shape. Preserve telemetry there without
-		// claiming a transition; the next normal migration adds the column.
 		try {
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-			return db.withWriteTx((w: import("./db-accessor").WriteDb) => {
-				const existing = w.prepare("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1").get() as
-					| { readonly id: string }
-					| null
-					| undefined;
-				if (existing?.id) return { id: existing.id, created: false };
-				const id = crypto.randomUUID();
-				const result = w
-					.prepare("INSERT OR IGNORE INTO telemetry_install (id, created_at) VALUES (?, ?)")
-					.run(id, new Date().toISOString());
-				if (result.changes > 0) return { id, created: true };
-				const inserted = w.prepare("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1").get() as
-					| { readonly id: string }
-					| null
-					| undefined;
-				return inserted?.id ? { id: inserted.id, created: false } : { id, created: false };
-			});
+			return db.withWriteTx(
+				(w: import("./db-accessor").WriteDb) => resolveLegacyInstallIdentity(w),
+				"telemetry.ts:558",
+			);
 		} catch {
-			return { id: crypto.randomUUID(), created: false };
+			return fallback;
 		}
 	}
 }
@@ -563,7 +576,7 @@ function getOrCreateInstallId(
 const MAX_CRASH_MESSAGE_CHARS = 400;
 const MAX_CRASH_STACK_FRAMES = 8;
 
-const HOME_PATH_PATTERNS = [/\/home\/[^\/\s]+/g, /\/Users\/[^\/\s]+/g];
+const HOME_PATH_PATTERNS = [/\/home\/[^/\s]+/g, /\/Users\/[^/\s]+/g];
 
 function stripUserPaths(text: string): string {
 	let out = text;
@@ -786,6 +799,7 @@ export function createTelemetryCollector(
 	let droppedEventCount = 0;
 	let pendingDroppedEventCount = 0;
 	let flushPromise: Promise<void> | null = null;
+	let installLifecycleReady = Promise.resolve();
 	const pendingAsyncWrites = new Set<Promise<void>>();
 	let deliveryStatePersistenceFailed = false;
 	let deliveryState: TelemetryDeliveryState = {
@@ -801,7 +815,10 @@ export function createTelemetryCollector(
 	let persistedQueueCount = 0;
 	let persistedOldestTimestamp: string | null = null;
 	let lastDaemonEventTimestamp: string | null = null;
-	const { id: installId, created: installActivated, previousVersion } = getOrCreateInstallId(db, daemonVersion);
+	const installIdentity = getOrCreateInstallId(db, daemonVersion);
+	let installId = installIdentity.id;
+	let installActivated = installIdentity.created;
+	let previousVersion = installIdentity.previousVersion;
 
 	const posthogConfigured = config.posthogHost.length > 0 && config.posthogApiKey.length > 0;
 
@@ -820,6 +837,7 @@ export function createTelemetryCollector(
 					 FROM telemetry_delivery_state WHERE id = 1`,
 						)
 						.get() as TelemetryDeliveryState | undefined,
+				{ siteToken: "telemetry.ts:827" },
 			);
 			if (row) {
 				droppedEventCount = Math.max(droppedEventCount, row.droppedEventCount ?? 0);
@@ -843,24 +861,27 @@ export function createTelemetryCollector(
 
 	async function refreshPersistedQueue(): Promise<void> {
 		try {
-			const queue = await db.withReadDbAsync(async (r) => {
-				const pending = r
-					.prepare(
-						`SELECT COUNT(*) AS count, MIN(timestamp) AS oldestTimestamp
+			const queue = await db.withReadDbAsync(
+				async (r) => {
+					const pending = r
+						.prepare(
+							`SELECT COUNT(*) AS count, MIN(timestamp) AS oldestTimestamp
 						 FROM telemetry_events WHERE source = 'daemon' AND sent_to_posthog = 0`,
-					)
-					.get() as { count?: number; oldestTimestamp?: string | null } | undefined;
-				const latest = r
-					.prepare(
-						"SELECT MAX(timestamp) AS timestamp FROM telemetry_events WHERE source = 'daemon' AND event <> 'telemetry.health'",
-					)
-					.get() as { timestamp?: string | null } | undefined;
-				return {
-					count: pending?.count ?? 0,
-					oldestTimestamp: pending?.oldestTimestamp ?? null,
-					lastTimestamp: latest?.timestamp ?? null,
-				};
-			});
+						)
+						.get() as { count?: number; oldestTimestamp?: string | null } | undefined;
+					const latest = r
+						.prepare(
+							"SELECT MAX(timestamp) AS timestamp FROM telemetry_events WHERE source = 'daemon' AND event <> 'telemetry.health'",
+						)
+						.get() as { timestamp?: string | null } | undefined;
+					return {
+						count: pending?.count ?? 0,
+						oldestTimestamp: pending?.oldestTimestamp ?? null,
+						lastTimestamp: latest?.timestamp ?? null,
+					};
+				},
+				{ siteToken: "telemetry.ts:864" },
+			);
 			persistedQueueCount = queue.count;
 			persistedOldestTimestamp = queue.oldestTimestamp;
 			lastDaemonEventTimestamp = queue.lastTimestamp;
@@ -1271,7 +1292,7 @@ export function createTelemetryCollector(
 		};
 	}
 
-	function appendBufferedEvent(event: TelemetryEventType, properties: TelemetryProperties): void {
+	function appendBufferedEvent(event: TelemetryEventType, properties: TelemetryProperties, enriched = false): void {
 		if (recordingStopped) return;
 		if (buffer.length >= MAX_BUFFER_EVENTS) {
 			const dropCount = buffer.length - MAX_BUFFER_EVENTS + 1;
@@ -1286,10 +1307,23 @@ export function createTelemetryCollector(
 			id: crypto.randomUUID(),
 			event,
 			timestamp: new Date().toISOString(),
-			properties: addContext(event, enrichSessionEvent(event, properties)),
+			properties: addContext(event, enriched ? properties : enrichSessionEvent(event, properties)),
 		};
 		buffer.push(next);
 		queueLogLine(next);
+	}
+
+	const pendingIdentityRecords: Array<{
+		readonly event: TelemetryEventType;
+		readonly properties: TelemetryProperties;
+	}> = [];
+	let installIdentityReady = false;
+	function appendAfterInstallIdentity(event: TelemetryEventType, properties: TelemetryProperties): void {
+		if (!installIdentityReady) {
+			pendingIdentityRecords.push({ event, properties: enrichSessionEvent(event, properties) });
+			return;
+		}
+		appendBufferedEvent(event, properties);
 	}
 
 	async function drainBuffer(): Promise<void> {
@@ -1313,6 +1347,7 @@ export function createTelemetryCollector(
 		// re-check the gate after the state has been applied because the caller's
 		// initial check necessarily ran before this await.
 		await deliveryStateReady;
+		await installLifecycleReady;
 		if (allowRemote && !force && Date.now() < nextAllowedFlushAt) allowRemote = false;
 		await awaitPendingAsyncWrites();
 		flushCount++;
@@ -1467,7 +1502,7 @@ export function createTelemetryCollector(
 		},
 
 		record(event, properties): void {
-			appendBufferedEvent(event, properties);
+			appendAfterInstallIdentity(event, properties);
 
 			if (buffer.length >= MAX_BUFFER_SIZE) {
 				void flushInternal(false);
@@ -1475,7 +1510,7 @@ export function createTelemetryCollector(
 		},
 
 		recordDeferred(event, properties): void {
-			appendBufferedEvent(event, properties);
+			appendAfterInstallIdentity(event, properties);
 		},
 
 		recordFirstUse(kind): void {
@@ -1563,72 +1598,90 @@ export function createTelemetryCollector(
 
 		async query(opts): Promise<readonly TelemetryEvent[]> {
 			try {
-				return await db.withReadDbAsync(async (r) => {
-					const conditions: string[] = [];
-					const params: unknown[] = [];
+				return await db.withReadDbAsync(
+					async (r) => {
+						const conditions: string[] = [];
+						const params: unknown[] = [];
 
-					if (opts?.event) {
-						conditions.push("event = ?");
-						params.push(opts.event);
-					}
-					if (opts?.since) {
-						conditions.push("timestamp >= ?");
-						params.push(opts.since);
-					}
-					if (opts?.until) {
-						conditions.push("timestamp <= ?");
-						params.push(opts.until);
-					}
+						if (opts?.event) {
+							conditions.push("event = ?");
+							params.push(opts.event);
+						}
+						if (opts?.since) {
+							conditions.push("timestamp >= ?");
+							params.push(opts.since);
+						}
+						if (opts?.until) {
+							conditions.push("timestamp <= ?");
+							params.push(opts.until);
+						}
 
-					const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-					const limit = opts?.limit ?? 100;
+						const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+						const limit = opts?.limit ?? 100;
 
-					const rows = r
-						.prepare(
-							`SELECT id, event, timestamp, properties
+						const rows = r
+							.prepare(
+								`SELECT id, event, timestamp, properties
 							 FROM telemetry_events
 							 ${where}
 							 ORDER BY timestamp DESC
 							 LIMIT ?`,
-						)
-						.all(...params, limit) as unknown as readonly {
-						id: string;
-						event: string;
-						timestamp: string;
-						properties: string;
-					}[];
+							)
+							.all(...params, limit) as unknown as readonly {
+							id: string;
+							event: string;
+							timestamp: string;
+							properties: string;
+						}[];
 
-					return rows.map((row) => ({
-						id: row.id,
-						event: row.event as TelemetryEventType,
-						timestamp: row.timestamp,
-						properties: JSON.parse(row.properties) as TelemetryProperties,
-					}));
-				});
+						return rows.map((row) => ({
+							id: row.id,
+							event: row.event as TelemetryEventType,
+							timestamp: row.timestamp,
+							properties: JSON.parse(row.properties) as TelemetryProperties,
+						}));
+					},
+					{ siteToken: "telemetry.ts:1601" },
+				);
 			} catch {
 				return [];
 			}
 		},
 	};
 
-	// First run of a new install: emit install.activated so daemon-running
-	// installs are countable regardless of how they were installed (the npm
-	// postinstall ping never fires for bun global or desktop installs).
-	if (installActivated) {
-		collector.record("install.activated", {
-			version: reportedVersion,
-			platform: process.platform,
-		});
-		if (opts.configSnapshot) {
-			collector.record("config.snapshot", { ...opts.configSnapshot });
+	const emitInstallLifecycle = (): void => {
+		// First run of a new install: emit install.activated so daemon-running
+		// installs are countable regardless of how they were installed (the npm
+		// postinstall ping never fires for bun global or desktop installs).
+		if (installActivated) {
+			collector.record("install.activated", {
+				version: reportedVersion,
+				platform: process.platform,
+			});
+			if (opts.configSnapshot) {
+				collector.record("config.snapshot", { ...opts.configSnapshot });
+			}
 		}
-	}
-	if (previousVersion && previousVersion !== daemonVersion) {
-		collector.record("version.observed", {
-			from: previousVersion,
-			to: daemonVersion,
-		});
-	}
+		if (previousVersion && previousVersion !== daemonVersion) {
+			collector.record("version.observed", {
+				from: previousVersion,
+				to: daemonVersion,
+			});
+		}
+	};
+	const finishInstallIdentity = (resolved?: InstallIdentity): void => {
+		if (resolved) {
+			installId = resolved.id;
+			installActivated = resolved.created;
+			previousVersion = resolved.previousVersion;
+		}
+		installIdentityReady = true;
+		emitInstallLifecycle();
+		for (const pending of pendingIdentityRecords.splice(0))
+			appendBufferedEvent(pending.event, pending.properties, true);
+	};
+	installLifecycleReady =
+		installIdentity.ready?.then(finishInstallIdentity) ?? Promise.resolve().then(() => finishInstallIdentity());
 
 	return collector;
 }

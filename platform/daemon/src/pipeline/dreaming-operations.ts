@@ -115,7 +115,7 @@ function citeEvidence(accessor: DbAccessor, agentId: string, citation: unknown):
 				return { evidence: createDreamingAgentEvidence([source]), sourceAgentIds: [] };
 			}
 			return { evidence: [], sourceAgentIds: findEpisodicSourceAgentIds(db, requested.sourceRef) };
-		});
+		}, "pipeline/dreaming-operations.ts:112");
 	return {
 		evidence:
 			result.evidence.find(
@@ -162,7 +162,7 @@ function semanticDuplicateIds(accessor: DbAccessor, agentId: string, canonicalNa
 			)
 			.all(agentId, canonicalName, ...SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES) as Array<{ id: string }>;
 		return new Set(rows.map((row) => row.id));
-	});
+	}, "pipeline/dreaming-operations.ts:154");
 }
 
 function asStringRecord(value: unknown): Readonly<Record<string, string>> | undefined {
@@ -475,38 +475,44 @@ function lookupString(db: ReadDb, sql: string, ...params: unknown[]): string | n
 
 function lookupEntityName(accessor: DbAccessor, agentId: string, entityId: string): string | null {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) =>
-		lookupString(
-			db,
-			"SELECT name AS value FROM entities WHERE id = ? AND agent_id = ? AND COALESCE(status,'active') = 'active'",
-			entityId,
-			agentId,
-		),
+	return accessor.withReadDb(
+		(db: import("../db-accessor").ReadDb) =>
+			lookupString(
+				db,
+				"SELECT name AS value FROM entities WHERE id = ? AND agent_id = ? AND COALESCE(status,'active') = 'active'",
+				entityId,
+				agentId,
+			),
+		"pipeline/dreaming-operations.ts:478",
 	);
 }
 
 function lookupAspectName(accessor: DbAccessor, agentId: string, entityId: string, aspectId: string): string | null {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) =>
-		lookupString(
-			db,
-			"SELECT name AS value FROM entity_aspects WHERE id = ? AND entity_id = ? AND agent_id = ? AND COALESCE(status,'active') = 'active'",
-			aspectId,
-			entityId,
-			agentId,
-		),
+	return accessor.withReadDb(
+		(db: import("../db-accessor").ReadDb) =>
+			lookupString(
+				db,
+				"SELECT name AS value FROM entity_aspects WHERE id = ? AND entity_id = ? AND agent_id = ? AND COALESCE(status,'active') = 'active'",
+				aspectId,
+				entityId,
+				agentId,
+			),
+		"pipeline/dreaming-operations.ts:492",
 	);
 }
 
 function lookupAspectEntityId(accessor: DbAccessor, agentId: string, aspectId: string): string | null {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) =>
-		lookupString(
-			db,
-			"SELECT entity_id AS value FROM entity_aspects WHERE id = ? AND agent_id = ? AND COALESCE(status,'active') = 'active'",
-			aspectId,
-			agentId,
-		),
+	return accessor.withReadDb(
+		(db: import("../db-accessor").ReadDb) =>
+			lookupString(
+				db,
+				"SELECT entity_id AS value FROM entity_aspects WHERE id = ? AND agent_id = ? AND COALESCE(status,'active') = 'active'",
+				aspectId,
+				agentId,
+			),
+		"pipeline/dreaming-operations.ts:507",
 	);
 }
 
@@ -517,14 +523,16 @@ function lookupActiveClaimAttributeId(
 	claimKey: string,
 ): string | null {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) =>
-		lookupString(
-			db,
-			"SELECT id AS value FROM entity_attributes WHERE aspect_id = ? AND agent_id = ? AND claim_key = ? AND status = 'active' ORDER BY created_at DESC, id ASC LIMIT 1",
-			aspectId,
-			agentId,
-			claimKey,
-		),
+	return accessor.withReadDb(
+		(db: import("../db-accessor").ReadDb) =>
+			lookupString(
+				db,
+				"SELECT id AS value FROM entity_attributes WHERE aspect_id = ? AND agent_id = ? AND claim_key = ? AND status = 'active' ORDER BY created_at DESC, id ASC LIMIT 1",
+				aspectId,
+				agentId,
+				claimKey,
+			),
+		"pipeline/dreaming-operations.ts:526",
 	);
 }
 
@@ -689,13 +697,15 @@ function validateRequestBeforeWrites(params: ApplyDreamingOperationsParams): str
 			const attentionId = stringField(operation.payload, "attentionId");
 			if (attentionId === null) return "decline_attention requires payload.attentionId";
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			const pending = params.accessor.withReadDb((db: import("../db-accessor").ReadDb) =>
-				db
-					.prepare(
-						`SELECT 1 FROM dreaming_attention
+			const pending = params.accessor.withReadDb(
+				(db: import("../db-accessor").ReadDb) =>
+					db
+						.prepare(
+							`SELECT 1 FROM dreaming_attention
 						 WHERE id = ? AND agent_id = ? AND resolved_at IS NULL`,
-					)
-					.get(attentionId, params.agentId),
+						)
+						.get(attentionId, params.agentId),
+				"pipeline/dreaming-operations.ts:700",
 			);
 			if (pending == null) return "Attention record is not pending in this agent scope";
 			continue;

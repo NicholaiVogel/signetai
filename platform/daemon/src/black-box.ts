@@ -431,15 +431,17 @@ export function buildBlackBoxSession(
 ): BlackBoxSession {
 	const limit = Math.max(1, Math.min(input.limit ?? MAX_EVENTS, MAX_EVENTS));
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	const events = accessor.withReadDb((db: import("./db-accessor").ReadDb) =>
-		[
-			...listTelemetryEvents(db, input.agentId, input.sessionKey, input.project, limit),
-			...listSessionRecallEvents(db, input.agentId, input.sessionKey, input.project, limit),
-			...listArtifactEvents(db, input.agentId, input.sessionKey, input.project, limit),
-			...listAssertionEvents(db, input.agentId, input.sessionKey, input.project, limit),
-		]
-			.sort(compareEvent)
-			.slice(0, limit),
+	const events = accessor.withReadDb(
+		(db: import("./db-accessor").ReadDb) =>
+			[
+				...listTelemetryEvents(db, input.agentId, input.sessionKey, input.project, limit),
+				...listSessionRecallEvents(db, input.agentId, input.sessionKey, input.project, limit),
+				...listArtifactEvents(db, input.agentId, input.sessionKey, input.project, limit),
+				...listAssertionEvents(db, input.agentId, input.sessionKey, input.project, limit),
+			]
+				.sort(compareEvent)
+				.slice(0, limit),
+		"black-box.ts:434",
 	);
 	return {
 		sessionKey: input.sessionKey,
@@ -523,5 +525,5 @@ export function listBlackBoxSessions(
 		}
 
 		return [...bySession.values()].sort((a, b) => b.lastAt.localeCompare(a.lastAt)).slice(0, limit);
-	});
+	}, "black-box.ts:469");
 }

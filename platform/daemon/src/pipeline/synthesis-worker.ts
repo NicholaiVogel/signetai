@@ -130,7 +130,7 @@ function getLastSessionEndTime(deps: SynthesisDeps): number {
 				WHERE trigger = 'session_end'
 			`)
 				.get();
-		});
+		}, "pipeline/synthesis-worker.ts:125");
 		const checkpointTs = parseLastEndTimestamp(checkpointRow);
 		if (checkpointTs > 0) {
 			return checkpointTs;
@@ -158,7 +158,7 @@ function getLastSessionEndTime(deps: SynthesisDeps): number {
 					WHERE completed_at IS NOT NULL
 				`)
 				.get();
-		});
+		}, "pipeline/synthesis-worker.ts:151");
 		return parseLastEndTimestamp(transcriptRow);
 	} catch (error) {
 		if (!isExpectedSessionActivityLookupError(error, "session_transcripts")) {

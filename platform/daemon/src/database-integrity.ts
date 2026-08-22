@@ -20,11 +20,11 @@ import type { DbOwnerStatement } from "./db-owner-protocol";
 import { logger } from "./logger";
 import { resolveEmbeddedWorkerPath } from "./native-runtime-assets";
 
-export type DatabaseIntegrityState = "unknown" | "healthy" | "repaired" | "corrupt" | "unavailable";
+export type DatabaseIntegrityState = "unknown" | "healthy" | "repaired" | "corrupt" | "unavailable" | "degraded";
 
 export interface DatabaseIntegrityProgress {
 	readonly checkpointKey: string;
-	readonly phase: "running" | "complete" | "cancelled" | "timed_out" | "unavailable";
+	readonly phase: "running" | "complete" | "cancelled" | "timed_out" | "unavailable" | "degraded";
 	readonly checkedObjects: number;
 	readonly failedObjects: number;
 	readonly remainingObjects: number;
@@ -35,6 +35,7 @@ export interface DatabaseIntegrityProgress {
 	readonly ownerQueueAdmissionMs: number;
 	readonly ownerExecutionMs: number;
 	readonly cancellationReason: string | null;
+	readonly degradationReason: string | null;
 }
 
 export interface IntegrityCheckStatus {
@@ -45,7 +46,8 @@ export interface IntegrityCheckStatus {
 export interface DatabaseIntegrityStatus {
 	readonly checkedAt: string;
 	readonly state: DatabaseIntegrityState;
-	readonly phase: "pending" | "running" | "complete" | "timed_out";
+	readonly phase: "pending" | "running" | "complete" | "timed_out" | "degraded";
+	readonly integrity: string | null;
 	readonly quickCheck: IntegrityCheckStatus;
 	readonly telemetryCheck: IntegrityCheckStatus;
 	readonly rebuiltIndexes: readonly string[];
@@ -53,7 +55,6 @@ export interface DatabaseIntegrityStatus {
 	readonly repairGuidance: string | null;
 	readonly ownerState: string | null;
 	readonly ownerGeneration: number | null;
-	readonly deadlineKills: number;
 	readonly incrementalProgress: DatabaseIntegrityProgress | null;
 }
 
@@ -80,6 +81,7 @@ let latestStatus: DatabaseIntegrityStatus = {
 	checkedAt: "",
 	state: "unknown",
 	phase: "pending",
+	integrity: null,
 	quickCheck: UNKNOWN_CHECK,
 	telemetryCheck: UNKNOWN_CHECK,
 	rebuiltIndexes: [],
@@ -87,7 +89,6 @@ let latestStatus: DatabaseIntegrityStatus = {
 	repairGuidance: null,
 	ownerState: null,
 	ownerGeneration: null,
-	deadlineKills: 0,
 	incrementalProgress: null,
 };
 
@@ -128,6 +129,7 @@ function statusWith(
 		checkedAt: new Date().toISOString(),
 		state,
 		phase,
+		integrity: null,
 		quickCheck,
 		telemetryCheck,
 		rebuiltIndexes,
@@ -135,7 +137,6 @@ function statusWith(
 		repairGuidance,
 		ownerState: health?.state ?? null,
 		ownerGeneration: health?.generation ?? null,
-		deadlineKills: health?.deadlineKills ?? 0,
 		incrementalProgress: null,
 	};
 }
@@ -149,20 +150,30 @@ export function updateDatabaseIntegrityStatus(
 	const health = owner?.health();
 	const failed = progress.failedObjects > 0 || errors.length > 0;
 	const operationalFailure = progress.phase === "unavailable" || progress.phase === "timed_out";
+	const degraded = progress.phase === "degraded" || progress.degradationReason !== null;
 	const state: DatabaseIntegrityState = operationalFailure
 		? "unavailable"
-		: failed
-			? "corrupt"
-			: progress.phase === "complete"
-				? "healthy"
-				: "unknown";
+		: degraded
+			? "degraded"
+			: failed
+				? "corrupt"
+				: progress.phase === "complete"
+					? "healthy"
+					: "unknown";
 	const phase: DatabaseIntegrityStatus["phase"] =
-		progress.phase === "timed_out" ? "timed_out" : progress.phase === "running" ? "running" : "complete";
+		progress.phase === "timed_out"
+			? "timed_out"
+			: progress.phase === "running"
+				? "running"
+				: progress.phase === "degraded"
+					? "degraded"
+					: "complete";
 	latestStatus = {
 		...latestStatus,
 		checkedAt: new Date().toISOString(),
 		state,
 		phase,
+		integrity: degraded ? progress.degradationReason : null,
 		quickCheck: failed
 			? { ok: false, messages: errors.length > 0 ? errors : ["incremental integrity check failed"] }
 			: progress.phase === "complete"
@@ -172,7 +183,6 @@ export function updateDatabaseIntegrityStatus(
 		repairGuidance: state === "corrupt" || state === "unavailable" ? REPAIR_GUIDANCE : null,
 		ownerState: health?.state ?? latestStatus.ownerState,
 		ownerGeneration: health?.generation ?? latestStatus.ownerGeneration,
-		deadlineKills: health?.deadlineKills ?? latestStatus.deadlineKills,
 		incrementalProgress: progress,
 	};
 }
@@ -452,7 +462,7 @@ async function runKillableTelemetryRepair(
 }
 
 async function writeAsync<Result>(accessor: DbAccessor, processBatch: (db: WriteDb) => Result): Promise<Result> {
-	return accessor.withWriteTxAsync(processBatch);
+	return accessor.withWriteTxAsync(processBatch, { siteToken: "database-integrity.ts:465" });
 }
 
 /**
@@ -498,7 +508,6 @@ async function runOwnerDeferredIntegrityCheck(
 			budgetMs: ownerTimeoutMs,
 			ownerState: health.state,
 			ownerGeneration: health.generation,
-			deadlineKills: health.deadlineKills,
 		});
 	}, 1_000);
 	try {
@@ -515,7 +524,6 @@ async function runOwnerDeferredIntegrityCheck(
 			durationMs: latestStatus.durationMs,
 			ownerState: latestStatus.ownerState,
 			ownerGeneration: latestStatus.ownerGeneration,
-			deadlineKills: latestStatus.deadlineKills,
 		});
 		return latestStatus;
 	} catch (error) {
@@ -535,7 +543,6 @@ async function runOwnerDeferredIntegrityCheck(
 			error: message,
 			ownerState: latestStatus.ownerState,
 			ownerGeneration: latestStatus.ownerGeneration,
-			deadlineKills: latestStatus.deadlineKills,
 		});
 		return latestStatus;
 	} finally {
@@ -616,11 +623,14 @@ async function readIntegrityChecks(
 	readonly indexes: readonly string[];
 }> {
 	if (options?.owner === undefined) {
-		return await accessor.withReadDbAsync(async (db) => ({
-			quick: options?.quickCheck ?? check(db, "quick_check"),
-			telemetry: check(db, "integrity_check", "telemetry_events"),
-			indexes: listTelemetryIndexes(db),
-		}));
+		return await accessor.withReadDbAsync(
+			async (db) => ({
+				quick: options?.quickCheck ?? check(db, "quick_check"),
+				telemetry: check(db, "integrity_check", "telemetry_events"),
+				indexes: listTelemetryIndexes(db),
+			}),
+			{ siteToken: "database-integrity.ts:626" },
+		);
 	}
 	const deadlineMs = options.repairTimeoutMs ?? DEFAULT_INTEGRITY_TIMEOUT_MS;
 	const quick =
@@ -731,7 +741,9 @@ export async function repairTelemetryIndexes(
 
 			const verifiedTelemetry =
 				options?.owner === undefined
-					? await accessor.withReadDbAsync(async (db) => check(db, "integrity_check", "telemetry_events"))
+					? await accessor.withReadDbAsync(async (db) => check(db, "integrity_check", "telemetry_events"), {
+							siteToken: "database-integrity.ts:744",
+						})
 					: ownerCheck(
 							await ownerQueryAll<Record<string, unknown>>(
 								options.owner,

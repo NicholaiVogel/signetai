@@ -144,6 +144,11 @@ import { up as memoryHeadPublication } from "./135-memory-head-publication";
 import { up as memoryHeadRevisions } from "./136-memory-head-revisions";
 import { up as dreamingHeadManifest } from "./137-dreaming-head-manifest";
 import { up as boundedStatusProjections } from "./138-bounded-status-projections";
+import { up as nativeSourceSyncState } from "./139-native-source-sync-state";
+import { up as transcriptRecoveryFrontier } from "./140-transcript-recovery-frontier";
+import { up as sourceSyncCheckpoints } from "./141-source-sync-checkpoints";
+import { up as sourceSyncFrontier } from "./142-source-sync-frontier";
+import { up as embeddingIndexProgress } from "./143-embedding-index-progress";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1273,6 +1278,49 @@ export const MIGRATIONS: readonly Migration[] = [
 		up: boundedStatusProjections,
 		artifacts: {
 			tables: ["transcript_capture_status", "memories_duplicate_hash_counts", "memories_diagnostics_state"],
+		},
+	},
+	// 139 tracks provider pause/running lifecycle and its legacy checkpoint.
+	// 141/142 track per-agent/source/phase scan cursors/frontiers; they are a
+	// separate bounded walk concern and intentionally remain a distinct table.
+	{
+		version: 139,
+		name: "native-source-sync-state",
+		up: nativeSourceSyncState,
+		artifacts: { tables: ["native_source_sync_state"] },
+	},
+	{
+		version: 140,
+		name: "transcript-recovery-frontier",
+		up: transcriptRecoveryFrontier,
+		artifacts: { tables: ["transcript_recovery_frontiers"] },
+	},
+	{
+		version: 141,
+		name: "source-sync-checkpoints",
+		up: sourceSyncCheckpoints,
+		artifacts: { tables: ["source_sync_checkpoints"] },
+	},
+	{
+		version: 142,
+		name: "source-sync-frontier",
+		up: sourceSyncFrontier,
+		artifacts: { columns: [{ table: "source_sync_checkpoints", column: "frontier" }] },
+	},
+	{
+		version: 143,
+		name: "embedding-index-progress",
+		up: embeddingIndexProgress,
+		artifacts: {
+			columns: [
+				{ table: "embedding_index_state", column: "migration_phase" },
+				{ table: "embedding_index_state", column: "progress_staged" },
+				{ table: "embedding_index_state", column: "progress_total" },
+				{ table: "embedding_index_state", column: "projection_cursor_last_id" },
+				{ table: "embedding_index_state", column: "projection_cursor_slot" },
+				{ table: "embedding_index_state", column: "no_progress_ticks" },
+				{ table: "embedding_index_state", column: "provider_endpoint" },
+			],
 		},
 	},
 ];

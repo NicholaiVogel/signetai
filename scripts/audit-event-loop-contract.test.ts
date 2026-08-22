@@ -14,11 +14,19 @@ import {
 	type LegacyDbCountBaseline,
 } from "./audit-event-loop-contract";
 
-test("the deterministic ledger retains the exact 724-site inventory", () => {
+test("the deterministic ledger retains the exact current source inventory", () => {
 	const baseline = loadBaseline(resolve("scripts/event-loop-contract-baseline.json"));
-	expect(baseline).toHaveLength(724);
-	expect(baseline.filter((site) => site.api === "withWriteTx")).toHaveLength(101);
-	expect(baseline.filter((site) => site.api === "withReadDb")).toHaveLength(139);
+	expect(baseline).toHaveLength(970);
+	expect(baseline.filter((site) => site.api === "withWriteTx")).toHaveLength(73);
+	expect(baseline.filter((site) => site.api === "withReadDb")).toHaveLength(115);
+	expect(baseline.filter((site) => site.api === "withWriteTxAsync")).toHaveLength(59);
+	expect(baseline.filter((site) => site.api === "withReadDbAsync")).toHaveLength(225);
+});
+
+test("the event-loop ledger exactly equals the current source inventory", () => {
+	const baseline = loadBaseline(resolve("scripts/event-loop-contract-baseline.json"));
+	const result = runAudit({ sourceRoot: resolve("platform/daemon/src"), baselineSites: baseline });
+	expect(result.sites).toEqual(baseline);
 });
 
 test("the ledger reports legacy DB markers and rejects new call sites", () => {
@@ -28,14 +36,14 @@ test("the ledger reports legacy DB markers and rejects new call sites", () => {
 			join(root, "legacy.ts"),
 			[
 				"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site",
-				"getDbAccessor().withReadDb((db) => db);",
+				'getDbAccessor().withReadDb((db) => db, "legacy.ts:2");',
 				"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site",
-				"getDbAccessor().withWriteTx((db) => db);",
+				'getDbAccessor().withWriteTx((db) => db, "legacy.ts:4");',
 			].join("\n"),
 		);
 		writeFileSync(
 			join(root, "new-call.ts"),
-			"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site\ngetDbAccessor().withReadDb((db) => db);\n",
+			'// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site\ngetDbAccessor().withReadDb((db) => db, "new-call.ts:2");\n',
 		);
 		const result = runAudit({
 			sourceRoot: root,
@@ -44,14 +52,14 @@ test("the ledger reports legacy DB markers and rejects new call sites", () => {
 					path: "legacy.ts",
 					line: 2,
 					api: "withReadDb",
-					source: "getDbAccessor().withReadDb((db) => db);",
+					source: 'getDbAccessor().withReadDb((db) => db, "legacy.ts:2");',
 					category: "hot-path",
 				},
 				{
 					path: "legacy.ts",
 					line: 4,
 					api: "withWriteTx",
-					source: "getDbAccessor().withWriteTx((db) => db);",
+					source: 'getDbAccessor().withWriteTx((db) => db, "legacy.ts:4");',
 					category: "hot-path",
 				},
 			],
@@ -87,6 +95,36 @@ test("the ledger rejects a replacement call at the same path and API", () => {
 		expect(result.violations[0]?.path).toBe("legacy.ts");
 		expect(occurrenceKeys(result.sites)).not.toEqual(occurrenceKeys(baseline));
 		expect(findStaleBaselineSites(result.sites, baseline)).toHaveLength(1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a marked legacy DB call without a site token fails the attribution coverage rule", () => {
+	const root = mkdtempSync(join(tmpdir(), "signet-legacy-site-token-"));
+	try {
+		writeFileSync(
+			join(root, "missing-token.ts"),
+			"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site\ngetDbAccessor().withReadDb((db) => db);\n",
+		);
+		const result = runAudit({ sourceRoot: root });
+		const violation = result.violations.find((item) => item.kind === "missing-legacy-db-site-token");
+		expect(violation?.path).toBe("missing-token.ts");
+		expect(violation?.message).toContain('"missing-token.ts:2"');
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a tokenless async-named DB call fails the attribution coverage rule", () => {
+	const root = mkdtempSync(join(tmpdir(), "signet-async-site-token-"));
+	try {
+		writeFileSync(join(root, "missing-token.ts"), "getDbAccessor().withReadDbAsync((db) => db);\n");
+		const result = runAudit({ sourceRoot: root });
+		const violation = result.violations.find((item) => item.kind === "missing-async-db-site-token");
+		expect(violation?.path).toBe("missing-token.ts");
+		expect(violation?.api).toBe("withReadDbAsync");
+		expect(violation?.message).toContain('"missing-token.ts:1"');
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -287,9 +325,9 @@ test("the production TypeScript project cannot import the compatibility module",
 
 test("the generated report describes the type boundary and transitional counts", () => {
 	const baseline = loadBaseline(resolve("scripts/event-loop-contract-baseline.json"));
-	const report = renderReport(baseline, { total: 240, withWriteTx: 101, withReadDb: 139 });
-	expect(report).toContain("Exact ledger inventory: 724 sites");
-	expect(report).toContain("101 synchronous writes and 139 synchronous reads");
+	const report = renderReport(baseline, { total: 188, withWriteTx: 73, withReadDb: 115 });
+	expect(report).toContain("Exact ledger inventory: 970 sites");
+	expect(report).toContain("73 synchronous writes, 115 synchronous reads, and 287 async-named parent DB sites");
 	expect(report).toContain("type boundary");
 	expect(report).not.toContain("1061");
 });
@@ -351,7 +389,7 @@ test("a marker above the call line keeps the site marked, a distant marker does 
 			join(root, "placement.ts"),
 			[
 				"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site",
-				"getDbAccessor().withReadDb((db) => db);",
+				'getDbAccessor().withReadDb((db) => db, "placement.ts:2");',
 				"const unrelated = 1;",
 				"// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site",
 				"const gap = 2;",

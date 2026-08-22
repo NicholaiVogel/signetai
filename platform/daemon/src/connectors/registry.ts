@@ -27,7 +27,7 @@ export function registerConnector(accessor: DbAccessor, config: ConnectorConfig)
 			  last_sync_at, last_error, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, NULL, 'idle', NULL, NULL, ?, ?)`,
 		).run(id, config.provider, config.displayName, JSON.stringify(config), now, now);
-	});
+	}, "connectors/registry.ts:23");
 
 	return id;
 }
@@ -46,7 +46,7 @@ export function updateConnectorStatus(accessor: DbAccessor, id: string, status: 
 			 SET status = ?, last_error = ?, updated_at = ?
 			 WHERE id = ?`,
 		).run(status, error ?? null, now, id);
-	});
+	}, "connectors/registry.ts:43");
 }
 
 /**
@@ -62,7 +62,7 @@ export function updateCursor(accessor: DbAccessor, id: string, cursor: SyncCurso
 			 SET cursor_json = ?, last_sync_at = ?, updated_at = ?
 			 WHERE id = ?`,
 		).run(JSON.stringify(cursor), cursor.lastSyncAt, now, id);
-	});
+	}, "connectors/registry.ts:59");
 }
 
 /**
@@ -74,14 +74,14 @@ export function removeConnector(accessor: DbAccessor, id: string): boolean {
 	const before = accessor.withReadDb((db: import("../db-accessor").ReadDb) => {
 		const row = db.prepare("SELECT COUNT(*) AS n FROM connectors WHERE id = ?").get(id) as { n: number } | undefined;
 		return row?.n ?? 0;
-	});
+	}, "connectors/registry.ts:74");
 
 	if (before === 0) return false;
 
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
 	accessor.withWriteTx((db: import("../db-accessor").WriteDb) => {
 		db.prepare("DELETE FROM connectors WHERE id = ?").run(id);
-	});
+	}, "connectors/registry.ts:82");
 
 	return true;
 }
@@ -97,7 +97,7 @@ export function getConnector(accessor: DbAccessor, id: string): ConnectorRow | u
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
 	return accessor.withReadDb((db: import("../db-accessor").ReadDb) => {
 		return db.prepare("SELECT * FROM connectors WHERE id = ?").get(id) as ConnectorRow | undefined;
-	});
+	}, "connectors/registry.ts:98");
 }
 
 /**
@@ -107,7 +107,15 @@ export function listConnectors(accessor: DbAccessor): readonly ConnectorRow[] {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
 	return accessor.withReadDb((db: import("../db-accessor").ReadDb) => {
 		return db.prepare("SELECT * FROM connectors ORDER BY created_at DESC").all() as ConnectorRow[];
-	});
+	}, "connectors/registry.ts:108");
+}
+
+/** Async diagnostic projection used by heartbeat and other background paths. */
+export async function listConnectorsAsync(accessor: DbAccessor): Promise<readonly ConnectorRow[]> {
+	return await accessor.withReadDbAsync(
+		(db) => db.prepare("SELECT * FROM connectors ORDER BY created_at DESC").all() as ConnectorRow[],
+		{ siteToken: "connectors/registry.ts:115", operation: "heartbeat.list-connectors" },
+	);
 }
 
 /**
@@ -150,5 +158,5 @@ export function getConnectorDocumentCount(accessor: DbAccessor, connectorId: str
 			)
 			.get(`${prefix.replace(/[%_\\]/g, "\\$&")}%`) as { n: number } | undefined;
 		return result?.n ?? 0;
-	});
+	}, "connectors/registry.ts:153");
 }

@@ -30,4 +30,15 @@ describe("daemon production DB owner wiring", () => {
 		expect(source).toContain("INCREMENTAL_INTEGRITY_TABLES_PER_RUN");
 		expect(source).not.toContain("runDeferredIntegrityCheck");
 	});
+
+	it("keeps a paused startup source partial instead of reporting success", async () => {
+		const source = await Bun.file(daemonSourceUrl).text();
+
+		expect(source).toContain("const syncResult = nativeMemoryBridge?.getLastSyncResult?.();");
+		expect(source).toContain("pauseSourceIndexJob(sourceId, jobId, {");
+		expect(source).toContain("scanned: paused.scanned,");
+		expect(source).toContain("indexed: paused.indexed,");
+		expect(source).toContain('outcome: syncResult?.status === "paused" && paused ? "partial" : "success",');
+		expect(source).toContain('updateFreshness: syncResult?.status === "paused" && paused ? false : undefined,');
+	});
 });

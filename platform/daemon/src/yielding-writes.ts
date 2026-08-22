@@ -109,10 +109,14 @@ async function writeBatch<Result>(
 	estimatedWorkUnits: number,
 ): Promise<Result> {
 	if (accessor.withWriteTxAsync) {
-		return accessor.withWriteTxAsync(processBatch, { operation: `db.batch.${label}`, estimatedWorkUnits });
+		return accessor.withWriteTxAsync(processBatch, {
+			siteToken: "yielding-writes.ts:112",
+			operation: `db.batch.${label}`,
+			estimatedWorkUnits,
+		});
 	}
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return accessor.withWriteTx(processBatch);
+	return accessor.withWriteTx(processBatch, "yielding-writes.ts:119");
 }
 
 /**
@@ -152,7 +156,10 @@ export async function drainWriteBatches<Item>(
 		const remaining = maxTotal - processed;
 		const limit = Math.min(maxPerTx, maxRows, remaining);
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		const batch = accessor.withReadDb((db: import("./db-accessor").ReadDb) => fetchBatch(db, limit));
+		const batch = accessor.withReadDb(
+			(db: import("./db-accessor").ReadDb) => fetchBatch(db, limit),
+			"yielding-writes.ts:159",
+		);
 		if (!batch || batch.length === 0) {
 			return { processed, batches, paused, stopped: "exhausted" };
 		}

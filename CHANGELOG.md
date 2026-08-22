@@ -6,6 +6,14 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-21
+- Bug fixes: trim async DB attribution overhead; endpoint-neutral fingerprint + reachable building-state recovery + owner-bound resumable embedding migration; recover endpoint-only embedding builds; make embedding migration owner-bound and resumable; amputate parent-side native-memory indexing behind killable boundary with transactional resumable frontier; preserve provider retry frontiers; close native source frontier crash windows; type native embedding protocol; isolate native source embeddings; persist native source traversal frontier; move native memory indexing behind owner boundary; remove secondary parent sync paths + recovery child exit-0 protocol; remove secondary sync paths; parent sync attribution with in-flight latch naming + telemetry conversion; preserve in-flight sync DB attribution; lazily capture sync DB attribution; refresh event-loop source ledger; refresh sync access ledger for telemetry fallback; satisfy attribution boundary checks; move startup telemetry write behind owner; attribute transitional sync db stalls.
+
+### 2026-08-20
+- Features: pause native source sync when provider is down.
+- Bug fixes: correct integrity page/byte accounting and park unverifiable FTS objects in named degraded state; park unchunkable FTS integrity frontier; real ownership isolation — all unbounded SQLite/source work behind the killable boundary (W3.1); classify vacuum conversion as durable; fence db-owner commit cancellation; fence aborted db-owner writes; repair PR 1702 migration and source sync paths; isolate native source sync work; isolate remaining recovery and source DB paths; pause source sync on provider outage; preserve paused source progress counts; report paused source syncs honestly; reserve interactive DB-owner capacity; repair DB owner review findings; reserve interactive db-owner capacity.
+- Docs: refresh event-loop inventory report; align owner deadline semantics.
+
 ### 2026-08-19
 - Features: expose truthful event-loop health; prioritize owner foreground workloads.
 - Bug fixes: baseline event-loop monitor restarts; latch event-loop wedge state; expose truthful event-loop health; checkpoint integrity maintenance; bound integrity maintenance retries; harden incremental integrity maintenance; validate live PR body in readiness checklist; read PR checklist body live; close owner lane review findings; unblock DB-owner startup handshake; address db owner startup review findings; unblock db owner startup handshake; bound status and diagnostics projections; close phase d pollers deterministically; harden phase d acceptance harness; hard self-destruct timer in acceptance runner; seed real embedding vectors; fail loudly on shape drift; resolve core migrations via relative path; format count baseline with Biome-canonical tabs.
@@ -31,14 +39,127 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: make recall routes async; enforce async db accessor types; add async db contract audit; remove dead Python vector path.
 - Docs: document deferred accessor cleanup; align Kimi Code nav; add Kimi Code support.
 
-### 2026-08-14
-- Bug fixes: enforce strict Biome rules; isolate token cache scopes; cache exact backlog tokens; avoid synchronous backlog encoding; harden macOS FD failures; support macOS FD accounting; gate duplicate removal guidance; restore macOS tray click; materialize core native deps; maintain Dreaming gate paths; cover Dreaming helper paths; isolate telemetry env in hermetic runs; bypass stale MCP refresh snapshots; restore strict workspace reader; restore workspace override precedence; restore macOS application menus.
-
-### 2026-08-13
-- Features: expose workload diagnostics.
-- Bug fixes: fail on filesystem budget truncation; bound filesystem traversal; narrow keychain error matching; classify locked git keychains; stop detached daemon process groups; preflight macOS pickers; resolve Windows Bun fallback; handle bundled runtime ENOENT; prevent duplicate app launches; narrow retry predicate; retry transient GitHub API failures; validate semantic premises; reject failed backlog snapshots; coalesce liveness probes; coalesce daemon startup probes; migrate localhost daemon URLs; route client loopback resolution; normalize loopback daemon URLs; isolate legacy OpenClaw env; close hermetic env gaps; isolate hermetic test environment; resolve launchd child executables; preserve launchd executable paths; classify discovery permission denials; cover Discord TCC cache reads; guide macOS permission denials; avoid WAL on network volumes; close embedding ownership race; close embedding repair races; default repaired embedding scope; preserve cross-agent embeddings; scope orphan embedding repair; scope embedding maintenance; guard content migration races; guard migration promotion races; guard repair promotion races; converge autonomous embedding repairs; correct workload diagnostics; count telemetry log write drops; bound telemetry JSONL; probe zero-free backup volumes; match startup status diagnostics; match windows exit status; make signal regression portable; preserve startup diagnostics.
-
 ## Release Ledger
+
+## [0.214.7] - 2026-08-21
+
+Release summary: 1 bug fix.
+Tag range: `v0.214.6..v0.214.7`.
+
+### Bug Fixes
+
+- **daemon**: trim async DB attribution overhead (#1707)
+
+## [0.214.6] - 2026-08-21
+
+Release summary: 3 bug fixes.
+Tag range: `v0.214.5..v0.214.6`.
+
+### Bug Fixes
+
+- **daemon**: endpoint-neutral fingerprint + reachable building-state recovery + owner-bound resumable embedding migration (#1708)
+- recover endpoint-only embedding builds
+- make embedding migration owner-bound and resumable
+
+## [0.214.5] - 2026-08-21
+
+Release summary: 7 bug fixes.
+Tag range: `v0.214.4..v0.214.5`.
+
+### Bug Fixes
+
+- **daemon**: amputate parent-side native-memory indexing behind killable boundary with transactional resumable frontier (#1705)
+- **daemon**: preserve provider retry frontiers
+- **daemon**: close native source frontier crash windows
+- **daemon**: type native embedding protocol
+- **daemon**: isolate native source embeddings
+- **daemon**: persist native source traversal frontier
+- **daemon**: move native memory indexing behind owner boundary
+
+## [0.214.4] - 2026-08-21
+
+Release summary: 2 bug fixes.
+Tag range: `v0.214.3..v0.214.4`.
+
+### Bug Fixes
+
+- **daemon**: remove secondary parent sync paths + recovery child exit-0 protocol (#1706)
+- **daemon**: remove secondary sync paths
+
+## [0.214.3] - 2026-08-21
+
+Release summary: 8 bug fixes.
+Tag range: `v0.214.2..v0.214.3`.
+
+### Bug Fixes
+
+- **daemon**: parent sync attribution with in-flight latch naming + telemetry conversion (#1704)
+- **daemon**: preserve in-flight sync DB attribution
+- **daemon**: lazily capture sync DB attribution
+- **daemon**: refresh event-loop source ledger
+- **daemon**: refresh sync access ledger for telemetry fallback
+- **daemon**: satisfy attribution boundary checks
+- **daemon**: move startup telemetry write behind owner
+- **daemon**: attribute transitional sync db stalls
+
+## [0.214.2] - 2026-08-20
+
+Release summary: 2 bug fixes.
+Tag range: `v0.214.1..v0.214.2`.
+
+### Bug Fixes
+
+- **daemon**: correct integrity page/byte accounting and park unverifiable FTS objects in named degraded state (#1703)
+- **daemon**: park unchunkable FTS integrity frontier
+
+## [0.214.1] - 2026-08-20
+
+Release summary: 7 bug fixes and 1 docs update.
+Tag range: `v0.214.0..v0.214.1`.
+
+### Bug Fixes
+
+- **daemon**: real ownership isolation — all unbounded SQLite/source work behind the killable boundary (W3.1) (#1702)
+- **daemon**: classify vacuum conversion as durable
+- **daemon**: fence db-owner commit cancellation
+- **daemon**: fence aborted db-owner writes
+- repair PR 1702 migration and source sync paths
+- isolate native source sync work
+- **daemon**: isolate remaining recovery and source DB paths
+
+### Docs
+
+- **audit**: refresh event-loop inventory report
+
+## [0.214.0] - 2026-08-20
+
+Release summary: 1 feature and 3 bug fixes.
+Tag range: `v0.213.2..v0.214.0`.
+
+### Features
+
+- **daemon**: pause native source sync when provider is down
+
+### Bug Fixes
+
+- **daemon**: pause source sync on provider outage (#1700)
+- **daemon**: preserve paused source progress counts
+- **daemon**: report paused source syncs honestly
+
+## [0.213.2] - 2026-08-20
+
+Release summary: 3 bug fixes and 1 docs update.
+Tag range: `v0.213.1..v0.213.2`.
+
+### Bug Fixes
+
+- **daemon**: reserve interactive DB-owner capacity (#1698)
+- **daemon**: repair DB owner review findings
+- **daemon**: reserve interactive db-owner capacity
+
+### Docs
+
+- **daemon**: align owner deadline semantics
 
 ## [0.213.1] - 2026-08-19
 

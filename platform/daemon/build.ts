@@ -29,7 +29,9 @@ const targets: Array<{
 	{ entrypoint: "./src/synthesis-render-worker.ts", outfile: "./dist/synthesis-render-worker.js" },
 	{ entrypoint: "./src/database-integrity-worker.ts", outfile: "./dist/database-integrity-worker.js" },
 	{ entrypoint: "./src/db-owner-worker.ts", outfile: "./dist/db-owner-worker.js" },
+	{ entrypoint: "./src/native-memory-source-worker.ts", outfile: "./dist/native-memory-source-worker.js" },
 	{ entrypoint: "./src/pipeline/dreaming-token-worker.ts", outfile: "./dist/dreaming-token-worker.js" },
+	{ entrypoint: "./src/transcript-recovery-child.ts", outfile: "./dist/transcript-recovery-child.js" },
 ];
 
 const forceNodeBuild = process.env.FORCE_NODE_BUILD === "1";

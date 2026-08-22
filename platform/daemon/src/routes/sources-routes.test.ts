@@ -13,7 +13,12 @@ import { Hono } from "hono";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "../db-accessor";
 import { dbOwnerBatch, ownerStatement } from "../db-owner-runtime";
 import { hashNormalizedBody } from "../memory-lineage";
-import type { NativeMemoryBridgeHandle, NativeMemoryBridgeOptions, NativeMemorySource } from "../native-memory-sources";
+import type {
+	NativeMemoryBridgeHandle,
+	NativeMemoryBridgeOptions,
+	NativeMemorySource,
+	NativeMemorySyncResult,
+} from "../native-memory-sources";
 import { indexSourceArtifactStructure } from "../source-artifact-graph";
 import {
 	beginSourceIndexJob,
@@ -71,6 +76,8 @@ describe("Sources routes", () => {
 			purged?: number;
 			syncGate?: Promise<void>;
 			syncError?: unknown;
+			pausedSync?: boolean;
+			pausedBeforeScan?: boolean;
 			recordIndexOperation?: (input: SourceIndexTelemetryInput) => Promise<void>;
 			onPurge?: () => void;
 			onSyncStart?: () => void;
@@ -94,21 +101,44 @@ describe("Sources routes", () => {
 				expect(bridgeOptions.fetchEmbedding).toBeDefined();
 				expect(bridgeOptions.sourceCleanupEnabled).toBe(false);
 				expect(bridgeOptions.sourceGraphEnabled).toBe(true);
+				const syncResult: NativeMemorySyncResult = options.pausedSync
+					? {
+							status: "paused",
+							scanned: options.pausedBeforeScan ? 0 : 2,
+							indexed: options.pausedBeforeScan ? 0 : 1,
+							pausedSources: [
+								{
+									sourceKey: sources[0]?.sourceId ?? "obsidian:test",
+									sourceId: sources[0]?.sourceId,
+									status: "paused",
+									scanned: options.pausedBeforeScan ? 0 : 2,
+									indexed: options.pausedBeforeScan ? 0 : 1,
+									resumeFrontier: options.pausedBeforeScan ? null : join(vault, "permanent", "Note.md"),
+									pauseReason: "provider_unavailable",
+								},
+							],
+						}
+					: { status: "complete", scanned: 1, indexed: options.indexed ?? 1, pausedSources: [] };
 				return {
 					syncExisting: async () => {
 						options.onSyncStart?.();
 						if (options.syncGate) await options.syncGate;
 						if (options.syncError !== undefined) throw options.syncError;
-						bridgeOptions.onFileIndexed?.({
-							source: sources[0] as NativeMemorySource,
-							filePath: join(vault, "permanent", "Note.md"),
-							indexed: true,
-							scanned: 1,
-							total: 1,
-							changed: options.indexed ?? 1,
-						});
+						if (!options.pausedSync) {
+							if (!options.pausedBeforeScan) {
+								bridgeOptions.onFileIndexed?.({
+									source: sources[0] as NativeMemorySource,
+									filePath: join(vault, "permanent", "Note.md"),
+									indexed: true,
+									scanned: 1,
+									total: 1,
+									changed: options.indexed ?? 1,
+								});
+							}
+						}
 						return options.indexed ?? 1;
 					},
+					getLastSyncResult: () => syncResult,
 					close: async () => {},
 				} satisfies NativeMemoryBridgeHandle;
 			},
@@ -420,6 +450,47 @@ describe("Sources routes", () => {
 
 		await waitFor(() => !!loadSourcesConfig(dir).sources[0]?.lastIndexedAt);
 		expect(loadSourcesConfig(dir).sources[0]?.id).toBe(body.source.id);
+	});
+
+	it("reports a provider outage as paused partial progress without stamping freshness", async () => {
+		const app = makeApp({ pausedSync: true });
+		const response = await app.request("/api/sources/obsidian", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ path: vault, name: "Paused Vault" }),
+		});
+		expect(response.status).toBe(202);
+		const body = (await response.json()) as { source: { id: string } };
+		await waitFor(() => getSourceIndexJob(body.source.id)?.status === "paused");
+		expect(loadSourcesConfig(dir).sources[0]?.lastIndexedAt).toBeUndefined();
+		expect(getSourceIndexJob(body.source.id)).toMatchObject({
+			status: "paused",
+			partial: true,
+			scanned: 2,
+			indexed: 1,
+			pauseReason: "provider_unavailable",
+			resumeFrontier: join(vault, "permanent", "Note.md"),
+		});
+	});
+
+	it("reports zero partial counts when the provider is down before the first file", async () => {
+		const app = makeApp({ pausedSync: true, pausedBeforeScan: true });
+		const response = await app.request("/api/sources/obsidian", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ path: vault, name: "Paused Before Scan Vault" }),
+		});
+		expect(response.status).toBe(202);
+		const body = (await response.json()) as { source: { id: string } };
+		await waitFor(() => getSourceIndexJob(body.source.id)?.status === "paused");
+		expect(getSourceIndexJob(body.source.id)).toMatchObject({
+			status: "paused",
+			partial: true,
+			scanned: 0,
+			indexed: 0,
+			pauseReason: "provider_unavailable",
+		});
+		expect(loadSourcesConfig(dir).sources[0]?.lastIndexedAt).toBeUndefined();
 	});
 
 	it("finalizes a failed index job before lifecycle telemetry failure can reject the job", async () => {

@@ -1,11 +1,21 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	createDbOwnerClient,
+	DB_OWNER_CANCEL_REGISTRY_MAX_AGE_MS,
 	DbOwnerAdmissionError,
 	DbOwnerCancelledError,
 	DbOwnerDeadlineError,
@@ -13,9 +23,12 @@ import {
 	MAX_DB_OWNER_PENDING_JOBS,
 	MAX_DB_OWNER_WORK_UNITS,
 } from "./db-owner-client";
+import { shouldRecordDbOwnerCancellation } from "./db-owner-worker";
 import { findSqliteVecExtension } from "@signet/core";
 import { closeDbAccessor, initDbAccessor } from "./db-accessor";
+import { createDbOwnerMaintenance, registerDbOwnerMaintenance } from "./db-owner-maintenance";
 import { recallThroughDbOwner } from "./db-owner-recall";
+import { dbOwnerQuery } from "./db-owner-runtime";
 
 function makeDb(): { readonly directory: string; readonly path: string } {
 	const directory = mkdtempSync(join(tmpdir(), "signet-db-owner-"));
@@ -54,6 +67,7 @@ describe("DB owner client", () => {
 	let directory: string | null = null;
 
 	afterEach(async () => {
+		registerDbOwnerMaintenance(null);
 		await client?.close();
 		client = null;
 		if (directory !== null) rmSync(directory, { recursive: true, force: true });
@@ -305,33 +319,62 @@ describe("DB owner client", () => {
 		expect(recallDurationMs).toBeLessThan(200);
 	});
 
-	test("prioritizes foreground writes over queued maintenance work", async () => {
+	test("reserves interactive write capacity while maintenance is saturated", async () => {
 		const database = makeDb();
 		directory = database.directory;
 		client = createDbOwnerClient({ dbPath: database.path });
-		const first = client.submit(
-			{ kind: "sleep", durationMs: 180 },
-			{ operation: "maintenance.first", lane: "maintenance", deadlineMs: 2_000 },
+		const maintenance = client.submit(
+			{ kind: "sleep", durationMs: 300 },
+			{ operation: "maintenance.saturation", lane: "maintenance", deadlineMs: 2_000 },
 		);
-		const second = client.submit(
-			{ kind: "sleep", durationMs: 180 },
-			{ operation: "maintenance.second", lane: "maintenance", deadlineMs: 2_000 },
-		);
-		await waitFor(() => client?.health().activeJobId === first.job.id);
+		await waitFor(() => client?.health().lanes?.maintenance.activeJobId === maintenance.job.id);
+		const startedAt = Date.now();
 		const foreground = client.submit<unknown[]>(
 			{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "all" } },
-			{ operation: "memory.foreground-priority", lane: "write", deadlineMs: 2_000 },
+			{ operation: "memory.interactive-write", lane: "write", deadlineMs: 1_000 },
 		);
-		expect(client.health().foregroundQueuedJobs).toBe(1);
-		expect(client.health().maintenanceQueuedJobs).toBe(1);
-		expect(client.health().queuedJobs).toBe(2);
-		expect(client.health().lanes?.maintenance.queuedJobs).toBe(2);
-		expect(client.health().lanes?.maintenance.activeJobId).toBe(first.job.id);
-		expect(client.health().activeWorkloadClass).toBe("maintenance");
-		const startedAt = Date.now();
 		expect(await foreground.result).toEqual([{ value: 1 }]);
-		expect(Date.now() - startedAt).toBeLessThan(320);
-		await Promise.all([first.result, second.result]);
+		expect(Date.now() - startedAt).toBeLessThan(250);
+		expect(client.health().lanes?.maintenance.activeJobId).toBe(maintenance.job.id);
+		expect(client.health().lanes?.write.activeJobId).toBeNull();
+		await maintenance.result;
+	});
+
+	test("serves health, dashboard, recall, and writes during maintenance saturation", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+		const maintenance = client.submit(
+			{ kind: "sleep", durationMs: 350 },
+			{ operation: "sources.native-sync", lane: "maintenance", deadlineMs: 2_000 },
+		);
+		await waitFor(() => client?.health().lanes?.maintenance.activeJobId === maintenance.job.id);
+		const startedAt = Date.now();
+		const health = client.submit<unknown[]>(
+			{ kind: "query", statement: { sql: "SELECT 1 AS health", result: "all" } },
+			{ operation: "health", lane: "read", deadlineMs: 1_000 },
+		);
+		const dashboard = client.submit<unknown[]>(
+			{ kind: "query", statement: { sql: "SELECT 1 AS dashboard", result: "all" } },
+			{ operation: "dashboard", lane: "read", deadlineMs: 1_000 },
+		);
+		const recall = client.submit<unknown[]>(
+			{ kind: "query", statement: { sql: "SELECT 1 AS recall", result: "all" } },
+			{ operation: "recall", lane: "read", deadlineMs: 1_000 },
+		);
+		const write = client.submit<unknown[]>(
+			{ kind: "query", statement: { sql: "SELECT 1 AS write", result: "all" } },
+			{ operation: "memory.interactive-write", lane: "write", deadlineMs: 1_000 },
+		);
+		expect(await Promise.all([health.result, dashboard.result, recall.result, write.result])).toEqual([
+			[{ health: 1 }],
+			[{ dashboard: 1 }],
+			[{ recall: 1 }],
+			[{ write: 1 }],
+		]);
+		expect(Date.now() - startedAt).toBeLessThan(500);
+		await maintenance.result;
 	});
 
 	test("keeps recall reads independent from maintenance work", async () => {
@@ -357,7 +400,7 @@ describe("DB owner client", () => {
 		}
 	});
 
-	test("applies a hard deadline to a slow recall read and recovers", async () => {
+	test("abandons a slow recall read without replacing its owner", async () => {
 		const database = makeDb();
 		directory = database.directory;
 		client = createDbOwnerClient({ dbPath: database.path, workerRole: "recall" });
@@ -370,7 +413,7 @@ describe("DB owner client", () => {
 			deadlineMs: 1_000,
 		});
 		expect(await fast).toEqual([{ id: "m1" }]);
-		expect(client.health().generation).toBe(2);
+		expect(client.health().generation).toBe(1);
 	});
 
 	test("executes a transactional write on the owner before a read lane job", async () => {
@@ -479,25 +522,27 @@ describe("DB owner client", () => {
 		expect(client.health().generation).toBe(2);
 	});
 
-	test("kills the owner at a hard deadline and leaves the daemon responsive", async () => {
+	test("abandons a timed-out maintenance job without killing the owner", async () => {
 		const database = makeDb();
 		directory = database.directory;
 		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
 		const slow = client.submit(
 			{ kind: "sleep", durationMs: 250 },
 			{ operation: "maintenance.deadline-test", lane: "maintenance", deadlineMs: 40 },
 		);
 		await expect(slow.result).rejects.toBeInstanceOf(DbOwnerDeadlineError);
-		await waitFor(() => client?.health().state === "dead");
-		expect(client.health().deadlineKills).toBe(1);
+		expect(client.health().lanes?.maintenance.pid).not.toBeNull();
 		const fast = client.submit<unknown[]>(
 			{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "all" } },
-			{ operation: "recall.read", lane: "read", deadlineMs: 1_000 },
+			{ operation: "memory.interactive-after-maintenance-timeout", lane: "write", deadlineMs: 1_000 },
 		);
 		expect(await fast.result).toEqual([{ value: 1 }]);
+		expect(client.health().state).toBe("ready");
+		await waitFor(() => client?.health().lanes?.maintenance.activeJobId === null);
 	});
 
-	test("recovers immediately after a deadline kills the owner", async () => {
+	test("recovers immediately after a maintenance deadline is abandoned", async () => {
 		const database = makeDb();
 		directory = database.directory;
 		client = createDbOwnerClient({ dbPath: database.path });
@@ -562,6 +607,208 @@ describe("DB owner client", () => {
 		await first.result;
 		expect(client.health().queuedJobs).toBe(0);
 		expect(client.health().activeJobId).toBeNull();
+	});
+
+	test("does not commit a stale write after aborting an in-flight owner operation", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const blocker = new Database(database.path);
+		let blockerReleased = false;
+		blocker.exec("BEGIN IMMEDIATE");
+		client = createDbOwnerClient({ dbPath: database.path });
+		try {
+			const write = client.submit<{ readonly changes: number }>(
+				{
+					kind: "query",
+					statement: {
+						sql: "INSERT INTO memories (id, content) VALUES (?, ?)",
+						params: ["stale-after-abort", "must not commit"],
+						result: "run",
+					},
+				},
+				{ operation: "memory.stale-commit-after-abort", lane: "write", deadlineMs: 5_000 },
+			);
+			await waitFor(() => client?.health().lanes?.write.activeJobId === write.job.id);
+			client.cancel(write.job.id);
+			blocker.exec("ROLLBACK");
+			blockerReleased = true;
+			await expect(write.result).rejects.toBeInstanceOf(DbOwnerCancelledError);
+			const rows = await client.submit<readonly { readonly id: string }[]>(
+				{ kind: "query", statement: { sql: "SELECT id FROM memories ORDER BY id", result: "all" } },
+				{ operation: "memory.verify-no-stale-commit", lane: "read", deadlineMs: 1_000 },
+			).result;
+			expect(rows).toEqual([{ id: "m1" }]);
+		} finally {
+			if (!blockerReleased) blocker.exec("ROLLBACK");
+			blocker.close();
+		}
+	});
+
+	test("reports the durable result when cancellation lands inside SQLite COMMIT", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const blocker = new Database(database.path);
+		blocker.exec("BEGIN");
+		blocker.prepare("SELECT id FROM memories").all();
+		const commitStarted = join(database.directory, "commit-started");
+		const previousCommitMarker = process.env.SIGNET_DB_OWNER_TEST_COMMIT_STARTED;
+		process.env.SIGNET_DB_OWNER_TEST_COMMIT_STARTED = commitStarted;
+		let blockerReleased = false;
+		try {
+			client = createDbOwnerClient({ dbPath: database.path });
+			await client.start();
+			const write = client.submit<{ readonly changes: number }>(
+				{
+					kind: "query",
+					statement: {
+						sql: "INSERT INTO memories (id, content) VALUES (?, ?)",
+						params: ["commit-window-write", "must commit exactly once"],
+						result: "run",
+					},
+				},
+				{ operation: "memory.commit-window-cancel", lane: "write", deadlineMs: 5_000 },
+			);
+			await waitFor(() => client?.health().lanes?.write.activeJobId === write.job.id);
+			await waitFor(() => existsSync(commitStarted));
+			client.cancel(write.job.id);
+			blocker.exec("ROLLBACK");
+			blockerReleased = true;
+			await expect(write.result).resolves.toMatchObject({ changes: 1 });
+			const rows = await client.submit<readonly { readonly id: string }[]>(
+				{ kind: "query", statement: { sql: "SELECT id FROM memories ORDER BY id", result: "all" } },
+				{ operation: "memory.verify-commit-window-write", lane: "read", deadlineMs: 1_000 },
+			).result;
+			expect(rows).toContainEqual({ id: "commit-window-write" });
+		} finally {
+			if (!blockerReleased) blocker.exec("ROLLBACK");
+			blocker.close();
+			if (previousCommitMarker === undefined)
+				Reflect.deleteProperty(process.env, "SIGNET_DB_OWNER_TEST_COMMIT_STARTED");
+			else process.env.SIGNET_DB_OWNER_TEST_COMMIT_STARTED = previousCommitMarker;
+		}
+	});
+
+	test("sweeps stale cancellation registries when a client starts", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const staleRegistry = join(database.directory, ".db-owner-cancel-stale");
+		writeFileSync(staleRegistry, "stale-job\n");
+		const staleTime = new Date(Date.now() - DB_OWNER_CANCEL_REGISTRY_MAX_AGE_MS * 2);
+		utimesSync(staleRegistry, staleTime, staleTime);
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+		expect(existsSync(staleRegistry)).toBe(false);
+		expect(readdirSync(database.directory).filter((entry) => entry.startsWith(".db-owner-cancel-")).length).toBe(0);
+	});
+
+	test("cleans cancellation registries after owner death before the next client starts", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		const originalClient = client;
+		await client.start();
+		const first = client.submit(
+			{ kind: "sleep", durationMs: 500 },
+			{ operation: "maintenance.owner-death-active", lane: "maintenance", deadlineMs: 5_000 },
+		);
+		const queued = client.submit(
+			{ kind: "query", statement: { sql: "SELECT 1", result: "all" } },
+			{ operation: "maintenance.owner-death-queued", lane: "maintenance", deadlineMs: 5_000 },
+		);
+		const firstResult = first.result.catch(() => undefined);
+		const queuedResult = queued.result.catch(() => undefined);
+		await waitFor(() => client?.health().lanes?.maintenance.activeJobId === first.job.id);
+		queued.cancel();
+		await queuedResult;
+		const ownerPid = client.health().lanes?.maintenance.pid;
+		if (ownerPid === null || ownerPid === undefined) throw new Error("maintenance owner did not publish a pid");
+		expect(readdirSync(database.directory).filter((entry) => entry.startsWith(".db-owner-cancel-")).length).toBe(1);
+		process.kill(ownerPid, "SIGKILL");
+		await waitFor(() => !processExists(ownerPid));
+		await waitFor(() => client?.health().lanes?.maintenance.state === "dead");
+		await firstResult;
+		const nextClient = createDbOwnerClient({ dbPath: database.path });
+		client = nextClient;
+		try {
+			await nextClient.start();
+			expect(readdirSync(database.directory).filter((entry) => entry.startsWith(".db-owner-cancel-")).length).toBe(0);
+		} finally {
+			await originalClient.close();
+		}
+	});
+
+	test("reports completion when cancellation lands during vacuum conversion", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const activeFile = join(database.directory, "vacuum-conversion-active");
+		const previousPause = process.env.SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS;
+		const previousActiveFile = process.env.SIGNET_TEST_DB_OWNER_VACUUM_ACTIVE_FILE;
+		process.env.SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS = "250";
+		process.env.SIGNET_TEST_DB_OWNER_VACUUM_ACTIVE_FILE = activeFile;
+		client = createDbOwnerClient({ dbPath: database.path });
+		try {
+			await client.start();
+			const conversion = client.submit<{ readonly converted: boolean }>(
+				{ kind: "vacuum_conversion" },
+				{ operation: "maintenance.vacuum-conversion-cancel", lane: "maintenance", deadlineMs: 15 * 60_000 },
+			);
+			await waitFor(() => client?.health().lanes?.maintenance.activeJobId === conversion.job.id);
+			await waitFor(() => existsSync(activeFile));
+			client.cancel(conversion.job.id);
+			expect(await conversion.result).toEqual({ converted: true });
+
+			const verification = new Database(database.path, { readonly: true });
+			expect((verification.prepare("PRAGMA auto_vacuum").get() as { auto_vacuum: number }).auto_vacuum).toBe(2);
+			expect(
+				verification
+					.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_signet_vacuum_converted'")
+					.get(),
+			).toBeDefined();
+			verification.close();
+		} finally {
+			if (previousPause === undefined) Reflect.deleteProperty(process.env, "SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS");
+			else process.env.SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS = previousPause;
+			if (previousActiveFile === undefined)
+				Reflect.deleteProperty(process.env, "SIGNET_TEST_DB_OWNER_VACUUM_ACTIVE_FILE");
+			else process.env.SIGNET_TEST_DB_OWNER_VACUUM_ACTIVE_FILE = previousActiveFile;
+		}
+	});
+
+	test("does not retain cancellation IDs for completed or active jobs", () => {
+		const completedJobs = Array.from({ length: 1_000 }, (_, index) => ({ id: `completed-${index}` }));
+		const activeJob = { id: "active" };
+
+		for (const job of completedJobs) {
+			expect(shouldRecordDbOwnerCancellation(job.id, null, [], [])).toBe(false);
+		}
+		expect(shouldRecordDbOwnerCancellation(activeJob.id, activeJob.id, [], [])).toBe(false);
+		expect(shouldRecordDbOwnerCancellation("queued", null, [{ ...activeJob, id: "queued" }], [])).toBe(true);
+	});
+
+	test("classifies a sources operation as maintenance despite a foreground override", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		registerDbOwnerMaintenance(createDbOwnerMaintenance({ dbPath: database.path, owner: client }));
+		const slow = client.submit(
+			{ kind: "sleep", durationMs: 250 },
+			{ operation: "maintenance.classifier-saturation", lane: "maintenance", deadlineMs: 1_000 },
+		);
+		await waitFor(() => client?.health().lanes?.maintenance.activeJobId === slow.job.id);
+
+		const query = dbOwnerQuery<readonly { readonly value: number }[]>(
+			{ sql: "SELECT 1 AS value", result: "all" },
+			{
+				operation: "sources.foreground-override",
+				lane: "write",
+				workloadClass: "foreground",
+				deadlineMs: 1_000,
+			},
+		);
+		await waitFor(() => client?.health().lanes?.maintenance.queuedJobs === 1);
+		expect(client.health().lanes?.write.queuedJobs).toBe(0);
+		await expect(query).resolves.toEqual([{ value: 1 }]);
+		await slow.result;
 	});
 
 	test("rejects owner work beyond the bounded queue admission cap", async () => {

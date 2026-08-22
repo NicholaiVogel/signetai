@@ -182,7 +182,7 @@ export function writeDreamingRunbook(
 			)
 			.run(serializeRunbook(params.entry), params.passId, params.agentId);
 		return result.changes === 1;
-	});
+	}, "pipeline/dreaming-runbook.ts:177");
 }
 
 /** Persist the exact source references presented to one pass, never their content. */
@@ -252,7 +252,7 @@ export function readDreamingRunbook(accessor: DbAccessor, agentId: string, limit
 			runbook: parseRunbook((row.runbookJson as string) ?? null),
 			quarantines: quarantines.all(agentId, row.id) as DreamingRunbookPass["quarantines"],
 		}));
-	});
+	}, "pipeline/dreaming-runbook.ts:219");
 }
 
 /** Compact, delimited local history for a later pass; never a semantic claim source. */

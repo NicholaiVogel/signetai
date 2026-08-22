@@ -332,7 +332,18 @@ export function ensureVacuumConversionState(db: PragmaDb): VacuumConversionStatu
 /** Read durable conversion state for status and readiness diagnostics. */
 export function getVacuumConversionStatus(accessor: DbAccessor): VacuumConversionStatus {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("./db-accessor").ReadDb) => readStatusFromDb(toPragmaReadDb(db)));
+	return accessor.withReadDb(
+		(db: import("./db-accessor").ReadDb) => readStatusFromDb(toPragmaReadDb(db)),
+		"db-vacuum.ts:335",
+	);
+}
+
+/** Async durable conversion-state lookup for background workers. */
+export async function getVacuumConversionStatusAsync(accessor: DbAccessor): Promise<VacuumConversionStatus> {
+	return await accessor.withReadDbAsync((db) => readStatusFromDb(toPragmaReadDb(db)), {
+		siteToken: "db-vacuum.ts:343",
+		operation: "maintenance.vacuum.status",
+	});
 }
 
 /** Get the free-page ratio (freelist_count / page_count). */
@@ -438,7 +449,7 @@ export async function reclaimIncrementalVacuum(
 		if (opts.owner) remaining = await dbOwnerIncrementalVacuum(opts.owner, batchPages);
 		else {
 			if (!accessor.incrementalVacuumAsync) throw new Error("incremental vacuum operation is unavailable");
-			remaining = await accessor.incrementalVacuumAsync();
+			remaining = await accessor.incrementalVacuumAsync({ siteToken: "db-vacuum.ts:452" });
 		}
 		const progressed = before === null ? Math.max(0, batchPages) : Math.max(0, before - remaining);
 		reclaimed += progressed;
@@ -473,26 +484,28 @@ export function startVacuumConversionWorker(
 	async function run(): Promise<VacuumConversionStatus> {
 		if (inFlight) return inFlight;
 		const cycle = (async (): Promise<VacuumConversionStatus> => {
-			const before = getVacuumConversionStatus(accessor);
+			const before = await getVacuumConversionStatusAsync(accessor);
 			if (before.state !== "pending" || before.attempts >= before.maxAttempts) return before;
 
-			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-			accessor.withWriteTx((db: import("./db-accessor").WriteDb) => {
-				const state = stateFromRow(
-					toPragmaReadDb(db).prepare(`SELECT * FROM ${VACUUM_CONVERSION_STATE_TABLE} WHERE id = 1`).get(),
-				);
-				if (state.state !== "pending") return;
-				const requestedAt = state.requestedAt ?? now();
-				writeState(toPragmaDb(db), "running", {
-					attempts: state.attempts + 1,
-					requestedAt,
-					startedAt: now(),
-					completedAt: null,
-					lastError: null,
-				});
-			});
+			await accessor.withWriteTxAsync(
+				(db) => {
+					const state = stateFromRow(
+						toPragmaReadDb(db).prepare(`SELECT * FROM ${VACUUM_CONVERSION_STATE_TABLE} WHERE id = 1`).get(),
+					);
+					if (state.state !== "pending") return;
+					const requestedAt = state.requestedAt ?? now();
+					writeState(toPragmaDb(db), "running", {
+						attempts: state.attempts + 1,
+						requestedAt,
+						startedAt: now(),
+						completedAt: null,
+						lastError: null,
+					});
+				},
+				{ siteToken: "db-vacuum.ts:490", operation: "maintenance.vacuum.mark-running" },
+			);
 
-			const running = getVacuumConversionStatus(accessor);
+			const running = await getVacuumConversionStatusAsync(accessor);
 			if (running.state !== "running") return running;
 			logger.info("db-vacuum", "Post-ready conversion worker started", {
 				attempt: running.attempts,
@@ -504,44 +517,48 @@ export function startVacuumConversionWorker(
 					await dbOwnerVacuumConversion(opts.owner);
 				} else {
 					if (!accessor.vacuumConversionAsync) throw new Error("VACUUM conversion operation is unavailable");
-					await accessor.vacuumConversionAsync();
+					await accessor.vacuumConversionAsync({ siteToken: "db-vacuum.ts:520" });
 				}
-				// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-				accessor.withWriteTx((db: import("./db-accessor").WriteDb) => {
-					const state = stateFromRow(
-						toPragmaReadDb(db).prepare(`SELECT * FROM ${VACUUM_CONVERSION_STATE_TABLE} WHERE id = 1`).get(),
-					);
-					writeState(toPragmaDb(db), "completed", {
-						attempts: state.attempts,
-						requestedAt: state.requestedAt ?? now(),
-						startedAt: state.startedAt,
-						completedAt: now(),
-						lastError: null,
-					});
-				});
+				await accessor.withWriteTxAsync(
+					(db) => {
+						const state = stateFromRow(
+							toPragmaReadDb(db).prepare(`SELECT * FROM ${VACUUM_CONVERSION_STATE_TABLE} WHERE id = 1`).get(),
+						);
+						writeState(toPragmaDb(db), "completed", {
+							attempts: state.attempts,
+							requestedAt: state.requestedAt ?? now(),
+							startedAt: state.startedAt,
+							completedAt: now(),
+							lastError: null,
+						});
+					},
+					{ siteToken: "db-vacuum.ts:522", operation: "maintenance.vacuum.mark-completed" },
+				);
 				logger.info("db-vacuum", "Post-ready conversion worker completed");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-				accessor.withWriteTx((db: import("./db-accessor").WriteDb) => {
-					const state = stateFromRow(
-						toPragmaReadDb(db).prepare(`SELECT * FROM ${VACUUM_CONVERSION_STATE_TABLE} WHERE id = 1`).get(),
-					);
-					writeState(toPragmaDb(db), "failed", {
-						attempts: state.attempts,
-						requestedAt: state.requestedAt ?? now(),
-						startedAt: state.startedAt,
-						completedAt: null,
-						lastError: message.slice(0, 500),
-					});
-				});
+				await accessor.withWriteTxAsync(
+					(db) => {
+						const state = stateFromRow(
+							toPragmaReadDb(db).prepare(`SELECT * FROM ${VACUUM_CONVERSION_STATE_TABLE} WHERE id = 1`).get(),
+						);
+						writeState(toPragmaDb(db), "failed", {
+							attempts: state.attempts,
+							requestedAt: state.requestedAt ?? now(),
+							startedAt: state.startedAt,
+							completedAt: null,
+							lastError: message.slice(0, 500),
+						});
+					},
+					{ siteToken: "db-vacuum.ts:540", operation: "maintenance.vacuum.mark-failed" },
+				);
 				logger.error(
 					"db-vacuum",
 					"Post-ready conversion worker failed; retry is available on a later startup while the attempt budget remains",
 					error instanceof Error ? error : undefined,
 				);
 			}
-			return getVacuumConversionStatus(accessor);
+			return await getVacuumConversionStatusAsync(accessor);
 		})();
 		inFlight = cycle;
 		void cycle.then(

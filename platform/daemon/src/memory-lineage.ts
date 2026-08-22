@@ -740,11 +740,22 @@ async function upsertSourceArtifactRow(
 	frontmatter: Record<string, unknown>,
 	body: string,
 	sourceMtimeMs = statSync(path).mtimeMs,
-	options: { readonly trustSourcePath?: boolean; readonly trustNativeMarker?: boolean } = {},
+	options: {
+		readonly trustSourcePath?: boolean;
+		readonly trustNativeMarker?: boolean;
+		readonly signal?: AbortSignal;
+	} = {},
 ): Promise<void> {
 	await dbOwnerSourceArtifactUpsert(
 		{ fields: artifactFieldsFromFrontmatter(path, frontmatter, body, sourceMtimeMs, options) },
-		{ operation: "sources.artifacts.upsert", lane: "write", workloadClass: "maintenance", estimatedWorkUnits: 2 },
+		{
+			operation: "sources.artifacts.upsert",
+			lane: "write",
+			workloadClass: "maintenance",
+			deadlineMs: 30_000,
+			estimatedWorkUnits: 2,
+			signal: options.signal,
+		},
 	);
 }
 
@@ -762,6 +773,7 @@ export async function indexExternalMemoryArtifact(input: {
 	readonly sourceExternalId?: string | null;
 	readonly sourceParentPath?: string | null;
 	readonly sourceMeta?: Readonly<Record<string, unknown>>;
+	readonly signal?: AbortSignal;
 }): Promise<void> {
 	const capturedAt =
 		input.capturedAt ??
@@ -792,7 +804,7 @@ export async function indexExternalMemoryArtifact(input: {
 		},
 		input.content,
 		input.sourceMtimeMs,
-		{ trustNativeMarker: true, trustSourcePath: true },
+		{ trustNativeMarker: true, trustSourcePath: true, signal: input.signal },
 	);
 }
 
@@ -855,6 +867,7 @@ export async function softDeleteArtifactRowsForPath(
 	path: string,
 	agentId: string | null,
 	deletedAt = new Date().toISOString(),
+	options: { readonly signal?: AbortSignal } = {},
 ): Promise<void> {
 	const sourcePath = relativePath(path);
 	const absolutePath = path.replace(/\\/g, "/");
@@ -892,6 +905,7 @@ export async function softDeleteArtifactRowsForPath(
 		lane: "write",
 		workloadClass: "maintenance",
 		estimatedWorkUnits: 2,
+		signal: options.signal,
 	});
 }
 
@@ -1023,10 +1037,15 @@ async function doReindex(agentId?: string): Promise<void> {
 	lastChangedManifestsByAgent.delete(cacheKey);
 
 	try {
-		const ready = await getDbAccessor().withReadDbAsync(async (db) => {
-			const row = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_artifacts'`).get();
-			return row !== undefined;
-		});
+		const ready = await getDbAccessor().withReadDbAsync(
+			async (db) => {
+				const row = db
+					.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_artifacts'`)
+					.get();
+				return row !== undefined;
+			},
+			{ siteToken: "memory-lineage.ts:1040" },
+		);
 		if (!ready) {
 			stopTimer({ fileCount: files.length });
 			return;
@@ -1039,20 +1058,23 @@ async function doReindex(agentId?: string): Promise<void> {
 	if (cache.size === 0) {
 		// Seed from DB state too so files deleted while daemon was down get
 		// detected, while unchanged files can skip a full reread on restart.
-		const dbPaths = await getDbAccessor().withReadDbAsync(async (db) => {
-			const rows = scope
-				? (db
-						.prepare("SELECT source_path, source_mtime_ms FROM memory_artifacts WHERE agent_id = ?")
-						.all(scope) as Array<{
-						source_path: string;
-						source_mtime_ms?: number | null;
-					}>)
-				: (db.prepare("SELECT source_path, source_mtime_ms FROM memory_artifacts").all() as Array<{
-						source_path: string;
-						source_mtime_ms?: number | null;
-					}>);
-			return rows;
-		});
+		const dbPaths = await getDbAccessor().withReadDbAsync(
+			async (db) => {
+				const rows = scope
+					? (db
+							.prepare("SELECT source_path, source_mtime_ms FROM memory_artifacts WHERE agent_id = ?")
+							.all(scope) as Array<{
+							source_path: string;
+							source_mtime_ms?: number | null;
+						}>)
+					: (db.prepare("SELECT source_path, source_mtime_ms FROM memory_artifacts").all() as Array<{
+							source_path: string;
+							source_mtime_ms?: number | null;
+						}>);
+				return rows;
+			},
+			{ siteToken: "memory-lineage.ts:1061" },
+		);
 		if (dbPaths.length > 0) {
 			const root = getAgentsDir();
 			for (const row of dbPaths) {
@@ -1328,6 +1350,7 @@ async function findExistingManifest(agentId: string, sessionId: string): Promise
 					 LIMIT 1`,
 					)
 					.get(agentId, sessionId) as { source_path: string } | undefined,
+			{ siteToken: "memory-lineage.ts:1342" },
 		);
 		if (!row) return null;
 		return loadManifest(join(getAgentsDir(), row.source_path));
@@ -1735,34 +1758,37 @@ async function readThreadHeads(agentId: string): Promise<
 	}>
 > {
 	try {
-		const rows = await getDbAccessor().withReadDbAsync(async (db) => {
-			const queried = db
-				.prepare(
-					`SELECT label, source_type, latest_at, sample, node_id, project, session_key, harness
+		const rows = await getDbAccessor().withReadDbAsync(
+			async (db) => {
+				const queried = db
+					.prepare(
+						`SELECT label, source_type, latest_at, sample, node_id, project, session_key, harness
 				 FROM memory_thread_heads
 				 WHERE agent_id = ?
 				 ORDER BY latest_at DESC
 				 LIMIT 12`,
-				)
-				.all(agentId) as Array<{
-				label: string;
-				source_type: string;
-				latest_at: string;
-				sample: string;
-				node_id: string;
-				project: string | null;
-				session_key: string | null;
-				harness: string | null;
-			}>;
-			return queried.filter((row) =>
-				isMemoryContentContextEligible(db, {
-					agentId,
-					sourceKind: "summary",
-					sourceId: row.node_id,
-					content: row.sample,
-				}),
-			);
-		});
+					)
+					.all(agentId) as Array<{
+					label: string;
+					source_type: string;
+					latest_at: string;
+					sample: string;
+					node_id: string;
+					project: string | null;
+					session_key: string | null;
+					harness: string | null;
+				}>;
+				return queried.filter((row) =>
+					isMemoryContentContextEligible(db, {
+						agentId,
+						sourceKind: "summary",
+						sourceId: row.node_id,
+						content: row.sample,
+					}),
+				);
+			},
+			{ siteToken: "memory-lineage.ts:1761" },
+		);
 		return rows.filter(
 			(row) =>
 				!isNoiseSession({
@@ -1788,31 +1814,34 @@ async function readTopMemories(agentId: string): Promise<
 	try {
 		const scope = getAgentScope(agentId);
 		const clause = buildAgentScopeClause(agentId, scope.readPolicy, scope.policyGroup);
-		const rows = await getDbAccessor().withReadDbAsync(async (db) => {
-			const queried = db
-				.prepare(
-					`SELECT m.id, m.content, m.type, m.importance, m.project
+		const rows = await getDbAccessor().withReadDbAsync(
+			async (db) => {
+				const queried = db
+					.prepare(
+						`SELECT m.id, m.content, m.type, m.importance, m.project
 				 FROM memories m
 				 WHERE m.is_deleted = 0${clause.sql}
 				 ORDER BY m.pinned DESC, m.importance DESC, m.created_at DESC
 				 LIMIT 32`,
-				)
-				.all(...clause.args) as Array<{
-				id: string;
-				content: string;
-				type: string;
-				importance: number;
-				project: string | null;
-			}>;
-			return queried.filter((row) =>
-				isMemoryContentContextEligible(db, {
-					agentId,
-					sourceKind: "memory",
-					sourceId: row.id,
-					content: row.content,
-				}),
-			);
-		});
+					)
+					.all(...clause.args) as Array<{
+					id: string;
+					content: string;
+					type: string;
+					importance: number;
+					project: string | null;
+				}>;
+				return queried.filter((row) =>
+					isMemoryContentContextEligible(db, {
+						agentId,
+						sourceKind: "memory",
+						sourceId: row.id,
+						content: row.content,
+					}),
+				);
+			},
+			{ siteToken: "memory-lineage.ts:1817" },
+		);
 		return rows.filter((row) => !isNoiseSession({ project: row.project })).slice(0, 8);
 	} catch {
 		return [];
@@ -1833,36 +1862,39 @@ async function readTemporalNodes(agentId: string): Promise<
 	}>
 > {
 	try {
-		const rows = await getDbAccessor().withReadDbAsync(async (db) => {
-			const queried = db
-				.prepare(
-					`SELECT id, kind, COALESCE(source_type, kind) AS source_type, depth, latest_at,
+		const rows = await getDbAccessor().withReadDbAsync(
+			async (db) => {
+				const queried = db
+					.prepare(
+						`SELECT id, kind, COALESCE(source_type, kind) AS source_type, depth, latest_at,
 				        project, session_key, source_ref, content
 				 FROM session_summaries
 				 WHERE agent_id = ?
 				 ORDER BY latest_at DESC
 				 LIMIT 20`,
-				)
-				.all(agentId) as Array<{
-				id: string;
-				kind: string;
-				source_type: string;
-				depth: number;
-				latest_at: string;
-				project: string | null;
-				session_key: string | null;
-				source_ref: string | null;
-				content: string;
-			}>;
-			return queried.filter((row) =>
-				isMemoryContentContextEligible(db, {
-					agentId,
-					sourceKind: "summary",
-					sourceId: row.id,
-					content: row.content,
-				}),
-			);
-		});
+					)
+					.all(agentId) as Array<{
+					id: string;
+					kind: string;
+					source_type: string;
+					depth: number;
+					latest_at: string;
+					project: string | null;
+					session_key: string | null;
+					source_ref: string | null;
+					content: string;
+				}>;
+				return queried.filter((row) =>
+					isMemoryContentContextEligible(db, {
+						agentId,
+						sourceKind: "summary",
+						sourceId: row.id,
+						content: row.content,
+					}),
+				);
+			},
+			{ siteToken: "memory-lineage.ts:1865" },
+		);
 		return rows.filter(
 			(row) =>
 				!isNoiseSession({
@@ -1921,27 +1953,29 @@ async function buildLedger(agentId: string): Promise<ReadonlyArray<LedgerSession
 	const floor = now - 30 * 24 * 60 * 60 * 1000;
 	let rows: ArtifactRow[] = [];
 	try {
-		rows = await getDbAccessor().withReadDbAsync(async (db) =>
-			(
-				db
-					.prepare(
-						`SELECT agent_id, source_path, source_sha256, source_kind, session_id, session_key,
+		rows = await getDbAccessor().withReadDbAsync(
+			async (db) =>
+				(
+					db
+						.prepare(
+							`SELECT agent_id, source_path, source_sha256, source_kind, session_id, session_key,
 					        session_token, project, harness, captured_at, started_at, ended_at,
 					        manifest_path, source_node_id, memory_sentence, memory_sentence_quality, content
 					 FROM memory_artifacts
 					 WHERE agent_id = ?
 					   AND source_kind IN ('summary', 'transcript', 'compaction')
 					 ORDER BY COALESCE(ended_at, captured_at) DESC, captured_at DESC`,
-					)
-					.all(agentId) as ArtifactRow[]
-			).filter((row) =>
-				isMemoryContentContextEligible(db, {
-					agentId,
-					sourceKind: "artifact",
-					sourceId: row.source_path,
-					content: row.content,
-				}),
-			),
+						)
+						.all(agentId) as ArtifactRow[]
+				).filter((row) =>
+					isMemoryContentContextEligible(db, {
+						agentId,
+						sourceKind: "artifact",
+						sourceId: row.source_path,
+						content: row.content,
+					}),
+				),
+			{ siteToken: "memory-lineage.ts:1956" },
 		);
 	} catch {
 		rows = [];
@@ -2271,6 +2305,7 @@ export async function removeCanonicalSession(agentId: string, sessionToken: stri
 				 WHERE agent_id = ? AND session_token = ?`,
 				)
 				.all(agentId, sessionToken) as Array<{ source_path: string }>,
+		{ siteToken: "memory-lineage.ts:2299" },
 	);
 	const paths = rows.map((row) => row.source_path);
 	await runWriteTxAsync(getDbAccessor(), (db) => {
@@ -2334,6 +2369,7 @@ export async function purgeCanonicalNoiseSessions(agentId: string, reason: strin
 				project: string | null;
 				harness: string | null;
 			}>,
+		{ siteToken: "memory-lineage.ts:2355" },
 	);
 	const groups = new Map<
 		string,

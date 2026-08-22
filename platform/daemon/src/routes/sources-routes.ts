@@ -46,6 +46,7 @@ import {
 	isSourceIndexInFlight,
 	markSourceIndexInFlight,
 	markSourceIndexJobRunning,
+	pauseSourceIndexJob,
 	updateSourceIndexJobProgress,
 } from "../source-index-progress";
 import {
@@ -653,6 +654,28 @@ async function runSourceIndexJob(input: SourceIndexJobInput, job: SourceIndexJob
 		});
 		const indexed = await bridge.syncExisting();
 		if (!isCurrentSourceIndexJob(input.source.id, job.id)) return;
+		const syncResult = bridge.getLastSyncResult?.();
+		const paused = syncResult?.pausedSources.find((result) => result.sourceId === input.source.id);
+		if (syncResult?.status === "paused" && paused) {
+			pauseSourceIndexJob(input.source.id, job.id, {
+				pauseReason: paused.pauseReason ?? "provider_unavailable",
+				resumeFrontier: paused.resumeFrontier,
+				scanned: paused.scanned,
+				indexed: paused.indexed,
+			});
+			await recordSourceIndexTelemetryBestEffort(input.recordIndexOperation, {
+				source: input.source,
+				agentId,
+				discovered: syncResult.scanned,
+				accepted: syncResult.indexed,
+				durationMs: Date.now() - startedAt,
+				outcome: "partial",
+				failureClass: sourceFailureClass(new Error("network provider unavailable")),
+				searchable: syncResult.indexed > 0,
+				updateFreshness: false,
+			});
+			return;
+		}
 		markSourceIndexed(input.source.id, undefined, input.agentsDir);
 		const progress = getSourceIndexJob(input.source.id);
 		completeSourceIndexJob(input.source.id, job.id, indexed);
@@ -939,7 +962,7 @@ function sourceStats(source: SignetSourceEntry, agentId: string): SourceStats {
 					source.kind === "obsidian" ? source.root : undefined,
 				),
 			};
-		});
+		}, "routes/sources-routes.ts:906");
 	} catch {
 		return { artifacts: 0, chunks: 0, indexed: 0, hasEligibleUnconsumedEvidence: false };
 	}
@@ -1038,7 +1061,7 @@ function sourceOrphanChunks(source: SignetSourceEntry, agentId: string): number 
 				`${chunkPrefix}\uffff`,
 			) as SourceChunkHealthRow[];
 		return chunks.filter((chunk) => !sourceChunkMatchesLiveArtifact(source, chunk, livePaths)).length;
-	});
+	}, "routes/sources-routes.ts:1045");
 }
 
 function liveSourceArtifactPaths(db: ReadDb, source: SignetSourceEntry, agentId: string): ReadonlySet<string> {
@@ -1169,7 +1192,7 @@ function artifactHealthSummary(
 			latestArtifactAt: stringOrNull(row?.latestArtifactAt),
 			deletedArtifacts: numberOrZero(row?.deletedArtifacts),
 		};
-	});
+	}, "routes/sources-routes.ts:1157");
 }
 
 interface DiscordHealthSummary {
@@ -1228,7 +1251,7 @@ function discordHealthSummary(source: SignetSourceEntry, agentId: string): Disco
 			failures: { total: failures, recoverable },
 			checkpoints: { total: checkpoints, partial, stale },
 		};
-	});
+	}, "routes/sources-routes.ts:1220");
 }
 
 function semanticHealthSummary(source: SignetSourceEntry, agentId: string): SourceHealth["semantic"] {
@@ -1266,7 +1289,7 @@ function semanticHealthSummary(source: SignetSourceEntry, agentId: string): Sour
 			total: entities + aspects + attributes + dependencies + communities,
 			documentEntityId: documentEntity?.id ?? null,
 		};
-	});
+	}, "routes/sources-routes.ts:1259");
 }
 
 function countSourceRows(

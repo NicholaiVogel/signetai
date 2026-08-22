@@ -1,6 +1,10 @@
 import { DEFAULT_EMBEDDING_DIMENSIONS } from "@signet/core";
 import type { ReadDb, WriteDb } from "./db-accessor";
-import { embeddingProfileFingerprint, recommendedEmbeddingProfileId } from "./embedding-profile";
+import {
+	embeddingProfileFingerprint,
+	embeddingProfileFingerprintsEqual,
+	recommendedEmbeddingProfileId,
+} from "./embedding-profile";
 import type { EmbeddingConfig } from "./memory-config";
 
 export type EmbeddingIndexBuildState = "ready" | "building" | "failed";
@@ -8,6 +12,22 @@ export type EmbeddingProjectionSlot = "active" | "staging";
 
 export const MAX_CONSECUTIVE_PROVIDER_FAILURES = 6;
 export const MAX_PROVIDER_BACKOFF_MS = 60_000;
+export const MAX_CONSECUTIVE_NO_PROGRESS_TICKS = 6;
+
+export type EmbeddingMigrationPhase = "staging" | "projection" | "promoting";
+
+export interface EmbeddingIndexMigrationProgress {
+	readonly state: EmbeddingIndexBuildState;
+	readonly staged: number;
+	readonly total: number;
+	readonly phase: EmbeddingMigrationPhase | null;
+	readonly providerEndpoint: string | null;
+	readonly lastError: string | null;
+	readonly projectionCursor: {
+		readonly lastId: string | null;
+		readonly slot: EmbeddingProjectionSlot | null;
+	} | null;
+}
 
 export interface PersistedEmbeddingProfile {
 	readonly fingerprint: string;
@@ -89,7 +109,9 @@ export function resolveActiveEmbeddingConfig(db: ReadDb, configured: EmbeddingCo
 		provider: active.provider,
 		model: active.model,
 		dimensions: active.dimensions,
-		base_url: active.baseUrl,
+		// Endpoint is transport, not vector identity. Use the live configured
+		// endpoint after the compatibility shim accepts an endpoint-only change.
+		base_url: configured.base_url,
 		...(active.profile ? { profile: active.profile } : { profile: undefined }),
 	};
 }
@@ -106,7 +128,107 @@ export function isActiveEmbeddingConfig(db: ReadDb, cfg: EmbeddingConfig): boole
 	// slot during that window: callers can finish an in-flight provider request,
 	// but their write must fail closed when it reaches the database.
 	if (state.state === "building" && state.staging?.projectionRebuild === true) return false;
-	return embeddingProfileFingerprint(cfg) === state.active.fingerprint;
+	return embeddingProfileFingerprintsEqual(embeddingProfileFingerprint(cfg), state.active.fingerprint);
+}
+
+function stateHasColumn(db: ReadDb, column: string): boolean {
+	return (db.prepare("PRAGMA table_info(embedding_index_state)").all() as Array<{ name?: string }>).some(
+		(row) => row.name === column,
+	);
+}
+
+function updateProgressColumns(
+	db: WriteDb,
+	values: Partial<{
+		migration_phase: EmbeddingMigrationPhase | null;
+		progress_staged: number;
+		progress_total: number;
+		projection_cursor_last_id: string | null;
+		projection_cursor_slot: EmbeddingProjectionSlot | null;
+		no_progress_ticks: number;
+		provider_endpoint: string | null;
+	}>,
+): void {
+	const available = new Set(
+		(db.prepare("PRAGMA table_info(embedding_index_state)").all() as Array<{ name?: string }>)
+			.map((row) => row.name)
+			.filter((name): name is string => typeof name === "string"),
+	);
+	const entries = Object.entries(values).filter(([column]) => available.has(column));
+	if (entries.length === 0) return;
+	const assignments = entries.map(([column]) => `${column} = ?`).join(", ");
+	db.prepare(`UPDATE embedding_index_state SET ${assignments} WHERE id = 1`).run(...entries.map(([, value]) => value));
+}
+
+/** Read bounded migration visibility without exposing raw SQL to HTTP callers. */
+export function readEmbeddingIndexMigrationProgress(
+	db: ReadDb,
+	configured?: EmbeddingConfig,
+): EmbeddingIndexMigrationProgress | null {
+	const state = readEmbeddingIndexState(db);
+	if (!state) return null;
+	let staged = 0;
+	let total = 0;
+	try {
+		total = (db.prepare("SELECT COUNT(*) AS n FROM embeddings").get() as { n?: number } | undefined)?.n ?? 0;
+		staged = (db.prepare("SELECT COUNT(*) AS n FROM embeddings_staging").get() as { n?: number } | undefined)?.n ?? 0;
+	} catch {
+		// Pre-generation/fixture databases may not carry the payload tables.
+	}
+	if (state.state !== "building") staged = total;
+	let phase: EmbeddingMigrationPhase | null = state.state === "building" ? "staging" : null;
+	let lastId: string | null = null;
+	let slot: EmbeddingProjectionSlot | null = null;
+	if (state.staging?.projectionRebuild) phase = "projection";
+	if (stateHasColumn(db, "migration_phase")) {
+		const row = db
+			.prepare(
+				"SELECT migration_phase, progress_staged, progress_total, projection_cursor_last_id, projection_cursor_slot, provider_endpoint FROM embedding_index_state WHERE id = 1",
+			)
+			.get() as
+			| {
+					migration_phase?: string | null;
+					progress_staged?: number;
+					progress_total?: number;
+					projection_cursor_last_id?: string | null;
+					projection_cursor_slot?: string | null;
+					provider_endpoint?: string | null;
+			  }
+			| undefined;
+		if (
+			row?.migration_phase === "staging" ||
+			row?.migration_phase === "projection" ||
+			row?.migration_phase === "promoting"
+		)
+			phase = row.migration_phase;
+		if (typeof row?.progress_staged === "number") staged = row.progress_staged;
+		if (typeof row?.progress_total === "number") total = row.progress_total;
+		lastId = typeof row?.projection_cursor_last_id === "string" ? row.projection_cursor_last_id : null;
+		slot =
+			row?.projection_cursor_slot === "active" || row?.projection_cursor_slot === "staging"
+				? row.projection_cursor_slot
+				: null;
+		const providerEndpoint =
+			configured?.base_url ?? row?.provider_endpoint ?? state.staging?.baseUrl ?? state.active.baseUrl;
+		return {
+			state: state.state,
+			staged,
+			total,
+			phase,
+			providerEndpoint,
+			lastError: state.lastError,
+			projectionCursor: lastId !== null || slot !== null ? { lastId, slot } : null,
+		};
+	}
+	return {
+		state: state.state,
+		staged,
+		total,
+		phase,
+		providerEndpoint: configured?.base_url ?? state.staging?.baseUrl ?? state.active.baseUrl,
+		lastError: state.lastError,
+		projectionCursor: null,
+	};
 }
 
 function parseProfile(value: string): PersistedEmbeddingProfile | null {
@@ -214,39 +336,108 @@ export function beginEmbeddingIndexBuild(
 		...profileForStorage(stagingConfig),
 		projectionSlot: current.active.projectionSlot === "staging" ? ("active" as const) : ("staging" as const),
 	};
-	if (current.state === "building" && current.staging?.fingerprint === staging.fingerprint) return current;
-	const failure = parseFailure(current.lastError);
-	if (
-		current.state === "failed" &&
-		current.staging?.fingerprint === staging.fingerprint &&
-		failure?.cause === "provider-unavailable" &&
-		failure.nextAttemptAt !== undefined &&
-		now < failure.nextAttemptAt
-	)
-		return current;
-	if (current.active.fingerprint === staging.fingerprint) {
+	const activeMatchesTarget = embeddingProfileFingerprintsEqual(current.active.fingerprint, staging.fingerprint);
+	if (activeMatchesTarget) {
+		// Compatibility shim for v91-v142 rows whose fingerprint included the
+		// endpoint. Rewrite the persisted profile in place; this resolves an old
+		// stuck `building` latch without re-embedding the corpus.
+		const normalizedActive = {
+			...current.active,
+			fingerprint: staging.fingerprint,
+			baseUrl: cfg.base_url,
+		};
+		db.prepare("UPDATE embedding_index_state SET active_profile_json = ? WHERE id = 1").run(
+			JSON.stringify(normalizedActive),
+		);
+		updateProgressColumns(db, { provider_endpoint: cfg.base_url });
 		// The configured profile IS the active generation: nothing to build.
 		// If a build of a different generation is in flight (the live config
 		// flipped back to the active profile mid-build, #1160), abandon it
 		// instead of promoting a generation the config no longer wants.
 		if (current.state === "building") {
+			if (current.staging?.projectionRebuild === true) {
+				// Promotion has already swapped durable slots. Restore the old
+				// active pair before clearing the interrupted build; deleting
+				// embeddings_staging first would destroy active recall.
+				const projectionTable = staging.projectionSlot === "staging" ? "vec_embeddings_staging" : "vec_embeddings";
+				db.exec("ALTER TABLE embeddings RENAME TO embeddings_next");
+				db.exec("ALTER TABLE embeddings_staging RENAME TO embeddings");
+				db.exec("ALTER TABLE embeddings_next RENAME TO embeddings_staging");
+				db.exec(`DELETE FROM ${projectionTable}`);
+			}
 			db.exec("DELETE FROM embeddings_staging");
 			db.prepare(
 				`UPDATE embedding_index_state
 				 SET staging_profile_json = NULL, state = 'ready', last_error = NULL, updated_at = ?
 				 WHERE id = 1`,
 			).run(now);
-			return { active: current.active, staging: null, state: "ready", lastError: null };
+			updateProgressColumns(db, {
+				migration_phase: null,
+				progress_staged: 0,
+				progress_total: 0,
+				projection_cursor_last_id: null,
+				projection_cursor_slot: null,
+				no_progress_ticks: 0,
+				provider_endpoint: cfg.base_url,
+			});
+			return { active: normalizedActive, staging: null, state: "ready", lastError: null };
 		}
+		db.prepare(
+			`UPDATE embedding_index_state
+			 SET staging_profile_json = NULL, state = 'ready', last_error = NULL, updated_at = ?
+			 WHERE id = 1`,
+		).run(now);
+		updateProgressColumns(db, {
+			migration_phase: null,
+			progress_staged: 0,
+			progress_total: 0,
+			projection_cursor_last_id: null,
+			projection_cursor_slot: null,
+			no_progress_ticks: 0,
+			provider_endpoint: cfg.base_url,
+		});
+		return { active: normalizedActive, staging: null, state: "ready", lastError: null };
+	}
+	const failure = parseFailure(current.lastError);
+	if (
+		current.state === "failed" &&
+		current.staging !== null &&
+		current.staging !== undefined &&
+		embeddingProfileFingerprintsEqual(current.staging.fingerprint, staging.fingerprint) &&
+		failure?.cause === "provider-unavailable" &&
+		failure.nextAttemptAt !== undefined &&
+		now < failure.nextAttemptAt
+	)
+		return current;
+	if (
+		current.state === "building" &&
+		current.staging &&
+		embeddingProfileFingerprintsEqual(current.staging.fingerprint, staging.fingerprint)
+	) {
 		return current;
 	}
 
 	db.exec("DELETE FROM embeddings_staging");
+	let total = 0;
+	try {
+		total = (db.prepare("SELECT COUNT(*) AS n FROM embeddings").get() as { n?: number } | undefined)?.n ?? 0;
+	} catch {
+		// Fixtures and pre-generation databases may not have durable embeddings.
+	}
 	db.prepare(
 		`UPDATE embedding_index_state
 		 SET staging_profile_json = ?, state = 'building', last_error = NULL, updated_at = ?
 		 WHERE id = 1`,
 	).run(JSON.stringify(staging), now);
+	updateProgressColumns(db, {
+		migration_phase: "staging",
+		progress_staged: 0,
+		progress_total: total,
+		projection_cursor_last_id: null,
+		projection_cursor_slot: null,
+		no_progress_ticks: 0,
+		provider_endpoint: cfg.base_url,
+	});
 	return { active: current.active, staging, state: "building", lastError: null };
 }
 

@@ -93,9 +93,9 @@ transaction request wraps all of its statements atomically. A `batch` contains
 only `run` statements and also rolls back on failure; `requireChanges` is a
 fail-closed zero-change precondition.
 
-A queued cancellation is removed from the client pending map, clears its deadline timer, and is removed from the owner's queue before execution. A cancellation received while synchronous native SQLite work is running is best effort because the owner cannot observe stdin until that call returns. A deadline is different: the client kills the entire child with `SIGKILL` at the absolute deadline. The subsequent owner death fails all other in-flight and queued jobs closed.
+A queued cancellation is removed from the client pending map, clears its deadline timer, and is removed from the owner's queue before execution. A cancellation received while synchronous native SQLite work is running is best effort because the owner cannot observe stdin until that call returns. A deadline abandons the job rather than killing the owner: the client rejects the handle, removes the job from its pending map, and sends a cancel message when the job was dispatched. The owner drops a still-queued job; an already-running synchronous operation may finish, but its abandoned result is ignored. Other jobs continue on the surviving owner.
 
-Construction failure, malformed protocol input, owner exit, deadline kill, and job failure are all observable through the health state or the rejected handle. A dead owner is recoverable without a daemon restart, but no job is silently replayed because writes may have reached SQLite before a process crash.
+Construction failure, malformed protocol input, owner exit, deadline abandonment, and job failure are observable through the health state or the rejected handle. Deadline expiry does not kill the owner or fail unrelated jobs. Supervised shutdown and transport recovery are the only owner-kill authorities; no job is silently replayed because writes may have reached SQLite before a process crash.
 
 ## Client surface
 
@@ -105,8 +105,7 @@ Construction failure, malformed protocol input, owner exit, deadline kill, and j
 - `submit(request, options)` returns a serializable job envelope and a typed result handle.
 - `awaitResult(handle, timeoutMs?)` awaits a result and cancels on the optional caller timeout.
 - `cancel(jobId)` requests cancellation.
-- `health()` returns owner state, PID, generation, total and per-class queue counts, active job/class, oldest pending ages, and last error without touching SQLite.
-- `health()` also reports hard-deadline kills, so maintenance pressure is visible without touching SQLite.
+- `health()` returns owner state, PID, generation, total and per-class queue counts, active job/class, oldest pending ages, and last error without touching SQLite. Deadline expiry is represented by the rejected job handle, not a hard-deadline-kill metric: it abandons the job, sends cancellation to the owner when dispatched, and leaves the owner alive.
 - `close()` sends shutdown and is idempotent.
 
 No callback receives a database handle. No synchronous SQLite symbol is exported by the client or the recall seam. The owner module is the sanctioned synchronous site.

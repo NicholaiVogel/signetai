@@ -149,7 +149,7 @@ export function mountMcpAnalyticsRoutes(app: Hono): void {
 					topTools,
 					latency: { p50, p95 },
 				} satisfies AnalyticsSummary;
-			});
+			}, "routes/mcp-analytics.ts:89");
 
 			return c.json(result);
 		} catch (error) {
@@ -227,7 +227,7 @@ export function mountMcpAnalyticsRoutes(app: Hono): void {
 					tools,
 					timeline,
 				} satisfies ServerAnalytics;
-			});
+			}, "routes/mcp-analytics.ts:171");
 
 			return c.json(result);
 		} catch (error) {

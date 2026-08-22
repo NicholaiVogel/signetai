@@ -716,7 +716,8 @@ describe("single-flight trigger overlap (#1354)", () => {
 			expect(calls).toBe(1);
 
 			releaseEmbedding?.();
-			await waitFor(() => calls === 2);
+			await waitFor(() => embeddingCount("alpha-skill") === 1 && embeddingCount("beta-skill") === 1);
+			expect(calls).toBe(2);
 
 			expect(entityCount("alpha-skill")).toBe(1);
 			expect(entityCount("beta-skill")).toBe(1);

@@ -24,6 +24,7 @@ import {
 	redactCheckpointRow,
 	redactSecrets,
 	writeCheckpoint,
+	writeCheckpointAsync,
 } from "./session-checkpoints";
 
 function makeState(overrides: Partial<ContinuityState> = {}): ContinuityState {
@@ -62,8 +63,22 @@ function createTestDbAccessor(dbPath: string): DbAccessor {
 				throw err;
 			}
 		},
+		async withWriteTxAsync<T>(fn: (wdb: WriteDb) => T): Promise<T> {
+			db.run("BEGIN IMMEDIATE");
+			try {
+				const result = fn(db as unknown as WriteDb);
+				db.run("COMMIT");
+				return result;
+			} catch (err) {
+				db.run("ROLLBACK");
+				throw err;
+			}
+		},
 		withReadDb<T>(fn: (rdb: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
+		},
+		async withReadDbAsync<T>(fn: (rdb: ReadDb) => T | Promise<T>): Promise<T> {
+			return await fn(db as unknown as ReadDb);
 		},
 		close() {
 			db.close();
@@ -117,6 +132,22 @@ describe("session-checkpoints", () => {
 		expect(JSON.parse(rows[0].focal_entity_names)).toEqual(["signetai"]);
 	});
 
+	test("writeCheckpointAsync uses the async DB boundary", async () => {
+		let syncCrossings = 0;
+		const asyncAccessor = {
+			withWriteTx: () => {
+				syncCrossings++;
+				throw new Error("unexpected synchronous checkpoint write");
+			},
+			withWriteTxAsync: async <T>(fn: (wdb: WriteDb) => T): Promise<T> =>
+				(dbAcc as unknown as { withWriteTx: (callback: (wdb: WriteDb) => T) => T }).withWriteTx(fn),
+		} as unknown as DbAccessor;
+
+		await writeCheckpointAsync(asyncAccessor, makeParams({ sessionKey: "async-checkpoint" }), 50);
+		expect(syncCrossings).toBe(0);
+		expect(getCheckpointsBySession(dbAcc, "async-checkpoint")).toHaveLength(1);
+	});
+
 	test("writeCheckpoint enforces maxPerSession", () => {
 		for (let i = 0; i < 5; i++) {
 			writeCheckpoint(dbAcc, makeParams({ promptCount: i }), 3);
@@ -163,7 +194,7 @@ describe("session-checkpoints", () => {
 		expect(rows.length).toBe(2);
 	});
 
-	test("queueCheckpointWrite merges structural snapshots explicitly", () => {
+	test("queueCheckpointWrite merges structural snapshots explicitly", async () => {
 		initCheckpointFlush(dbAcc);
 		queueCheckpointWrite(
 			makeParams({
@@ -188,7 +219,7 @@ describe("session-checkpoints", () => {
 			50,
 		);
 
-		flushPendingCheckpoints();
+		await flushPendingCheckpoints();
 		const row = getLatestCheckpointBySession(dbAcc, "structural-merge");
 		if (!row?.focal_entity_ids || !row.focal_entity_names || !row.active_aspect_ids) {
 			throw new Error("merged checkpoint fields missing");
@@ -475,13 +506,13 @@ describe("debounce merge", () => {
 		initCheckpointFlush(dbAcc);
 	});
 
-	afterEach(() => {
-		flushPendingCheckpoints();
+	afterEach(async () => {
+		await flushPendingCheckpoints();
 		dbAcc.close();
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	test("queuing two writes for same session merges data", () => {
+	test("queuing two writes for same session merges data", async () => {
 		const base: WriteCheckpointParams = {
 			sessionKey: "merge-test",
 			harness: "test",
@@ -506,7 +537,7 @@ describe("debounce merge", () => {
 			50,
 		);
 
-		flushPendingCheckpoints();
+		await flushPendingCheckpoints();
 		const rows = getCheckpointsBySession(dbAcc, "merge-test");
 		expect(rows.length).toBe(1);
 		// Prompt counts summed

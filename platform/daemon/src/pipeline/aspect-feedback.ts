@@ -143,7 +143,7 @@ export function applyFtsOverlapFeedback(
 			aspectsUpdated,
 			totalFtsConfirmations,
 		};
-	});
+	}, "pipeline/aspect-feedback.ts:79");
 
 	recordFeedbackTelemetry({
 		feedbackAspectsUpdated: result.aspectsUpdated,
@@ -189,6 +189,6 @@ export function decayAspectWeights(
 			count++;
 		}
 		return count;
-	});
+	}, "pipeline/aspect-feedback.ts:165");
 	return decayed;
 }

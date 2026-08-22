@@ -25,13 +25,13 @@
  */
 
 import { getDbAccessor } from "../src/db-accessor";
-import type { ReadDb, WriteDb } from "../src/db-accessor";
+import type { ReadDb, SyncDbCallSiteToken, WriteDb } from "../src/db-accessor";
 
 export interface SyncDbAccessor {
 	/** @deprecated Use `withWriteTxAsync` in production code. */
-	withWriteTx<T>(fn: (db: WriteDb) => T): T;
+	withWriteTx<T>(fn: (db: WriteDb) => T, siteToken?: SyncDbCallSiteToken): T;
 	/** @deprecated Use `withReadDbAsync` in production code. */
-	withReadDb<T>(fn: (db: ReadDb) => T): T;
+	withReadDb<T>(fn: (db: ReadDb) => T, siteToken?: SyncDbCallSiteToken): T;
 	/** @deprecated Use `checkpointWalAsync` in production code. */
 	checkpointWal(): void;
 	/** @deprecated Use `incrementalVacuumAsync` in production code. */

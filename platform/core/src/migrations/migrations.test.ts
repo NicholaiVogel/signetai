@@ -35,6 +35,16 @@ function createFreshDb(): Database {
 	return new Database(":memory:");
 }
 
+/** Rewind a fully migrated fixture to exercise an upgrade from a shipped version. */
+function rewindToMigration(db: Database, version: 138 | 139): void {
+	db.exec("PRAGMA foreign_keys = OFF");
+	db.exec("DROP TABLE IF EXISTS source_sync_checkpoints");
+	db.exec("DROP TABLE IF EXISTS transcript_recovery_frontiers");
+	if (version < 139) db.exec("DROP TABLE IF EXISTS native_source_sync_state");
+	db.prepare("DELETE FROM schema_migrations WHERE version > ?").run(version);
+	db.exec("PRAGMA foreign_keys = ON");
+}
+
 function installLegacyPorterMemoriesFts(db: Database): void {
 	db.exec("DROP TRIGGER IF EXISTS memories_ai");
 	db.exec("DROP TRIGGER IF EXISTS memories_ad");
@@ -119,6 +129,34 @@ describe("migration framework", () => {
 		// same number of migration records (no duplicates)
 		const uniqueVersions = new Set(migrations.map((m) => m.version));
 		expect(uniqueVersions.size).toBe(migrations.length);
+	});
+
+	test("fresh DB and upgrades from 138 and shipped 139 apply the repaired tail", () => {
+		for (const version of [138, 139] as const) {
+			db = createFreshDb();
+			runMigrations(db);
+			rewindToMigration(db, version);
+			expect(hasPendingMigrations(db)).toBe(true);
+			runMigrations(db);
+
+			const applied = db.query("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
+			expect(applied.version).toBe(143);
+			expect(
+				db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_source_sync_state'").get(),
+			).toBeTruthy();
+			expect(
+				db
+					.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'transcript_recovery_frontiers'")
+					.get(),
+			).toBeTruthy();
+			expect(
+				db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_sync_checkpoints'").get(),
+			).toBeTruthy();
+			const checkpointColumns = db.query("PRAGMA table_info(source_sync_checkpoints)").all() as Array<{ name: string }>;
+			expect(checkpointColumns.map((column) => column.name)).toContain("frontier");
+			db.close();
+		}
+		db = createFreshDb();
 	});
 
 	test("memory content safety migration backfills evidence without rewriting it", () => {

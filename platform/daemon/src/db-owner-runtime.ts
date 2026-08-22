@@ -14,6 +14,9 @@ import type {
 	DbOwnerSourceGraphIndex,
 	DbOwnerSourceGraphPurge,
 	DbOwnerSourceSnapshotImport,
+	DbOwnerSourceArtifactIndex,
+	DbOwnerNativeMemoryIndex,
+	DbOwnerSourceArtifactPurge,
 	DbOwnerSourceArtifactUpsert,
 	DbOwnerStatement,
 	DbOwnerWorkloadClass,
@@ -89,13 +92,18 @@ export interface DbOwnerSqlOptions {
 	readonly workloadClass?: DbOwnerWorkloadClass;
 	readonly deadlineMs?: number;
 	readonly estimatedWorkUnits?: number;
+	/** Aborting abandons the queued/in-flight owner job and suppresses its result. */
+	readonly signal?: AbortSignal;
 }
 
 function submitOptions(options: DbOwnerSqlOptions): DbOwnerSubmitOptions {
+	const workloadClass = /^(?:sources|maintenance|vacuum)\./.test(options.operation)
+		? "maintenance"
+		: options.workloadClass;
 	return {
 		operation: options.operation,
 		lane: options.lane ?? "write",
-		workloadClass: options.workloadClass,
+		workloadClass,
 		deadlineMs: options.deadlineMs ?? 5_000,
 		estimatedWorkUnits: options.estimatedWorkUnits,
 	};
@@ -106,14 +114,32 @@ async function submitWithAdmission<Result>(
 	request: Parameters<DbOwnerClient["submit"]>[0],
 	options: DbOwnerSqlOptions,
 ): Promise<Result> {
+	const signal = options.signal;
+	const throwIfAborted = (): void => {
+		if (!signal?.aborted) return;
+		throw signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
+	};
+	throwIfAborted();
 	const submit = submitOptions(options);
 	const deadlineAt = Date.now() + submit.deadlineMs;
 	for (;;) {
 		try {
+			throwIfAborted();
 			const handle = owner.submit<Result>(request, submit);
-			return await owner.awaitResult(handle);
+			// Cancellation may happen synchronously during bridge shutdown, before
+			// the async waiter gets its first turn. Keep the handle rejection
+			// observed while awaitResult still propagates it to the caller.
+			void handle.result.catch(() => {});
+			const onAbort = (): void => handle.cancel();
+			signal?.addEventListener("abort", onAbort, { once: true });
+			try {
+				return await owner.awaitResult(handle);
+			} finally {
+				signal?.removeEventListener("abort", onAbort);
+			}
 		} catch (error) {
 			if (!(error instanceof DbOwnerAdmissionError) || error.code !== "DB_OWNER_QUEUE_FULL") throw error;
+			throwIfAborted();
 			const remainingMs = deadlineAt - Date.now();
 			if (remainingMs <= 0) throw error;
 			await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, remainingMs)));
@@ -259,6 +285,46 @@ export async function dbOwnerSourceGraphPurge(
 	return await submitWithAdmission<unknown>(
 		owner,
 		{ kind: "source_graph_purge", input },
+		{ ...options, lane: options.lane ?? "write" },
+	);
+}
+
+export async function dbOwnerSourceArtifactIndex(
+	input: DbOwnerSourceArtifactIndex,
+	options: DbOwnerSqlOptions,
+): Promise<unknown> {
+	const owner = await getDbOwner();
+	return await submitWithAdmission<unknown>(
+		owner,
+		{ kind: "source_artifact_index", input },
+		{ ...options, lane: options.lane ?? "write" },
+	);
+}
+
+export async function dbOwnerSourceNativeMemoryIndex(
+	input: DbOwnerNativeMemoryIndex,
+	options: DbOwnerSqlOptions,
+): Promise<{
+	readonly artifactChanged: boolean;
+	readonly graphIndexed: boolean;
+	readonly embeddingProviderUnavailable: boolean;
+}> {
+	const owner = await getDbOwner();
+	return await submitWithAdmission<{
+		readonly artifactChanged: boolean;
+		readonly graphIndexed: boolean;
+		readonly embeddingProviderUnavailable: boolean;
+	}>(owner, { kind: "source_native_memory_index", input }, { ...options, lane: options.lane ?? "write" });
+}
+
+export async function dbOwnerSourceArtifactPurge(
+	input: DbOwnerSourceArtifactPurge,
+	options: DbOwnerSqlOptions,
+): Promise<unknown> {
+	const owner = await getDbOwner();
+	return await submitWithAdmission<unknown>(
+		owner,
+		{ kind: "source_artifact_purge", input },
 		{ ...options, lane: options.lane ?? "write" },
 	);
 }

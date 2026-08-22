@@ -118,7 +118,7 @@ function safeDecodeURIComponent(value: string): string {
 
 function displayNameFromPath(path: string): string {
 	const clean = canonicalSegment(path);
-	const tail = clean.split(/[\/#]/).filter(Boolean).at(-1);
+	const tail = clean.split(/[/#]/).filter(Boolean).at(-1);
 	return tail ? safeDecodeURIComponent(tail).replace(/\.[a-z0-9]+$/i, "") : path;
 }
 
@@ -301,9 +301,23 @@ export function purgeSourceArtifactStructure(
 	input: PurgeSourceArtifactStructureInput,
 ): PurgeSourceArtifactStructureResult {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) =>
-		purgeSourceArtifactStructureInTx(db, input),
+	return getDbAccessor().withWriteTx(
+		(db: import("./db-accessor").WriteDb) => purgeSourceArtifactStructureInTx(db, input),
+		"source-artifact-graph.ts:304",
 	);
+}
+
+export async function purgeSourceArtifactStructureAsync(
+	input: PurgeSourceArtifactStructureInput,
+): Promise<PurgeSourceArtifactStructureResult> {
+	const { dbOwnerSourceArtifactPurge } = await import("./db-owner-runtime");
+	return (await dbOwnerSourceArtifactPurge(input, {
+		operation: "sources.artifacts.graph-purge",
+		lane: "write",
+		workloadClass: "maintenance",
+		deadlineMs: 30_000,
+		estimatedWorkUnits: 2,
+	})) as PurgeSourceArtifactStructureResult;
 }
 
 export function indexSourceArtifactStructure(
@@ -311,9 +325,23 @@ export function indexSourceArtifactStructure(
 ): IndexSourceArtifactStructureResult {
 	const now = new Date().toISOString();
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) =>
-		indexSourceArtifactStructureInTx(db, input, now),
+	return getDbAccessor().withWriteTx(
+		(db: import("./db-accessor").WriteDb) => indexSourceArtifactStructureInTx(db, input, now),
+		"source-artifact-graph.ts:328",
 	);
+}
+
+export async function indexSourceArtifactStructureAsync(
+	input: IndexSourceArtifactStructureInput,
+): Promise<IndexSourceArtifactStructureResult> {
+	const { dbOwnerSourceArtifactIndex } = await import("./db-owner-runtime");
+	return (await dbOwnerSourceArtifactIndex(input, {
+		operation: "sources.artifacts.graph-index",
+		lane: "write",
+		workloadClass: "maintenance",
+		deadlineMs: 30_000,
+		estimatedWorkUnits: Math.max(1, Math.ceil(input.content.length / 1024)),
+	})) as IndexSourceArtifactStructureResult;
 }
 
 export function indexSourceArtifactStructureInTx(

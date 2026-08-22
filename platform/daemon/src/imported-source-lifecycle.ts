@@ -157,5 +157,5 @@ export function markImportedSourceUnsupported(
 			attributes,
 			dependencies,
 		};
-	});
+	}, "imported-source-lifecycle.ts:36");
 }

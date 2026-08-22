@@ -133,7 +133,10 @@ export function getDreamingAttention(
 	limit?: number,
 ): readonly DreamingAttention[] {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) => getDreamingAttentionInDb(db, agentId, limit));
+	return accessor.withReadDb(
+		(db: import("../db-accessor").ReadDb) => getDreamingAttentionInDb(db, agentId, limit),
+		"pipeline/dreaming-attention.ts:136",
+	);
 }
 
 export function getDreamingAttentionWorkloadDiagnostics(
@@ -158,7 +161,7 @@ export function getDreamingAttentionWorkloadDiagnostics(
 			pending: row.pending,
 			oldestAgeMs: oldestMs > 0 ? Math.max(0, nowMs - oldestMs) : null,
 		};
-	});
+	}, "pipeline/dreaming-attention.ts:148");
 }
 
 /** Scoped attention query with kind and resolution filters (attention_list). */
@@ -199,7 +202,7 @@ export function getDreamingAttentionScoped(
 			...attention,
 			details: parseDetails(detailsJson),
 		}));
-	});
+	}, "pipeline/dreaming-attention.ts:184");
 }
 
 /**
@@ -245,7 +248,7 @@ export function getDreamingAttentionAcrossScopes(
 			...attention,
 			details: parseDetails(detailsJson),
 		}));
-	});
+	}, "pipeline/dreaming-attention.ts:228");
 }
 
 export function getDreamingAttentionById(
@@ -278,7 +281,7 @@ export function getDreamingAttentionById(
 			priority: row.priority,
 			createdAt: row.createdAt,
 		};
-	});
+	}, "pipeline/dreaming-attention.ts:259");
 }
 
 export function getDreamingAttentionSnapshots(
@@ -287,8 +290,9 @@ export function getDreamingAttentionSnapshots(
 	limit?: number,
 ): readonly DreamingAttentionSnapshot[] {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) =>
-		getDreamingAttentionSnapshotsInDb(db, agentId, limit),
+	return accessor.withReadDb(
+		(db: import("../db-accessor").ReadDb) => getDreamingAttentionSnapshotsInDb(db, agentId, limit),
+		"pipeline/dreaming-attention.ts:293",
 	);
 }
 

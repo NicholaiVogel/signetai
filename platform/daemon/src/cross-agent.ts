@@ -686,7 +686,7 @@ export function createAgentMessage(input: CreateAgentMessageInput): AgentMessage
 			row.created_at,
 			row.expires_at,
 		);
-	});
+	}, "cross-agent.ts:645");
 
 	const out = rowToAgentMessage(row);
 	emit({ type: "message", message: out, timestamp: now });
@@ -789,7 +789,7 @@ export function claimAcpMessageDelivery(input: {
 		if (row == null) throw new AgentMessageNotFoundError(messageId);
 		if (agentId && row.from_agent_id !== agentId) throw new AgentMessageNotFoundError(messageId);
 		attempt = buildAcpAttempt(row);
-	});
+	}, "cross-agent.ts:768");
 	if (attempt == null) throw new AgentMessageNotFoundError(messageId);
 	return attempt;
 }
@@ -832,7 +832,7 @@ export function completeAcpMessageDelivery(
 		const row = readMessageRow(db, normalizedId);
 		if (row == null) throw new AgentMessageNotFoundError(normalizedId);
 		updated = rowToAgentMessage(row);
-	});
+	}, "cross-agent.ts:813");
 	if (updated == null) throw new AgentMessageNotFoundError(normalizedId);
 	emit({ type: "message", message: updated, timestamp: now });
 	return updated;
@@ -871,20 +871,23 @@ export function updateAgentMessageDelivery(
 		const row = readMessageRow(db, normalizedId);
 		if (row == null) throw new AgentMessageNotFoundError(normalizedId);
 		updated = rowToAgentMessage(row);
-	});
+	}, "cross-agent.ts:856");
 	if (updated == null) throw new AgentMessageNotFoundError(normalizedId);
 	emit({ type: "message", message: updated, timestamp: now });
 	return updated;
 }
 
-export function reconcileAcpDeliveries(accessor: DbAccessor = getDbAccessor(), nowMs = Date.now()): number {
+export async function reconcileAcpDeliveries(
+	accessor: DbAccessor = getDbAccessor(),
+	nowMs = Date.now(),
+): Promise<number> {
 	const now = new Date(nowMs).toISOString();
 	const pendingCutoff = new Date(nowMs - ACP_PENDING_GRACE_MS).toISOString();
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return accessor.withWriteTx((db: import("./db-accessor").WriteDb) => {
-		const result = db
-			.prepare(
-				`UPDATE cross_agent_messages
+	return await accessor.withWriteTxAsync(
+		(db: import("./db-accessor").WriteDb) => {
+			const result = db
+				.prepare(
+					`UPDATE cross_agent_messages
 				 SET delivery_state = 'indeterminate', delivery_status = 'queued',
 				     delivery_error = CASE
 				       WHEN delivery_state = 'in_flight' THEN 'ACP relay interrupted; remote outcome is unknown'
@@ -895,10 +898,12 @@ export function reconcileAcpDeliveries(accessor: DbAccessor = getDbAccessor(), n
 				 WHERE delivery_path = 'acp'
 				   AND ((delivery_state = 'in_flight' AND delivery_lease_expires_at <= ?)
 				     OR (delivery_state = 'pending' AND delivery_updated_at <= ?))`,
-			)
-			.run(now, now, pendingCutoff);
-		return result.changes;
-	});
+				)
+				.run(now, now, pendingCutoff);
+			return result.changes;
+		},
+		{ siteToken: "cross-agent.ts:886", operation: "cross-agent.reconcile-acp-deliveries" },
+	);
 }
 
 export function listAgentMessagePage(options: ListAgentMessageOptions = {}): AgentMessagePage {
@@ -935,7 +940,7 @@ export function listAgentMessagePage(options: ListAgentMessageOptions = {}): Age
 			offset,
 			hasMore: offset + items.length < total,
 		};
-	});
+	}, "cross-agent.ts:919");
 }
 
 export function listAgentMessages(options: ListAgentMessageOptions = {}): AgentMessage[] {
@@ -992,7 +997,7 @@ export function acknowledgeAgentMessage(input: AcknowledgeAgentMessageInput): Ac
 		const acknowledgedAt = receipt?.acknowledged_at;
 		if (!acknowledgedAt) throw new Error("Failed to persist cross-agent acknowledgement");
 		return { messageId, agentId, acknowledgedAt, alreadyAcknowledged: false };
-	});
+	}, "cross-agent.ts:958");
 }
 
 export function subscribeCrossAgentEvents(subscriber: (event: CrossAgentEvent) => void): () => void {
@@ -1028,5 +1033,5 @@ export function resetCrossAgentStateForTest(): void {
 	getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) => {
 		db.prepare("DELETE FROM cross_agent_message_receipts").run();
 		db.prepare("DELETE FROM cross_agent_messages").run();
-	});
+	}, "cross-agent.ts:1033");
 }

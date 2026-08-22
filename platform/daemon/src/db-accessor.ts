@@ -51,6 +51,14 @@ import {
 import type { DbOwnerHealth } from "./db-owner-client";
 import { observeDbLatency } from "./runtime-pressure";
 import { resetFtsIndexState, setFtsIndexIncomplete } from "./fts-index-state";
+import {
+	beginSyncDbCall,
+	captureSyncDbCallSiteToken,
+	endSyncDbCall,
+	type SyncDbCallSiteToken,
+} from "./sync-db-attribution";
+
+export type { SyncDbCallSiteToken } from "./sync-db-attribution";
 
 export { DbSpacePreflightError };
 
@@ -197,11 +205,15 @@ export interface ReadAdmissionOptions {
 	readonly signal?: AbortSignal;
 	/** Stable diagnostic label for the owner boundary. */
 	readonly operation?: string;
+	/** Static caller location retained for in-flight parent attribution. */
+	readonly siteToken?: SyncDbCallSiteToken;
 }
 
 export interface WriteAdmissionOptions {
 	/** Stable diagnostic label for the owner boundary. */
 	readonly operation?: string;
+	/** Static caller location retained for in-flight parent attribution. */
+	readonly siteToken?: SyncDbCallSiteToken;
 	/** Maximum time a queued job may wait before it is rejected. */
 	readonly deadlineMs?: number;
 	/** Estimated work units for diagnostics and scheduling. */
@@ -291,14 +303,14 @@ export interface AsyncDbAccessor {
 	withWriteTxAsync<T>(fn: (db: WriteDb) => T, options?: WriteAdmissionOptions): Promise<T>;
 
 	/** Admit a WAL checkpoint through the bounded async writer queue. */
-	checkpointWalAsync?(): Promise<void>;
+	checkpointWalAsync?(options?: WriteAdmissionOptions): Promise<void>;
 
 	/** Admit incremental vacuum through the bounded async writer queue. */
-	incrementalVacuumAsync?(): Promise<number>;
+	incrementalVacuumAsync?(options?: WriteAdmissionOptions): Promise<number>;
 
 	/** Admit the one-time legacy auto_vacuum conversion through the bounded
 	 *  async writer queue. */
-	vacuumConversionAsync?(): Promise<boolean>;
+	vacuumConversionAsync?(options?: WriteAdmissionOptions): Promise<boolean>;
 
 	/** Return bounded local diagnostics for the writer admission path. */
 	getWritePressure?(): WritePressure;
@@ -1711,25 +1723,70 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 	}
 
 	return {
-		withWriteTx<T>(fn: (db: WriteDb) => T): T {
+		withWriteTx<T>(fn: (db: WriteDb) => T, siteToken?: SyncDbCallSiteToken): T {
 			if (closed) throw new Error("DbAccessor is closed");
-			return runWriteTx(fn);
+			const attribution = beginSyncDbCall("withWriteTx", Date.now(), siteToken);
+			try {
+				return runWriteTx(fn);
+			} finally {
+				endSyncDbCall(attribution);
+			}
 		},
 
 		withWriteTxAsync<T>(fn: (db: WriteDb) => T, options?: WriteAdmissionOptions): Promise<T> {
-			return enqueueWrite(() => fn(writeConn), options);
+			return enqueueWrite(() => {
+				const attribution = beginSyncDbCall("withWriteTxAsync", Date.now(), options?.siteToken);
+				try {
+					return fn(writeConn);
+				} finally {
+					endSyncDbCall(attribution);
+				}
+			}, options);
 		},
 
-		checkpointWalAsync(): Promise<void> {
-			return enqueueWrite(runCheckpointWal, { operation: "db.checkpoint_wal" }, false);
+		checkpointWalAsync(options?: WriteAdmissionOptions): Promise<void> {
+			return enqueueWrite(
+				() => {
+					const attribution = beginSyncDbCall("checkpointWalAsync", Date.now(), options?.siteToken);
+					try {
+						return runCheckpointWal();
+					} finally {
+						endSyncDbCall(attribution);
+					}
+				},
+				{ ...options, operation: options?.operation ?? "db.checkpoint_wal" },
+				false,
+			);
 		},
 
-		incrementalVacuumAsync(): Promise<number> {
-			return enqueueWrite(runIncrementalVacuum, { operation: "db.incremental_vacuum" }, false);
+		incrementalVacuumAsync(options?: WriteAdmissionOptions): Promise<number> {
+			return enqueueWrite(
+				() => {
+					const attribution = beginSyncDbCall("incrementalVacuumAsync", Date.now(), options?.siteToken);
+					try {
+						return runIncrementalVacuum();
+					} finally {
+						endSyncDbCall(attribution);
+					}
+				},
+				{ ...options, operation: options?.operation ?? "db.incremental_vacuum" },
+				false,
+			);
 		},
 
-		vacuumConversionAsync(): Promise<boolean> {
-			return enqueueWrite(runVacuumConversion, { operation: "db.vacuum_conversion" }, false);
+		vacuumConversionAsync(options?: WriteAdmissionOptions): Promise<boolean> {
+			return enqueueWrite(
+				() => {
+					const attribution = beginSyncDbCall("vacuumConversionAsync", Date.now(), options?.siteToken);
+					try {
+						return runVacuumConversion();
+					} finally {
+						endSyncDbCall(attribution);
+					}
+				},
+				{ ...options, operation: options?.operation ?? "db.vacuum_conversion" },
+				false,
+			);
 		},
 
 		checkpointWal(): void {
@@ -1789,18 +1846,21 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 			return dbOwnerHealthProvider?.() ?? null;
 		},
 
-		withReadDb<T>(fn: (db: ReadDb) => T): T {
+		withReadDb<T>(fn: (db: ReadDb) => T, siteToken?: SyncDbCallSiteToken): T {
 			if (closed) throw new Error("DbAccessor is closed");
+			const attribution = beginSyncDbCall("withReadDb", Date.now(), siteToken);
 			const startedAt = performance.now();
-			const conn = acquireReadSync("db.read.sync");
+			let conn: SqliteDatabase | null = null;
 			let outcome: DbOperationOutcome = "completed";
 			try {
+				conn = acquireReadSync("db.read.sync");
 				return fn(conn);
 			} catch (error) {
 				outcome = "failed";
 				throw error;
 			} finally {
-				releaseRead(conn);
+				endSyncDbCall(attribution);
+				if (conn !== null) releaseRead(conn);
 				const durationMs = performance.now() - startedAt;
 				observeDbLatency(durationMs);
 				recordDbOperation({
@@ -1826,7 +1886,12 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 				// Invoke the callback before releasing the lease so its synchronous
 				// query work runs against the admitted connection. Do not await a
 				// returned promise here: unrelated async work must not retain it.
-				result = fn(lease.conn);
+				const attribution = beginSyncDbCall("withReadDbAsync", Date.now(), options?.siteToken);
+				try {
+					result = fn(lease.conn);
+				} finally {
+					endSyncDbCall(attribution);
+				}
 			} catch (error) {
 				outcome = "failed";
 				releaseRead(lease.conn);
@@ -1891,9 +1956,14 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 // Public helpers
 // ---------------------------------------------------------------------------
 
-/** Queue a write transaction through the bounded async writer. */
-export async function runWriteTxAsync<T>(accessor: DbAccessor, fn: (db: WriteDb) => T): Promise<T> {
-	return await accessor.withWriteTxAsync(fn);
+export async function runWriteTxAsync<T>(
+	accessor: DbAccessor,
+	fn: (db: WriteDb) => T,
+	options?: WriteAdmissionOptions,
+): Promise<T> {
+	const siteToken = options?.siteToken ?? captureSyncDbCallSiteToken();
+	// DYNAMIC_SITE_TOKEN: this helper captures its actual caller before queueing.
+	return await accessor.withWriteTxAsync(fn, siteToken === undefined ? options : { ...options, siteToken });
 }
 
 /** Get the initialised accessor. Throws if `initDbAccessor` hasn't been called. */

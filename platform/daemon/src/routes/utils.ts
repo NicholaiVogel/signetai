@@ -507,7 +507,7 @@ export function loadForgetCandidates(
 			version: row.version,
 			score: 0,
 		}));
-	});
+	}, "routes/utils.ts:437");
 }
 
 export function loadForgetCandidatesByIds(
@@ -547,7 +547,7 @@ export function loadForgetCandidatesByIds(
 				version: row.version,
 				score: 0,
 			}));
-	});
+	}, "routes/utils.ts:525");
 }
 
 export function buildForgetConfirmToken(memoryIds: readonly string[]): string {
@@ -575,7 +575,7 @@ export function parseModifyPatch(
 	let changed = false;
 	let contentForEmbedding: string | null = null;
 
-	const hasField = (field: string): boolean => Object.prototype.hasOwnProperty.call(payload, field);
+	const hasField = (field: string): boolean => Object.hasOwn(payload, field);
 
 	if (hasField("content")) {
 		if (typeof payload.content !== "string") {

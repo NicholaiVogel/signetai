@@ -77,7 +77,6 @@ export interface DbOwnerSourceGraphIndex {
 	readonly root: string;
 	readonly filePath: string;
 	readonly content: string;
-	readonly markdownPaths?: readonly string[];
 }
 
 export interface DbOwnerSourceGraphFilePurge {
@@ -91,6 +90,87 @@ export interface DbOwnerSourceGraphPurge {
 	readonly agentId?: string;
 	readonly sourceId: string;
 	readonly root: string;
+}
+
+export interface DbOwnerSourceArtifactPurge {
+	readonly agentId: string;
+	readonly sourceId: string;
+	readonly sourcePath: string;
+}
+
+export interface DbOwnerSourceArtifactIndex {
+	readonly agentId: string;
+	readonly sourceId: string;
+	readonly sourceKind: string;
+	readonly sourceRoot: string;
+	readonly sourcePath: string;
+	readonly sourceParentPath?: string;
+	readonly displayName?: string;
+	readonly content: string;
+}
+
+/**
+ * The source/index owner receives a descriptor produced by the killable source
+ * worker. The parent never reads, hashes, or normalizes the file; this owner
+ * performs the artifact upsert and optional graph projection in one boundary.
+ */
+export interface DbOwnerNativeMemoryIndex {
+	readonly agentId: string;
+	readonly sourcePath: string;
+	readonly sourceHash: string;
+	readonly sourceKind: string;
+	readonly harness: string;
+	readonly content: string;
+	readonly sourceMtimeMs: number;
+	readonly sourceId: string | null;
+	readonly sourceRoot: string | null;
+	readonly sourceExternalId: string | null;
+	readonly sourceParentPath: string | null;
+	readonly sourceMetaJson: string | null;
+	readonly displayName: string;
+	/** Source-worker prepared chunks and configuration for owner-side embedding. */
+	readonly embedding?: {
+		readonly config: {
+			readonly provider: string;
+			readonly model: string;
+			readonly dimensions: number;
+			readonly base_url: string;
+			readonly api_key?: string;
+			readonly profile?: string;
+			readonly warmNative?: boolean;
+			readonly indexGeneration?: string;
+			readonly llamaCppMaxInputTokens?: number;
+		};
+		readonly chunks: readonly {
+			readonly id: string;
+			readonly chunkText: string;
+		}[];
+	};
+	/** Durable per-file frontier update committed with the artifact transaction. */
+	readonly checkpoint?: {
+		readonly sourceKey: string;
+		readonly scanned: number;
+		/** Traversal state immediately after this descriptor's file. */
+		readonly cursor: string | null;
+		readonly frontier: readonly string[] | null;
+		readonly complete: boolean;
+	};
+	/**
+	 * Retry frontier selected atomically when owner-side embedding reports that
+	 * the provider is unavailable partway through this descriptor.
+	 */
+	readonly checkpointOnProviderFailure?: {
+		readonly sourceKey: string;
+		readonly scanned: number;
+		readonly cursor: string | null;
+		readonly frontier: readonly string[] | null;
+		readonly complete: boolean;
+	};
+	readonly graph?: {
+		readonly sourceId: string;
+		readonly sourceName: string;
+		readonly root: string;
+	};
 }
 
 export interface DbOwnerSourceArtifactFields {
@@ -144,6 +224,9 @@ export type DbOwnerRequest =
 	| { readonly kind: "source_graph_index"; readonly input: DbOwnerSourceGraphIndex }
 	| { readonly kind: "source_graph_file_purge"; readonly input: DbOwnerSourceGraphFilePurge }
 	| { readonly kind: "source_graph_purge"; readonly input: DbOwnerSourceGraphPurge }
+	| { readonly kind: "source_artifact_index"; readonly input: DbOwnerSourceArtifactIndex }
+	| { readonly kind: "source_native_memory_index"; readonly input: DbOwnerNativeMemoryIndex }
+	| { readonly kind: "source_artifact_purge"; readonly input: DbOwnerSourceArtifactPurge }
 	| { readonly kind: "source_artifact_upsert"; readonly input: DbOwnerSourceArtifactUpsert }
 	| { readonly kind: "source_artifact_upsert_batch"; readonly input: readonly DbOwnerSourceArtifactUpsert[] }
 	| { readonly kind: "vacuum_conversion" }

@@ -40,7 +40,6 @@ export interface StartupRecoveryProgress {
 	readonly operation: string;
 	readonly processed: number;
 	readonly batches: number;
-	readonly deadlineKills: number;
 	readonly ownerState: string | null;
 	readonly ownerGeneration: number | null;
 	readonly updatedAt: string;
@@ -56,6 +55,7 @@ const PENDING_INTEGRITY: DatabaseIntegrityStatus = {
 	checkedAt: "",
 	state: "unknown",
 	phase: "pending",
+	integrity: null,
 	quickCheck: { ok: false, messages: ["not checked"] },
 	telemetryCheck: { ok: false, messages: ["not checked"] },
 	rebuiltIndexes: [],
@@ -63,7 +63,6 @@ const PENDING_INTEGRITY: DatabaseIntegrityStatus = {
 	repairGuidance: null,
 	ownerState: null,
 	ownerGeneration: null,
-	deadlineKills: 0,
 	incrementalProgress: null,
 };
 
@@ -75,7 +74,7 @@ function yieldToEventLoop(): Promise<void> {
 }
 
 async function writeBatch<Result>(accessor: DbAccessor, processBatch: (db: WriteDb) => Result): Promise<Result> {
-	return accessor.withWriteTxAsync(processBatch);
+	return accessor.withWriteTxAsync(processBatch, { siteToken: "startup-recovery.ts:77" });
 }
 
 /**
@@ -97,7 +96,9 @@ async function drainBatchesAsync<Item>(
 	let batches = 0;
 	while (processed < maxTotal) {
 		const limit = Math.min(BATCH_SIZE, maxTotal - processed);
-		const batch = await accessor.withReadDbAsync(async (db) => fetchBatch(db, limit));
+		const batch = await accessor.withReadDbAsync(async (db) => fetchBatch(db, limit), {
+			siteToken: "startup-recovery.ts:99",
+		});
 		if (!batch || batch.length === 0) return processed;
 		await writeBatch(accessor, (db) => processBatch(db, batch));
 		processed += batch.length;
@@ -149,7 +150,6 @@ async function runOwnerStartupRecovery(owner: DbOwnerClient): Promise<StartupRec
 			processed,
 			ownerState: health.state,
 			ownerGeneration: health.generation,
-			deadlineKills: health.deadlineKills,
 		});
 	};
 
@@ -481,16 +481,19 @@ async function runStartupRecoveryInternal(accessor: DbAccessor, owner?: DbOwnerC
 
 	let stagingRowsCleaned = 0;
 	try {
-		const migrationInProgress = await accessor.withReadDbAsync(async (db) => {
-			const tableExists = db
-				.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'embedding_index_state'")
-				.get() as { n: number } | undefined;
-			if (!tableExists?.n) return false;
-			const state = db.prepare("SELECT state FROM embedding_index_state WHERE id = 1").get() as
-				| { state: string }
-				| undefined;
-			return state?.state === "building";
-		});
+		const migrationInProgress = await accessor.withReadDbAsync(
+			async (db) => {
+				const tableExists = db
+					.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'embedding_index_state'")
+					.get() as { n: number } | undefined;
+				if (!tableExists?.n) return false;
+				const state = db.prepare("SELECT state FROM embedding_index_state WHERE id = 1").get() as
+					| { state: string }
+					| undefined;
+				return state?.state === "building";
+			},
+			{ siteToken: "startup-recovery.ts:484" },
+		);
 
 		if (migrationInProgress) {
 			logger.info("startup-recovery", "Skipping staging cleanup, embedding index migration is in progress");

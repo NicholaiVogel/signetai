@@ -10,7 +10,7 @@
  * Idempotent — matched by canonical name + frontmatter content hash.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { access, readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { watch } from "chokidar";
 import type { DbAccessor } from "../db-accessor.js";
@@ -68,6 +68,15 @@ export function withSkillReconciliationLock<T>(
 
 function skillsDir(agentsDir: string): string {
 	return join(agentsDir, "skills");
+}
+
+async function pathExists(path: string): Promise<boolean> {
+	try {
+		await access(path);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -133,12 +142,12 @@ export async function reconcileOnce(
 
 	// 1. Scan filesystem
 	const diskSkills = new Map<string, string>(); // name → SKILL.md path
-	if (options.scanFilesystem !== false && existsSync(dir)) {
-		const entries = readdirSync(dir, { withFileTypes: true });
+	if (options.scanFilesystem !== false && (await pathExists(dir))) {
+		const entries = await readdir(dir, { withFileTypes: true });
 		for (const entry of entries) {
 			if (!entry.isDirectory()) continue;
 			const skillMdPath = join(dir, entry.name, "SKILL.md");
-			if (existsSync(skillMdPath)) {
+			if (await pathExists(skillMdPath)) {
 				diskSkills.set(entry.name, skillMdPath);
 			}
 		}
@@ -159,16 +168,16 @@ export async function reconcileOnce(
 	}
 
 	// 3. Check for orphaned graph nodes (file removed from disk)
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	const graphSkills = deps.accessor.withReadDb(
+	const graphSkills = await deps.accessor.withReadDbAsync(
 		(db: import("../db-accessor").ReadDb) =>
 			db
 				.prepare("SELECT entity_id, fs_path FROM skill_meta WHERE agent_id = 'default' AND uninstalled_at IS NULL")
 				.all() as Array<{ entity_id: string; fs_path: string }>,
+		{ siteToken: "pipeline/skill-reconciler.ts:171", operation: "pipeline.skill-reconciler.list-graph-skills" },
 	);
 
 	for (const row of graphSkills) {
-		if (!existsSync(row.fs_path)) {
+		if (!(await pathExists(row.fs_path))) {
 			// Prefer the namespace id, but retain the filesystem name for legacy
 			// rows whose entity_id does not use the skill namespace.
 			const parts = row.entity_id.split(":");
@@ -226,32 +235,32 @@ export async function reconcileSkillFile(
 		}
 
 		try {
-			if (!existsSync(mdPath)) {
-				const result = uninstallSkillNode({ skillName }, deps.accessor);
+			if (!(await pathExists(mdPath))) {
+				const result = await uninstallSkillNode({ skillName }, deps.accessor);
 				resetSkillFailureState(skillName);
 				return result.removed ? "removed" : "unchanged";
 			}
 
-			const content = readFileSync(mdPath, "utf-8");
+			const content = await readFile(mdPath, "utf-8");
 			const parsed = parseSkillFile(content);
 			if (!parsed) return "skipped";
 
 			const entityId = `skill:default:${skillName}`;
-			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			const existing = deps.accessor.withReadDb(
+			const existing = await deps.accessor.withReadDbAsync(
 				(db: import("../db-accessor").ReadDb) =>
 					db
 						.prepare("SELECT id FROM entities WHERE id = ? OR (name = ? AND agent_id = 'default')")
 						.get(entityId, skillName) as { id: string } | undefined,
+				{ siteToken: "pipeline/skill-reconciler.ts:249", operation: "pipeline.skill-reconciler.find-entity" },
 			);
 			const actualId = existing?.id ?? entityId;
 			const rawHash = skillEmbeddingHash(actualId, parsed.frontmatter);
-			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			const storedEmb = deps.accessor.withReadDb(
+			const storedEmb = await deps.accessor.withReadDbAsync(
 				(db: import("../db-accessor").ReadDb) =>
 					db
 						.prepare("SELECT content_hash FROM embeddings WHERE source_type = 'skill' AND source_id = ?")
 						.get(actualId) as { content_hash: string } | undefined,
+				{ siteToken: "pipeline/skill-reconciler.ts:258", operation: "pipeline.skill-reconciler.find-embedding" },
 			);
 
 			const shouldInstall =
@@ -305,8 +314,8 @@ export async function reconcileSkillFile(
  * unlink path and must use the workspace key, not the skills directory path.
  */
 export function reconcileUnlinkedSkill(skillName: string, deps: ReconcilerDeps): Promise<ReconcileSkillResult> {
-	return withSkillReconciliationLock(deps.agentsDir, skillName, () => {
-		const result = uninstallSkillNode({ skillName }, deps.accessor);
+	return withSkillReconciliationLock(deps.agentsDir, skillName, async () => {
+		const result = await uninstallSkillNode({ skillName }, deps.accessor);
 		resetSkillFailureState(skillName);
 		return result.removed ? "removed" : "unchanged";
 	});
@@ -329,9 +338,9 @@ export function startReconciler(deps: ReconcilerDeps): ReconcilerHandle {
 	let activePass: Promise<void> | null = null;
 	let stopped = false;
 
-	const directoryMtimeMs = (): number | null => {
+	const directoryMtimeMs = async (): Promise<number | null> => {
 		try {
-			return statSync(dir).mtimeMs;
+			return (await stat(dir)).mtimeMs;
 		} catch {
 			return null;
 		}
@@ -342,7 +351,7 @@ export function startReconciler(deps: ReconcilerDeps): ReconcilerHandle {
 		if (activePass) return activePass;
 
 		const pass = (async () => {
-			const currentMtimeMs = directoryMtimeMs();
+			const currentMtimeMs = await directoryMtimeMs();
 			const scanFilesystem = currentMtimeMs !== lastScannedDirMtimeMs;
 			await reconcileOnce(deps, { scanFilesystem });
 			lastScannedDirMtimeMs = currentMtimeMs;
@@ -373,45 +382,43 @@ export function startReconciler(deps: ReconcilerDeps): ReconcilerHandle {
 	// File watcher for low-latency reconciliation
 	let watcher: ReturnType<typeof watch> | null = null;
 
-	if (existsSync(dir)) {
-		watcher = watch(join(dir, "*", "SKILL.md"), {
-			ignoreInitial: true,
-			awaitWriteFinish: { stabilityThreshold: 500 },
-		});
+	watcher = watch(join(dir, "*", "SKILL.md"), {
+		ignoreInitial: true,
+		awaitWriteFinish: { stabilityThreshold: 500 },
+	});
 
-		watcher.on("add", (filePath) => {
-			const skillName = basename(dirname(filePath));
-			logger.info("reconciler", "SKILL.md added", { skill: skillName });
-			reconcileSkillFile(skillName, filePath, deps, { forceInstall: true }).catch((e) => {
-				logger.error("reconciler", "Watcher reconciliation failed", e instanceof Error ? e : undefined, {
-					skill: skillName,
-					error: String(e),
-				});
+	watcher.on("add", (filePath) => {
+		const skillName = basename(dirname(filePath));
+		logger.info("reconciler", "SKILL.md added", { skill: skillName });
+		reconcileSkillFile(skillName, filePath, deps, { forceInstall: true }).catch((e) => {
+			logger.error("reconciler", "Watcher reconciliation failed", e instanceof Error ? e : undefined, {
+				skill: skillName,
+				error: String(e),
 			});
 		});
+	});
 
-		watcher.on("change", (filePath) => {
-			const skillName = basename(dirname(filePath));
-			logger.info("reconciler", "SKILL.md changed", { skill: skillName });
-			reconcileSkillFile(skillName, filePath, deps, { forceInstall: true }).catch((e) => {
-				logger.error("reconciler", "Watcher reconciliation failed", e instanceof Error ? e : undefined, {
-					skill: skillName,
-					error: String(e),
-				});
+	watcher.on("change", (filePath) => {
+		const skillName = basename(dirname(filePath));
+		logger.info("reconciler", "SKILL.md changed", { skill: skillName });
+		reconcileSkillFile(skillName, filePath, deps, { forceInstall: true }).catch((e) => {
+			logger.error("reconciler", "Watcher reconciliation failed", e instanceof Error ? e : undefined, {
+				skill: skillName,
+				error: String(e),
 			});
 		});
+	});
 
-		watcher.on("unlink", (filePath) => {
-			const skillName = basename(dirname(filePath));
-			logger.info("reconciler", "SKILL.md removed", { skill: skillName });
-			reconcileUnlinkedSkill(skillName, deps).catch((e) => {
-				logger.error("reconciler", "Watcher uninstall failed", e instanceof Error ? e : undefined, {
-					skill: skillName,
-					error: String(e),
-				});
+	watcher.on("unlink", (filePath) => {
+		const skillName = basename(dirname(filePath));
+		logger.info("reconciler", "SKILL.md removed", { skill: skillName });
+		reconcileUnlinkedSkill(skillName, deps).catch((e) => {
+			logger.error("reconciler", "Watcher uninstall failed", e instanceof Error ? e : undefined, {
+				skill: skillName,
+				error: String(e),
 			});
 		});
-	}
+	});
 
 	logger.info("reconciler", "Skill reconciler started", {
 		intervalMs,

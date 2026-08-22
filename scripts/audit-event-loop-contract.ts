@@ -6,6 +6,11 @@ import ts from "typescript";
 export const SYNC_APIS = [
 	"withWriteTx",
 	"withReadDb",
+	"withWriteTxAsync",
+	"withReadDbAsync",
+	"checkpointWalAsync",
+	"incrementalVacuumAsync",
+	"vacuumConversionAsync",
 	"accessSync",
 	"readdirSync",
 	"readFileSync",
@@ -29,6 +34,16 @@ export type SyncApi = (typeof SYNC_APIS)[number];
 export type SiteCategory = "pre-readiness-bootstrap" | "cli-only" | "isolated-worker" | "hot-path";
 const LEGACY_DB_APIS = ["withWriteTx", "withReadDb"] as const;
 type LegacyDbApi = (typeof LEGACY_DB_APIS)[number];
+const ATTRIBUTED_DB_APIS = [
+	"withWriteTx",
+	"withReadDb",
+	"withWriteTxAsync",
+	"withReadDbAsync",
+	"checkpointWalAsync",
+	"incrementalVacuumAsync",
+	"vacuumConversionAsync",
+] as const;
+type AttributedDbApi = (typeof ATTRIBUTED_DB_APIS)[number];
 
 export interface AuditSite {
 	readonly path: string;
@@ -68,6 +83,24 @@ export interface UnmarkedLegacyDbAccessViolation {
 	readonly message: string;
 }
 
+/** A marked legacy DB call without its static in-flight attribution token. */
+export interface MissingLegacyDbSiteTokenViolation {
+	readonly kind: "missing-legacy-db-site-token";
+	readonly path: string;
+	readonly line: number;
+	readonly api: LegacyDbApi;
+	readonly message: string;
+}
+
+/** An async-named parent DB call without its static in-flight attribution token. */
+export interface MissingAsyncDbSiteTokenViolation {
+	readonly kind: "missing-async-db-site-token";
+	readonly path: string;
+	readonly line: number;
+	readonly api: Exclude<AttributedDbApi, LegacyDbApi>;
+	readonly message: string;
+}
+
 /** Committed marker-count snapshot; the ratchet fails when the live count grows past it. */
 export interface LegacyDbCountBaseline {
 	readonly version: 1;
@@ -88,7 +121,13 @@ export interface RatchetOutcome {
 
 export interface AuditResult {
 	readonly sites: readonly AuditSite[];
-	readonly violations: readonly (ImportBoundaryViolation | LegacyDbAccessViolation | UnmarkedLegacyDbAccessViolation)[];
+	readonly violations: readonly (
+		| ImportBoundaryViolation
+		| LegacyDbAccessViolation
+		| UnmarkedLegacyDbAccessViolation
+		| MissingLegacyDbSiteTokenViolation
+		| MissingAsyncDbSiteTokenViolation
+	)[];
 	readonly legacyDbAccess: LegacyDbAccessCounts;
 }
 
@@ -220,6 +259,26 @@ function staticStringBindings(sourceFile: ts.SourceFile): ReadonlyMap<string, ts
 	return bindings;
 }
 
+function staticAsyncSiteToken(
+	node: ts.CallExpression,
+	bindings: ReadonlyMap<string, ts.Expression>,
+	api: Exclude<AttributedDbApi, LegacyDbApi>,
+): string | null {
+	const options = node.arguments[api === "withReadDbAsync" || api === "withWriteTxAsync" ? 1 : 0];
+	if (options === undefined) return null;
+	const unwrapped = unwrapStaticStringExpression(options);
+	if (ts.isStringLiteral(unwrapped) || ts.isNoSubstitutionTemplateLiteral(unwrapped)) return unwrapped.text;
+	if (!ts.isObjectLiteralExpression(unwrapped)) return null;
+	for (const property of unwrapped.properties) {
+		if (!ts.isPropertyAssignment(property)) continue;
+		const name = property.name;
+		const key = ts.isIdentifier(name) || ts.isStringLiteral(name) ? name.text : null;
+		if (key !== "siteToken") continue;
+		return staticStringValue(property.initializer, bindings);
+	}
+	return null;
+}
+
 function findImportBoundaryViolations(
 	sourceRoot: string,
 	allowedSyncCompatImporters: ReadonlySet<string>,
@@ -313,12 +372,15 @@ function findImportBoundaryViolations(
 function findLegacyDbAccessSites(sourceRoot: string): {
 	readonly sites: AuditSite[];
 	readonly unmarked: UnmarkedCallSite[];
+	readonly missingSiteTokens: (MissingLegacyDbSiteTokenViolation | MissingAsyncDbSiteTokenViolation)[];
 } {
 	const sites: AuditSite[] = [];
 	const unmarked: UnmarkedCallSite[] = [];
+	const missingSiteTokens: (MissingLegacyDbSiteTokenViolation | MissingAsyncDbSiteTokenViolation)[] = [];
 	for (const path of walk(sourceRoot)) {
 		const source = readFileSync(path, "utf8");
 		const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+		const bindings = staticStringBindings(sourceFile);
 		const lines = source.split("\n");
 		const markerLines = new Set<number>();
 		for (let index = 0; index < lines.length; index++) {
@@ -335,8 +397,12 @@ function findLegacyDbAccessSites(sourceRoot: string): {
 							(ts.isStringLiteral(expression.argumentExpression) ||
 								ts.isNoSubstitutionTemplateLiteral(expression.argumentExpression))
 						? expression.argumentExpression.text
-						: null;
-				if (LEGACY_DB_APIS.includes(api as LegacyDbApi)) {
+						: ts.isIdentifier(expression)
+							? expression.text
+							: null;
+				const isLegacyDbMemberAccess =
+					ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression);
+				if (SYNC_APIS.includes(api as SyncApi)) {
 					const position = ts.isPropertyAccessExpression(expression)
 						? expression.name.getStart(sourceFile)
 						: expression.getStart(sourceFile);
@@ -344,25 +410,60 @@ function findLegacyDbAccessSites(sourceRoot: string): {
 					sites.push({
 						path: relativePath,
 						line,
-						api: api as LegacyDbApi,
+						api: api as SyncApi,
 						source: lines[line - 1]?.trim() ?? "",
 						category: "hot-path",
 					});
-					let marked = false;
-					for (let candidate = line - 1; candidate >= Math.max(1, line - MARKER_WINDOW_LINES); candidate--) {
-						if (markerLines.has(candidate)) {
-							marked = true;
-							break;
+					if (isLegacyDbMemberAccess && LEGACY_DB_APIS.includes(api as LegacyDbApi)) {
+						let marked = false;
+						for (let candidate = line - 1; candidate >= Math.max(1, line - MARKER_WINDOW_LINES); candidate--) {
+							if (markerLines.has(candidate)) {
+								marked = true;
+								break;
+							}
+						}
+						if (!marked) unmarked.push({ path: relativePath, line, api: api as LegacyDbApi });
+						if (marked) {
+							const tokenArgument = node.arguments[1];
+							const token = tokenArgument === undefined ? null : staticStringValue(tokenArgument, bindings);
+							const expected = `${relativePath}:${line}`;
+							if (token !== expected) {
+								missingSiteTokens.push({
+									kind: "missing-legacy-db-site-token",
+									path: relativePath,
+									line,
+									api: api as LegacyDbApi,
+									message: `${relativePath}:${line} ${api}() must pass its static site token ${JSON.stringify(expected)}; unattributed in-flight DB calls are not allowed`,
+								});
+							}
 						}
 					}
-					if (!marked) unmarked.push({ path: relativePath, line, api: api as LegacyDbApi });
+					if (isLegacyDbMemberAccess && ATTRIBUTED_DB_APIS.includes(api as AttributedDbApi)) {
+						const isLegacy = LEGACY_DB_APIS.includes(api as LegacyDbApi);
+						if (!isLegacy) {
+							const expected = `${relativePath}:${line}`;
+							const token = staticAsyncSiteToken(node, bindings, api as Exclude<AttributedDbApi, LegacyDbApi>);
+							const dynamicTokenBoundary = lines
+								.slice(Math.max(0, line - 3), line)
+								.some((candidate) => candidate.includes("DYNAMIC_SITE_TOKEN"));
+							if (!dynamicTokenBoundary && token !== expected) {
+								missingSiteTokens.push({
+									kind: "missing-async-db-site-token",
+									path: relativePath,
+									line,
+									api: api as Exclude<AttributedDbApi, LegacyDbApi>,
+									message: `${relativePath}:${line} ${api}() must pass its static site token ${JSON.stringify(expected)}; unattributed in-flight DB calls are not allowed`,
+								});
+							}
+						}
+					}
 				}
 			}
 			ts.forEachChild(node, visit);
 		};
 		visit(sourceFile);
 	}
-	return { sites, unmarked };
+	return { sites, unmarked, missingSiteTokens };
 }
 
 /** A synchronous DB call site with no LEGACY_SYNC_DB_ACCESS marker within the marker window. */
@@ -513,7 +614,7 @@ export function writeCountBaseline(
 }
 
 export function runAudit(options: AuditOptions): AuditResult {
-	const { sites, unmarked } = findLegacyDbAccessSites(options.sourceRoot);
+	const { sites, unmarked, missingSiteTokens } = findLegacyDbAccessSites(options.sourceRoot);
 	const baselineSites = options.baselineSites ?? [];
 	return {
 		sites,
@@ -521,6 +622,7 @@ export function runAudit(options: AuditOptions): AuditResult {
 			...findImportBoundaryViolations(options.sourceRoot, new Set(options.allowedSyncCompatImporters ?? [])),
 			...findNewLegacyDbAccessViolations(sites, baselineSites),
 			...findUnmarkedLegacyDbAccess(unmarked),
+			...missingSiteTokens,
 		],
 		legacyDbAccess: countLegacyDbAccess(options.sourceRoot),
 	};
@@ -533,15 +635,23 @@ export function loadBaseline(path = DEFAULT_BASELINE): readonly AuditSite[] {
 }
 
 export function writeBaseline(sites: readonly AuditSite[], path = DEFAULT_BASELINE): void {
-	const output: BaselineFile = { version: 1, generatedFrom: "manual migration ledger", sites };
+	const output: BaselineFile = {
+		version: 1,
+		generatedFrom: "bun scripts/audit-event-loop-contract.ts --write-baseline",
+		sites,
+	};
 	writeFileSync(resolve(path), `${JSON.stringify(output, null, 2)}\n`);
 }
 
 export function renderReport(baselineSites: readonly AuditSite[], legacyDbAccess: LegacyDbAccessCounts): string {
 	const counts = new Map<SyncApi, number>();
 	for (const site of baselineSites) counts.set(site.api, (counts.get(site.api) ?? 0) + 1);
+	const asyncDbCount = ATTRIBUTED_DB_APIS.filter((api) => !LEGACY_DB_APIS.includes(api as LegacyDbApi)).reduce(
+		(total, api) => total + (counts.get(api) ?? 0),
+		0,
+	);
 	const filesystemProcessCount =
-		baselineSites.length - (counts.get("withReadDb") ?? 0) - (counts.get("withWriteTx") ?? 0);
+		baselineSites.length - (counts.get("withReadDb") ?? 0) - (counts.get("withWriteTx") ?? 0) - asyncDbCount;
 	return `# Event-loop synchronous contract audit
 
 This report is generated from the deterministic migration ledger in \`scripts/event-loop-contract-baseline.json\`. Phase A enforces the type boundary structurally: production code receives an async-only \`DbAccessor\`, while the synchronous compatibility module lives outside the daemon production \`src/\` tree and is rejected by the production TypeScript project's \`rootDir\`. The AST import and call checks remain belt-and-suspenders diagnostics, and new synchronous DB call sites fail closed through exact ledger matching.
@@ -551,12 +661,13 @@ This report is generated from the deterministic migration ledger in \`scripts/ev
 - Exact ledger inventory: ${baselineSites.length} sites
 - Synchronous \`withWriteTx()\` sites: ${counts.get("withWriteTx") ?? 0}
 - Synchronous \`withReadDb()\` sites: ${counts.get("withReadDb") ?? 0}
+- Async-named parent DB sites: ${asyncDbCount}
 - Synchronous filesystem/process sites: ${filesystemProcessCount}
 - Compile-visible legacy DB sites remaining: ${legacyDbAccess.total}
   - \`withWriteTx\`: ${legacyDbAccess.withWriteTx}
   - \`withReadDb\`: ${legacyDbAccess.withReadDb}
 
-The ${baselineSites.length.toLocaleString("en-US")}-site inventory excludes test, benchmark, generated, and \`__tests__\` fixtures. The ${counts.get("withWriteTx") ?? 0} synchronous writes and ${counts.get("withReadDb") ?? 0} synchronous reads remain transitional callers for the later migration phase. They are marked with \`@ts-expect-error LEGACY_SYNC_DB_ACCESS\`, so the compiler reports every remaining site without forcing this phase to migrate ${legacyDbAccess.total} database operations.
+The ${baselineSites.length.toLocaleString("en-US")}-site inventory excludes test, benchmark, generated, and \`__tests__\` fixtures and includes every synchronous filesystem, process, and database call, including async-named parent DB callbacks. The ${counts.get("withWriteTx") ?? 0} synchronous writes, ${counts.get("withReadDb") ?? 0} synchronous reads, and ${asyncDbCount} async-named parent DB sites are the complete database-call inventory; ${legacyDbAccess.total} compatibility DB operations remain transitional callers for the later migration phase. Those compatibility calls are marked with \`@ts-expect-error LEGACY_SYNC_DB_ACCESS\`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## A3 Slice 2 migration notes
 
@@ -578,9 +689,12 @@ A runtime-computed require() or import() can still reach a source-tree file when
 }
 
 function main(): void {
-	const baselineSites = loadBaseline();
+	const regenerateBaseline = process.argv.includes("--write-baseline");
+	const committedBaseline = loadBaseline();
 	const countBaseline = loadCountBaseline();
-	const result = runAudit({ sourceRoot: resolve(DEFAULT_SOURCE_ROOT), baselineSites });
+	const result = runAudit({ sourceRoot: resolve(DEFAULT_SOURCE_ROOT), baselineSites: committedBaseline });
+	if (regenerateBaseline) writeBaseline(result.sites);
+	const baselineSites = regenerateBaseline ? result.sites : committedBaseline;
 	const report = renderReport(baselineSites, result.legacyDbAccess);
 	writeFileSync(resolve(DEFAULT_REPORT), report);
 	console.log(`Ledger inventory: ${baselineSites.length}`);

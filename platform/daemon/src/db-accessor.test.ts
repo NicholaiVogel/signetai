@@ -8,6 +8,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isFtsIndexIncomplete } from "./fts-index-state";
 import {
+	getEventLoopLiveness,
+	recordEventLoopHeartbeat,
+	establishEventLoopHeartbeatBaseline,
+	resetDbObservability,
+} from "./db-observability";
+import { getSyncDbAccessor } from "../legacy-sync/db-accessor-sync";
+import {
 	DbSpacePreflightError,
 	DbReadAdmissionCancelledError,
 	DbReadAdmissionRejectedError,
@@ -22,6 +29,7 @@ import {
 	resolveCustomSqlitePath,
 	resolveSqliteAgentsDir,
 	resolveSqliteRuntimeConfig,
+	runWriteTxAsync,
 	vecEmbeddingsSchemaNeedsRepair,
 } from "./db-accessor";
 
@@ -150,6 +158,152 @@ describe("DbAccessor", () => {
 		});
 		expect(result).toBeTruthy();
 		expect(result?.val).toBe("hello");
+	});
+
+	test("attributes a wedged parent sync call with its file and line", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+
+		const realNow = Date.now;
+		let now = 1_000;
+		Date.now = () => now;
+		try {
+			resetDbObservability();
+			establishEventLoopHeartbeatBaseline(1_000, 2_000);
+			getDbAccessor().withWriteTx((db) => {
+				// Keep this synchronous on purpose: this is the parent-isolate wedge seam.
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+				now = 5_000;
+				db.prepare("SELECT 1").get();
+			});
+
+			recordEventLoopHeartbeat(5_000, 2_000);
+			const liveness = getEventLoopLiveness(5_000);
+			expect(liveness.status).toBe("wedged");
+			expect(liveness.syncDbCallSites.some((site) => site.includes("db-accessor.test.ts:"))).toBe(true);
+		} finally {
+			Date.now = realNow;
+		}
+	});
+
+	test("attributes an in-flight async-named read callback at latch time", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+
+		const realNow = Date.now;
+		let now = 1_000;
+		const state: { latched: ReturnType<typeof getEventLoopLiveness> | null } = { latched: null };
+		Date.now = () => now;
+		try {
+			resetDbObservability();
+			establishEventLoopHeartbeatBaseline(1_000, 2_000);
+			await getDbAccessor().withReadDbAsync(
+				(db) => {
+					Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+					now = 5_000;
+					recordEventLoopHeartbeat(5_000, 2_000);
+					state.latched = getEventLoopLiveness(5_000);
+					db.prepare("SELECT 1").get();
+				},
+				{ siteToken: "db-accessor.test.ts:190" },
+			);
+		} finally {
+			Date.now = realNow;
+		}
+
+		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
+		expect(state.latched.status).toBe("wedged");
+		expect(state.latched.syncDbCallSites).toContain("withReadDbAsync@platform/daemon/src/db-accessor.test.ts:190");
+	});
+
+	test("attributes an in-flight parent sync call at latch time", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+
+		const realNow = Date.now;
+		let now = 1_000;
+		const state: { latched: ReturnType<typeof getEventLoopLiveness> | null } = { latched: null };
+		Date.now = () => now;
+		try {
+			resetDbObservability();
+			establishEventLoopHeartbeatBaseline(1_000, 2_000);
+			getSyncDbAccessor().withWriteTx((db) => {
+				// Hold the real accessor call in flight while the latch inspects it.
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+				now = 5_000;
+				recordEventLoopHeartbeat(5_000, 2_000);
+				state.latched = getEventLoopLiveness(5_000);
+				db.prepare("SELECT 1").get();
+			}, "db-accessor.test.ts:201");
+		} finally {
+			Date.now = realNow;
+		}
+
+		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
+		expect(state.latched.status).toBe("wedged");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTx@platform/daemon/src/db-accessor.test.ts:201");
+	});
+
+	test("attributes an in-flight queued async write callback at latch time", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+
+		const realNow = Date.now;
+		let now = 1_000;
+		const state: { latched: ReturnType<typeof getEventLoopLiveness> | null } = { latched: null };
+		Date.now = () => now;
+		try {
+			resetDbObservability();
+			establishEventLoopHeartbeatBaseline(1_000, 2_000);
+			await getDbAccessor().withWriteTxAsync(
+				(db) => {
+					Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+					now = 5_000;
+					recordEventLoopHeartbeat(5_000, 2_000);
+					state.latched = getEventLoopLiveness(5_000);
+					db.prepare("SELECT 1").get();
+				},
+				{ siteToken: "db-accessor.test.ts:222" },
+			);
+		} finally {
+			Date.now = realNow;
+		}
+
+		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
+		expect(state.latched.status).toBe("wedged");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:222");
+	});
+
+	test("attributes the actual caller through runWriteTxAsync", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+
+		const realNow = Date.now;
+		let now = 1_000;
+		const state: { latched: ReturnType<typeof getEventLoopLiveness> | null } = { latched: null };
+		Date.now = () => now;
+		try {
+			resetDbObservability();
+			establishEventLoopHeartbeatBaseline(1_000, 2_000);
+			await runWriteTxAsync(getDbAccessor(), (db) => {
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+				now = 5_000;
+				recordEventLoopHeartbeat(5_000, 2_000);
+				state.latched = getEventLoopLiveness(5_000);
+				db.prepare("SELECT 1").get();
+			});
+		} finally {
+			Date.now = realNow;
+		}
+
+		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
+		expect(state.latched.status).toBe("wedged");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:293");
 	});
 
 	test("write statements expose the number of affected rows", () => {

@@ -3,16 +3,23 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
+import { DbOwnerDiedError } from "./db-owner-client";
 import { deriveSessionEndFallbackId } from "./session-end-recovery";
+import { logger } from "./logger";
 import { markSessionTranscriptCompleted, upsertSessionTranscript } from "./session-transcripts";
 import { enqueueTranscriptCaptureJob, runTranscriptCaptureOnce } from "./transcript-capture-worker";
 import { normalizeSessionTranscript } from "./transcript-normalization";
-import { runTranscriptRecoveryScan } from "./transcript-recovery-worker";
+import {
+	runTranscriptRecoveryScan,
+	parseTranscriptRecoveryResult,
+	startTranscriptRecoveryWorker,
+} from "./transcript-recovery-worker";
 
 let dir = "";
 let claudeRoot = "";
 let codexRoot = "";
 let previousSignetPath: string | undefined;
+let previousRecoveryHoldFile: string | undefined;
 
 function writeSettled(path: string, content: string): void {
 	mkdirSync(dirname(path), { recursive: true });
@@ -29,8 +36,25 @@ async function scan(nowMs = Date.now()) {
 }
 
 describe("transcript recovery worker", () => {
+	it("parses a buffered child result after the child has closed", () => {
+		const result = {
+			discovered: 1,
+			examined: 1,
+			enqueued: 1,
+			deduplicated: 0,
+			skippedRecent: 0,
+			skippedOversized: 0,
+			skippedUnchanged: 0,
+			skippedInvalid: 0,
+		};
+		expect(parseTranscriptRecoveryResult(`logger output\n${JSON.stringify({ type: "result", result })}\n`)).toEqual(
+			result,
+		);
+	});
+
 	beforeEach(() => {
 		previousSignetPath = process.env.SIGNET_PATH;
+		previousRecoveryHoldFile = process.env.SIGNET_TRANSCRIPT_RECOVERY_TEST_HOLD_FILE;
 		dir = mkdtempSync(join(tmpdir(), "signet-transcript-recovery-"));
 		claudeRoot = join(dir, "native", "claude", "projects");
 		codexRoot = join(dir, "native", "codex", "sessions");
@@ -42,6 +66,9 @@ describe("transcript recovery worker", () => {
 		closeDbAccessor();
 		if (previousSignetPath === undefined) Reflect.deleteProperty(process.env, "SIGNET_PATH");
 		else process.env.SIGNET_PATH = previousSignetPath;
+		if (previousRecoveryHoldFile === undefined)
+			Reflect.deleteProperty(process.env, "SIGNET_TRANSCRIPT_RECOVERY_TEST_HOLD_FILE");
+		else process.env.SIGNET_TRANSCRIPT_RECOVERY_TEST_HOLD_FILE = previousRecoveryHoldFile;
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -360,5 +387,249 @@ describe("transcript recovery worker", () => {
 		const second = await scan();
 		expect(second.skippedUnchanged).toBe(1);
 		expect(second.examined).toBe(0);
+	});
+
+	it("resumes a bounded scan from its durable frontier", async () => {
+		const firstPath = join(claudeRoot, "-repo", "a-frontier.jsonl");
+		const secondPath = join(claudeRoot, "-repo", "b-frontier.jsonl");
+		const makeLog = (sessionId: string, content: string) =>
+			[
+				JSON.stringify({
+					sessionId,
+					timestamp: "2026-07-20T10:00:00.000Z",
+					cwd: "/repo",
+					message: { role: "user", content },
+				}),
+				JSON.stringify({
+					sessionId,
+					timestamp: "2026-07-20T10:01:00.000Z",
+					cwd: "/repo",
+					message: { role: "assistant", content: `${content} response` },
+				}),
+			].join("\\n");
+		writeSettled(firstPath, makeLog("frontier-a", "frontier a"));
+		writeSettled(secondPath, makeLog("frontier-b", "frontier b"));
+
+		const bounded = () =>
+			runTranscriptRecoveryScan(getDbAccessor(), dir, "agent-a", {
+				roots: { claudeCode: claudeRoot, codex: codexRoot },
+				maxFiles: 1,
+			});
+		const first = await bounded();
+		expect(first.examined).toBe(1);
+		expect(first.enqueued).toBe(1);
+		const second = await bounded();
+		expect(second.examined).toBe(1);
+		expect(second.enqueued).toBe(1);
+
+		const jobs = getDbAccessor().withReadDb((db) =>
+			db.prepare("SELECT transcript_path FROM transcript_capture_jobs ORDER BY transcript_path").all(),
+		) as Array<{ transcript_path: string }>;
+		expect(jobs.map((job) => job.transcript_path)).toEqual([firstPath, secondPath]);
+	});
+
+	it("resumes after cancellation keeps the persisted frontier", async () => {
+		const firstPath = join(claudeRoot, "-repo", "a-aborted.jsonl");
+		const secondPath = join(claudeRoot, "-repo", "b-aborted.jsonl");
+		const makeLog = (sessionId: string) =>
+			JSON.stringify({
+				sessionId,
+				timestamp: "2026-07-20T10:00:00.000Z",
+				cwd: "/repo",
+				message: { role: "user", content: sessionId },
+			});
+		writeSettled(firstPath, makeLog("aborted-a"));
+		writeSettled(secondPath, makeLog("aborted-b"));
+
+		const cancellation = new AbortController();
+		const realAccessor = getDbAccessor();
+		let frontierSaves = 0;
+		const interruptingAccessor = {
+			...realAccessor,
+			withWriteTxAsync: (
+				fn: Parameters<typeof realAccessor.withWriteTxAsync>[0],
+				options?: Parameters<typeof realAccessor.withWriteTxAsync>[1],
+			) =>
+				realAccessor.withWriteTxAsync(fn, options).then((value) => {
+					if (options?.operation === "transcript-recovery.save-frontier" && ++frontierSaves === 1)
+						cancellation.abort(new Error("cancel recovery after first cursor"));
+					return value;
+				}),
+		} as import("./db-accessor").DbAccessor;
+		await expect(
+			runTranscriptRecoveryScan(interruptingAccessor, dir, "agent-a", {
+				roots: { claudeCode: claudeRoot, codex: codexRoot },
+				signal: cancellation.signal,
+			}),
+		).rejects.toThrow("cancel recovery after first cursor");
+
+		const persisted = await realAccessor.withReadDbAsync((db) =>
+			db
+				.prepare("SELECT cursor_path FROM transcript_recovery_frontiers WHERE agent_id = ? AND harness = ?")
+				.get("agent-a", "claude-code"),
+		);
+		expect(persisted).toEqual({ cursor_path: firstPath });
+		const resumed = await scan();
+		expect(resumed.enqueued).toBe(1);
+		const jobs = realAccessor.withReadDb((db) =>
+			db.prepare("SELECT transcript_path FROM transcript_capture_jobs ORDER BY transcript_path").all(),
+		) as Array<{ transcript_path: string }>;
+		expect(jobs.map((job) => job.transcript_path)).toEqual([firstPath, secondPath]);
+	});
+
+	it("propagates DB-owner death instead of converting it into recovery success", async () => {
+		const ownerDiedAccessor = {
+			withReadDbAsync: async () => {
+				throw new DbOwnerDiedError();
+			},
+		} as unknown as import("./db-accessor").DbAccessor;
+		await expect(
+			runTranscriptRecoveryScan(ownerDiedAccessor, dir, "agent-a", {
+				roots: { claudeCode: claudeRoot, codex: codexRoot },
+				maxDiscoveredFiles: 1,
+			}),
+		).rejects.toBeInstanceOf(DbOwnerDiedError);
+		const responsive = await scan();
+		expect(responsive.enqueued).toBe(0);
+	});
+	it("cancels an in-flight scan without scheduling another pass", async () => {
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 60_000,
+			execution: "child",
+		});
+		await handle.stop();
+		expect(handle.running).toBe(false);
+	});
+
+	it("accepts a result written immediately before the recovery child exits", async () => {
+		const childPath = join(dir, "immediate-exit-child.js");
+		const result = {
+			discovered: 1,
+			examined: 1,
+			enqueued: 1,
+			deduplicated: 0,
+			skippedRecent: 0,
+			skippedOversized: 0,
+			skippedUnchanged: 0,
+			skippedInvalid: 0,
+		};
+		writeFileSync(
+			childPath,
+			`process.stdout.write(${JSON.stringify(`${JSON.stringify({ type: "result", result })}\n`)}); process.exit(0);`,
+		);
+		const infoMessages: string[] = [];
+		const warnMessages: string[] = [];
+		const originalInfo = logger.info;
+		const originalWarn = logger.warn;
+		logger.info = ((category, message) => {
+			infoMessages.push(`${category}:${message}`);
+		}) as typeof logger.info;
+		logger.warn = ((category, message) => {
+			warnMessages.push(`${category}:${message}`);
+		}) as typeof logger.warn;
+
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 60_000,
+			childPath,
+		});
+		try {
+			for (let attempt = 0; attempt < 200; attempt++) {
+				if (infoMessages.includes("transcripts:Transcript recovery scan complete")) break;
+				await Bun.sleep(5);
+			}
+			expect(infoMessages).toContain("transcripts:Transcript recovery scan complete");
+			expect(warnMessages).toEqual([]);
+		} finally {
+			await handle.stop();
+			logger.info = originalInfo;
+			logger.warn = originalWarn;
+		}
+	});
+
+	it("cancels a scan waiting for DB admission", async () => {
+		let admittedResolve!: () => void;
+		const admitted = new Promise<void>((resolve) => {
+			admittedResolve = resolve;
+		});
+		const queuedAccessor = {
+			withReadDbAsync(_fn: unknown, options?: { readonly signal?: AbortSignal }): Promise<never> {
+				admittedResolve();
+				return new Promise((_, reject) => {
+					options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+				});
+			},
+		} as unknown as import("./db-accessor").DbAccessor;
+		const handle = startTranscriptRecoveryWorker(queuedAccessor, dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 60_000,
+			execution: "in-process",
+		});
+		await admitted;
+		await handle.stop();
+		expect(handle.running).toBe(false);
+	});
+
+	it("does not clear a frontier when discovery is capped", async () => {
+		const firstPath = join(claudeRoot, "-repo", "a-capped.jsonl");
+		const secondPath = join(claudeRoot, "-repo", "b-capped.jsonl");
+		const makeLog = (sessionId: string) => JSON.stringify({ sessionId, message: { role: "user", content: sessionId } });
+		writeSettled(firstPath, makeLog("capped-a"));
+		writeSettled(secondPath, makeLog("capped-b"));
+
+		const result = await runTranscriptRecoveryScan(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			maxDiscoveredFiles: 1,
+			maxFiles: 10,
+		});
+		expect(result.discovered).toBe(1);
+		const frontier = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare("SELECT cursor_path FROM transcript_recovery_frontiers WHERE agent_id = ? AND harness = ?")
+					.get("agent-a", "claude-code") as { cursor_path?: string } | null,
+		);
+		expect(frontier?.cursor_path === firstPath || frontier?.cursor_path === secondPath).toBe(true);
+	});
+
+	it("keeps the parent responsive when the recovery child dies and resumes its durable frontier", async () => {
+		const firstPath = join(claudeRoot, "-repo", "a-child-death.jsonl");
+		const secondPath = join(claudeRoot, "-repo", "b-child-death.jsonl");
+		const makeLog = (sessionId: string) => JSON.stringify({ sessionId, message: { role: "user", content: sessionId } });
+		writeSettled(firstPath, makeLog("child-death-a"));
+		writeSettled(secondPath, makeLog("child-death-b"));
+		await runTranscriptRecoveryScan(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			maxFiles: 1,
+		});
+
+		const holdFile = join(dir, "hold-recovery-child");
+		writeFileSync(holdFile, "hold");
+		process.env.SIGNET_TRANSCRIPT_RECOVERY_TEST_HOLD_FILE = holdFile;
+		const killed = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 60_000,
+		});
+		let childPid: number | null = null;
+		for (let attempt = 0; attempt < 100 && childPid === null; attempt++) {
+			childPid = killed.childPid;
+			if (childPid === null) await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		expect(childPid).not.toBeNull();
+		if (childPid !== null) process.kill(childPid, "SIGKILL");
+		await killed.stop();
+
+		rmSync(holdFile, { force: true });
+		const resumed = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 60_000,
+		});
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		await resumed.stop();
+		const jobs = getDbAccessor().withReadDb((db) =>
+			db.prepare("SELECT transcript_path FROM transcript_capture_jobs ORDER BY transcript_path").all(),
+		) as Array<{ transcript_path: string }>;
+		expect(jobs.map((job) => job.transcript_path)).toEqual([firstPath, secondPath]);
 	});
 });

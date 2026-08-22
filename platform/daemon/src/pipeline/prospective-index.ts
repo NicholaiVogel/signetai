@@ -227,7 +227,10 @@ export function startHintsWorker(deps: {
 		let job: HintJobRow | null = null;
 		try {
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-			job = accessor.withWriteTx((db: import("../db-accessor").WriteDb) => leaseJob(db, 3));
+			job = accessor.withWriteTx(
+				(db: import("../db-accessor").WriteDb) => leaseJob(db, 3),
+				"pipeline/prospective-index.ts:230",
+			);
 			if (!job) {
 				schedule();
 				return;
@@ -239,7 +242,10 @@ export function startHintsWorker(deps: {
 				payload = JSON.parse(j.payload) as HintPayload;
 			} catch {
 				// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-				accessor.withWriteTx((db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"));
+				accessor.withWriteTx(
+					(db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"),
+					"pipeline/prospective-index.ts:245",
+				);
 				schedule();
 				return;
 			}
@@ -252,14 +258,17 @@ export function startHintsWorker(deps: {
 				accessor.withWriteTx((db: import("../db-accessor").WriteDb) => {
 					writeHints(db, payload.memoryId, hints);
 					completeJob(db, j.id);
-				});
+				}, "pipeline/prospective-index.ts:258");
 				logger.info("pipeline", "Prospective hints generated", {
 					memoryId: payload.memoryId,
 					hints: hints.length,
 				});
 			} else {
 				// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-				accessor.withWriteTx((db: import("../db-accessor").WriteDb) => completeJob(db, j.id));
+				accessor.withWriteTx(
+					(db: import("../db-accessor").WriteDb) => completeJob(db, j.id),
+					"pipeline/prospective-index.ts:268",
+				);
 				logger.debug("pipeline", "No hints generated (empty LLM response)", {
 					memoryId: payload.memoryId,
 				});
@@ -269,7 +278,10 @@ export function startHintsWorker(deps: {
 				const j = job;
 				const msg = e instanceof Error ? e.message : String(e);
 				// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-				accessor.withWriteTx((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg));
+				accessor.withWriteTx(
+					(db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg),
+					"pipeline/prospective-index.ts:281",
+				);
 				logger.warn("pipeline", "Hints worker job failed", {
 					jobId: j.id,
 					memoryId: j.memory_id,

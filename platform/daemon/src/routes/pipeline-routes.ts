@@ -5,9 +5,10 @@ import type { Context, Hono } from "hono";
 import { resolveAgentId, resolveDaemonAgentId } from "../agent-id.js";
 import { requirePermission, requireRateLimit } from "../auth";
 import { getDbAccessor } from "../db-accessor.js";
-import { getVacuumConversionStatus } from "../db-vacuum.js";
+import { getVacuumConversionStatusAsync } from "../db-vacuum.js";
 import { type QueueCounts, getQueueDiagnosticsSnapshot } from "../diagnostics-queue.js";
 import { readEmbeddingUsageSummary } from "../embedding-usage";
+import { readEmbeddingIndexMigrationProgress } from "../embedding-index-state";
 import { getInferenceRouterOrNull } from "../inference-router.js";
 import type { BackgroundWorkloadDiagnostics } from "../inference-router.js";
 import { getLlmProvider } from "../llm.js";
@@ -121,7 +122,7 @@ export function pipelineQueueBlock(options: { readonly allowSynchronousRead?: bo
 				summary: snapshot.summary,
 				oldestDeadSummaryJob: snapshot.oldestDeadSummaryJob,
 			};
-		});
+		}, "routes/pipeline-routes.ts:118");
 	} catch {
 		return {
 			memory: { ...UNKNOWN_QUEUE_COUNTS_SHAPE },
@@ -334,6 +335,15 @@ export function registerPipelineRoutes(app: Hono): void {
 		}
 
 		const us = getUpdateState();
+		let embeddingMigration = null;
+		try {
+			embeddingMigration = await getDbAccessor().withReadDbAsync(
+				(db) => readEmbeddingIndexMigrationProgress(db, config.embedding),
+				{ siteToken: "routes/pipeline-routes.ts:340" },
+			);
+		} catch {
+			// Database may still be initializing; omit migration visibility.
+		}
 
 		let agentCreatedAt: string | null = null;
 		try {
@@ -422,6 +432,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					? { available: cachedEmbeddingStatus.available }
 					: {}),
 				usage: await readEmbeddingUsageSummary(getDbAccessor()),
+				migration: embeddingMigration,
 			},
 		});
 	});
@@ -510,6 +521,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					limit,
 					offset,
 				}),
+			"routes/pipeline-routes.ts:515",
 		);
 		return c.json({
 			agentId: resolveAgentId({ agentId: scopedAgent.agentId }),
@@ -595,37 +607,39 @@ export function registerPipelineRoutes(app: Hono): void {
 		return c.json(buildOpenClawHealth());
 	});
 
-	app.get("/api/pipeline/status", (c) => {
+	app.get("/api/pipeline/status", async (c) => {
 		const cfg = loadMemoryConfig(AGENTS_DIR);
 		const accessor = getDbAccessor();
 
-		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		const dbData = accessor.withReadDb((db: import("../db-accessor").ReadDb) => {
-			const memoryRows = db
-				.prepare("SELECT status, COUNT(*) as count FROM memory_jobs GROUP BY status")
-				.all() as Array<{
-				status: string;
-				count: number;
-			}>;
-			const toCountMap = (rows: Array<{ status: string; count: number }>): Record<string, number> => {
-				const out: Record<string, number> = {
-					pending: 0,
-					leased: 0,
-					completed: 0,
-					failed: 0,
-					dead: 0,
+		const dbData = await accessor.withReadDbAsync(
+			(db) => {
+				const memoryRows = db
+					.prepare("SELECT status, COUNT(*) as count FROM memory_jobs GROUP BY status")
+					.all() as Array<{
+					status: string;
+					count: number;
+				}>;
+				const toCountMap = (rows: Array<{ status: string; count: number }>): Record<string, number> => {
+					const out: Record<string, number> = {
+						pending: 0,
+						leased: 0,
+						completed: 0,
+						failed: 0,
+						dead: 0,
+					};
+					for (const r of rows) out[r.status] = r.count;
+					return out;
 				};
-				for (const r of rows) out[r.status] = r.count;
-				return out;
-			};
 
-			return {
-				queues: {
-					memory: toCountMap(memoryRows),
-					summary: toCountMap([]),
-				},
-			};
-		});
+				return {
+					queues: {
+						memory: toCountMap(memoryRows),
+						summary: toCountMap([]),
+					},
+				};
+			},
+			{ siteToken: "routes/pipeline-routes.ts:614", operation: "pipeline.status" },
+		);
 		const diagnostics = getCachedDiagnosticsReport();
 
 		const pipelineV2 = cfg.pipelineV2;
@@ -635,7 +649,7 @@ export function registerPipelineRoutes(app: Hono): void {
 		return c.json({
 			workers,
 			databaseMaintenance: {
-				vacuumConversion: getVacuumConversionStatus(accessor),
+				vacuumConversion: await getVacuumConversionStatusAsync(accessor),
 			},
 			providerResolution: {
 				...providerRuntimeResolution,

@@ -29,7 +29,8 @@
 			"!**/memorybench/data",
 			"!**/memorybench/dist",
 			"!**/memorybench/node_modules",
-			"!scripts/event-loop-contract-baseline.json"
+			"!scripts/event-loop-contract-baseline.json",
+			"!**/.bench"
 		]
 	},
 	"formatter": {
@@ -119,6 +120,28 @@
 					},
 					"suspicious": {
 						"noExplicitAny": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["**/*.astro"],
+			"linter": {
+				"rules": {
+					"correctness": {
+						"noUnusedImports": "warn",
+						"noUnusedVariables": "warn"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["**/*.astro"],
+			"linter": {
+				"rules": {
+					"correctness": {
+						"noUnusedImports": "warn",
+						"noUnusedVariables": "warn"
 					}
 				}
 			}

@@ -281,7 +281,7 @@ export function registerConnectorRoutes(app: Hono): void {
 								 WHERE source_url LIKE ? ESCAPE '\\'`,
 							)
 							.all(escapeLikePrefix(rootPath)) as ReadonlyArray<{ id: string }>;
-					});
+					}, "routes/connectors-routes.ts:277");
 					const now = new Date().toISOString();
 					for (const doc of docs) {
 						// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
@@ -293,7 +293,7 @@ export function registerConnectorRoutes(app: Hono): void {
 								     updated_at = ?
 								 WHERE id = ?`,
 							).run(now, doc.id);
-						});
+						}, "routes/connectors-routes.ts:288");
 					}
 				}
 			}
@@ -329,7 +329,7 @@ export function registerConnectorRoutes(app: Hono): void {
 					)
 					.get(escapeLikePrefix(rootPath)) as { cnt: number } | undefined;
 				return row?.cnt ?? 0;
-			});
+			}, "routes/connectors-routes.ts:319");
 
 			return c.json({
 				id: connectorRow.id,

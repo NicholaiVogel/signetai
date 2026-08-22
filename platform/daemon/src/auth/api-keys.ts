@@ -215,7 +215,7 @@ export function createApiKey(accessor: DbAccessor, input: ApiKeyCreateInput): Cr
 			now,
 			expiresAt,
 		);
-	});
+	}, "auth/api-keys.ts:197");
 
 	return {
 		id,
@@ -238,17 +238,19 @@ export function createApiKey(accessor: DbAccessor, input: ApiKeyCreateInput): Cr
 
 export function listApiKeys(accessor: DbAccessor): readonly ApiKeyRecord[] {
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) =>
-		(
-			db
-				.prepare(
-					`SELECT id, prefix, name, key_hash, role, scope_json, permissions_json, connector, harness,
+	return accessor.withReadDb(
+		(db: import("../db-accessor").ReadDb) =>
+			(
+				db
+					.prepare(
+						`SELECT id, prefix, name, key_hash, role, scope_json, permissions_json, connector, harness,
 					        agent_id, allowed_projects_json, created_at, last_used_at, revoked_at, expires_at
 					   FROM api_keys
 					  ORDER BY created_at DESC`,
-				)
-				.all() as unknown as ApiKeyRow[]
-		).map(rowToRecord),
+					)
+					.all() as unknown as ApiKeyRow[]
+			).map(rowToRecord),
+		"auth/api-keys.ts:241",
 	);
 }
 
@@ -260,7 +262,7 @@ export function revokeApiKey(accessor: DbAccessor, idOrPrefix: string): ApiKeyRe
 		if (!row) return null;
 		db.prepare("UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?").run(now, row.id);
 		return rowToRecord({ ...row, revoked_at: row.revoked_at ?? now });
-	});
+	}, "auth/api-keys.ts:260");
 }
 
 export function verifyApiKey(accessor: DbAccessor, token: string): AuthResult {
@@ -303,5 +305,5 @@ export function verifyApiKey(accessor: DbAccessor, token: string): AuthResult {
 			...(permissions.length > 0 ? { permissions } : {}),
 		};
 		return { authenticated: true, claims };
-	});
+	}, "auth/api-keys.ts:274");
 }

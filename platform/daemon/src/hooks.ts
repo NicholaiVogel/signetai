@@ -35,7 +35,7 @@ import {
 	shouldCheckpoint,
 } from "./continuity-state";
 import { listAgentPresence } from "./cross-agent";
-import { type ReadDb, getDbAccessor } from "./db-accessor";
+import { getDbAccessor } from "./db-accessor";
 import { fetchEmbedding } from "./embedding-fetch";
 import {
 	DEFAULT_SESSION_START_MAX_INJECT_TOKENS,
@@ -103,7 +103,7 @@ import {
 	getLatestCheckpoint,
 	getLatestCheckpointBySession,
 	queueCheckpointWrite,
-	writeCheckpoint,
+	writeCheckpointAsync,
 } from "./session-checkpoints";
 import { deriveSessionEndFallbackId, recoverMissingSessionEndOnClearStart } from "./session-end-recovery";
 import {
@@ -121,7 +121,7 @@ import {
 	recordSessionCandidates,
 	trackFtsHits,
 } from "./session-memories";
-import { advanceRecallContextEpoch, claimRecallItems } from "./session-recall-dedupe";
+import { advanceRecallContextEpochAsync, claimRecallItemsAsync } from "./session-recall-dedupe";
 import {
 	buildSignetSystemPrompt,
 	formatLastSeenShort,
@@ -141,18 +141,17 @@ import {
 } from "./session-start-state";
 import { getExpiryWarning } from "./session-tracker";
 import {
-	ensureCanonicalTranscriptHistory,
 	findStaleLiveSessions,
-	getSessionTranscriptContent,
+	getStoredSessionTranscriptInfoAsync,
 	markSessionTranscriptCompleted,
 	upsertSessionTranscript,
+	upsertSessionTranscriptAsync,
 } from "./session-transcripts";
 import { type StructuralCandidateSource, type StructuralFeatures, getStructuralFeatures } from "./structural-features";
 import { assembleInheritedContextBlock, resolveParentSession } from "./subagent-context";
 import { awaitPressureClear, isSystemPressureHigh } from "./system-pressure";
 import { getActiveTelemetry } from "./telemetry";
 import { searchTemporalFallback } from "./temporal-fallback";
-import { writeTranscriptAudit } from "./transcript-audit";
 import * as transcriptCapture from "./transcript-capture";
 import {
 	enqueueTranscriptCaptureJob,
@@ -500,29 +499,32 @@ async function getSessionGapSummary(): Promise<string | undefined> {
 	if (!existsSync(getMemoryDbPath())) return undefined;
 
 	try {
-		return await getDbAccessor().withReadDbAsync(async (db) => {
-			// The completion marker covers explicit ends and daemon recovery/TTL
-			// boundaries; all are settled session activity for this brief.
-			const lastSession = db.prepare("SELECT MAX(completed_at) as last_end FROM session_transcripts").get() as
-				| { last_end: string | null }
-				| undefined;
+		return await getDbAccessor().withReadDbAsync(
+			async (db) => {
+				// The completion marker covers explicit ends and daemon recovery/TTL
+				// boundaries; all are settled session activity for this brief.
+				const lastSession = db.prepare("SELECT MAX(completed_at) as last_end FROM session_transcripts").get() as
+					| { last_end: string | null }
+					| undefined;
 
-			if (!lastSession?.last_end) return undefined;
+				if (!lastSession?.last_end) return undefined;
 
-			const lastEnd = lastSession.last_end;
+				const lastEnd = lastSession.last_end;
 
-			// Count new memories since last session
-			const memCount = db
-				.prepare("SELECT COUNT(*) as cnt FROM memories WHERE created_at > ? AND is_deleted = 0")
-				.get(lastEnd) as { cnt: number };
+				// Count new memories since last session
+				const memCount = db
+					.prepare("SELECT COUNT(*) as cnt FROM memories WHERE created_at > ? AND is_deleted = 0")
+					.get(lastEnd) as { cnt: number };
 
-			// Count sessions since last session
-			const sessionCount = db
-				.prepare("SELECT COUNT(*) as cnt FROM session_transcripts WHERE completed_at > ?")
-				.get(lastEnd) as { cnt: number };
+				// Count sessions since last session
+				const sessionCount = db
+					.prepare("SELECT COUNT(*) as cnt FROM session_transcripts WHERE completed_at > ?")
+					.get(lastEnd) as { cnt: number };
 
-			return `[since last session: ${memCount.cnt} new memories, ${sessionCount.cnt} sessions captured]`;
-		});
+				return `[since last session: ${memCount.cnt} new memories, ${sessionCount.cnt} sessions captured]`;
+			},
+			{ siteToken: "hooks.ts:502" },
+		);
 	} catch {
 		return undefined;
 	}
@@ -600,11 +602,12 @@ async function getRecentMemories(
 	if (!existsSync(getMemoryDbPath())) return [];
 
 	try {
-		const rows = await getDbAccessor().withReadDbAsync(async (db) => {
-			const scope = agentScope
-				? buildAgentScopeClause(agentScope.agentId, agentScope.readPolicy, agentScope.policyGroup)
-				: { sql: " AND m.visibility != 'archived'", args: [] };
-			const query = `
+		const rows = await getDbAccessor().withReadDbAsync(
+			async (db) => {
+				const scope = agentScope
+					? buildAgentScopeClause(agentScope.agentId, agentScope.readPolicy, agentScope.policyGroup)
+					: { sql: " AND m.visibility != 'archived'", args: [] };
+				const query = `
         SELECT
           m.id, m.content, m.type, m.importance, m.created_at,
           (julianday('now') - julianday(m.created_at)) as age_days
@@ -617,22 +620,24 @@ async function getRecentMemories(
         LIMIT ?
       `;
 
-			const rows = db.prepare(query).all(...scope.args, limit) as Array<{
-				id: string;
-				content: string;
-				type: string;
-				importance: number;
-				created_at: string;
-			}>;
-			return rows.filter((row) =>
-				isMemoryContentContextEligible(db, {
-					agentId: agentScope?.agentId ?? "default",
-					sourceKind: "memory",
-					sourceId: row.id,
-					content: row.content,
-				}),
-			);
-		});
+				const rows = db.prepare(query).all(...scope.args, limit) as Array<{
+					id: string;
+					content: string;
+					type: string;
+					importance: number;
+					created_at: string;
+				}>;
+				return rows.filter((row) =>
+					isMemoryContentContextEligible(db, {
+						agentId: agentScope?.agentId ?? "default",
+						sourceKind: "memory",
+						sourceId: row.id,
+						content: row.content,
+					}),
+				);
+			},
+			{ siteToken: "hooks.ts:605" },
+		);
 
 		return rows.map((r) => ({
 			id: r.id,
@@ -686,7 +691,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 
 	if (isClearSessionStart(req)) {
 		const sessionKey = req.sessionKey?.trim();
-		const recoveredSessionEnd = recoverMissingSessionEndOnClearStart(req, agentId, new Date().toISOString());
+		const recoveredSessionEnd = await recoverMissingSessionEndOnClearStart(req, agentId, new Date().toISOString());
 		clearSessionStartDedupe(req);
 		// A reset also opens a new session lifetime — any prior session.end
 		// marker must not suppress a termination event for the new one (#1212).
@@ -698,7 +703,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 		if (sessionKey) {
 			clearRawSessionStartDedupeKey(sessionKey);
 			clearContinuity(sessionKey);
-			advanceRecallContextEpoch({
+			await advanceRecallContextEpochAsync({
 				sessionKey: sessionStartRecallKey(req),
 				agentId,
 				reason: "session-clear",
@@ -808,20 +813,23 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	if (req.sessionKey && existsSync(getMemoryDbPath())) {
 		try {
 			const subagentCfg = memoryCfg.pipelineV2.subagents ?? { inheritContext: true, tailChars: 3000 };
-			const block = await getDbAccessor().withReadDbAsync(async (db) => {
-				const parent = resolveParentSession(db, {
-					harness: req.harness,
-					project: req.project,
-					sessionKey: req.sessionKey,
-					agentId: traversalAgentId,
-					harnessAgentId: req.harnessAgentId,
-					parentSessionKey: req.parentSessionKey,
-					parentKey: req.parentKey,
-					parentId: req.parentId,
-					parentID: req.parentID,
-				});
-				return parent ? assembleInheritedContextBlock(db, parent, subagentCfg) : null;
-			});
+			const block = await getDbAccessor().withReadDbAsync(
+				async (db) => {
+					const parent = resolveParentSession(db, {
+						harness: req.harness,
+						project: req.project,
+						sessionKey: req.sessionKey,
+						agentId: traversalAgentId,
+						harnessAgentId: req.harnessAgentId,
+						parentSessionKey: req.parentSessionKey,
+						parentKey: req.parentKey,
+						parentId: req.parentId,
+						parentID: req.parentID,
+					});
+					return parent ? assembleInheritedContextBlock(db, parent, subagentCfg) : null;
+				},
+				{ siteToken: "hooks.ts:816" },
+			);
 			inheritedSection = block ?? "";
 		} catch (error) {
 			logger.warn("hooks", "Sub-agent inherited context lookup failed (non-fatal)", {
@@ -883,19 +891,25 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	if (traversalEnabled) {
 		const _traversalStart = Date.now();
 		try {
-			const focal = await getDbAccessor().withReadDbAsync(async (db) =>
-				resolveFocalEntities(db, traversalAgentId, {
-					project: req.project,
-					sessionKey: req.sessionKey,
-				}),
+			const focal = await getDbAccessor().withReadDbAsync(
+				async (db) =>
+					resolveFocalEntities(db, traversalAgentId, {
+						project: req.project,
+						sessionKey: req.sessionKey,
+					}),
+				{ siteToken: "hooks.ts:894" },
 			);
 			traversalFocalSource = focal.source;
 			traversalEntities = focal.entityIds.length;
 			traversalEntityNames = focal.entityNames;
 
 			if (focal.entityIds.length > 0) {
-				const traversalResult = await getDbAccessor().withReadDbAsync(async (db) =>
-					traverseKnowledgeGraph(focal.entityIds, db, traversalAgentId, traversalRuntimeCfg),
+				const traversalResult = await traverseKnowledgeGraph(
+					focal.entityIds,
+					(readFn) =>
+						getDbAccessor().withReadDbAsync(readFn, { siteToken: "hooks.ts:910", operation: "hooks.graph-traversal" }),
+					traversalAgentId,
+					traversalRuntimeCfg,
 				);
 				traversalTimedOut = traversalResult.timedOut;
 				traversalTraversedEntities = traversalResult.entityCount;
@@ -1028,13 +1042,15 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 
 	const sessionStartRecallSessionKey = sessionStartRecallKey(req);
 	if (sessionStartRecallSessionKey && memories.length > 0) {
-		memories = claimRecallItems({
-			sessionKey: sessionStartRecallSessionKey,
-			agentId,
-			surface: "api.hooks.session-start",
-			mode: "automatic",
-			items: memories,
-		}).items;
+		memories = (
+			await claimRecallItemsAsync({
+				sessionKey: sessionStartRecallSessionKey,
+				agentId,
+				surface: "api.hooks.session-start",
+				mode: "automatic",
+				items: memories,
+			})
+		).items;
 	}
 
 	const exploredId: string | null = null;
@@ -1369,7 +1385,7 @@ ${guidelines}
 		try {
 			const cfg = loadMemoryConfig(getAgentsDir()).pipelineV2.continuity;
 			const digest = formatPreCompactionDigest(snap, req.sessionContext);
-			writeCheckpoint(
+			await writeCheckpointAsync(
 				getDbAccessor(),
 				{
 					sessionKey: snap.sessionKey,
@@ -1547,6 +1563,7 @@ type UserPromptSubmitDeps = {
 	readonly queueCheckpointWrite: typeof queueCheckpointWrite;
 	readonly formatPeriodicDigest: typeof formatPeriodicDigest;
 	readonly upsertSessionTranscript: typeof upsertSessionTranscript;
+	readonly upsertSessionTranscriptAsync?: typeof upsertSessionTranscriptAsync;
 	readonly getExpiryWarning: typeof getExpiryWarning;
 	readonly hybridRecall: typeof hybridRecall;
 	readonly fetchEmbedding: typeof fetchEmbedding;
@@ -1569,6 +1586,7 @@ const DEFAULT_USER_PROMPT_SUBMIT_DEPS: UserPromptSubmitDeps = {
 	queueCheckpointWrite,
 	formatPeriodicDigest,
 	upsertSessionTranscript,
+	upsertSessionTranscriptAsync,
 	getExpiryWarning,
 	hybridRecall,
 	fetchEmbedding,
@@ -1582,6 +1600,10 @@ export async function handleUserPromptSubmit(
 	overrides?: Partial<UserPromptSubmitDeps>,
 ): Promise<UserPromptSubmitResponse> {
 	const deps = { ...DEFAULT_USER_PROMPT_SUBMIT_DEPS, ...overrides };
+	const upsertTranscriptAsync =
+		deps.upsertSessionTranscriptAsync ??
+		(async (...args: Parameters<typeof upsertSessionTranscript>): Promise<boolean> =>
+			deps.upsertSessionTranscript(...args));
 	const start = deps.now();
 	const clockContext = formatPromptClockContext(new Date(start));
 	const submitCfg = loadHooksConfigForHarness(req.harness).userPromptSubmit ?? {};
@@ -1664,9 +1686,10 @@ export async function handleUserPromptSubmit(
 
 		if (transcript) {
 			try {
-				const prev = getSessionTranscriptContent(req.sessionKey, agentId);
+				const prevInfo = await getStoredSessionTranscriptInfoAsync(req.sessionKey, agentId);
+				const prev = prevInfo?.content;
 				if (!prev || transcript.length >= prev.length) {
-					deps.upsertSessionTranscript(req.sessionKey, transcript, req.harness, req.project ?? null, agentId);
+					await upsertTranscriptAsync(req.sessionKey, transcript, req.harness, req.project ?? null, agentId);
 				}
 				await transcriptCapture.writeCanonicalTranscriptFromSnapshot({
 					basePath: getAgentsDir(),
@@ -1686,8 +1709,9 @@ export async function handleUserPromptSubmit(
 		} else if (userMessage.trim().length > 0) {
 			try {
 				const liveTranscript = transcriptCapture.formatLivePromptTranscript(userMessage, req.lastAssistantMessage);
-				const prev = getSessionTranscriptContent(req.sessionKey, agentId);
-				deps.upsertSessionTranscript(
+				const prevInfo = await getStoredSessionTranscriptInfoAsync(req.sessionKey, agentId);
+				const prev = prevInfo?.content;
+				await upsertTranscriptAsync(
 					req.sessionKey,
 					transcriptCapture.appendLivePromptTranscript(prev, liveTranscript),
 					req.harness,
@@ -1705,23 +1729,6 @@ export async function handleUserPromptSubmit(
 				});
 			} catch (error) {
 				deps.logger.warn("hooks", "Prompt JSONL transcript append failed", {
-					error: error instanceof Error ? error.message : String(error),
-					sessionKey: req.sessionKey,
-				});
-			}
-		}
-
-		if (rawTranscript) {
-			try {
-				writeTranscriptAudit({
-					basePath: getAgentsDir(),
-					agentId,
-					sessionId: req.sessionKey,
-					sessionKey: req.sessionKey,
-					rawTranscript,
-				});
-			} catch (error) {
-				deps.logger.warn("hooks", "Prompt transcript audit write failed", {
 					error: error instanceof Error ? error.message : String(error),
 					sessionKey: req.sessionKey,
 				});
@@ -1977,7 +1984,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 
 	// Flush pending periodic checkpoints
 	try {
-		flushPendingCheckpoints();
+		await flushPendingCheckpoints();
 	} catch (err) {
 		logger.warn("hooks", "Checkpoint flush on session-end failed", {
 			error: err instanceof Error ? err.message : String(err),
@@ -1988,7 +1995,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 		// Caller intends to discard session context — skip checkpoint, just clean up
 		clearSessionStartDedupe(req);
 		clearRawSessionStartDedupeKey(sessionKey);
-		advanceRecallContextEpoch({
+		await advanceRecallContextEpochAsync({
 			sessionKey: sessionStartRecallKey(req),
 			agentId,
 			reason: "session-clear",
@@ -2040,7 +2047,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	if (snap && snap.totalPromptCount > 0) {
 		try {
 			const cfg = loadMemoryConfig(getAgentsDir()).pipelineV2.continuity;
-			writeCheckpoint(
+			await writeCheckpointAsync(
 				getDbAccessor(),
 				{
 					sessionKey: snap.sessionKey,
@@ -2090,7 +2097,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	let storedTranscript = "";
 	if (sessionKey) {
 		try {
-			storedTranscript = getSessionTranscriptContent(sessionKey, agentId) ?? "";
+			storedTranscript = (await getStoredSessionTranscriptInfoAsync(sessionKey, agentId))?.content ?? "";
 		} catch (error) {
 			logger.warn("hooks", "Failed to read stored transcript for fallback", {
 				error: error instanceof Error ? error.message : String(error),
@@ -2118,7 +2125,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	let transcriptRetained = false;
 	if (retainedTranscript && sessionKey) {
 		try {
-			transcriptRetained = upsertSessionTranscript(
+			transcriptRetained = await upsertSessionTranscriptAsync(
 				sessionKey,
 				retainedTranscript,
 				req.harness,
@@ -2317,7 +2324,7 @@ async function deferSessionEndWork(params: {
 // Mid-session checkpoint extraction (long-lived sessions)
 // ---------------------------------------------------------------------------
 
-export function handleCheckpointExtract(req: CheckpointExtractRequest): CheckpointExtractResponse {
+export async function handleCheckpointExtract(req: CheckpointExtractRequest): Promise<CheckpointExtractResponse> {
 	const agentId = resolveAgentId({ agentId: req.agentId, sessionKey: req.sessionKey });
 	ensureAgentRegistered(agentId);
 
@@ -2350,7 +2357,7 @@ export function handleCheckpointExtract(req: CheckpointExtractRequest): Checkpoi
 
 	// Fall back to stored transcript if nothing was provided inline
 	if (!transcript) {
-		transcript = getSessionTranscriptContent(req.sessionKey, agentId) ?? "";
+		transcript = (await getStoredSessionTranscriptInfoAsync(req.sessionKey, agentId))?.content ?? "";
 		fromStore = true;
 	}
 
@@ -2367,10 +2374,10 @@ export function handleCheckpointExtract(req: CheckpointExtractRequest): Checkpoi
 	// payload would discard valid canonical content before the final completion
 	// marker is written.
 	if (!fromStore) {
-		const prev = getSessionTranscriptContent(req.sessionKey, agentId);
+		const prev = (await getStoredSessionTranscriptInfoAsync(req.sessionKey, agentId))?.content;
 		if (!prev || transcript.length >= prev.length) {
 			try {
-				upsertSessionTranscript(req.sessionKey, transcript, req.harness, req.project ?? null, agentId);
+				await upsertSessionTranscriptAsync(req.sessionKey, transcript, req.harness, req.project ?? null, agentId);
 			} catch (e) {
 				logger.warn("hooks", "Checkpoint transcript upsert failed (non-fatal)", {
 					error: e instanceof Error ? e.message : String(e),
@@ -2395,7 +2402,7 @@ export function handleCheckpointExtract(req: CheckpointExtractRequest): Checkpoi
 		const snap = consumeState(req.sessionKey);
 		if (snap && snap.totalPromptCount > 0) {
 			const cfg = loadMemoryConfig(getAgentsDir()).pipelineV2.continuity;
-			writeCheckpoint(
+			await writeCheckpointAsync(
 				getDbAccessor(),
 				{
 					sessionKey: snap.sessionKey,

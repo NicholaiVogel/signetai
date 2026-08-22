@@ -150,17 +150,19 @@ export async function getOntologyClaimEvidence(
 	if (result === null) throw new OntologyClaimEvidenceError("Claim path not found", 404);
 
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	const items = accessor.withReadDb((db: import("./db-accessor").ReadDb) =>
-		result.items.map((attribute) => {
-			const evidence = attributeEvidenceRefs(attribute).map((ref) =>
-				resolveOntologyEvidenceRef(db, params.agentId, ref),
-			);
-			return {
-				attribute,
-				evidence,
-				evidenceCount: evidence.length,
-			};
-		}),
+	const items = accessor.withReadDb(
+		(db: import("./db-accessor").ReadDb) =>
+			result.items.map((attribute) => {
+				const evidence = attributeEvidenceRefs(attribute).map((ref) =>
+					resolveOntologyEvidenceRef(db, params.agentId, ref),
+				);
+				return {
+					attribute,
+					evidence,
+					evidenceCount: evidence.length,
+				};
+			}),
+		"ontology-claim-evidence.ts:153",
 	);
 
 	return {
