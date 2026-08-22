@@ -274,6 +274,7 @@ const __dirname = dirname(__filename);
 let httpServer: import("node:net").Server | null = null;
 let dbOwnerClient: DbOwnerClient | null = null;
 let dbOwnerMaintenanceHandle: DbOwnerMaintenance | null = null;
+let globalVerifyInFlight = false;
 let dreamingWorkerHandle: DreamingWorkerHandle | null = null;
 let reflectionWorkerHandle: ReflectionWorkerHandle | null = null;
 let embeddingTrackerHandle: EmbeddingTrackerHandle | null = null;
@@ -737,7 +738,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:740" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:741" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -780,7 +781,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:762" },
+			{ siteToken: "daemon.ts:763" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -857,7 +858,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:853" },
+			{ siteToken: "daemon.ts:854" },
 		);
 	} catch {
 		return false;
@@ -1481,7 +1482,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1467", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1468", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1549,7 +1550,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1550", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1551", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2262,11 +2263,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2258", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2259", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2268",
+								siteToken: "daemon.ts:2269",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2525,9 +2526,32 @@ async function main() {
 			// the rollback backup. Each completed backup generation gets its own
 			// checkpoint key, so a parked or failed prior generation cannot suppress
 			// verification of this generation.
+			let integritySliceTimer: ReturnType<typeof setTimeout> | null = null;
+			let integritySlicePending = false;
+			let runIntegritySlice: () => Promise<void>;
+			const scheduleIntegritySlice = (delayMs: number): void => {
+				integritySlicePending = true;
+				if (globalVerifyInFlight || integritySliceTimer !== null) return;
+				integritySliceTimer = setTimeout(() => {
+					integritySliceTimer = null;
+					if (globalVerifyInFlight) return;
+					integritySlicePending = false;
+					void runIntegritySlice().catch((error) => {
+						logger.error("startup-recovery", "Incremental database integrity continuation rejected", error);
+					});
+				}, delayMs);
+				integritySliceTimer.unref?.();
+			};
 			if (migrationBackupPending && migrationBackupPath !== null) {
-				const runMigrationVerifyGate = (): Promise<unknown> =>
-					runMigrationIntegrityVerifyGate(migrationVerifyGateOptions);
+				const runMigrationVerifyGate = async (): Promise<unknown> => {
+					globalVerifyInFlight = true;
+					try {
+						return await runMigrationIntegrityVerifyGate(migrationVerifyGateOptions);
+					} finally {
+						globalVerifyInFlight = false;
+						if (integritySlicePending) scheduleIntegritySlice(0);
+					}
+				};
 				let setupRetry: ReturnType<typeof createMigrationVerifySetupRetry>;
 				const migrationVerifyGateOptions: Parameters<typeof runMigrationIntegrityVerifyGate>[0] = {
 					owner,
@@ -2556,7 +2580,11 @@ async function main() {
 				setupRetry.run();
 			}
 
-			const runIntegritySlice = async (): Promise<void> => {
+			runIntegritySlice = async (): Promise<void> => {
+				if (globalVerifyInFlight) {
+					integritySlicePending = true;
+					return;
+				}
 				const result = await runIncrementalDatabaseIntegrityCheck({
 					owner,
 					checkpointKey: "database.quick-check",
@@ -2576,18 +2604,10 @@ async function main() {
 					});
 				}
 				if (result.phase === "running" || result.phase === "timed_out" || result.phase === "unavailable") {
-					const timer = setTimeout(
-						() => {
-							void runIntegritySlice().catch((error) => {
-								logger.error("startup-recovery", "Incremental database integrity continuation rejected", error);
-							});
-						},
-						result.phase === "running" ? 0 : 1000,
-					);
-					timer.unref?.();
+					scheduleIntegritySlice(result.phase === "running" ? 0 : 1000);
 				}
 			};
-			await runIntegritySlice();
+			scheduleIntegritySlice(0);
 			if (owner.health().state === "failed") {
 				logger.error("startup-recovery", "DB owner failed during incremental integrity maintenance", undefined, {
 					ownerState: owner.health().state,

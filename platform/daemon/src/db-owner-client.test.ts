@@ -179,6 +179,40 @@ describe("DB owner client", () => {
 		}
 	});
 
+	test("preserves application error codes across the owner boundary", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const workerPath = join(database.directory, "serialized-error-worker.js");
+		await Bun.write(
+			workerPath,
+			[
+				'process.stdout.write(JSON.stringify({ type: "ready", pid: process.pid }) + "\\n");',
+				'let input = "";',
+				'process.stdin.setEncoding("utf8");',
+				'process.stdin.on("data", (chunk) => {',
+				"  input += chunk;",
+				'  const lines = input.split("\\n");',
+				'  input = lines.pop() || "";',
+				"  for (const line of lines) {",
+				"    if (!line) continue;",
+				"    const command = JSON.parse(line);",
+				'    if (command.type === "submit") process.stdout.write(JSON.stringify({ type: "result", jobId: command.job.id, outcome: "failed", error: { name: "MigrationBackupAdmissionError", message: "admission refused", code: "DB_MIGRATION_BACKUP_ADMISSION_FAILED" } }) + "\\n");',
+				'    if (command.type === "shutdown") process.exit(0);',
+				"  }",
+				"});",
+			].join("\n"),
+		);
+		client = createDbOwnerClient({ dbPath: database.path, workerPath });
+		await client.start();
+
+		await expect(
+			client.submit(
+				{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "all" } },
+				{ operation: "serialized-application-error", lane: "read", deadlineMs: 1_000 },
+			).result,
+		).rejects.toMatchObject({ code: "DB_MIGRATION_BACKUP_ADMISSION_FAILED", sqliteCode: undefined });
+	});
+
 	test("keeps transport readiness distinct from database initialization", async () => {
 		const database = makeMigratedDb();
 		directory = database.directory;

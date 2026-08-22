@@ -28,6 +28,9 @@ describe("daemon production DB owner wiring", () => {
 		expect(source).toContain("runIncrementalDatabaseIntegrityCheck");
 		expect(source).toContain('checkpointKey: "database.quick-check"');
 		expect(source).toContain("INCREMENTAL_INTEGRITY_TABLES_PER_RUN");
+		expect(source).toContain("let globalVerifyInFlight = false;");
+		expect(source).toContain("if (globalVerifyInFlight) return;");
+		expect(source).toContain("if (integritySlicePending) scheduleIntegritySlice(0);");
 		expect(source).not.toContain("runDeferredIntegrityCheck");
 	});
 

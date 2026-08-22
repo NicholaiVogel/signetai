@@ -589,6 +589,54 @@ describe("DbAccessor", () => {
 		expect(Array.from(files.keys())).toEqual(["test.db.bak-v62-5000"]);
 	});
 
+	test("reclaims stale-generation backups before admission", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const dbDir = join(dbPath, "..");
+		writeFileSync(dbPath, "database");
+
+		const staleName = "test.db.bak-v61-4000";
+		const stalePath = join(dbDir, staleName);
+		writeFileSync(
+			`${stalePath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: 7,
+				sourceMtimeMs: 100,
+				destination: stalePath,
+				offset: 8,
+			}),
+		);
+		const files = new Map<string, { readonly mtimeMs: number; readonly size: number }>([
+			[staleName, { mtimeMs: 4000, size: 8 }],
+		]);
+		const operations: string[] = [];
+		const requiredBytes = 8 + MIGRATION_BACKUP_CHUNK_BYTES * 2;
+
+		backupBeforeMigration({ exec: () => {} }, dbPath, 62, {
+			copyFileSync: (_source, destination) => {
+				const name = String(destination).slice(dbDir.length + 1);
+				operations.push(`copy:${name}`);
+				files.set(name, { mtimeMs: 6000, size: 8 });
+			},
+			readdirSync: () => Array.from(files.keys()),
+			statSync: (path) => {
+				const name = String(path).slice(dbDir.length + 1);
+				return name === "test.db" ? { mtimeMs: 200, size: 8 } : (files.get(name) ?? { mtimeMs: 0, size: 8 });
+			},
+			statfsSync: () => ({ bavail: files.has(staleName) ? requiredBytes - 1 : requiredBytes, bsize: 1 }),
+			unlinkSync: (path) => {
+				const name = String(path).slice(dbDir.length + 1);
+				operations.push(`unlink:${name}`);
+				files.delete(name);
+			},
+			now: () => 6000,
+			log: () => {},
+		});
+
+		expect(operations.slice(0, 2)).toEqual([`unlink:${staleName}`, `unlink:${staleName}.cursor.json`]);
+		expect(operations[2]).toContain("copy:test.db.bak-v62-6000");
+	});
 	test("refuses a migration backup when statfs is degenerate instead of copy-probing", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
@@ -883,7 +931,7 @@ describe("DbAccessor", () => {
 
 		await expect(backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 71)).resolves.toBe(backupPath);
 		expect(readFileSync(backupPath)).toEqual(source);
-		expect(existsSync(`${backupPath}.cursor.json`)).toBe(false);
+		expect(existsSync(`${backupPath}.cursor.json`)).toBe(true);
 	});
 	test("resume admission does not prune the only completed-unverified backup", async () => {
 		const dbPath = tmpDbPath();

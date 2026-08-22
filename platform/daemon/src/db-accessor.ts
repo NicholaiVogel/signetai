@@ -772,6 +772,53 @@ function migrationBackups(
 		.sort((a, b) => b.mtime - a.mtime);
 }
 
+function migrationBackupCursor(
+	dbPath: string,
+	backupPath: string,
+): Pick<MigrationBackupCursor, "sourceSize" | "sourceMtimeMs"> | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as Partial<MigrationBackupCursor>;
+		if (
+			parsed.sourcePath !== dbPath ||
+			parsed.destination !== backupPath ||
+			typeof parsed.sourceSize !== "number" ||
+			!Number.isFinite(parsed.sourceSize) ||
+			typeof parsed.sourceMtimeMs !== "number" ||
+			!Number.isFinite(parsed.sourceMtimeMs)
+		)
+			return undefined;
+		return { sourceSize: parsed.sourceSize, sourceMtimeMs: parsed.sourceMtimeMs };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Reclaim only backups whose retained cursor proves an older source generation. */
+function pruneStaleMigrationBackups(
+	dbPath: string,
+	sourceSize: number,
+	sourceMtimeMs: number,
+	deps: MigrationBackupDeps,
+): void {
+	for (const backup of migrationBackups(dbPath, deps)) {
+		const backupPath = join(dirname(dbPath), backup.name);
+		const cursor = migrationBackupCursor(dbPath, backupPath);
+		if (cursor === undefined || (cursor.sourceSize === sourceSize && cursor.sourceMtimeMs === sourceMtimeMs)) continue;
+		try {
+			deps.unlinkSync(backupPath);
+		} catch (error) {
+			if (!isMissingPathError(error)) throw error;
+			continue;
+		}
+		try {
+			deps.unlinkSync(`${backupPath}.cursor.json`);
+		} catch (error) {
+			if (!isMissingPathError(error)) throw error;
+		}
+		deps.log(`[db-accessor] Reclaimed stale migration backup: ${backup.name}`);
+	}
+}
+
 function pruneMigrationBackups(
 	dbPath: string,
 	keep: number,
@@ -874,8 +921,8 @@ function migrationBackupSpaceError(
 /**
  * Back up the database file before running migrations.
  * Flushes WAL first, then copies the main file. Prunes old
- * backups after the space preflight, so a failed preflight keeps existing
- * recovery backups intact.
+ * stale backups before admission, then prunes old backups after the copy is
+ * complete so a failed preflight keeps current-generation recovery intact.
  */
 export function backupBeforeMigration(
 	db: { exec(sql: string): unknown },
@@ -959,13 +1006,13 @@ async function streamedMigrationBackup(
 		// can change between processes (the partial copy already consumed
 		// `offset` bytes), so a resume re-preflights the remaining bytes and
 		// re-probes the remaining copy budget before writing anything.
+		pruneStaleMigrationBackups(dbPath, sourceSize, sourceMtimeMs, migrationBackupDeps);
 		preflightResumedMigrationBackupSpace(dbPath, sourceSize, offset, migrationBackupDeps);
 		await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, sourceMode, offset, deadlineAt);
 		await copyMigrationBackupChunks(dbPath, backupDest, sourceSize, sourceMtimeMs, sourceMode, offset, deadlineAt);
 	}
 	finishMigrationBackup(dbPath, backupDest, migrationBackupDeps);
 	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, migrationBackupDeps);
-	await removeMigrationBackupCursor(backupDest);
 	return backupDest;
 }
 
@@ -1008,14 +1055,6 @@ async function writeMigrationBackupCursor(cursor: MigrationBackupCursor): Promis
 	const tempPath = `${cursorPath}.tmp-${process.pid}`;
 	await writeFileAsync(tempPath, `${JSON.stringify(cursor)}\n`, "utf8");
 	await renameAsync(tempPath, cursorPath);
-}
-
-async function removeMigrationBackupCursor(backupDest: string): Promise<void> {
-	try {
-		await unlinkAsync(`${backupDest}.cursor.json`);
-	} catch (error) {
-		if (!isMissingPathError(error)) throw error;
-	}
 }
 
 async function probeMigrationBackupThroughput(
@@ -1190,6 +1229,15 @@ function prepareMigrationBackup(
 		// Non-fatal — backup still useful even with WAL.
 	}
 
+	try {
+		const source = deps.statSync(dbPath);
+		if (typeof source.size === "number" && Number.isFinite(source.size)) {
+			pruneStaleMigrationBackups(dbPath, source.size, source.mtimeMs, deps);
+		}
+	} catch {
+		// The space preflight remains authoritative when metadata collection races
+		// with a source or backup disappearing.
+	}
 	return preflightMigrationBackupSpace(dbPath, deps);
 }
 

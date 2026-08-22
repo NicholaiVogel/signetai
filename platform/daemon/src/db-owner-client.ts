@@ -104,11 +104,11 @@ export interface DbOwnerClient {
 }
 
 export class DbOwnerError extends Error {
-	readonly code: string;
+	readonly code: string | number;
 	readonly sqliteCode?: string | number;
 	readonly causeFamily?: DbOwnerFailureCause;
 
-	constructor(code: string, message: string, causeFamily?: DbOwnerFailureCause, sqliteCode?: string | number) {
+	constructor(code: string | number, message: string, causeFamily?: DbOwnerFailureCause, sqliteCode?: string | number) {
 		super(message);
 		this.name = "DbOwnerError";
 		this.code = code;
@@ -226,7 +226,7 @@ function ownerIsDead(owner: ChildProcess): boolean {
 }
 
 function messageFromError(error: DbOwnerSerializedError): Error {
-	return new DbOwnerError(error.name, error.message, error.causeFamily, error.sqliteCode ?? error.code);
+	return new DbOwnerError(error.code ?? error.name, error.message, error.causeFamily, error.sqliteCode);
 }
 
 function oldestAge(first: number | null, second: number | null): number | null {
