@@ -154,6 +154,7 @@ describe("migration integrity verify gate", () => {
 	test("prunes the rollback backup only after a pass result", async () => {
 		const { store, state } = fakeStore();
 		let pruned = false;
+		let reset = false;
 		const publications: Array<{ state: string; messages: readonly string[] | undefined }> = [];
 		const result = await runMigrationIntegrityVerifyGate({
 			owner,
@@ -163,6 +164,9 @@ describe("migration integrity verify gate", () => {
 			pruneBackup: () => {
 				pruned = true;
 			},
+			resetGlobalLatch: () => {
+				reset = true;
+			},
 			publishStatus: (publishedState, messages) => {
 				publications.push({ state: publishedState, messages });
 			},
@@ -170,6 +174,7 @@ describe("migration integrity verify gate", () => {
 
 		expect(result.phase).toBe("pass");
 		expect(pruned).toBe(true);
+		expect(reset).toBe(true);
 		expect(state.terminal).toBe("complete");
 		expect(publications).toEqual([
 			{ state: "degraded", messages: ["degraded:integrity-unverified"] },

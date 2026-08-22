@@ -50,7 +50,7 @@ import { listConnectorsAsync } from "./connectors/registry";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
 import { runIncrementalDatabaseIntegrityCheck } from "./incremental-database-integrity";
 import { createMigrationVerifySetupRetry, runMigrationIntegrityVerifyGate } from "./migration-integrity-verify";
-import { publishDatabaseIntegrityStatus } from "./database-integrity";
+import { resetGlobalIntegrityLatch, publishDatabaseIntegrityStatus } from "./database-integrity";
 import {
 	closeDbAccessor,
 	getDbAccessor,
@@ -2561,6 +2561,7 @@ async function main() {
 					publishStatus: (state, messages): void => {
 						publishDatabaseIntegrityStatus(state, messages, owner);
 					},
+					resetGlobalLatch: resetGlobalIntegrityLatch,
 					onProgress: (progress): void => {
 						logger.info("startup-recovery", "Migration integrity verify attempt", { ...progress });
 					},

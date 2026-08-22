@@ -139,6 +139,8 @@ export interface MigrationVerifyGateOptions {
 	readonly scheduleNextAttempt?: (callback: () => void, delayMs: number) => void;
 	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
 	readonly publishStatus?: (state: "healthy" | "corrupt" | "degraded", messages?: readonly string[]) => void;
+	/** Reset a stronger global latch only after a confirmed clean pass. */
+	readonly resetGlobalLatch?: () => void;
 	readonly log?: (message: string, details?: Record<string, unknown>) => void;
 	readonly onContinuationRejection?: (callback: () => Promise<unknown>, error: unknown) => void;
 }
@@ -272,6 +274,7 @@ export async function runMigrationIntegrityVerifyGate(
 			throw error;
 		}
 		await store.markTerminal("complete");
+		options.resetGlobalLatch?.();
 		options.publishStatus?.("healthy");
 		options.log?.("Global integrity check passed; rollback backup pruned", { elapsedMs: result.elapsedMs });
 		return { phase: "pass", attemptCount, scheduled: false };

@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import {
 	open as openAsync,
+	rm as rmAsync,
 	readFile as readFileAsync,
 	rename as renameAsync,
 	unlink as unlinkAsync,
@@ -1029,20 +1030,37 @@ async function readMigrationBackupCursor(
 		const cursorPath = join(dir, name);
 		try {
 			const parsed = JSON.parse(await readFileAsync(cursorPath, "utf8")) as Partial<MigrationBackupCursor>;
+			const cursorMatchesSource =
+				parsed.sourcePath === dbPath && parsed.sourceSize === sourceSize && parsed.sourceMtimeMs === sourceMtimeMs;
+			const destination = typeof parsed.destination === "string" ? parsed.destination : undefined;
+			const safeDestination =
+				destination !== undefined &&
+				destination === join(dir, basename(destination)) &&
+				basename(destination).startsWith(`${base}.bak-v`);
+			const destinationExists = destination !== undefined && existsSync(destination);
+			const destinationSize = destinationExists ? statSync(destination).size : undefined;
 			if (
-				parsed.sourcePath !== dbPath ||
-				parsed.sourceSize !== sourceSize ||
-				parsed.sourceMtimeMs !== sourceMtimeMs ||
-				typeof parsed.destination !== "string" ||
-				parsed.destination !== join(dir, basename(parsed.destination)) ||
-				!basename(parsed.destination).startsWith(`${base}.bak-v`) ||
+				!cursorMatchesSource ||
+				!safeDestination ||
 				typeof parsed.offset !== "number" ||
 				parsed.offset < 0 ||
 				parsed.offset > sourceSize ||
-				!existsSync(parsed.destination)
-			)
+				!destinationExists ||
+				destinationSize !== parsed.offset
+			) {
+				if (
+					cursorMatchesSource &&
+					safeDestination &&
+					typeof parsed.offset === "number" &&
+					destinationExists &&
+					destinationSize !== parsed.offset
+				) {
+					await rmAsync(destination, { force: true, recursive: true });
+					await rmAsync(cursorPath, { force: true });
+				}
 				continue;
-			return parsed as MigrationBackupCursor;
+			}
+			return { ...parsed, destination } as MigrationBackupCursor;
 		} catch {
 			// A torn cursor is ignored; the next admission creates a fresh backup.
 		}
@@ -1200,10 +1218,10 @@ export async function copyMigrationBackupChunks(
 				offset,
 			});
 		}
-		if (Date.now() >= deadlineAt) {
+		if (Date.now() >= deadlineAt - MIGRATION_BACKUP_STARTUP_RESERVE_MS) {
 			throw new MigrationBackupAdmissionError(
 				"throughput",
-				`migration backup copy exhausted its deadline at ${offset} of ${sourceSize} bytes; resume cursor retained`,
+				`migration backup copy exhausted its deadline reserve at ${offset} of ${sourceSize} bytes; resume cursor retained`,
 			);
 		}
 	} catch (error) {

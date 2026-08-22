@@ -1,11 +1,12 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	getDatabaseIntegrityStatus,
 	publishDatabaseIntegrityStatus,
+	resetGlobalIntegrityLatch,
 	repairTelemetryIndexes,
 	runDeferredIntegrityCheck,
 	type DatabaseIntegrityProgress,
@@ -564,6 +565,10 @@ describe("deferred database integrity recovery (#1513)", () => {
 });
 
 describe("integrity state severity merge", () => {
+	beforeEach(() => {
+		resetGlobalIntegrityLatch();
+		updateDatabaseIntegrityStatus(incrementalProgress());
+	});
 	it("publishes incremental corruption and repair guidance over a degraded latch", () => {
 		publishDatabaseIntegrityStatus("degraded", ["global verification incomplete"]);
 		updateDatabaseIntegrityStatus(incrementalProgress({ failedObjects: 1 }), ["confirmed corruption"]);
@@ -592,6 +597,7 @@ describe("integrity state severity merge", () => {
 	});
 
 	it("retains a degraded global latch over a healthy incremental result", () => {
+		resetGlobalIntegrityLatch();
 		publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"]);
 		updateDatabaseIntegrityStatus(incrementalProgress());
 
@@ -600,5 +606,20 @@ describe("integrity state severity merge", () => {
 			integrity: "degraded:integrity-unverified",
 		});
 		publishDatabaseIntegrityStatus("healthy");
+	});
+
+	it("does not downgrade a latched corrupt verdict during persistence retries", () => {
+		resetGlobalIntegrityLatch();
+		publishDatabaseIntegrityStatus("corrupt", ["confirmed corruption"]);
+		publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"]);
+
+		expect(getDatabaseIntegrityStatus()).toMatchObject({
+			state: "corrupt",
+			integrity: "confirmed corruption",
+		});
+
+		resetGlobalIntegrityLatch();
+		publishDatabaseIntegrityStatus("healthy");
+		expect(getDatabaseIntegrityStatus().state).toBe("healthy");
 	});
 });
