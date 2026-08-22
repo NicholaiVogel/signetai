@@ -18,7 +18,10 @@ function attempt(phase: MigrationVerifyResult["phase"]): MigrationVerifyResult {
 	return { phase, messages: phase === "failed" ? ["corrupt"] : [], elapsedMs: 12, attemptDeadlineMs: 300_000 };
 }
 
-function fakeStore(initialAttemptCount = 0): {
+function fakeStore(
+	initialAttemptCount = 0,
+	events: string[] = [],
+): {
 	store: MigrationVerifyCheckpointStore;
 	state: { checkpoint: MigrationVerifyCheckpoint; terminal: string | null };
 } {
@@ -31,6 +34,7 @@ function fakeStore(initialAttemptCount = 0): {
 		store: {
 			read: async () => state.checkpoint,
 			incrementIncompleteAttempt: async () => {
+				events.push("attempt-persisted");
 				state.checkpoint = { ...state.checkpoint, attemptCount: state.checkpoint.attemptCount + 1 };
 				return state.checkpoint.attemptCount;
 			},
@@ -76,14 +80,19 @@ describe("migration integrity verify gate", () => {
 	});
 
 	test("retains the rollback backup and schedules only one fixed-delay retry after incomplete", async () => {
-		const { store, state } = fakeStore();
+		const events: string[] = [];
+		const { store, state } = fakeStore(0, events);
 		let pruned = false;
 		let scheduledDelay = 0;
 		const result = await runMigrationIntegrityVerifyGate({
 			owner,
 			backupPath: "/tmp/memories.db.bak-v151-1234",
 			checkpointStore: store,
-			runAttempt: async () => attempt("incomplete"),
+			runAttempt: async () => {
+				expect(events).toEqual(["attempt-persisted"]);
+				events.push("integrity-check");
+				return attempt("incomplete");
+			},
 			pruneBackup: () => {
 				pruned = true;
 			},

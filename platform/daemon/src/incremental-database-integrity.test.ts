@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createDbOwnerClient } from "./db-owner-client";
 import {
 	runIncrementalDatabaseIntegrityCheck,
+	readMigrationVerifyCheckpoint,
 	type IncrementalIntegrityProgress,
 } from "./incremental-database-integrity";
 import { getDatabaseIntegrityStatus } from "./database-integrity";
@@ -35,6 +36,41 @@ function makeDatabase(): {
 }
 
 describe("incremental database integrity maintenance (#1683)", () => {
+	it("tolerates concurrent legacy checkpoint upgrades", async () => {
+		const database = makeDatabase();
+		const legacy = new Database(database.path);
+		legacy.exec(`
+			CREATE TABLE db_integrity_checkpoints (
+				checkpoint_key TEXT PRIMARY KEY,
+				cursor TEXT NOT NULL DEFAULT '',
+				checked_tables INTEGER NOT NULL DEFAULT 0,
+				failed_tables INTEGER NOT NULL DEFAULT 0,
+				pages_checked INTEGER NOT NULL DEFAULT 0,
+				bytes_checked INTEGER NOT NULL DEFAULT 0,
+				status TEXT NOT NULL DEFAULT 'running',
+				updated_at TEXT NOT NULL
+			)
+		`);
+		legacy.close();
+		await database.owner.start();
+
+		const checkpoints = await Promise.all([
+			readMigrationVerifyCheckpoint(database.owner, "test.integrity.concurrent-legacy"),
+			readMigrationVerifyCheckpoint(database.owner, "test.integrity.concurrent-legacy"),
+		]);
+		expect(checkpoints).toEqual([
+			{ attemptCount: 0, status: "running" },
+			{ attemptCount: 0, status: "running" },
+		]);
+
+		const verification = new Database(database.path, { readonly: true });
+		const columns = verification.prepare("PRAGMA table_info(db_integrity_checkpoints)").all() as Array<{
+			name: string;
+		}>;
+		verification.close();
+		expect(columns.some((column) => column.name === "attempt_count")).toBe(true);
+	});
+
 	it("does not multiply the database-wide page count by the object frontier", async () => {
 		const database = makeDatabase();
 		await database.owner.start();

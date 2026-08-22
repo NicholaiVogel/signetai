@@ -153,6 +153,10 @@ function isDeadline(error: unknown): boolean {
 	return error instanceof DbOwnerDeadlineError || (error instanceof Error && error.name === "DbOwnerDeadlineError");
 }
 
+function isDuplicateColumnError(error: unknown): boolean {
+	return error instanceof Error && /duplicate column name/i.test(error.message);
+}
+
 async function ensureCheckpoint(
 	owner: DbOwnerClient,
 	key: string,
@@ -189,12 +193,24 @@ async function ensureCheckpoint(
 		{ deadlineMs, onOwnerMetrics },
 	);
 	if (!columns.some((column) => column.name === "attempt_count")) {
-		await ownerTransaction(
-			owner,
-			"integrity.checkpoint.attempt-count-column",
-			[ownerRunStatement(`ALTER TABLE ${CHECKPOINT_TABLE} ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0`)],
-			{ deadlineMs, estimatedWorkUnits: 1, onOwnerMetrics },
-		);
+		try {
+			await ownerTransaction(
+				owner,
+				"integrity.checkpoint.attempt-count-column",
+				[ownerRunStatement(`ALTER TABLE ${CHECKPOINT_TABLE} ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0`)],
+				{ deadlineMs, estimatedWorkUnits: 1, onOwnerMetrics },
+			);
+		} catch (error) {
+			if (!isDuplicateColumnError(error)) throw error;
+			const columnsAfterRace = await ownerQueryAll<{ readonly name?: unknown }>(
+				owner,
+				"integrity.checkpoint.columns.after-race",
+				`PRAGMA table_info(${CHECKPOINT_TABLE})`,
+				[],
+				{ deadlineMs, onOwnerMetrics },
+			);
+			if (!columnsAfterRace.some((column) => column.name === "attempt_count")) throw error;
+		}
 	}
 	await ownerTransaction(
 		owner,

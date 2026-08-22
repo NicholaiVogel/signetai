@@ -144,6 +144,10 @@ export async function runMigrationIntegrityVerifyGate(
 		return { phase: "terminal", attemptCount: checkpoint.attemptCount, scheduled: false };
 	}
 
+	// Count the attempt before starting integrity_check. The check can occupy
+	// the maintenance lane until its owner deadline, so persisting afterward
+	// can queue behind the very work whose incomplete result must be retried.
+	const attemptCount = await store.incrementIncompleteAttempt();
 	const result = await (
 		options.runAttempt ??
 		(() =>
@@ -159,7 +163,7 @@ export async function runMigrationIntegrityVerifyGate(
 		await options.pruneBackup();
 		await store.markTerminal("complete");
 		options.log?.("Global integrity check passed; rollback backup pruned", { elapsedMs: result.elapsedMs });
-		return { phase: "pass", attemptCount: checkpoint.attemptCount, scheduled: false };
+		return { phase: "pass", attemptCount, scheduled: false };
 	}
 	if (result.phase === "failed") {
 		await store.markTerminal(MIGRATION_VERIFY_FAILED_STATUS);
@@ -167,10 +171,9 @@ export async function runMigrationIntegrityVerifyGate(
 			messages: result.messages,
 			elapsedMs: result.elapsedMs,
 		});
-		return { phase: "failed", attemptCount: checkpoint.attemptCount, scheduled: false };
+		return { phase: "failed", attemptCount, scheduled: false };
 	}
 
-	const attemptCount = await store.incrementIncompleteAttempt();
 	if (attemptCount >= MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS) {
 		await store.markTerminal(MIGRATION_VERIFY_PARKED_STATUS);
 		options.log?.("degraded:integrity-unverified", {

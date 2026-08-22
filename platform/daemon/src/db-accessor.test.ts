@@ -21,6 +21,7 @@ import {
 	DbWriteQueueFullError,
 	MAX_READ_CONNECTIONS,
 	MAX_WRITE_QUEUE,
+	MIGRATION_BACKUP_CHUNK_BYTES,
 	backupBeforeMigration,
 	backupBeforeMigrationAsync,
 	closeDbAccessor,
@@ -306,7 +307,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:296");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:298");
 	});
 
 	test("write statements expose the number of affected rows", () => {
@@ -748,6 +749,38 @@ describe("DbAccessor", () => {
 		expect(operations).toContain("unlink:test.db.bak-v65-7000");
 		expect(files.has("test.db.bak-v65-7000")).toBe(false);
 	});
+	test("uses the absolute admission window when copy outlasts the remaining budget", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, Buffer.alloc(MIGRATION_BACKUP_CHUNK_BYTES + 1));
+		const realNow = Date.now;
+		const baseNow = realNow();
+		let fakeNow = baseNow;
+		let nowCalls = 0;
+		Date.now = () => {
+			nowCalls += 1;
+			return nowCalls >= 5 ? baseNow + 60_000 : fakeNow;
+		};
+		try {
+			await expect(
+				backupBeforeMigrationAsync(
+					{
+						exec: () => {
+							fakeNow = baseNow + 54_000;
+						},
+					},
+					dbPath,
+					73,
+				),
+			).rejects.toMatchObject({
+				name: "MigrationBackupAdmissionError",
+				reason: "throughput",
+			});
+		} finally {
+			Date.now = realNow;
+		}
+	});
+
 	test("resumes a chunked migration backup from its durable cursor", async () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));

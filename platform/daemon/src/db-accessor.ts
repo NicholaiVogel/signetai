@@ -688,7 +688,6 @@ export function isVectorRuntimeUsable(): boolean {
 const MAX_MIGRATION_BACKUPS = 1;
 export const MIGRATION_BACKUP_CHUNK_BYTES = 64 * 1024 * 1024;
 const MIGRATION_BACKUP_SPACE_MARGIN_BYTES = MIGRATION_BACKUP_CHUNK_BYTES * 2;
-const MIGRATION_BACKUP_COPY_BUDGET_MS = 55_000;
 /**
  * The db.initialize owner job's deadline (maintenance lane, see
  * db-owner-client.ts). The backup copy window is what remains of this
@@ -922,6 +921,7 @@ async function streamedMigrationBackup(
 	dbPath: string,
 	schemaVersion: number,
 ): Promise<string> {
+	const startedAt = Date.now();
 	try {
 		db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 	} catch {
@@ -942,16 +942,17 @@ async function streamedMigrationBackup(
 			}
 			throw error;
 		}
-		await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest);
+		const copyWindowMs = await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, 0, startedAt);
+		await copyMigrationBackupChunks(dbPath, backupDest, sourceSize, sourceMtimeMs, offset, Date.now() + copyWindowMs);
 	} else {
 		// Admission holds across restarts too: free space and disk throughput
 		// can change between processes (the partial copy already consumed
 		// `offset` bytes), so a resume re-preflights the remaining bytes and
 		// re-probes the remaining copy budget before writing anything.
 		preflightResumedMigrationBackupSpace(dbPath, sourceSize, offset, migrationBackupDeps);
-		await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, offset);
+		const copyWindowMs = await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, offset, startedAt);
+		await copyMigrationBackupChunks(dbPath, backupDest, sourceSize, sourceMtimeMs, offset, Date.now() + copyWindowMs);
 	}
-	await copyMigrationBackupChunks(dbPath, backupDest, sourceSize, sourceMtimeMs, offset);
 	finishMigrationBackup(dbPath, backupDest, migrationBackupDeps);
 	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, migrationBackupDeps);
 	await removeMigrationBackupCursor(backupDest);
@@ -1012,8 +1013,11 @@ async function probeMigrationBackupThroughput(
 	sourceSize: number,
 	backupDest: string,
 	resumeOffset = 0,
-): Promise<void> {
-	if (sourceSize === 0 || resumeOffset >= sourceSize) return;
+	startedAt = Date.now(),
+): Promise<number> {
+	if (sourceSize === 0 || resumeOffset >= sourceSize) {
+		return MIGRATION_BACKUP_DEADLINE_TOTAL_MS - (Date.now() - startedAt) - MIGRATION_BACKUP_STARTUP_RESERVE_MS;
+	}
 	const probeDest = `${backupDest}.probe-${process.pid}`;
 	let source: Awaited<ReturnType<typeof openAsync>> | undefined;
 	let probe: Awaited<ReturnType<typeof openAsync>> | undefined;
@@ -1021,7 +1025,7 @@ async function probeMigrationBackupThroughput(
 		source = await openAsync(dbPath, "r");
 		probe = await openAsync(probeDest, "w");
 		const buffer = Buffer.allocUnsafe(Math.min(MIGRATION_BACKUP_CHUNK_BYTES, sourceSize));
-		const startedAt = performance.now();
+		const probeStartedAt = performance.now();
 		const result = await source.read(buffer, 0, buffer.length, resumeOffset);
 		let probeWritten = 0;
 		while (probeWritten < result.bytesRead) {
@@ -1032,8 +1036,9 @@ async function probeMigrationBackupThroughput(
 			probeWritten += written.bytesWritten;
 		}
 		await probe.sync();
-		const elapsedMs = Math.max(1, performance.now() - startedAt);
-		const bytesPerMs = result.bytesRead / elapsedMs;
+		const probeElapsedMs = Math.max(1, performance.now() - probeStartedAt);
+		const elapsedMs = Math.max(1, Date.now() - startedAt);
+		const bytesPerMs = result.bytesRead / probeElapsedMs;
 		const remainingBytes = sourceSize - resumeOffset;
 		const estimatedMs = Math.ceil(remainingBytes / bytesPerMs);
 		// The initialize job's deadline covers admission + probe + copy +
@@ -1048,6 +1053,7 @@ async function probeMigrationBackupThroughput(
 				`measured copy rate predicts ${estimatedMs}ms for the remaining ${remainingBytes} of ${sourceSize} bytes; copy window is ${copyWindowMs}ms after probe time and startup reserve`,
 			);
 		}
+		return copyWindowMs;
 	} catch (error) {
 		if (error instanceof MigrationBackupAdmissionError) throw error;
 		if (isDbFullError(error)) {
@@ -1075,6 +1081,7 @@ async function copyMigrationBackupChunks(
 	sourceSize: number,
 	sourceMtimeMs: number,
 	offset: number,
+	deadlineAt: number,
 ): Promise<void> {
 	const source = await openAsync(dbPath, "r");
 	let destination: Awaited<ReturnType<typeof openAsync>> | undefined;
@@ -1086,7 +1093,6 @@ async function copyMigrationBackupChunks(
 		// hard stop. This wall-clock check makes budget exhaustion mid-copy a
 		// named admission error with a resumable cursor, instead of letting
 		// the copy run until the deadline kills the job.
-		const deadlineAt = Date.now() + MIGRATION_BACKUP_DEADLINE_TOTAL_MS - MIGRATION_BACKUP_STARTUP_RESERVE_MS;
 		const buffer = Buffer.allocUnsafe(Math.min(MIGRATION_BACKUP_CHUNK_BYTES, Math.max(1, sourceSize)));
 		while (offset < sourceSize) {
 			if (Date.now() >= deadlineAt) {
