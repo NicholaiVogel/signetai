@@ -49,6 +49,7 @@ import {
 import { listConnectorsAsync } from "./connectors/registry";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
 import { runIncrementalDatabaseIntegrityCheck } from "./incremental-database-integrity";
+import { nextMigrationVerifyDeadline, runMigrationIntegrityVerify } from "./migration-integrity-verify";
 import {
 	closeDbAccessor,
 	getDbAccessor,
@@ -2259,11 +2260,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2255", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2256", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2265",
+								siteToken: "daemon.ts:2266",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2506,17 +2507,53 @@ async function main() {
 			const owner = dbOwnerClient;
 			const migrationBackupPending = hasPendingMigrationBackup(MEMORY_DB);
 			if (owner === null) throw new Error("DB owner is unavailable for incremental integrity maintenance");
+
+			// ── Migration backup prune gate ──────────────────────────────────
+			// Global `PRAGMA integrity_check` is the ONLY result that may delete
+			// the rollback backup. Table-scoped checks (even integrity_check(tbl))
+			// are documented as not global-equivalent: they miss freelist damage
+			// and pages claimed by multiple tables. The gate therefore runs the
+			// global check post-ready on the maintenance lane with escalating
+			// deadline retries; a partial pass never prunes.
+			if (migrationBackupPending) {
+				let attemptDeadlineMs = 5_000;
+				const verifyOnce = async (): Promise<void> => {
+					const result = await runMigrationIntegrityVerify({
+						owner,
+						attemptDeadlineMs,
+						onProgress: (progress): void => {
+							logger.info("startup-recovery", "Migration integrity verify attempt", { ...progress });
+						},
+					});
+					if (result.phase === "pass") {
+						pruneMigrationBackupsAfterIntegrity(MEMORY_DB);
+						logger.info("startup-recovery", "Global integrity check passed; rollback backup pruned");
+						return;
+					}
+					if (result.phase === "failed") {
+						logger.error("startup-recovery", "Global integrity check FAILED; rollback backup retained", undefined, {
+							messages: result.messages,
+						});
+						return; // operator repairs from the retained backup
+					}
+					// incomplete: retry from scratch with a doubled, capped deadline
+					attemptDeadlineMs = nextMigrationVerifyDeadline(attemptDeadlineMs);
+					const timer = setTimeout(() => {
+						void verifyOnce().catch((error) => {
+							logger.error("startup-recovery", "Migration integrity verify rejected", error);
+						});
+					}, 1000);
+					timer.unref?.();
+				};
+				void verifyOnce().catch((error) => {
+					logger.error("startup-recovery", "Migration integrity verify rejected", error);
+				});
+			}
+
 			const runIntegritySlice = async (): Promise<void> => {
-				// When a migration rollback point is pending, verification must be
-				// full-equivalent before that backup may be pruned. A dedicated
-				// checkpoint key starts a fresh generation for this migrated
-				// database — a stale pre-migration cursor must never satisfy the
-				// prune gate — and fullMode switches every table scan from
-				// quick_check to integrity_check for the duration.
 				const result = await runIncrementalDatabaseIntegrityCheck({
 					owner,
-					checkpointKey: migrationBackupPending ? "database.migration-verify" : "database.quick-check",
-					fullMode: migrationBackupPending,
+					checkpointKey: "database.quick-check",
 					tablesPerRun: INCREMENTAL_INTEGRITY_TABLES_PER_RUN,
 					runBudgetMs: INCREMENTAL_INTEGRITY_RUN_BUDGET_MS,
 					ownerDeadlineMs: INCREMENTAL_INTEGRITY_OWNER_DEADLINE_MS,

@@ -689,6 +689,17 @@ const MAX_MIGRATION_BACKUPS = 1;
 export const MIGRATION_BACKUP_CHUNK_BYTES = 64 * 1024 * 1024;
 const MIGRATION_BACKUP_SPACE_MARGIN_BYTES = MIGRATION_BACKUP_CHUNK_BYTES * 2;
 const MIGRATION_BACKUP_COPY_BUDGET_MS = 55_000;
+/**
+ * The db.initialize owner job's deadline (maintenance lane, see
+ * db-owner-client.ts). The backup copy window is what remains of this
+ * deadline after the probe elapsed time and the startup reserve.
+ */
+const MIGRATION_BACKUP_DEADLINE_TOTAL_MS = 60_000;
+/**
+ * Startup deadline headroom reserved for migration execution and post-copy
+ * bookkeeping inside the initialize job's deadline.
+ */
+const MIGRATION_BACKUP_STARTUP_RESERVE_MS = 5_000;
 
 export type MigrationBackupAdmissionReason = "space" | "throughput";
 
@@ -1020,10 +1031,16 @@ async function probeMigrationBackupThroughput(
 		const bytesPerMs = result.bytesRead / elapsedMs;
 		const remainingBytes = sourceSize - resumeOffset;
 		const estimatedMs = Math.ceil(remainingBytes / bytesPerMs);
-		if (!Number.isFinite(estimatedMs) || estimatedMs > MIGRATION_BACKUP_COPY_BUDGET_MS) {
+		// The initialize job's deadline covers admission + probe + copy +
+		// migration + startup bookkeeping. The copy may only claim the window
+		// left after the probe spent its time and the reserve is kept for the
+		// migration itself. (The copy loop re-checks this window every chunk;
+		// a stall mid-copy surfaces as the deadline error, never a silent wedge.)
+		const copyWindowMs = MIGRATION_BACKUP_DEADLINE_TOTAL_MS - elapsedMs - MIGRATION_BACKUP_STARTUP_RESERVE_MS;
+		if (!Number.isFinite(estimatedMs) || copyWindowMs <= 0 || estimatedMs > copyWindowMs) {
 			throw new MigrationBackupAdmissionError(
 				"throughput",
-				`measured copy rate predicts ${estimatedMs}ms for the remaining ${remainingBytes} of ${sourceSize} bytes; budget is ${MIGRATION_BACKUP_COPY_BUDGET_MS}ms`,
+				`measured copy rate predicts ${estimatedMs}ms for the remaining ${remainingBytes} of ${sourceSize} bytes; copy window is ${copyWindowMs}ms after probe time and startup reserve`,
 			);
 		}
 	} catch (error) {
@@ -1058,8 +1075,19 @@ async function copyMigrationBackupChunks(
 	const destination = await openAsync(backupDest, offset === 0 ? "w" : "r+");
 	try {
 		await destination.truncate(offset);
+		// The measured rate is admission, not a leash: the deadline owns the
+		// hard stop. This wall-clock check makes budget exhaustion mid-copy a
+		// named admission error with a resumable cursor, instead of letting
+		// the copy run until the deadline kills the job.
+		const deadlineAt = Date.now() + MIGRATION_BACKUP_DEADLINE_TOTAL_MS - MIGRATION_BACKUP_STARTUP_RESERVE_MS;
 		const buffer = Buffer.allocUnsafe(Math.min(MIGRATION_BACKUP_CHUNK_BYTES, Math.max(1, sourceSize)));
 		while (offset < sourceSize) {
+			if (Date.now() >= deadlineAt) {
+				throw new MigrationBackupAdmissionError(
+					"throughput",
+					`migration backup copy exceeded its budget at ${offset} of ${sourceSize} bytes; resume cursor retained`,
+				);
+			}
 			const result = await source.read(buffer, 0, Math.min(buffer.length, sourceSize - offset), offset);
 			if (result.bytesRead === 0) throw new Error(`Migration backup source ended at ${offset} of ${sourceSize} bytes`);
 			let chunkOffset = 0;
