@@ -886,6 +886,23 @@ describe("DbAccessor", () => {
 		expect(existsSync(backupPath)).toBe(false);
 		expect(existsSync(`${backupPath}.cursor.json`)).toBe(false);
 	});
+
+	test("propagates a failed rollback backup deletion after integrity passes", () => {
+		const dbPath = "/tmp/migration-prune-failure/test.db";
+		const deps = {
+			copyFileSync: () => {},
+			readdirSync: () => ["test.db.bak-v72-9000"],
+			statSync: () => ({ mtimeMs: 1, size: 10 }),
+			statfsSync: () => ({ bavail: 1, bsize: 1 }),
+			unlinkSync: () => {
+				throw new Error("unlink denied");
+			},
+			now: () => 0,
+			log: () => {},
+		};
+
+		expect(() => pruneMigrationBackupsAfterIntegrity(dbPath, deps)).toThrow("unlink denied");
+	});
 });
 
 describe("resolveCustomSqlitePath", () => {

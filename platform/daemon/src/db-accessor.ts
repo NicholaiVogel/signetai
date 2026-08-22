@@ -717,7 +717,7 @@ interface MigrationBackupCursor {
 	readonly offset: number;
 }
 
-interface MigrationBackupDeps {
+export interface MigrationBackupDeps {
 	readonly copyFileSync: (source: string, destination: string) => void;
 	readonly readdirSync: (path: string) => string[];
 	readonly statSync: (path: string) => { readonly mtimeMs: number; readonly size?: number };
@@ -772,22 +772,36 @@ function migrationBackups(
 		.sort((a, b) => b.mtime - a.mtime);
 }
 
-function pruneMigrationBackups(dbPath: string, keep: number, deps: MigrationBackupDeps, keepName?: string): void {
+function pruneMigrationBackups(
+	dbPath: string,
+	keep: number,
+	deps: MigrationBackupDeps,
+	keepName?: string,
+	strict = false,
+): void {
 	const dir = dirname(dbPath);
 	for (const old of migrationBackups(dbPath, deps)
 		.filter((backup) => backup.name !== keepName)
 		.slice(Math.max(0, keep))) {
 		try {
 			const backupPath = join(dir, old.name);
-			deps.unlinkSync(backupPath);
+			try {
+				deps.unlinkSync(backupPath);
+			} catch (err) {
+				if (!isMissingPathError(err)) throw err;
+			}
+			if (migrationBackups(dbPath, deps).some((backup) => backup.name === old.name)) {
+				throw new Error(`Migration backup still exists after unlink: ${backupPath}`);
+			}
 			try {
 				deps.unlinkSync(`${backupPath}.cursor.json`);
 			} catch {
 				// A completed backup has no cursor; stale cursor cleanup is best effort.
 			}
 			deps.log(`[db-accessor] Pruned old backup: ${old.name}`);
-		} catch {
-			// Best effort.
+		} catch (error) {
+			if (strict) throw error;
+			// Best effort during pre-migration pruning; the integrity gate uses strict mode.
 		}
 	}
 }
@@ -1238,15 +1252,24 @@ export function pendingMigrationBackupPath(dbPath: string): string | null {
 	return pending === undefined ? null : join(dirname(dbPath), pending.name);
 }
 
+/** Return the size of the newest rollback backup awaiting post-ready verification. */
+export function pendingMigrationBackupSizeBytes(dbPath: string): number | null {
+	const pending = migrationBackups(dbPath, migrationBackupDeps)[0];
+	return pending?.size ?? null;
+}
+
 /** Remove rollback points only after post-ready integrity maintenance passes. */
-export function pruneMigrationBackupsAfterIntegrity(dbPath: string): void {
-	pruneMigrationBackups(dbPath, 0, migrationBackupDeps);
+export function pruneMigrationBackupsAfterIntegrity(
+	dbPath: string,
+	deps: MigrationBackupDeps = migrationBackupDeps,
+): void {
+	pruneMigrationBackups(dbPath, 0, deps, undefined, true);
 	const dir = dirname(dbPath);
-	for (const name of readdirSync(dir).filter(
-		(entry) => entry.startsWith(`${basename(dbPath)}.bak-v`) && entry.endsWith(".cursor.json"),
-	)) {
+	for (const name of deps
+		.readdirSync(dir)
+		.filter((entry) => entry.startsWith(`${basename(dbPath)}.bak-v`) && entry.endsWith(".cursor.json"))) {
 		try {
-			unlinkSync(join(dir, name));
+			deps.unlinkSync(join(dir, name));
 		} catch {
 			// Best effort cleanup; retaining a cursor is safer than deleting evidence.
 		}

@@ -34,12 +34,10 @@ describe("daemon production DB owner wiring", () => {
 	it("retries migration verification after setup rejection with a bounded cap", async () => {
 		const source = await Bun.file(daemonSourceUrl).text();
 
-		expect(source).toContain("MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS = 3");
-		expect(source).toContain('publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"], owner);');
-		expect(source).toContain("MIGRATION_VERIFY_RETRY_INTERVAL_MS");
-		expect(source).toContain("setupRejectionAttempts = 0");
-		expect(source).toContain("timer.unref?.();");
-		expect(source).toContain("retry cap reached");
+		expect(source).toContain("createMigrationVerifySetupRetry");
+		expect(source).toContain("onContinuationRejection");
+		expect(source).not.toContain("setupRejectionAttempts");
+		expect(source).toContain("setupRetry.run();");
 	});
 
 	it("keeps a paused startup source partial instead of reporting success", async () => {

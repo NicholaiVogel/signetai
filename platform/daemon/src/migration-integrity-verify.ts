@@ -24,6 +24,9 @@ import { ownerQueryAll } from "./db-owner-maintenance";
 export const MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS = 300_000;
 export const MIGRATION_VERIFY_RETRY_INTERVAL_MS = 30 * 60_000;
 export const MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS = 8;
+export const MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS = 3;
+const MIGRATION_VERIFY_SCAN_BYTES_PER_SECOND = 10 * 1024 * 1024;
+const MIGRATION_VERIFY_MAX_ATTEMPT_DEADLINE_MS = 15 * 60_000;
 export { MIGRATION_VERIFY_PARKED_STATUS, MIGRATION_VERIFY_FAILED_STATUS };
 
 export interface MigrationVerifyResult {
@@ -36,9 +39,15 @@ export interface MigrationVerifyResult {
 
 export interface MigrationVerifyOptions {
 	readonly owner: DbOwnerClient;
-	/** Per-attempt owner deadline. Production uses 300 seconds. */
+	/** Per-attempt owner deadline. Production derives this from the database size. */
 	readonly attemptDeadlineMs?: number;
 	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
+}
+
+export function migrationVerifyAttemptDeadlineMs(databaseSizeBytes: number): number {
+	const sizeBytes = Number.isFinite(databaseSizeBytes) ? Math.max(0, databaseSizeBytes) : 0;
+	const sizeAllowanceMs = Math.ceil(sizeBytes / MIGRATION_VERIFY_SCAN_BYTES_PER_SECOND) * 1000;
+	return Math.min(MIGRATION_VERIFY_MAX_ATTEMPT_DEADLINE_MS, MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS + sizeAllowanceMs);
 }
 
 interface IntegrityCheckRow {
@@ -70,9 +79,15 @@ export async function runMigrationIntegrityVerify(options: MigrationVerifyOption
 		return result;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		const normalizedMessage = message.toLowerCase();
 		const isDeadline = message.includes("exceeded its deadline") || message.includes("DB_OWNER_DEADLINE");
+		const isRecognizedCorruption = [
+			"database disk image is malformed",
+			"file is not a database",
+			"database disk image malformed",
+		].some((signature) => normalizedMessage.includes(signature));
 		const result: MigrationVerifyResult = {
-			phase: isDeadline ? "incomplete" : "failed",
+			phase: isDeadline || !isRecognizedCorruption ? "incomplete" : "failed",
 			messages: [message],
 			elapsedMs: Date.now() - startedAt,
 			attemptDeadlineMs,
@@ -94,6 +109,8 @@ export interface MigrationVerifyGateOptions {
 	readonly owner: DbOwnerClient;
 	/** Completed backup generation this gate is verifying. */
 	readonly backupPath: string;
+	/** Optional stat result for tests or callers that already have the file size. */
+	readonly databaseSizeBytes?: number;
 	readonly checkpointStore?: MigrationVerifyCheckpointStore;
 	readonly runAttempt?: () => Promise<MigrationVerifyResult>;
 	readonly pruneBackup: () => void | Promise<void>;
@@ -101,6 +118,7 @@ export interface MigrationVerifyGateOptions {
 	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
 	readonly publishStatus?: (state: "healthy" | "corrupt" | "degraded", messages?: readonly string[]) => void;
 	readonly log?: (message: string, details?: Record<string, unknown>) => void;
+	readonly onContinuationRejection?: (callback: () => Promise<unknown>, error: unknown) => void;
 }
 
 export interface MigrationVerifyGateResult {
@@ -127,6 +145,60 @@ function ownerCheckpointStore(owner: DbOwnerClient, backupPath: string): Migrati
 	};
 }
 
+export interface MigrationVerifySetupRetryOptions {
+	readonly run: () => Promise<unknown>;
+	readonly publishStatus?: (state: "degraded", messages: readonly string[]) => void;
+	readonly scheduleNextAttempt?: (callback: () => void, delayMs: number) => void;
+	readonly logWarn?: (message: string, details: Record<string, unknown>) => void;
+	readonly logError?: (message: string, error: Error, details: Record<string, unknown>) => void;
+}
+
+export interface MigrationVerifySetupRetryController {
+	readonly run: () => void;
+	readonly handleRejection: (callback: () => Promise<unknown>, error: unknown) => void;
+}
+
+/** Share the bounded setup-rejection policy between the first run and continuations. */
+export function createMigrationVerifySetupRetry(
+	options: MigrationVerifySetupRetryOptions,
+): MigrationVerifySetupRetryController {
+	const schedule = options.scheduleNextAttempt ?? defaultScheduleNextAttempt;
+	let rejectionAttempts = 0;
+
+	const handleRejection = (callback: () => Promise<unknown>, error: unknown): void => {
+		const attemptCount = rejectionAttempts + 1;
+		rejectionAttempts = attemptCount;
+		const rejectionError = error instanceof Error ? error : new Error(String(error));
+		options.publishStatus?.("degraded", ["degraded:integrity-unverified"]);
+		if (attemptCount >= MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS) {
+			options.logError?.("Migration integrity verify setup rejected; retry cap reached", rejectionError, {
+				attemptCount,
+				maxAttempts: MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS,
+			});
+			return;
+		}
+		options.logWarn?.("Migration integrity verify setup rejected; retry scheduled", {
+			attemptCount,
+			retryDelayMs: MIGRATION_VERIFY_RETRY_INTERVAL_MS,
+			error: rejectionError.message,
+		});
+		schedule(() => run(callback), MIGRATION_VERIFY_RETRY_INTERVAL_MS);
+	};
+	const run = (callback: () => Promise<unknown>): void => {
+		void Promise.resolve()
+			.then(callback)
+			.then(() => {
+				rejectionAttempts = 0;
+			})
+			.catch((error: unknown) => handleRejection(callback, error));
+	};
+
+	return {
+		run: () => run(options.run),
+		handleRejection,
+	};
+}
+
 /**
  * Process one maintenance tick. The continuation is deliberately scheduled
  * only after an incomplete attempt, and never runs a tight retry loop.
@@ -150,6 +222,9 @@ export async function runMigrationIntegrityVerifyGate(
 		return { phase: "terminal", attemptCount: checkpoint.attemptCount, scheduled: false };
 	}
 
+	options.publishStatus?.("degraded", ["degraded:integrity-unverified"]);
+	const attemptDeadlineMs = migrationVerifyAttemptDeadlineMs(options.databaseSizeBytes ?? 0);
+
 	// Count the attempt before starting integrity_check. The check can occupy
 	// the maintenance lane until its owner deadline, so persisting afterward
 	// can queue behind the very work whose incomplete result must be retried.
@@ -159,14 +234,21 @@ export async function runMigrationIntegrityVerifyGate(
 		(() =>
 			runMigrationIntegrityVerify({
 				owner: options.owner,
-				attemptDeadlineMs: MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS,
+				attemptDeadlineMs,
 				onProgress: options.onProgress,
 			}))
 	)();
 	if (options.runAttempt !== undefined) await options.onProgress?.(result);
 
 	if (result.phase === "pass") {
-		await options.pruneBackup();
+		try {
+			await options.pruneBackup();
+		} catch (error) {
+			options.log?.("Global integrity check passed but rollback backup prune failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
 		await store.markTerminal("complete");
 		options.publishStatus?.("healthy");
 		options.log?.("Global integrity check passed; rollback backup pruned", { elapsedMs: result.elapsedMs });
@@ -182,7 +264,6 @@ export async function runMigrationIntegrityVerifyGate(
 		return { phase: "failed", attemptCount, scheduled: false };
 	}
 
-	options.publishStatus?.("degraded", ["degraded:integrity-unverified"]);
 	options.log?.("degraded:integrity-unverified", {
 		attemptCount,
 		rollbackBackup: "retained",
@@ -198,8 +279,13 @@ export async function runMigrationIntegrityVerifyGate(
 	}
 
 	const schedule = options.scheduleNextAttempt ?? defaultScheduleNextAttempt;
+	const continuation = (): Promise<unknown> => runMigrationIntegrityVerifyGate(options);
 	schedule(() => {
-		void runMigrationIntegrityVerifyGate(options).catch((error) => {
+		void continuation().catch((error) => {
+			if (options.onContinuationRejection !== undefined) {
+				options.onContinuationRejection(continuation, error);
+				return;
+			}
 			options.log?.("Migration integrity verify continuation rejected", {
 				error: error instanceof Error ? error.message : String(error),
 			});

@@ -49,13 +49,14 @@ import {
 import { listConnectorsAsync } from "./connectors/registry";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
 import { runIncrementalDatabaseIntegrityCheck } from "./incremental-database-integrity";
-import { MIGRATION_VERIFY_RETRY_INTERVAL_MS, runMigrationIntegrityVerifyGate } from "./migration-integrity-verify";
+import { createMigrationVerifySetupRetry, runMigrationIntegrityVerifyGate } from "./migration-integrity-verify";
 import { publishDatabaseIntegrityStatus } from "./database-integrity";
 import {
 	closeDbAccessor,
 	getDbAccessor,
 	getVectorRuntimeStatus,
 	pendingMigrationBackupPath,
+	pendingMigrationBackupSizeBytes,
 	initDbAccessorLite,
 	pruneMigrationBackupsAfterIntegrity,
 	resolveSqliteRuntimeConfig,
@@ -736,7 +737,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:739" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:740" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -779,7 +780,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:761" },
+			{ siteToken: "daemon.ts:762" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -856,7 +857,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:852" },
+			{ siteToken: "daemon.ts:853" },
 		);
 	} catch {
 		return false;
@@ -1480,7 +1481,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1466", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1467", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1548,7 +1549,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1549", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1550", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2261,11 +2262,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2257", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2258", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2267",
+								siteToken: "daemon.ts:2268",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2489,7 +2490,6 @@ async function main() {
 	const INCREMENTAL_INTEGRITY_TABLES_PER_RUN = 8;
 	const INCREMENTAL_INTEGRITY_RUN_BUDGET_MS = 5_000;
 	const INCREMENTAL_INTEGRITY_OWNER_DEADLINE_MS = 1_000;
-	const MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS = 3;
 
 	const onListening = (info: { address: string; port: number }): void => {
 		logger.info("daemon", "Server listening", {
@@ -2516,6 +2516,7 @@ async function main() {
 			vacuumConversionHandle = startVacuumConversionWorker(getDbAccessor(), { owner: dbOwnerClient ?? undefined });
 			const owner = dbOwnerClient;
 			const migrationBackupPath = pendingMigrationBackupPath(MEMORY_DB);
+			const migrationBackupSizeBytes = pendingMigrationBackupSizeBytes(MEMORY_DB);
 			const migrationBackupPending = migrationBackupPath !== null;
 			if (owner === null) throw new Error("DB owner is unavailable for incremental integrity maintenance");
 
@@ -2525,9 +2526,13 @@ async function main() {
 			// checkpoint key, so a parked or failed prior generation cannot suppress
 			// verification of this generation.
 			if (migrationBackupPending && migrationBackupPath !== null) {
+				const runMigrationVerifyGate = (): Promise<unknown> =>
+					runMigrationIntegrityVerifyGate(migrationVerifyGateOptions);
+				let setupRetry: ReturnType<typeof createMigrationVerifySetupRetry>;
 				const migrationVerifyGateOptions: Parameters<typeof runMigrationIntegrityVerifyGate>[0] = {
 					owner,
 					backupPath: migrationBackupPath,
+					databaseSizeBytes: migrationBackupSizeBytes ?? 0,
 					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB),
 					publishStatus: (state, messages): void => {
 						publishDatabaseIntegrityStatus(state, messages, owner);
@@ -2538,46 +2543,17 @@ async function main() {
 					log: (message, details): void => {
 						logger.info("startup-recovery", message, details);
 					},
+					onContinuationRejection: (callback, error): void => setupRetry.handleRejection(callback, error),
 				};
-				let setupRejectionAttempts = 0;
-				const runMigrationVerifyGate = (): Promise<unknown> =>
-					runMigrationIntegrityVerifyGate(migrationVerifyGateOptions);
-				const handleSetupRejection = (error: unknown): void => {
-					const attemptCount = setupRejectionAttempts + 1;
-					setupRejectionAttempts = attemptCount;
-					const rejectionError = error instanceof Error ? error : new Error(String(error));
-					publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"], owner);
-					if (attemptCount >= MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS) {
-						logger.error(
-							"startup-recovery",
-							"Migration integrity verify setup rejected; retry cap reached",
-							rejectionError,
-							{
-								attemptCount,
-								maxAttempts: MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS,
-							},
-						);
-						return;
-					}
-					logger.warn("startup-recovery", "Migration integrity verify setup rejected; retry scheduled", {
-						attemptCount,
-						retryDelayMs: MIGRATION_VERIFY_RETRY_INTERVAL_MS,
-						error: error instanceof Error ? error.message : String(error),
-					});
-					const timer = setTimeout(() => {
-						void runMigrationVerifyGate()
-							.then(() => {
-								setupRejectionAttempts = 0;
-							})
-							.catch(handleSetupRejection);
-					}, MIGRATION_VERIFY_RETRY_INTERVAL_MS);
-					timer.unref?.();
-				};
-				void runMigrationVerifyGate()
-					.then(() => {
-						setupRejectionAttempts = 0;
-					})
-					.catch(handleSetupRejection);
+				setupRetry = createMigrationVerifySetupRetry({
+					run: runMigrationVerifyGate,
+					publishStatus: (state, messages): void => {
+						publishDatabaseIntegrityStatus(state, messages, owner);
+					},
+					logWarn: (message, details): void => logger.warn("startup-recovery", message, details),
+					logError: (message, error, details): void => logger.error("startup-recovery", message, error, details),
+				});
+				setupRetry.run();
 			}
 
 			const runIntegritySlice = async (): Promise<void> => {

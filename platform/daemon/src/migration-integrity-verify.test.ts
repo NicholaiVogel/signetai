@@ -5,6 +5,8 @@ import {
 	MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS,
 	MIGRATION_VERIFY_PARKED_STATUS,
 	MIGRATION_VERIFY_RETRY_INTERVAL_MS,
+	createMigrationVerifySetupRetry,
+	migrationVerifyAttemptDeadlineMs,
 	migrationVerifyCheckpointKey,
 	runMigrationIntegrityVerify,
 	runMigrationIntegrityVerifyGate,
@@ -48,8 +50,8 @@ function fakeStore(
 }
 
 describe("migration integrity verify gate", () => {
-	test("returns a failed result for non-deadline integrity errors", async () => {
-		const failure = new Error("malformed database");
+	test("returns a failed result for recognized corruption errors", async () => {
+		const failure = new Error("database disk image is malformed");
 		const progress: MigrationVerifyResult[] = [];
 		const failingOwner = {
 			submit: () => ({ result: Promise.reject(failure), metrics: Promise.resolve(undefined), job: {} }),
@@ -62,9 +64,33 @@ describe("migration integrity verify gate", () => {
 					progress.push(result);
 				},
 			}),
-		).resolves.toMatchObject({ phase: "failed", messages: ["malformed database"] });
+		).resolves.toMatchObject({ phase: "failed", messages: ["database disk image is malformed"] });
 		expect(progress).toHaveLength(1);
 		expect(progress[0]?.phase).toBe("failed");
+	});
+
+	test("treats non-ok integrity rows as corruption", async () => {
+		const corruptOwner = {
+			submit: () => ({
+				result: Promise.resolve([{ integrity_check: "row missing from index" }]),
+				metrics: Promise.resolve(undefined),
+				job: {},
+			}),
+		} as unknown as DbOwnerClient;
+
+		await expect(runMigrationIntegrityVerify({ owner: corruptOwner })).resolves.toMatchObject({ phase: "failed" });
+	});
+
+	test("treats infrastructure errors as incomplete so they remain retryable", async () => {
+		const failure = new Error("owner queue rejected transiently");
+		const failingOwner = {
+			submit: () => ({ result: Promise.reject(failure), metrics: Promise.resolve(undefined), job: {} }),
+		} as unknown as DbOwnerClient;
+
+		await expect(runMigrationIntegrityVerify({ owner: failingOwner })).resolves.toMatchObject({
+			phase: "incomplete",
+			messages: ["owner queue rejected transiently"],
+		});
 	});
 
 	test("scopes checkpoint state to the backup generation", () => {
@@ -76,9 +102,41 @@ describe("migration integrity verify gate", () => {
 		);
 	});
 
-	test("uses one 300-second attempt and a fixed 30-minute continuation interval", () => {
-		expect(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS).toBe(300_000);
+	test("derives a larger attempt budget from the database size", () => {
+		expect(migrationVerifyAttemptDeadlineMs(0)).toBe(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS);
+		expect(migrationVerifyAttemptDeadlineMs(10 * 1024 * 1024)).toBe(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS + 1000);
+		expect(migrationVerifyAttemptDeadlineMs(20 * 1024 * 1024)).toBeGreaterThan(migrationVerifyAttemptDeadlineMs(1024));
 		expect(MIGRATION_VERIFY_RETRY_INTERVAL_MS).toBe(30 * 60_000);
+	});
+
+	test("bounds setup rejection retries and shares the policy with continuations", async () => {
+		const scheduled: Array<() => void> = [];
+		const warnings: number[] = [];
+		const giveUps: number[] = [];
+		let calls = 0;
+		const retry = createMigrationVerifySetupRetry({
+			run: async () => {
+				calls += 1;
+				throw new Error(`rejection ${calls}`);
+			},
+			scheduleNextAttempt: (callback, delayMs) => {
+				expect(delayMs).toBe(MIGRATION_VERIFY_RETRY_INTERVAL_MS);
+				scheduled.push(callback);
+			},
+			logWarn: (_message, details) => warnings.push(Number(details.attemptCount)),
+			logError: (_message, _error, details) => giveUps.push(Number(details.attemptCount)),
+		});
+
+		retry.run();
+		await Bun.sleep(0);
+		scheduled.shift()?.();
+		await Bun.sleep(0);
+		scheduled.shift()?.();
+		await Bun.sleep(0);
+
+		expect(calls).toBe(3);
+		expect(warnings).toEqual([1, 2]);
+		expect(giveUps).toEqual([3]);
 	});
 
 	test("prunes the rollback backup only after a pass result", async () => {
@@ -101,7 +159,35 @@ describe("migration integrity verify gate", () => {
 		expect(result.phase).toBe("pass");
 		expect(pruned).toBe(true);
 		expect(state.terminal).toBe("complete");
-		expect(publications).toEqual([{ state: "healthy", messages: undefined }]);
+		expect(publications).toEqual([
+			{ state: "degraded", messages: ["degraded:integrity-unverified"] },
+			{ state: "healthy", messages: undefined },
+		]);
+	});
+
+	test("does not complete the checkpoint when rollback pruning fails", async () => {
+		const { store, state } = fakeStore();
+		const logs: Array<{ message: string; details: Record<string, unknown> | undefined }> = [];
+		const pruneError = new Error("disk full while deleting backup");
+
+		await expect(
+			runMigrationIntegrityVerifyGate({
+				owner,
+				backupPath: "/tmp/memories.db.bak-v151-1234",
+				checkpointStore: store,
+				runAttempt: async () => attempt("pass"),
+				pruneBackup: () => {
+					throw pruneError;
+				},
+				log: (message, details) => logs.push({ message, details }),
+			}),
+		).rejects.toThrow("disk full while deleting backup");
+
+		expect(state.terminal).toBeNull();
+		expect(logs).toContainEqual({
+			message: "Global integrity check passed but rollback backup prune failed",
+			details: { error: "disk full while deleting backup" },
+		});
 	});
 
 	test("retains the rollback backup and schedules only one fixed-delay retry after incomplete", async () => {
@@ -163,7 +249,10 @@ describe("migration integrity verify gate", () => {
 		expect(pruned).toBe(false);
 		expect(scheduled).toBe(false);
 		expect(state.terminal).toBe("failed:integrity-unverified");
-		expect(publications).toEqual([{ state: "corrupt", messages: ["corrupt"] }]);
+		expect(publications).toEqual([
+			{ state: "degraded", messages: ["degraded:integrity-unverified"] },
+			{ state: "corrupt", messages: ["corrupt"] },
+		]);
 	});
 
 	test("parks after eight incomplete attempts with degraded:integrity-unverified", async () => {
