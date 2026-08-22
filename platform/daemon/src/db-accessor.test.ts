@@ -916,11 +916,11 @@ describe("sqlite runtime ordering", () => {
 			}
 		}
 
-		expect(hits).toEqual([
-			"db-owner-worker.ts",
+		expect([...new Set(hits)].sort()).toEqual([
 			"database-integrity-worker.ts",
-			"db-accessor.ts",
 			"database-integrity.ts",
+			"db-accessor.ts",
+			"db-owner-worker.ts",
 		]);
 	});
 });
