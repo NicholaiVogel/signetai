@@ -627,140 +627,140 @@
     },
     {
       "path": "db-accessor.ts",
-      "line": 761,
+      "line": 755,
       "api": "readdirSync",
       "source": ".readdirSync(dir)",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 771,
+      "line": 765,
       "api": "statSync",
       "source": "const stat = deps.statSync(join(dir, f));",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 788,
+      "line": 782,
       "api": "unlinkSync",
       "source": "deps.unlinkSync(backupPath);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 790,
+      "line": 784,
       "api": "unlinkSync",
       "source": "deps.unlinkSync(`${backupPath}.cursor.json`);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 804,
+      "line": 798,
       "api": "statfsSync",
       "source": "const stat = deps.statfsSync(path);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 816,
+      "line": 810,
       "api": "statSync",
       "source": "const size = deps.statSync(path).size;",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 881,
+      "line": 875,
       "api": "copyFileSync",
       "source": "deps.copyFileSync(dbPath, backupDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 904,
+      "line": 899,
       "api": "copyFileSync",
       "source": "deps.copyFileSync(dbPath, backupDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 930,
+      "line": 925,
       "api": "statSync",
       "source": "const sourceStat = statSync(dbPath);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 993,
+      "line": 965,
       "api": "readdirSync",
       "source": "for (const name of readdirSync(dir).filter(",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 1009,
+      "line": 981,
       "api": "existsSync",
       "source": "!existsSync(parsed.destination)",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 1230,
+      "line": 1204,
       "api": "unlinkSync",
       "source": "deps.unlinkSync(backupDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 1239,
+      "line": 1213,
       "api": "unlinkSync",
       "source": "else deps.unlinkSync(backupDest);",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 1271,
+      "line": 1245,
       "api": "readdirSync",
       "source": "for (const name of readdirSync(dir).filter(",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 1275,
+      "line": 1249,
       "api": "unlinkSync",
       "source": "unlinkSync(join(dir, name));",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 1372,
+      "line": 1349,
       "api": "existsSync",
       "source": "if (!existsSync(dir)) {",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 1373,
+      "line": 1350,
       "api": "mkdirSync",
       "source": "mkdirSync(dir, { recursive: true });",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 1394,
+      "line": 1371,
       "api": "existsSync",
       "source": "if (existsSync(path) && hasPendingMigrations(toMigrationDb(writeConn))) {",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 1401,
+      "line": 1382,
       "api": "existsSync",
       "source": "if (existsSync(path) && hasPendingMigrations(toMigrationDb(writeConn))) {",
       "category": "hot-path"
     },
     {
       "path": "db-accessor.ts",
-      "line": 2377,
+      "line": 2364,
       "api": "withWriteTxAsync",
       "source": "return await accessor.withWriteTxAsync(fn, siteToken === undefined ? options : { ...options, siteToken });",
       "category": "hot-path"
@@ -823,63 +823,63 @@
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 118,
+      "line": 119,
       "api": "readFileSync",
       "source": "return readFileSync(cancellationRegistryPath, \"utf8\").includes(`${jobId}\\n`);",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 143,
+      "line": 144,
       "api": "writeFileSync",
       "source": "writeFileSync(startupStarted, \"started\\n\");",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 145,
+      "line": 146,
       "api": "existsSync",
       "source": "while (!existsSync(startupRelease)) Atomics.wait(signal, 0, 0, 5);",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 151,
+      "line": 152,
       "api": "existsSync",
       "source": "if (sqlitePath !== undefined && existsSync(sqlitePath) && typeof Database.setCustomSQLite === \"function\") {",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 180,
+      "line": 181,
       "api": "writeFileSync",
       "source": "if (commitMarker !== undefined) writeFileSync(commitMarker, \"started\\n\");",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 695,
+      "line": 696,
       "api": "withReadDbAsync",
       "source": "const embedding = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 722,
+      "line": 723,
       "api": "writeFileSync",
       "source": "writeFileSync(startedMarker, \"started\\n\");",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 723,
+      "line": 724,
       "api": "existsSync",
       "source": "while (!existsSync(releaseMarker)) await new Promise((resolve) => setTimeout(resolve, 5));",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 757,
+      "line": 758,
       "api": "writeFileSync",
       "source": "if (activeFile) writeFileSync(activeFile, `${Date.now()}\\n`);",
       "category": "hot-path"

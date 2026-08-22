@@ -78,7 +78,6 @@ export async function runMigrationIntegrityVerify(options: MigrationVerifyOption
 			attemptDeadlineMs,
 		};
 		await options.onProgress?.(result);
-		if (!isDeadline) throw error;
 		return result;
 	}
 }
@@ -183,9 +182,13 @@ export async function runMigrationIntegrityVerifyGate(
 		return { phase: "failed", attemptCount, scheduled: false };
 	}
 
+	options.publishStatus?.("degraded", ["degraded:integrity-unverified"]);
+	options.log?.("degraded:integrity-unverified", {
+		attemptCount,
+		rollbackBackup: "retained",
+	});
 	if (attemptCount >= MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS) {
 		await store.markTerminal(MIGRATION_VERIFY_PARKED_STATUS);
-		options.publishStatus?.("degraded", ["degraded:integrity-unverified"]);
 		options.log?.("degraded:integrity-unverified", {
 			attemptCount,
 			rollbackBackup: "retained",

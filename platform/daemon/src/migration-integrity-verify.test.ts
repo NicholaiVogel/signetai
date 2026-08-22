@@ -6,6 +6,7 @@ import {
 	MIGRATION_VERIFY_PARKED_STATUS,
 	MIGRATION_VERIFY_RETRY_INTERVAL_MS,
 	migrationVerifyCheckpointKey,
+	runMigrationIntegrityVerify,
 	runMigrationIntegrityVerifyGate,
 	type MigrationVerifyCheckpointStore,
 	type MigrationVerifyResult,
@@ -47,6 +48,25 @@ function fakeStore(
 }
 
 describe("migration integrity verify gate", () => {
+	test("returns a failed result for non-deadline integrity errors", async () => {
+		const failure = new Error("malformed database");
+		const progress: MigrationVerifyResult[] = [];
+		const failingOwner = {
+			submit: () => ({ result: Promise.reject(failure), metrics: Promise.resolve(undefined), job: {} }),
+		} as unknown as DbOwnerClient;
+
+		await expect(
+			runMigrationIntegrityVerify({
+				owner: failingOwner,
+				onProgress: (result) => {
+					progress.push(result);
+				},
+			}),
+		).resolves.toMatchObject({ phase: "failed", messages: ["malformed database"] });
+		expect(progress).toHaveLength(1);
+		expect(progress[0]?.phase).toBe("failed");
+	});
+
 	test("scopes checkpoint state to the backup generation", () => {
 		expect(migrationVerifyCheckpointKey("/tmp/memories.db.bak-v151-1234")).toBe(
 			"database.migration-verify:memories.db.bak-v151-1234",
@@ -64,6 +84,7 @@ describe("migration integrity verify gate", () => {
 	test("prunes the rollback backup only after a pass result", async () => {
 		const { store, state } = fakeStore();
 		let pruned = false;
+		const publications: Array<{ state: string; messages: readonly string[] | undefined }> = [];
 		const result = await runMigrationIntegrityVerifyGate({
 			owner,
 			backupPath: "/tmp/memories.db.bak-v151-1234",
@@ -72,11 +93,15 @@ describe("migration integrity verify gate", () => {
 			pruneBackup: () => {
 				pruned = true;
 			},
+			publishStatus: (publishedState, messages) => {
+				publications.push({ state: publishedState, messages });
+			},
 		});
 
 		expect(result.phase).toBe("pass");
 		expect(pruned).toBe(true);
 		expect(state.terminal).toBe("complete");
+		expect(publications).toEqual([{ state: "healthy", messages: undefined }]);
 	});
 
 	test("retains the rollback backup and schedules only one fixed-delay retry after incomplete", async () => {
@@ -84,6 +109,7 @@ describe("migration integrity verify gate", () => {
 		const { store, state } = fakeStore(0, events);
 		let pruned = false;
 		let scheduledDelay = 0;
+		const publications: Array<{ state: string; messages: readonly string[] | undefined }> = [];
 		const result = await runMigrationIntegrityVerifyGate({
 			owner,
 			backupPath: "/tmp/memories.db.bak-v151-1234",
@@ -99,6 +125,9 @@ describe("migration integrity verify gate", () => {
 			scheduleNextAttempt: (_callback, delayMs) => {
 				scheduledDelay = delayMs;
 			},
+			publishStatus: (publishedState, messages) => {
+				publications.push({ state: publishedState, messages });
+			},
 		});
 
 		expect(result.phase).toBe("incomplete");
@@ -106,6 +135,7 @@ describe("migration integrity verify gate", () => {
 		expect(pruned).toBe(false);
 		expect(scheduledDelay).toBe(MIGRATION_VERIFY_RETRY_INTERVAL_MS);
 		expect(state.checkpoint.attemptCount).toBe(1);
+		expect(publications).toEqual([{ state: "degraded", messages: ["degraded:integrity-unverified"] }]);
 	});
 
 	test("retains the rollback backup and stops immediately after a failed result", async () => {

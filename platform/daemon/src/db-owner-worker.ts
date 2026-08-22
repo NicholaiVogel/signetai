@@ -60,6 +60,7 @@ interface SqliteDatabaseConstructor {
 
 interface JobExecutionContext {
 	readonly jobId: string;
+	readonly deadlineAt: number;
 	committed: boolean;
 }
 
@@ -694,7 +695,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:695" },
+			{ siteToken: "db-owner-worker.ts:696" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
@@ -723,7 +724,7 @@ export function runDbOwnerWorker(): void {
 			while (!existsSync(releaseMarker)) await new Promise((resolve) => setTimeout(resolve, 5));
 		}
 		const { initDbAccessorAsync } = await import("./db-accessor");
-		await initDbAccessorAsync(ownerDbPath, { agentsDir });
+		await initDbAccessorAsync(ownerDbPath, { agentsDir, deadlineAt: context?.deadlineAt });
 		if (context !== undefined) context.committed = true;
 		return { initialized: true };
 	}
@@ -815,7 +816,7 @@ export function runDbOwnerWorker(): void {
 			activeJobId = job.id;
 			send({ type: "started", jobId: job.id, workloadClass: job.workloadClass });
 			const startedAt = Date.now();
-			const context: JobExecutionContext = { jobId: job.id, committed: false };
+			const context: JobExecutionContext = { jobId: job.id, deadlineAt: job.deadlineAt, committed: false };
 			try {
 				if (cancelled.delete(job.id) || cancellationRequested(job.id)) {
 					result(job.id, "cancelled");

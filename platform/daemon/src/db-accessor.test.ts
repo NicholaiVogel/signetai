@@ -770,7 +770,7 @@ describe("DbAccessor", () => {
 		let nowCalls = 0;
 		Date.now = () => {
 			nowCalls += 1;
-			return nowCalls >= 5 ? baseNow + 60_000 : fakeNow;
+			return nowCalls >= 4 ? baseNow + 60_000 : fakeNow;
 		};
 		try {
 			await expect(
@@ -782,6 +782,8 @@ describe("DbAccessor", () => {
 					},
 					dbPath,
 					73,
+					undefined,
+					baseNow + 60_000,
 				),
 			).rejects.toMatchObject({
 				name: "MigrationBackupAdmissionError",
