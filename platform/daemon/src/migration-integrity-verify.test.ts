@@ -244,7 +244,7 @@ describe("migration integrity verify gate", () => {
 		]);
 	});
 
-	test("does not complete the checkpoint when rollback pruning fails", async () => {
+	test("records the pass checkpoint before rollback pruning", async () => {
 		const { store, state } = fakeStore();
 		const logs: Array<{ message: string; details: Record<string, unknown> | undefined }> = [];
 		const pruneError = new Error("disk full while deleting backup");
@@ -262,7 +262,7 @@ describe("migration integrity verify gate", () => {
 			}),
 		).rejects.toThrow("disk full while deleting backup");
 
-		expect(state.terminal).toBeNull();
+		expect(state.terminal).toBe("complete");
 		expect(logs).toContainEqual({
 			message: "Global integrity check passed but rollback backup prune failed",
 			details: { error: "disk full while deleting backup" },

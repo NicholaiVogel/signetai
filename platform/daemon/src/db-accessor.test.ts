@@ -27,6 +27,7 @@ import {
 import { getSyncDbAccessor } from "../legacy-sync/db-accessor-sync";
 import {
 	DbSpacePreflightError,
+	MigrationBackupAdmissionError,
 	DbReadAdmissionCancelledError,
 	DbReadAdmissionRejectedError,
 	DbWriteQueueFullError,
@@ -48,6 +49,8 @@ import {
 	resolveSqliteRuntimeConfig,
 	runWriteTxAsync,
 	vecEmbeddingsSchemaNeedsRepair,
+	isGeneratedMigrationBackupName,
+	backfillVecEmbeddings,
 } from "./db-accessor";
 
 function tmpDbPath(): string {
@@ -364,7 +367,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:354");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:357");
 	});
 
 	test("write statements expose the number of affected rows", () => {
@@ -616,13 +619,22 @@ describe("DbAccessor", () => {
 		writeFileSync(dbPath, "database");
 		const regularBackupPath = `${dbPath}.bak-v90-1000`;
 		const directoryBackupPath = `${dbPath}.bak-v91-2000`;
+		const operatorBackupPath = `${dbPath}.bak-vmanual`;
 		writeFileSync(regularBackupPath, "backup");
 		mkdirSync(directoryBackupPath);
+		writeFileSync(operatorBackupPath, "operator backup");
 
 		pruneMigrationBackupsAfterIntegrity(dbPath);
 
 		expect(existsSync(regularBackupPath)).toBe(false);
 		expect(existsSync(directoryBackupPath)).toBe(true);
+		expect(existsSync(operatorBackupPath)).toBe(true);
+	});
+
+	test("shares the exact generated backup-name predicate", () => {
+		expect(isGeneratedMigrationBackupName("memories.db", "memories.db.bak-v151-1234")).toBe(true);
+		expect(isGeneratedMigrationBackupName("memories.db", "memories.db.bak-vmanual")).toBe(false);
+		expect(isGeneratedMigrationBackupName("memories.db", "memories.db.bak-v151-1234.cursor.json")).toBe(false);
 	});
 
 	test("blocks a migration backup before deleting retained backups when headroom is insufficient", () => {
@@ -703,10 +715,42 @@ describe("DbAccessor", () => {
 			},
 			now: () => 6000,
 			log: () => {},
+			readVerificationCheckpoint: () => "complete",
 		});
 
 		expect(operations.slice(0, 2)).toEqual([`unlink:${staleName}`, `unlink:${staleName}.cursor.json`]);
 		expect(operations[2]).toContain("copy:test.db.bak-v62-6000");
+	});
+
+	test("preserves and refuses a stale rollback point with a failed checkpoint", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const dbDir = join(dbPath, "..");
+		writeFileSync(dbPath, "database");
+		const staleName = "test.db.bak-v61-4000";
+		const stalePath = join(dbDir, staleName);
+		writeFileSync(stalePath, "rollback");
+		writeFileSync(
+			`${stalePath}.cursor.json`,
+			JSON.stringify({ sourcePath: dbPath, sourceSize: 7, sourceMtimeMs: 100, destination: stalePath, offset: 8 }),
+		);
+		const operations: string[] = [];
+
+		expect(() =>
+			backupBeforeMigration({ exec: () => {} }, dbPath, 62, {
+				copyFileSync: () => operations.push("copy"),
+				readdirSync: () => [staleName],
+				statSync: (path) => (String(path).endsWith("test.db") ? { mtimeMs: 200, size: 8 } : { mtimeMs: 4000, size: 8 }),
+				statfsSync: () => ({ bavail: MIGRATION_BACKUP_CHUNK_BYTES * 4, bsize: 1 }),
+				unlinkSync: (path) => operations.push(`unlink:${path}`),
+				now: () => 6000,
+				log: () => {},
+				readVerificationCheckpoint: () => "failed:integrity-unverified",
+			}),
+		).toThrow(MigrationBackupAdmissionError);
+		expect(operations).toEqual([]);
+		expect(existsSync(stalePath)).toBe(true);
+		expect(existsSync(`${stalePath}.cursor.json`)).toBe(true);
 	});
 
 	test("reclaims stale migration probes before the free-space admission check", () => {
@@ -1438,5 +1482,33 @@ describe("vec_embeddings schema repair", () => {
 		expect(vecEmbeddingsSchemaNeedsRepair(currentSql, 1536)).toBe(false);
 		expect(vecEmbeddingsSchemaNeedsRepair(currentSql.replace("FLOAT[1536]", "FLOAT[768]"), 1536)).toBe(true);
 		expect(vecEmbeddingsSchemaNeedsRepair(currentSql.replace("id TEXT PRIMARY KEY,", ""), 1536)).toBe(true);
+	});
+
+	test("backfills missing embeddings in bounded keyset batches", () => {
+		const db = new Database(":memory:");
+		db.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB NOT NULL); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		const insert = db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)");
+		db.exec("BEGIN");
+		for (let index = 0; index < 10_001; index++) {
+			insert.run(`embedding-${String(index).padStart(5, "0")}`, 2, vector);
+		}
+		db.exec("COMMIT");
+		let batchQueries = 0;
+		const trackedDb = {
+			exec: (sql: string) => db.exec(sql),
+			prepare: (sql: string) => {
+				if (sql.includes("ORDER BY e.id LIMIT")) batchQueries++;
+				return db.prepare(sql);
+			},
+		};
+
+		backfillVecEmbeddings(trackedDb as never, 2);
+
+		expect(batchQueries).toBeGreaterThan(1);
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(10_001);
+		db.close();
 	});
 });

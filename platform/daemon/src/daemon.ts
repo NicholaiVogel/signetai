@@ -2568,7 +2568,7 @@ async function main() {
 					owner,
 					backupPath: migrationBackupPath,
 					databaseSizeBytes: migrationBackupSizeBytes ?? 0,
-					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB),
+					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB, undefined, migrationBackupPath),
 					publishStatus: publishMigrationVerifyStatus,
 					resetGlobalLatch: resetGlobalIntegrityLatch,
 					onProgress: (progress): void => {
@@ -2583,14 +2583,30 @@ async function main() {
 				runMigrationVerifyGate = async (): Promise<Awaited<ReturnType<typeof runMigrationIntegrityVerifyGate>>> => {
 					globalVerifyInFlight = true;
 					let resolveWorker: () => void = () => {};
+					let workerSettledResolved = false;
+					const settleWorker = (): void => {
+						if (workerSettledResolved) return;
+						workerSettledResolved = true;
+						resolveWorker();
+					};
 					const workerSettled = new Promise<void>((resolve) => {
 						resolveWorker = resolve;
 					});
 					try {
 						const result = await runMigrationIntegrityVerifyGate({
 							...migrationVerifyGateOptions,
-							onWorkerSettled: resolveWorker,
+							// Do not let the 30-minute continuation race a deadline-abandoned
+							// worker. Scheduling after settlement makes the global latch a true
+							// single-flight guard even when an old worker settles late.
+							scheduleNextAttempt: (callback, delayMs): void => {
+								void workerSettled.then(() => {
+									const timer = setTimeout(callback, delayMs);
+									timer.unref?.();
+								});
+							},
+							onWorkerSettled: settleWorker,
 							onAdmissionFailure: () => {
+								settleWorker();
 								// No owner job exists to settle after a synchronous admission
 								// rejection, so the integrity lane can be released now.
 								releaseVerifyLatch();

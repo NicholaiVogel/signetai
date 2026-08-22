@@ -295,6 +295,7 @@ export async function runMigrationIntegrityVerifyGate(
 	if (options.runAttempt !== undefined) await options.onProgress?.(result);
 
 	if (result.phase === "pass") {
+		await store.markTerminal("complete");
 		try {
 			await options.pruneBackup();
 		} catch (error) {
@@ -303,7 +304,6 @@ export async function runMigrationIntegrityVerifyGate(
 			});
 			throw error;
 		}
-		await store.markTerminal("complete");
 		options.resetGlobalLatch?.();
 		options.publishStatus?.("healthy");
 		options.log?.("Global integrity check passed; rollback backup pruned", { elapsedMs: result.elapsedMs });

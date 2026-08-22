@@ -697,7 +697,24 @@ const MIGRATION_BACKUP_SPACE_MARGIN_BYTES = MIGRATION_BACKUP_CHUNK_BYTES * 2;
  */
 const MIGRATION_BACKUP_STARTUP_RESERVE_MS = 5_000;
 
-export type MigrationBackupAdmissionReason = "space" | "throughput";
+export type MigrationBackupAdmissionReason = "space" | "throughput" | "retained-unverified-backup";
+
+const MIGRATION_CHECKPOINT_TABLE = "db_integrity_checkpoints";
+const MIGRATION_CHECKPOINT_COMPLETE_STATUS = "complete";
+const MIGRATION_VERIFY_CHECKPOINT_PREFIX = "database.migration-verify:";
+
+/** Match only names emitted by migrationBackupDestination. */
+export function isGeneratedMigrationBackupName(base: string, name: string): boolean {
+	const escapedBase = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`^${escapedBase}\\.bak-v\\d+-\\d+$`).test(name);
+}
+
+type MigrationBackupDb = {
+	exec(sql: string): unknown;
+	prepare?: (sql: string) => {
+		get(...params: unknown[]): Record<string, unknown> | undefined;
+	};
+};
 
 export class MigrationBackupAdmissionError extends Error {
 	readonly code = "DB_MIGRATION_BACKUP_ADMISSION_FAILED" as const;
@@ -742,6 +759,8 @@ export interface MigrationBackupDeps {
 	readonly unlinkSync: (path: string) => void;
 	readonly now: () => number;
 	readonly log: (message: string) => void;
+	/** Test seam and optional alternate checkpoint source for backup admission. */
+	readonly readVerificationCheckpoint?: (backupPath: string) => string | undefined;
 }
 
 const migrationBackupDeps: MigrationBackupDeps = {
@@ -773,7 +792,7 @@ function migrationBackups(
 		.readdirSync(dir)
 		.filter(
 			(f) =>
-				f.startsWith(`${base}.bak-v`) &&
+				isGeneratedMigrationBackupName(base, f) &&
 				!f.endsWith(".cursor.json") &&
 				!f.includes(".probe-") &&
 				!f.includes(".space-probe-"),
@@ -797,6 +816,25 @@ function migrationBackups(
 			}
 		})
 		.sort((a, b) => b.mtime - a.mtime);
+}
+
+function readMigrationBackupCheckpointStatus(
+	backupPath: string,
+	db: MigrationBackupDb | undefined,
+	deps: MigrationBackupDeps,
+): string | undefined {
+	const overridden = deps.readVerificationCheckpoint?.(backupPath);
+	if (overridden !== undefined) return overridden;
+	if (db?.prepare === undefined) return undefined;
+	try {
+		const row = db
+			.prepare(`SELECT status FROM ${MIGRATION_CHECKPOINT_TABLE} WHERE checkpoint_key = ?`)
+			.get(`${MIGRATION_VERIFY_CHECKPOINT_PREFIX}${basename(backupPath)}`);
+		return typeof row?.status === "string" ? row.status : undefined;
+	} catch {
+		// A missing/legacy checkpoint is unverified by definition.
+		return undefined;
+	}
 }
 
 function migrationBackupCursor(
@@ -826,11 +864,17 @@ function pruneStaleMigrationBackups(
 	sourceSize: number,
 	sourceMtimeMs: number,
 	deps: MigrationBackupDeps,
+	db?: MigrationBackupDb,
 ): void {
 	for (const backup of migrationBackups(dbPath, deps)) {
 		const backupPath = join(dirname(dbPath), backup.name);
 		const cursor = migrationBackupCursor(dbPath, backupPath);
 		if (cursor === undefined || (cursor.sourceSize === sourceSize && cursor.sourceMtimeMs === sourceMtimeMs)) continue;
+		const checkpointStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+		if (checkpointStatus !== MIGRATION_CHECKPOINT_COMPLETE_STATUS) {
+			deps.log(`[db-accessor] Preserving unverified rollback point: ${backup.name}`);
+			continue;
+		}
 		try {
 			deps.unlinkSync(backupPath);
 		} catch (error) {
@@ -846,12 +890,34 @@ function pruneStaleMigrationBackups(
 	}
 }
 
+function assertNoRetainedUnverifiedMigrationBackup(
+	dbPath: string,
+	sourceSize: number,
+	sourceMtimeMs: number,
+	deps: MigrationBackupDeps,
+	db?: MigrationBackupDb,
+): void {
+	for (const backup of migrationBackups(dbPath, deps)) {
+		const backupPath = join(dirname(dbPath), backup.name);
+		const cursor = migrationBackupCursor(dbPath, backupPath);
+		if (cursor === undefined || (cursor.sourceSize === sourceSize && cursor.sourceMtimeMs === sourceMtimeMs)) continue;
+		const checkpointStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+		if (checkpointStatus === MIGRATION_CHECKPOINT_COMPLETE_STATUS) continue;
+		throw new MigrationBackupAdmissionError(
+			"retained-unverified-backup",
+			`retained rollback file ${backup.name} is unverified; restore or rename the retained file before retrying`,
+		);
+	}
+}
+
 function pruneMigrationBackups(
 	dbPath: string,
 	keep: number,
 	deps: MigrationBackupDeps,
 	keepName?: string,
 	strict = false,
+	db?: MigrationBackupDb,
+	verifiedBackupPath?: string,
 ): void {
 	const dir = dirname(dbPath);
 	for (const old of migrationBackups(dbPath, deps)
@@ -859,6 +925,15 @@ function pruneMigrationBackups(
 		.slice(Math.max(0, keep))) {
 		try {
 			const backupPath = join(dir, old.name);
+			const cursor = migrationBackupCursor(dbPath, backupPath);
+			if (
+				cursor !== undefined &&
+				backupPath !== verifiedBackupPath &&
+				readMigrationBackupCheckpointStatus(backupPath, db, deps) !== MIGRATION_CHECKPOINT_COMPLETE_STATUS
+			) {
+				deps.log(`[db-accessor] Preserving unverified rollback point: ${old.name}`);
+				continue;
+			}
 			try {
 				deps.unlinkSync(backupPath);
 			} catch (err) {
@@ -969,7 +1044,7 @@ export function backupBeforeMigration(
 		throw migrationBackupError(backupDest, err);
 	}
 	finishMigrationBackup(dbPath, backupDest, deps);
-	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, deps);
+	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, deps, undefined, false, db);
 	return backupDest;
 }
 
@@ -993,7 +1068,7 @@ export async function backupBeforeMigrationAsync(
 			throw migrationBackupError(backupDest, err);
 		}
 		finishMigrationBackup(dbPath, backupDest, deps);
-		pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, deps);
+		pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, deps, undefined, false, db);
 		return backupDest;
 	}
 	return await streamedMigrationBackup(db, dbPath, schemaVersion, deadlineAt);
@@ -1033,13 +1108,13 @@ async function streamedMigrationBackup(
 		// can change between processes (the partial copy already consumed
 		// `offset` bytes), so a resume re-preflights the remaining bytes and
 		// re-probes the remaining copy budget before writing anything.
-		pruneStaleMigrationBackups(dbPath, sourceSize, sourceMtimeMs, migrationBackupDeps);
+		pruneStaleMigrationBackups(dbPath, sourceSize, sourceMtimeMs, migrationBackupDeps, db);
 		preflightResumedMigrationBackupSpace(dbPath, sourceSize, offset, migrationBackupDeps);
 		await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, sourceMode, offset, deadlineAt);
 		await copyMigrationBackupChunks(dbPath, backupDest, sourceSize, sourceMtimeMs, sourceMode, offset, deadlineAt);
 	}
 	finishMigrationBackup(dbPath, backupDest, migrationBackupDeps);
-	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, migrationBackupDeps);
+	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, migrationBackupDeps, undefined, false, db);
 	return backupDest;
 }
 
@@ -1051,7 +1126,8 @@ async function readMigrationBackupCursor(
 	const dir = dirname(dbPath);
 	const base = basename(dbPath);
 	for (const name of readdirSync(dir).filter(
-		(entry) => entry.endsWith(".cursor.json") && entry.startsWith(`${base}.bak-v`),
+		(entry) =>
+			entry.endsWith(".cursor.json") && isGeneratedMigrationBackupName(base, entry.slice(0, -".cursor.json".length)),
 	)) {
 		const cursorPath = join(dir, name);
 		try {
@@ -1308,9 +1384,13 @@ function sweepStaleMigrationBackupProbes(dbPath: string, deps: MigrationBackupDe
 		return;
 	}
 	for (const entry of entries) {
+		const isProbe = entry.includes(".probe-") || entry.includes(".space-probe-");
+		const probeName = entry.includes(".space-probe-")
+			? entry.slice(0, entry.indexOf(".space-probe-"))
+			: entry.slice(0, entry.indexOf(".probe-"));
 		if (
-			!entry.startsWith(`${base}.bak-v`) ||
-			(!entry.includes(".probe-") && !entry.includes(".space-probe-")) ||
+			!isGeneratedMigrationBackupName(base, probeName) ||
+			!isProbe ||
 			entry.endsWith(`.probe-${process.pid}`) ||
 			entry.endsWith(`.space-probe-${process.pid}`)
 		)
@@ -1327,7 +1407,7 @@ function sweepStaleMigrationBackupProbes(dbPath: string, deps: MigrationBackupDe
 }
 
 function prepareMigrationBackup(
-	db: { exec(sql: string): unknown },
+	db: MigrationBackupDb,
 	dbPath: string,
 	deps: MigrationBackupDeps,
 ): DbSpaceMetrics | null {
@@ -1341,9 +1421,11 @@ function prepareMigrationBackup(
 	try {
 		const source = deps.statSync(dbPath);
 		if (typeof source.size === "number" && Number.isFinite(source.size)) {
-			pruneStaleMigrationBackups(dbPath, source.size, source.mtimeMs, deps);
+			assertNoRetainedUnverifiedMigrationBackup(dbPath, source.size, source.mtimeMs, deps, db);
+			pruneStaleMigrationBackups(dbPath, source.size, source.mtimeMs, deps, db);
 		}
-	} catch {
+	} catch (error) {
+		if (error instanceof MigrationBackupAdmissionError) throw error;
 		// The space preflight remains authoritative when metadata collection races
 		// with a source or backup disappearing.
 	}
@@ -1429,12 +1511,19 @@ export function pendingMigrationBackupSizeBytes(dbPath: string): number | null {
 export function pruneMigrationBackupsAfterIntegrity(
 	dbPath: string,
 	deps: MigrationBackupDeps = migrationBackupDeps,
+	verifiedBackupPath?: string,
 ): void {
-	pruneMigrationBackups(dbPath, 0, deps, undefined, true);
+	pruneMigrationBackups(dbPath, 0, deps, undefined, true, undefined, verifiedBackupPath);
 	const dir = dirname(dbPath);
+	const base = basename(dbPath);
 	for (const name of deps
 		.readdirSync(dir)
-		.filter((entry) => entry.startsWith(`${basename(dbPath)}.bak-v`) && entry.endsWith(".cursor.json"))) {
+		.filter(
+			(entry) =>
+				entry.endsWith(".cursor.json") && isGeneratedMigrationBackupName(base, entry.slice(0, -".cursor.json".length)),
+		)) {
+		const backupName = name.slice(0, -".cursor.json".length);
+		if (migrationBackups(dbPath, deps).some((backup) => backup.name === backupName)) continue;
 		try {
 			deps.unlinkSync(join(dir, name));
 		} catch {
@@ -1779,9 +1868,13 @@ function vecRowidsTableAvailable(db: SqliteDatabase): boolean {
 	}
 }
 
+const VEC_EMBEDDING_BACKFILL_BATCH_SIZE = 10_000;
+
 function missingVecEmbeddingsRows(
 	db: SqliteDatabase,
 	expectedDimensions: number,
+	lastId: string,
+	limit: number,
 ): Array<{ id: string; vector: Buffer }> {
 	// sqlite-vec's virtual table is expensive for anti-joins: on a 43k-row local
 	// DB, `LEFT JOIN vec_embeddings` costs ~6.5s even when no rows are missing.
@@ -1794,9 +1887,10 @@ function missingVecEmbeddingsRows(
 		.prepare(
 			`SELECT e.id, e.vector FROM embeddings e
 			 LEFT JOIN ${targetTable} v ON v.id = e.id
-			 WHERE v.id IS NULL AND e.dimensions = ?`,
+			 WHERE v.id IS NULL AND e.dimensions = ? AND e.id > ?
+			 ORDER BY e.id LIMIT ?`,
 		)
-		.all(expectedDimensions) as Array<{ id: string; vector: Buffer }>;
+		.all(expectedDimensions, lastId, limit) as Array<{ id: string; vector: Buffer }>;
 }
 
 function countSkippedVecEmbeddingsRows(db: SqliteDatabase, expectedDimensions: number): number {
@@ -1811,12 +1905,11 @@ function countSkippedVecEmbeddingsRows(db: SqliteDatabase, expectedDimensions: n
 	return skippedRow?.n ?? 0;
 }
 
-function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number, deadlineAt?: number): void {
+export function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number, deadlineAt?: number): void {
 	// Directly query for missing rows instead of comparing counts.
 	// Count comparison is racy — a row can exist in embeddings but not
 	// vec_embeddings even when counts match (e.g. after a crash mid-sync).
-	const rows = missingVecEmbeddingsRows(db, expectedDimensions);
-
+	assertMigrationStartupBudget(deadlineAt, "vector embedding backfill query");
 	const skippedCount = countSkippedVecEmbeddingsRows(db, expectedDimensions);
 	if (skippedCount > 0) {
 		console.warn(
@@ -1824,38 +1917,46 @@ function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number, d
 		);
 	}
 
-	if (rows.length === 0) return;
-
 	const insert = db.prepare("INSERT OR REPLACE INTO vec_embeddings (id, embedding) VALUES (?, ?)");
-
+	let lastId = "";
 	let migrated = 0;
-	try {
-		db.exec("BEGIN");
-		for (const [index, row] of rows.entries()) {
-			if (index % 100 === 0) assertMigrationStartupBudget(deadlineAt, "vector embedding backfill");
-			try {
-				const vec = new Float32Array(
-					row.vector.buffer.slice(row.vector.byteOffset, row.vector.byteOffset + row.vector.byteLength),
-				);
-				insert.run(row.id, vec);
-				migrated++;
-			} catch {
-				// Skip malformed rows
-			}
-		}
-		db.exec("COMMIT");
-	} catch (e) {
+	let totalRows = 0;
+	for (;;) {
+		// Keep both the anti-join and the transaction inside the startup budget.
+		assertMigrationStartupBudget(deadlineAt, "vector embedding backfill batch");
+		const rows = missingVecEmbeddingsRows(db, expectedDimensions, lastId, VEC_EMBEDDING_BACKFILL_BATCH_SIZE);
+		if (rows.length === 0) break;
+		totalRows += rows.length;
 		try {
-			db.exec("ROLLBACK");
-		} catch {
-			// Rollback failed — transaction already closed or rolled back
+			db.exec("BEGIN");
+			for (const [index, row] of rows.entries()) {
+				if (index % 100 === 0) assertMigrationStartupBudget(deadlineAt, "vector embedding backfill");
+				try {
+					const vec = new Float32Array(
+						row.vector.buffer.slice(row.vector.byteOffset, row.vector.byteOffset + row.vector.byteLength),
+					);
+					insert.run(row.id, vec);
+					migrated++;
+				} catch {
+					// Skip malformed rows
+				}
+			}
+			db.exec("COMMIT");
+		} catch (e) {
+			try {
+				db.exec("ROLLBACK");
+			} catch {
+				// Rollback failed — transaction already closed or rolled back
+			}
+			throw e;
 		}
-		throw e;
+		lastId = rows[rows.length - 1]?.id ?? lastId;
+		if (rows.length < VEC_EMBEDDING_BACKFILL_BATCH_SIZE) break;
 	}
 
 	if (migrated > 0) {
 		// eslint-disable-next-line no-console
-		console.log(`[db-accessor] Backfilled ${migrated}/${rows.length} missing embeddings into vec_embeddings`);
+		console.log(`[db-accessor] Backfilled ${migrated}/${totalRows} missing embeddings into vec_embeddings`);
 	}
 
 	assertMigrationStartupBudget(deadlineAt, "vector embedding cleanup");

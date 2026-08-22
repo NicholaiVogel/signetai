@@ -39,6 +39,9 @@ describe("daemon production DB owner wiring", () => {
 			"if (!migrationIntegrityGateActive) {\n				integrityGateCompleted = true;\n				deferredRuntimeGate.completeIntegrity();\n			}",
 		);
 		expect(source).toContain('if (result.phase === "incomplete" && result.admitted)');
+		expect(source).toContain("scheduleNextAttempt: (callback, delayMs): void => {");
+		expect(source).toContain("void workerSettled.then(() => {");
+		expect(source).toContain("onWorkerSettled: settleWorker");
 		expect(source).not.toContain("runDeferredIntegrityCheck");
 	});
 
