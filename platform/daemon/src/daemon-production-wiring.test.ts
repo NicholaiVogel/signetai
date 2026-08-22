@@ -54,6 +54,24 @@ describe("daemon production DB owner wiring", () => {
 		expect(source).toContain("setupRetry.run();");
 	});
 
+	it("gates startup writers on retained migration classification and starts vacuum only after pass", async () => {
+		const source = await Bun.file(daemonSourceUrl).text();
+
+		expect(source).toContain("readMigrationVerifyCheckpoint");
+		expect(source).toContain("MIGRATION_VERIFY_FAILED_STATUS");
+		expect(source).toContain("MIGRATION_VERIFY_PARKED_STATUS");
+		expect(source).toContain("const retainedTerminalCheckpoint =");
+		expect(source).toContain("migrationWritersAllowed = new Promise<boolean>");
+		expect(source).toContain("const writersAllowed = await migrationWritersAllowed;");
+		expect(source).toContain("Skipping startup DB writers because migration verification confirmed corruption");
+		expect(source).toContain("if (!migrationBackupPending) startVacuumConversion();");
+		expect(source).toContain('if (result.phase === "pass") {\n							startVacuumConversion();');
+		expect(source).toContain(
+			'result.phase === "terminal" && migrationCheckpoint.status === MIGRATION_VERIFY_FAILED_STATUS',
+		);
+		expect(source).toContain("Migration verification retained the rollback backup; VACUUM deferred");
+	});
+
 	it("keeps a paused startup source partial instead of reporting success", async () => {
 		const source = await Bun.file(daemonSourceUrl).text();
 

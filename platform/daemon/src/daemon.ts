@@ -48,8 +48,17 @@ import {
 } from "./config-migration";
 import { listConnectorsAsync } from "./connectors/registry";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
-import { runIncrementalDatabaseIntegrityCheck } from "./incremental-database-integrity";
-import { createMigrationVerifySetupRetry, runMigrationIntegrityVerifyGate } from "./migration-integrity-verify";
+import {
+	MIGRATION_VERIFY_FAILED_STATUS,
+	MIGRATION_VERIFY_PARKED_STATUS,
+	readMigrationVerifyCheckpoint,
+	runIncrementalDatabaseIntegrityCheck,
+} from "./incremental-database-integrity";
+import {
+	createMigrationVerifySetupRetry,
+	migrationVerifyCheckpointKey,
+	runMigrationIntegrityVerifyGate,
+} from "./migration-integrity-verify";
 import { resetGlobalIntegrityLatch, publishDatabaseIntegrityStatus } from "./database-integrity";
 import {
 	closeDbAccessor,
@@ -738,7 +747,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:741" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:750" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -781,7 +790,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:763" },
+			{ siteToken: "daemon.ts:772" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -858,7 +867,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:854" },
+			{ siteToken: "daemon.ts:863" },
 		);
 	} catch {
 		return false;
@@ -1482,7 +1491,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1468", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1477", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1550,7 +1559,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1551", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1560", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2263,11 +2272,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2259", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2268", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2269",
+								siteToken: "daemon.ts:2278",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2515,12 +2524,16 @@ async function main() {
 		deferredRuntimeScheduler.scheduleIntegrity(async (): Promise<void> => {
 			logFdSnapshot("server-ready");
 			writeDaemonLifecycle(AGENTS_DIR, buildLifecycleRecord("running"));
-			vacuumConversionHandle = startVacuumConversionWorker(getDbAccessor(), { owner: dbOwnerClient ?? undefined });
 			const owner = dbOwnerClient;
 			const migrationBackupPath = pendingMigrationBackupPath(MEMORY_DB);
 			const migrationBackupSizeBytes = pendingMigrationBackupSizeBytes(MEMORY_DB);
 			const migrationBackupPending = migrationBackupPath !== null;
 			if (owner === null) throw new Error("DB owner is unavailable for incremental integrity maintenance");
+			const startVacuumConversion = (): void => {
+				if (vacuumConversionHandle !== null) return;
+				vacuumConversionHandle = startVacuumConversionWorker(getDbAccessor(), { owner });
+			};
+			if (!migrationBackupPending) startVacuumConversion();
 
 			// ── Migration backup prune gate ──────────────────────────────────
 			// Global `PRAGMA integrity_check` is the ONLY result that may delete
@@ -2531,6 +2544,7 @@ async function main() {
 			let integritySlicePending = false;
 			let migrationIntegrityGateActive = false;
 			let integrityGateCompleted = false;
+			let migrationWritersAllowed = Promise.resolve(true);
 			let runIntegritySlice: () => Promise<void>;
 			const scheduleIntegritySlice = (delayMs: number): void => {
 				integritySlicePending = true;
@@ -2547,6 +2561,20 @@ async function main() {
 			};
 			if (migrationBackupPending && migrationBackupPath !== null) {
 				migrationIntegrityGateActive = true;
+				const migrationCheckpoint = await readMigrationVerifyCheckpoint(
+					owner,
+					migrationVerifyCheckpointKey(migrationBackupPath),
+					5_000,
+				);
+				const retainedTerminalCheckpoint =
+					migrationCheckpoint.status === MIGRATION_VERIFY_FAILED_STATUS ||
+					migrationCheckpoint.status === MIGRATION_VERIFY_PARKED_STATUS;
+				let resolveMigrationWriters: ((allowed: boolean) => void) | undefined;
+				if (retainedTerminalCheckpoint) {
+					migrationWritersAllowed = new Promise<boolean>((resolve) => {
+						resolveMigrationWriters = resolve;
+					});
+				}
 				let runMigrationVerifyGate: () => Promise<Awaited<ReturnType<typeof runMigrationIntegrityVerifyGate>>>;
 				let scheduledVerifyRuntimeGateReleased = false;
 				const publishMigrationVerifyStatus = (
@@ -2612,6 +2640,20 @@ async function main() {
 								releaseVerifyLatch();
 							},
 						});
+						if (result.phase === "pass") {
+							startVacuumConversion();
+						} else if (result.phase === "parked" || result.phase === "failed" || result.phase === "terminal") {
+							logger.warn("startup-recovery", "Migration verification retained the rollback backup; VACUUM deferred", {
+								phase: result.phase,
+							});
+						}
+						if (resolveMigrationWriters !== undefined) {
+							const allowed =
+								result.phase !== "failed" &&
+								!(result.phase === "terminal" && migrationCheckpoint.status === MIGRATION_VERIFY_FAILED_STATUS);
+							resolveMigrationWriters(allowed);
+							resolveMigrationWriters = undefined;
+						}
 						if (result.phase === "incomplete" && result.admitted) void workerSettled.then(releaseVerifyLatch);
 						else releaseVerifyLatch();
 						return result;
@@ -2695,6 +2737,18 @@ async function main() {
 				}
 			} catch {}
 
+			const writersAllowed = await migrationWritersAllowed;
+			if (!writersAllowed) {
+				logger.error(
+					"startup-recovery",
+					"Skipping startup DB writers because migration verification confirmed corruption",
+					undefined,
+					{
+						checkpointStatus: MIGRATION_VERIFY_FAILED_STATUS,
+					},
+				);
+				return;
+			}
 			importExistingMemoryFiles().catch((e) => {
 				const errDetails = e instanceof Error ? { message: e.message, stack: e.stack } : { error: String(e) };
 				logger.error("daemon", "Failed to import existing memory files", undefined, errDetails);
