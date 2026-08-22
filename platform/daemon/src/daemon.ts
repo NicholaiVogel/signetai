@@ -2507,9 +2507,16 @@ async function main() {
 			const migrationBackupPending = hasPendingMigrationBackup(MEMORY_DB);
 			if (owner === null) throw new Error("DB owner is unavailable for incremental integrity maintenance");
 			const runIntegritySlice = async (): Promise<void> => {
+				// When a migration rollback point is pending, verification must be
+				// full-equivalent before that backup may be pruned. A dedicated
+				// checkpoint key starts a fresh generation for this migrated
+				// database — a stale pre-migration cursor must never satisfy the
+				// prune gate — and fullMode switches every table scan from
+				// quick_check to integrity_check for the duration.
 				const result = await runIncrementalDatabaseIntegrityCheck({
 					owner,
-					checkpointKey: "database.quick-check",
+					checkpointKey: migrationBackupPending ? "database.migration-verify" : "database.quick-check",
+					fullMode: migrationBackupPending,
 					tablesPerRun: INCREMENTAL_INTEGRITY_TABLES_PER_RUN,
 					runBudgetMs: INCREMENTAL_INTEGRITY_RUN_BUDGET_MS,
 					ownerDeadlineMs: INCREMENTAL_INTEGRITY_OWNER_DEADLINE_MS,

@@ -51,6 +51,14 @@ export interface IncrementalIntegrityResult extends IncrementalIntegrityProgress
 export interface IncrementalIntegrityOptions {
 	readonly owner: DbOwnerClient;
 	readonly checkpointKey?: string;
+	/**
+	 * Full-equivalent verification: every table scan runs `PRAGMA
+	 * integrity_check` instead of `quick_check`. Used while a migration
+	 * rollback backup is pending — quick_check cannot see UNIQUE-constraint
+	 * or index-vs-table inconsistencies, so it must not gate the only
+	 * rollback point's deletion.
+	 */
+	readonly fullMode?: boolean;
 	readonly tablesPerRun?: number;
 	readonly ownerDeadlineMs?: number;
 	readonly runBudgetMs?: number;
@@ -568,7 +576,9 @@ export async function runIncrementalDatabaseIntegrityCheck(
 					? await ownerQueryOne<QuickCheckRow>(
 							options.owner,
 							`integrity.${table.type}.check`,
-							`PRAGMA ${table.cursor === TELEMETRY_INTEGRITY_CURSOR ? "integrity_check" : "quick_check"}(${escapeIdentifier(table.name)})`,
+							table.cursor === TELEMETRY_INTEGRITY_CURSOR || options.fullMode === true
+								? `PRAGMA integrity_check(${escapeIdentifier(table.name)})`
+								: `PRAGMA quick_check(${escapeIdentifier(table.name)})`,
 							[],
 							{ deadlineMs: remainingBudget(), estimatedWorkUnits: 1, onOwnerMetrics: recordOwnerMetrics },
 						)

@@ -928,6 +928,13 @@ async function streamedMigrationBackup(
 			throw error;
 		}
 		await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest);
+	} else {
+		// Admission holds across restarts too: free space and disk throughput
+		// can change between processes (the partial copy already consumed
+		// `offset` bytes), so a resume re-preflights the remaining bytes and
+		// re-probes the remaining copy budget before writing anything.
+		preflightResumedMigrationBackupSpace(dbPath, sourceSize, offset, migrationBackupDeps);
+		await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, offset);
 	}
 	await copyMigrationBackupChunks(dbPath, backupDest, sourceSize, sourceMtimeMs, offset);
 	finishMigrationBackup(dbPath, backupDest, migrationBackupDeps);
@@ -984,8 +991,13 @@ async function removeMigrationBackupCursor(backupDest: string): Promise<void> {
 	}
 }
 
-async function probeMigrationBackupThroughput(dbPath: string, sourceSize: number, backupDest: string): Promise<void> {
-	if (sourceSize === 0) return;
+async function probeMigrationBackupThroughput(
+	dbPath: string,
+	sourceSize: number,
+	backupDest: string,
+	resumeOffset = 0,
+): Promise<void> {
+	if (sourceSize === 0 || resumeOffset >= sourceSize) return;
 	const probeDest = `${backupDest}.probe-${process.pid}`;
 	let source: Awaited<ReturnType<typeof openAsync>> | undefined;
 	let probe: Awaited<ReturnType<typeof openAsync>> | undefined;
@@ -994,7 +1006,7 @@ async function probeMigrationBackupThroughput(dbPath: string, sourceSize: number
 		probe = await openAsync(probeDest, "w");
 		const buffer = Buffer.allocUnsafe(Math.min(MIGRATION_BACKUP_CHUNK_BYTES, sourceSize));
 		const startedAt = performance.now();
-		const result = await source.read(buffer, 0, buffer.length, 0);
+		const result = await source.read(buffer, 0, buffer.length, resumeOffset);
 		let probeWritten = 0;
 		while (probeWritten < result.bytesRead) {
 			const written = await probe.write(buffer, probeWritten, result.bytesRead - probeWritten, probeWritten);
@@ -1006,11 +1018,12 @@ async function probeMigrationBackupThroughput(dbPath: string, sourceSize: number
 		await probe.sync();
 		const elapsedMs = Math.max(1, performance.now() - startedAt);
 		const bytesPerMs = result.bytesRead / elapsedMs;
-		const estimatedMs = Math.ceil(sourceSize / bytesPerMs);
+		const remainingBytes = sourceSize - resumeOffset;
+		const estimatedMs = Math.ceil(remainingBytes / bytesPerMs);
 		if (!Number.isFinite(estimatedMs) || estimatedMs > MIGRATION_BACKUP_COPY_BUDGET_MS) {
 			throw new MigrationBackupAdmissionError(
 				"throughput",
-				`measured copy rate predicts ${estimatedMs}ms for ${sourceSize} bytes; budget is ${MIGRATION_BACKUP_COPY_BUDGET_MS}ms`,
+				`measured copy rate predicts ${estimatedMs}ms for the remaining ${remainingBytes} of ${sourceSize} bytes; budget is ${MIGRATION_BACKUP_COPY_BUDGET_MS}ms`,
 			);
 		}
 	} catch (error) {
@@ -1103,6 +1116,31 @@ function prepareMigrationBackup(
 	// destroy the operator's only recovery path.
 	pruneMigrationBackups(dbPath, 0, deps);
 	return preflightMigrationBackupSpace(dbPath, deps);
+}
+
+/**
+ * Resume admission: the remaining bytes still need headroom on this disk,
+ * now, after the partial copy already consumed `offset` bytes. The
+ * in-progress backup itself is the current attempt's rollback point, so it
+ * is not pruned; only its remaining growth must fit. Degenerate statfs
+ * readings refuse, exactly like the fresh-copy preflight.
+ */
+function preflightResumedMigrationBackupSpace(
+	dbPath: string,
+	sourceSize: number,
+	offset: number,
+	deps: MigrationBackupDeps,
+): void {
+	const remaining = sourceSize - offset;
+	if (remaining <= 0) return;
+	const freeBytes = availableBytes(dirname(dbPath), deps);
+	const metrics = {
+		dbBytes: sourceSize,
+		freeBytes,
+		requiredBytes: remaining + MIGRATION_BACKUP_SPACE_MARGIN_BYTES,
+	} as DbSpaceMetrics;
+	if (freeBytes === null) throw new DbSpacePreflightError("migration_backup", metrics);
+	if (freeBytes < metrics.requiredBytes) throw new DbSpacePreflightError("migration_backup", metrics);
 }
 
 function migrationBackupDestination(dbPath: string, schemaVersion: number, deps: MigrationBackupDeps): string {
