@@ -1,23 +1,29 @@
 /**
- * Resumable full-database integrity verification for the migration backup
+ * Bounded, observable global integrity verification for the migration backup
  * prune gate.
  *
- * SQLite documents that a table-scoped `PRAGMA integrity_check(tbl)` is NOT
- * equivalent to the global check: it cannot detect unused file sections,
- * pages claimed by multiple tables, or freelist damage (the freelist is only
- * verified while checking the schema table). The prune gate must therefore
- * be satisfied by the global `PRAGMA integrity_check` — one synchronous
- * native operation — run post-ready on the owner's maintenance lane.
- *
- * Resumability: the global check cannot be paused at a page boundary, so a
- * slice that runs out of its owner deadline retries from scratch on the next
- * scheduled slice with a larger deadline, up to a bounded cap. A completed
- * pass gates the backup prune; a partial pass never does. Progress and
- * failures are always surfaced.
+ * SQLite's global `PRAGMA integrity_check` is one synchronous native operation
+ * and cannot be paused at a page boundary. Each maintenance tick therefore
+ * runs exactly one generous attempt. An incomplete attempt is persisted and
+ * retried on a fixed interval; a pass is the only result that prunes the
+ * rollback backup.
  */
 
 import type { DbOwnerClient } from "./db-owner-client";
-import { ownerQueryAll, type DbOwnerMaintenanceMetrics } from "./db-owner-maintenance";
+import {
+	incrementMigrationVerifyAttempt,
+	markMigrationVerifyTerminal,
+	MIGRATION_VERIFY_FAILED_STATUS,
+	MIGRATION_VERIFY_PARKED_STATUS,
+	readMigrationVerifyCheckpoint,
+	type MigrationVerifyCheckpoint,
+} from "./incremental-database-integrity";
+import { ownerQueryAll } from "./db-owner-maintenance";
+
+export const MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS = 300_000;
+export const MIGRATION_VERIFY_RETRY_INTERVAL_MS = 30 * 60_000;
+export const MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS = 8;
+export const MIGRATION_VERIFY_CHECKPOINT_KEY = "database.migration-verify";
 
 export interface MigrationVerifyResult {
 	/** "pass" — global integrity_check returned a single "ok" row. */
@@ -29,14 +35,10 @@ export interface MigrationVerifyResult {
 
 export interface MigrationVerifyOptions {
 	readonly owner: DbOwnerClient;
-	/** Per-attempt owner deadline. Retries use min(cap, attempt * 2). */
+	/** Per-attempt owner deadline. Production uses 300 seconds. */
 	readonly attemptDeadlineMs?: number;
-	readonly maxAttemptDeadlineMs?: number;
 	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
 }
-
-const DEFAULT_ATTEMPT_DEADLINE_MS = 5_000;
-const MAX_ATTEMPT_DEADLINE_MS = 55_000;
 
 interface IntegrityCheckRow {
 	readonly integrity_check?: unknown;
@@ -44,13 +46,9 @@ interface IntegrityCheckRow {
 
 const text = (value: unknown): string => String(value ?? "");
 
-/**
- * Run one global integrity_check attempt. Caller schedules retries while
- * `phase === "incomplete"`.
- */
+/** Run one global integrity_check attempt on the owner's maintenance lane. */
 export async function runMigrationIntegrityVerify(options: MigrationVerifyOptions): Promise<MigrationVerifyResult> {
-	const attemptDeadlineMs = options.attemptDeadlineMs ?? DEFAULT_ATTEMPT_DEADLINE_MS;
-	const maxAttemptDeadlineMs = options.maxAttemptDeadlineMs ?? MAX_ATTEMPT_DEADLINE_MS;
+	const attemptDeadlineMs = options.attemptDeadlineMs ?? MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS;
 	const startedAt = Date.now();
 	try {
 		const rows = await ownerQueryAll<IntegrityCheckRow>(
@@ -61,9 +59,8 @@ export async function runMigrationIntegrityVerify(options: MigrationVerifyOption
 			{ deadlineMs: attemptDeadlineMs, estimatedWorkUnits: 64 },
 		);
 		const messages = rows.map((row) => text(row.integrity_check));
-		const passed = messages.length === 1 && messages[0] === "ok";
 		const result: MigrationVerifyResult = {
-			phase: passed ? "pass" : "failed",
+			phase: messages.length === 1 && messages[0] === "ok" ? "pass" : "failed",
 			messages,
 			elapsedMs: Date.now() - startedAt,
 			attemptDeadlineMs,
@@ -71,10 +68,6 @@ export async function runMigrationIntegrityVerify(options: MigrationVerifyOption
 		await options.onProgress?.(result);
 		return result;
 	} catch (error) {
-		// Deadline exhaustion (DbOwnerDeadlineError) means the single native
-		// operation did not finish inside this attempt's window. That is an
-		// incomplete pass — never a prune gate and never a silent wedge: the
-		// caller retries with a larger deadline, and the backup stays.
 		const message = error instanceof Error ? error.message : String(error);
 		const isDeadline = message.includes("exceeded its deadline") || message.includes("DB_OWNER_DEADLINE");
 		const result: MigrationVerifyResult = {
@@ -89,7 +82,109 @@ export async function runMigrationIntegrityVerify(options: MigrationVerifyOption
 	}
 }
 
-/** Next attempt deadline: double, capped. */
-export function nextMigrationVerifyDeadline(currentMs: number, maxMs = MAX_ATTEMPT_DEADLINE_MS): number {
-	return Math.min(maxMs, Math.max(DEFAULT_ATTEMPT_DEADLINE_MS, currentMs * 2));
+export interface MigrationVerifyCheckpointStore {
+	readonly read: () => Promise<MigrationVerifyCheckpoint>;
+	readonly incrementIncompleteAttempt: () => Promise<number>;
+	readonly markTerminal: (
+		status: typeof MIGRATION_VERIFY_PARKED_STATUS | typeof MIGRATION_VERIFY_FAILED_STATUS | "complete",
+	) => Promise<void>;
+}
+
+export interface MigrationVerifyGateOptions {
+	readonly owner: DbOwnerClient;
+	readonly checkpointStore?: MigrationVerifyCheckpointStore;
+	readonly runAttempt?: () => Promise<MigrationVerifyResult>;
+	readonly pruneBackup: () => void | Promise<void>;
+	readonly scheduleNextAttempt?: (callback: () => void) => void;
+	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
+	readonly log?: (message: string, details?: Record<string, unknown>) => void;
+}
+
+export interface MigrationVerifyGateResult {
+	readonly phase: MigrationVerifyResult["phase"] | "parked" | "terminal";
+	readonly attemptCount: number;
+	readonly scheduled: boolean;
+}
+
+function defaultScheduleNextAttempt(callback: () => void): void {
+	const timer = setTimeout(callback, MIGRATION_VERIFY_RETRY_INTERVAL_MS);
+	(timer as unknown as { unref?: () => void }).unref?.();
+}
+
+function ownerCheckpointStore(owner: DbOwnerClient): MigrationVerifyCheckpointStore {
+	return {
+		read: () => readMigrationVerifyCheckpoint(owner, MIGRATION_VERIFY_CHECKPOINT_KEY, 5_000),
+		incrementIncompleteAttempt: () => incrementMigrationVerifyAttempt(owner, MIGRATION_VERIFY_CHECKPOINT_KEY, 5_000),
+		markTerminal: (status) => markMigrationVerifyTerminal(owner, status, MIGRATION_VERIFY_CHECKPOINT_KEY, 5_000),
+	};
+}
+
+/**
+ * Process one maintenance tick. The continuation is deliberately scheduled
+ * only after an incomplete attempt, and never runs a tight retry loop.
+ */
+export async function runMigrationIntegrityVerifyGate(
+	options: MigrationVerifyGateOptions,
+): Promise<MigrationVerifyGateResult> {
+	const store = options.checkpointStore ?? ownerCheckpointStore(options.owner);
+	const checkpoint = await store.read();
+	if (checkpoint.status === MIGRATION_VERIFY_PARKED_STATUS || checkpoint.status === MIGRATION_VERIFY_FAILED_STATUS) {
+		options.log?.("Migration integrity verify terminal state retained", {
+			phase: checkpoint.status,
+			attemptCount: checkpoint.attemptCount,
+		});
+		return { phase: "terminal", attemptCount: checkpoint.attemptCount, scheduled: false };
+	}
+
+	const result = await (
+		options.runAttempt ??
+		(() =>
+			runMigrationIntegrityVerify({
+				owner: options.owner,
+				attemptDeadlineMs: MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS,
+				onProgress: options.onProgress,
+			}))
+	)();
+	if (options.runAttempt !== undefined) await options.onProgress?.(result);
+
+	if (result.phase === "pass") {
+		await options.pruneBackup();
+		await store.markTerminal("complete");
+		options.log?.("Global integrity check passed; rollback backup pruned", { elapsedMs: result.elapsedMs });
+		return { phase: "pass", attemptCount: checkpoint.attemptCount, scheduled: false };
+	}
+	if (result.phase === "failed") {
+		await store.markTerminal(MIGRATION_VERIFY_FAILED_STATUS);
+		options.log?.("Global integrity check FAILED; rollback backup retained", {
+			messages: result.messages,
+			elapsedMs: result.elapsedMs,
+		});
+		return { phase: "failed", attemptCount: checkpoint.attemptCount, scheduled: false };
+	}
+
+	const attemptCount = await store.incrementIncompleteAttempt();
+	if (attemptCount >= MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS) {
+		await store.markTerminal(MIGRATION_VERIFY_PARKED_STATUS);
+		options.log?.("degraded:integrity-unverified", {
+			attemptCount,
+			rollbackBackup: "retained",
+			operatorSignal: true,
+		});
+		return { phase: "parked", attemptCount, scheduled: false };
+	}
+
+	const schedule = options.scheduleNextAttempt ?? defaultScheduleNextAttempt;
+	schedule(() => {
+		void runMigrationIntegrityVerifyGate(options).catch((error) => {
+			options.log?.("Migration integrity verify continuation rejected", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+	});
+	options.log?.("Migration integrity verify incomplete; next attempt scheduled", {
+		attemptCount,
+		intervalMs: MIGRATION_VERIFY_RETRY_INTERVAL_MS,
+		elapsedMs: result.elapsedMs,
+	});
+	return { phase: "incomplete", attemptCount, scheduled: true };
 }

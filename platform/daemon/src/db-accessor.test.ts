@@ -958,12 +958,11 @@ describe("sqlite runtime ordering", () => {
 			}
 		}
 
-		expect(hits).toEqual([
-			"db-owner-worker.ts",
-			"database-integrity-worker.ts",
-			"db-accessor.ts",
-			"database-integrity.ts",
-		]);
+		// Glob scan order is filesystem-dependent; the invariant is the exact SET
+		// of production files allowed to construct a bun:sqlite runtime.
+		expect([...hits].sort()).toEqual(
+			["database-integrity-worker.ts", "database-integrity.ts", "db-accessor.ts", "db-owner-worker.ts"].sort(),
+		);
 	});
 });
 

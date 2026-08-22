@@ -32,6 +32,8 @@ const MAX_RUN_BUDGET_MS = 60_000;
 const DEFAULT_WORK_UNITS = 8;
 const MAX_WORK_UNITS = 64;
 const FTS_UNVERIFIABLE_STATUS = "degraded:fts-unverifiable" as const;
+export const MIGRATION_VERIFY_PARKED_STATUS = "degraded:integrity-unverified" as const;
+export const MIGRATION_VERIFY_FAILED_STATUS = "failed:integrity-unverified" as const;
 
 export type IncrementalIntegrityPhase = "running" | "complete" | "cancelled" | "timed_out" | "unavailable" | "degraded";
 
@@ -68,7 +70,13 @@ interface Checkpoint {
 	readonly failedTables: number;
 	readonly pagesChecked: number;
 	readonly bytesChecked: number;
-	readonly status: "running" | "complete" | typeof FTS_UNVERIFIABLE_STATUS;
+	readonly attemptCount: number;
+	readonly status:
+		| "running"
+		| "complete"
+		| typeof FTS_UNVERIFIABLE_STATUS
+		| typeof MIGRATION_VERIFY_PARKED_STATUS
+		| typeof MIGRATION_VERIFY_FAILED_STATUS;
 }
 
 interface TableRow {
@@ -163,19 +171,35 @@ async function ensureCheckpoint(
 					failed_tables INTEGER NOT NULL DEFAULT 0,
 					pages_checked INTEGER NOT NULL DEFAULT 0,
 					bytes_checked INTEGER NOT NULL DEFAULT 0,
+					attempt_count INTEGER NOT NULL DEFAULT 0,
 					status TEXT NOT NULL DEFAULT 'running',
 					updated_at TEXT NOT NULL
 				)`,
 			),
 			ownerRunStatement(
 				`INSERT OR IGNORE INTO ${CHECKPOINT_TABLE}
-					(checkpoint_key, cursor, checked_tables, failed_tables, pages_checked, bytes_checked, status, updated_at)
-					VALUES (?, '', 0, 0, 0, 0, 'running', ?)`,
+					(checkpoint_key, cursor, checked_tables, failed_tables, pages_checked, bytes_checked, attempt_count, status, updated_at)
+					VALUES (?, '', 0, 0, 0, 0, 0, 'running', ?)`,
 				[key, new Date().toISOString()],
 			),
 		],
 		{ deadlineMs, estimatedWorkUnits: 1, onOwnerMetrics },
 	);
+	const columns = await ownerQueryAll<{ readonly name?: unknown }>(
+		owner,
+		"integrity.checkpoint.columns",
+		`PRAGMA table_info(${CHECKPOINT_TABLE})`,
+		[],
+		{ deadlineMs, onOwnerMetrics },
+	);
+	if (!columns.some((column) => column.name === "attempt_count")) {
+		await ownerTransaction(
+			owner,
+			"integrity.checkpoint.attempt-count-column",
+			[ownerRunStatement(`ALTER TABLE ${CHECKPOINT_TABLE} ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0`)],
+			{ deadlineMs, estimatedWorkUnits: 1, onOwnerMetrics },
+		);
+	}
 }
 
 async function readCheckpoint(
@@ -188,14 +212,20 @@ async function readCheckpoint(
 		owner,
 		"integrity.checkpoint.read",
 		`SELECT cursor, checked_tables AS checkedTables, failed_tables AS failedTables,
-			pages_checked AS pagesChecked, bytes_checked AS bytesChecked, status
+			pages_checked AS pagesChecked, bytes_checked AS bytesChecked,
+			attempt_count AS attemptCount, status
 		 FROM ${CHECKPOINT_TABLE} WHERE checkpoint_key = ?`,
 		[key],
 		{ deadlineMs, onOwnerMetrics },
 	);
 	if (
 		row === undefined ||
-		(row.status !== "running" && row.status !== "complete" && row.status !== FTS_UNVERIFIABLE_STATUS) ||
+		(row.status !== "running" &&
+			row.status !== "complete" &&
+			row.status !== FTS_UNVERIFIABLE_STATUS &&
+			row.status !== MIGRATION_VERIFY_PARKED_STATUS &&
+			row.status !== MIGRATION_VERIFY_FAILED_STATUS) ||
+		typeof row.attemptCount !== "number" ||
 		typeof row.cursor !== "string"
 	) {
 		throw new Error(`integrity checkpoint ${key} is missing or invalid`);
@@ -216,7 +246,8 @@ async function resetCompleteCheckpoint(
 			ownerRunStatement(
 				`UPDATE ${CHECKPOINT_TABLE}
 				 SET cursor = '', checked_tables = 0, failed_tables = 0,
-				     pages_checked = 0, bytes_checked = 0, status = 'running', updated_at = ?
+				     pages_checked = 0, bytes_checked = 0, attempt_count = 0,
+				     status = 'running', updated_at = ?
 				 WHERE checkpoint_key = ?`,
 				[new Date().toISOString(), key],
 			),
@@ -311,6 +342,7 @@ async function persistTable(
 		// count (the 765M-page integrity report was this exact bug).
 		pagesChecked: metrics.pages,
 		bytesChecked: metrics.bytes,
+		attemptCount: checkpoint.attemptCount,
 		status: "running",
 	};
 	await ownerTransaction(
@@ -320,7 +352,7 @@ async function persistTable(
 			ownerRunStatement(
 				`UPDATE ${CHECKPOINT_TABLE}
 				 SET cursor = ?, checked_tables = ?, failed_tables = ?, pages_checked = ?,
-				     bytes_checked = ?, status = 'running', updated_at = ?
+				     bytes_checked = ?, attempt_count = ?, status = 'running', updated_at = ?
 				 WHERE checkpoint_key = ? AND cursor = ?`,
 				[
 					next.cursor,
@@ -328,6 +360,7 @@ async function persistTable(
 					next.failedTables,
 					next.pagesChecked,
 					next.bytesChecked,
+					next.attemptCount,
 					new Date().toISOString(),
 					key,
 					checkpoint.cursor,
@@ -446,6 +479,7 @@ export async function runIncrementalDatabaseIntegrityCheck(
 		failedTables: 0,
 		pagesChecked: 0,
 		bytesChecked: 0,
+		attemptCount: 0,
 		status: "running",
 	};
 	let lastTable: string | null = null;
@@ -669,6 +703,67 @@ export async function runIncrementalDatabaseIntegrityCheck(
 		}
 		return { ...(await progressSnapshot()), errors: [...errors, reason] };
 	}
+}
+
+export interface MigrationVerifyCheckpoint {
+	readonly attemptCount: number;
+	readonly status: Checkpoint["status"];
+}
+
+export async function readMigrationVerifyCheckpoint(
+	owner: DbOwnerClient,
+	checkpointKey = "database.migration-verify",
+	deadlineMs = 5_000,
+): Promise<MigrationVerifyCheckpoint> {
+	const key = boundedString(checkpointKey);
+	await ensureCheckpoint(owner, key, deadlineMs);
+	const checkpoint = await readCheckpoint(owner, key, deadlineMs);
+	return { attemptCount: checkpoint.attemptCount, status: checkpoint.status };
+}
+
+export async function incrementMigrationVerifyAttempt(
+	owner: DbOwnerClient,
+	checkpointKey = "database.migration-verify",
+	deadlineMs = 5_000,
+): Promise<number> {
+	const key = boundedString(checkpointKey);
+	await ensureCheckpoint(owner, key, deadlineMs);
+	await ownerTransaction(
+		owner,
+		"integrity.migration-verify.attempt",
+		[
+			ownerRunStatement(
+				`UPDATE ${CHECKPOINT_TABLE}
+				 SET attempt_count = attempt_count + 1, status = 'running', updated_at = ?
+				 WHERE checkpoint_key = ?`,
+				[new Date().toISOString(), key],
+			),
+		],
+		{ deadlineMs, estimatedWorkUnits: 1 },
+	);
+	return (await readCheckpoint(owner, key, deadlineMs)).attemptCount;
+}
+
+export async function markMigrationVerifyTerminal(
+	owner: DbOwnerClient,
+	status: typeof MIGRATION_VERIFY_PARKED_STATUS | typeof MIGRATION_VERIFY_FAILED_STATUS | "complete",
+	checkpointKey = "database.migration-verify",
+	deadlineMs = 5_000,
+): Promise<void> {
+	const key = boundedString(checkpointKey);
+	await ensureCheckpoint(owner, key, deadlineMs);
+	await ownerTransaction(
+		owner,
+		"integrity.migration-verify.terminal",
+		[
+			ownerRunStatement(`UPDATE ${CHECKPOINT_TABLE} SET status = ?, updated_at = ? WHERE checkpoint_key = ?`, [
+				status,
+				new Date().toISOString(),
+				key,
+			]),
+		],
+		{ deadlineMs, estimatedWorkUnits: 1 },
+	);
 }
 
 export const INCREMENTAL_INTEGRITY_CHECKPOINT_TABLE = CHECKPOINT_TABLE;

@@ -49,7 +49,7 @@ import {
 import { listConnectorsAsync } from "./connectors/registry";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
 import { runIncrementalDatabaseIntegrityCheck } from "./incremental-database-integrity";
-import { nextMigrationVerifyDeadline, runMigrationIntegrityVerify } from "./migration-integrity-verify";
+import { runMigrationIntegrityVerifyGate } from "./migration-integrity-verify";
 import {
 	closeDbAccessor,
 	getDbAccessor,
@@ -2509,43 +2509,20 @@ async function main() {
 			if (owner === null) throw new Error("DB owner is unavailable for incremental integrity maintenance");
 
 			// ── Migration backup prune gate ──────────────────────────────────
-			// Global `PRAGMA integrity_check` is the ONLY result that may delete
-			// the rollback backup. Table-scoped checks (even integrity_check(tbl))
-			// are documented as not global-equivalent: they miss freelist damage
-			// and pages claimed by multiple tables. The gate therefore runs the
-			// global check post-ready on the maintenance lane with escalating
-			// deadline retries; a partial pass never prunes.
+			// A global integrity_check is the ONLY result that may delete the
+			// rollback backup. It runs once per maintenance tick with a generous
+			// deadline; incomplete attempts are persisted and retried every 30m.
 			if (migrationBackupPending) {
-				let attemptDeadlineMs = 5_000;
-				const verifyOnce = async (): Promise<void> => {
-					const result = await runMigrationIntegrityVerify({
-						owner,
-						attemptDeadlineMs,
-						onProgress: (progress): void => {
-							logger.info("startup-recovery", "Migration integrity verify attempt", { ...progress });
-						},
-					});
-					if (result.phase === "pass") {
-						pruneMigrationBackupsAfterIntegrity(MEMORY_DB);
-						logger.info("startup-recovery", "Global integrity check passed; rollback backup pruned");
-						return;
-					}
-					if (result.phase === "failed") {
-						logger.error("startup-recovery", "Global integrity check FAILED; rollback backup retained", undefined, {
-							messages: result.messages,
-						});
-						return; // operator repairs from the retained backup
-					}
-					// incomplete: retry from scratch with a doubled, capped deadline
-					attemptDeadlineMs = nextMigrationVerifyDeadline(attemptDeadlineMs);
-					const timer = setTimeout(() => {
-						void verifyOnce().catch((error) => {
-							logger.error("startup-recovery", "Migration integrity verify rejected", error);
-						});
-					}, 1000);
-					timer.unref?.();
-				};
-				void verifyOnce().catch((error) => {
+				void runMigrationIntegrityVerifyGate({
+					owner,
+					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB),
+					onProgress: (progress): void => {
+						logger.info("startup-recovery", "Migration integrity verify attempt", { ...progress });
+					},
+					log: (message, details): void => {
+						logger.info("startup-recovery", message, details);
+					},
+				}).catch((error) => {
 					logger.error("startup-recovery", "Migration integrity verify rejected", error);
 				});
 			}
@@ -2562,21 +2539,6 @@ async function main() {
 					},
 				});
 				logger.info("startup-recovery", "Incremental database integrity slice complete", { ...result });
-				if (migrationBackupPending && result.phase === "complete" && result.failedObjects === 0) {
-					pruneMigrationBackupsAfterIntegrity(MEMORY_DB);
-					logger.info("startup-recovery", "Post-ready migration integrity passed; rollback backup pruned");
-				} else if (migrationBackupPending && result.phase === "degraded") {
-					// Honest deferred retention: an FTS-table park (degraded:fts-unverifiable)
-					// means the integrity cycle can never reach "complete" on this database,
-					// so the rollback backup stays retained by design. Surface that state
-					// instead of retaining silently — the operator decides whether to run the
-					// explicit full verification and free the backup.
-					logger.warn(
-						"startup-recovery",
-						"Migration rollback backup retained: integrity cycle parked degraded; full verification unavailable",
-						{ backupPath: MEMORY_DB, phase: result.phase, reason: result.errors },
-					);
-				}
 				if (result.phase === "unavailable" || result.failedObjects > 0) {
 					logger.error("startup-recovery", "Incremental database integrity found a problem", undefined, {
 						phase: result.phase,
