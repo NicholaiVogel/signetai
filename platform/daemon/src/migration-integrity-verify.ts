@@ -24,6 +24,7 @@ export const MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS = 300_000;
 export const MIGRATION_VERIFY_RETRY_INTERVAL_MS = 30 * 60_000;
 export const MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS = 8;
 export const MIGRATION_VERIFY_CHECKPOINT_KEY = "database.migration-verify";
+export { MIGRATION_VERIFY_PARKED_STATUS, MIGRATION_VERIFY_FAILED_STATUS };
 
 export interface MigrationVerifyResult {
 	/** "pass" — global integrity_check returned a single "ok" row. */
@@ -95,7 +96,7 @@ export interface MigrationVerifyGateOptions {
 	readonly checkpointStore?: MigrationVerifyCheckpointStore;
 	readonly runAttempt?: () => Promise<MigrationVerifyResult>;
 	readonly pruneBackup: () => void | Promise<void>;
-	readonly scheduleNextAttempt?: (callback: () => void) => void;
+	readonly scheduleNextAttempt?: (callback: () => void, delayMs: number) => void;
 	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
 	readonly log?: (message: string, details?: Record<string, unknown>) => void;
 }
@@ -180,7 +181,7 @@ export async function runMigrationIntegrityVerifyGate(
 				error: error instanceof Error ? error.message : String(error),
 			});
 		});
-	});
+	}, MIGRATION_VERIFY_RETRY_INTERVAL_MS);
 	options.log?.("Migration integrity verify incomplete; next attempt scheduled", {
 		attemptCount,
 		intervalMs: MIGRATION_VERIFY_RETRY_INTERVAL_MS,

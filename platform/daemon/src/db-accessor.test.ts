@@ -26,8 +26,11 @@ import {
 import { getSyncDbAccessor } from "../legacy-sync/db-accessor-sync";
 import {
 	DbSpacePreflightError,
+	DbBackupBudgetExceededError,
 	DbReadAdmissionCancelledError,
 	DbReadAdmissionRejectedError,
+	type MigrationBackupDeps,
+	type MigrationBackupFileHandle,
 	DbWriteQueueFullError,
 	MAX_READ_CONNECTIONS,
 	MAX_WRITE_QUEUE,
@@ -50,6 +53,32 @@ function tmpDbPath(): string {
 	const dir = join(tmpdir(), `signet-accessor-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(dir, { recursive: true });
 	return join(dir, "test.db");
+}
+
+function migrationBackupTestDeps(overrides: Partial<MigrationBackupDeps> = {}): MigrationBackupDeps {
+	return {
+		copyFileSync,
+		readdirSync,
+		statSync,
+		statfsSync: () => ({ bavail: 1_000_000_000, bsize: 1 }),
+		unlinkSync: (path) => rmSync(path, { force: true }),
+		now: () => 0,
+		log: () => {},
+		...overrides,
+	};
+}
+
+function wrappedHandle(
+	handle: Awaited<ReturnType<typeof openAsync>>,
+	write: MigrationBackupFileHandle["write"],
+): MigrationBackupFileHandle {
+	return {
+		read: (...args) => handle.read(...args),
+		write,
+		truncate: (length) => handle.truncate(length),
+		sync: () => handle.sync(),
+		close: () => handle.close(),
+	};
 }
 
 describe("DbAccessor", () => {
@@ -316,7 +345,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:306");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:335");
 	});
 
 	test("write statements expose the number of affected rows", () => {
@@ -759,6 +788,95 @@ describe("DbAccessor", () => {
 		expect(operations).toContain("unlink:test.db.bak-v65-7000");
 		expect(files.has("test.db.bak-v65-7000")).toBe(false);
 	});
+	test("copies a fresh multi-chunk migration backup and removes its cursor", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("fresh multi-chunk migration backup fixture");
+		writeFileSync(dbPath, source);
+		const deps = migrationBackupTestDeps({ chunkBytes: 3 });
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 70, deps);
+
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(existsSync(`${backupPath}.cursor.json`)).toBe(false);
+	});
+
+	test("resumes an interrupted multi-chunk copy after admission re-runs", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("interrupted multi-chunk migration backup fixture");
+		writeFileSync(dbPath, source);
+		let destinationWrites = 0;
+		let probeOpens = 0;
+		let statfsCalls = 0;
+		let interrupt = true;
+		const deps = migrationBackupTestDeps({
+			chunkBytes: 3,
+			statfsSync: () => {
+				statfsCalls += 1;
+				return { bavail: 1_000_000_000, bsize: 1 };
+			},
+			open: async (path, flags) => {
+				const handle = await openAsync(path, flags);
+				if (String(path).includes(".probe-")) {
+					probeOpens += 1;
+					return handle as unknown as MigrationBackupFileHandle;
+				}
+				if (String(path) === dbPath) return handle as unknown as MigrationBackupFileHandle;
+				return wrappedHandle(handle, async (...args) => {
+					destinationWrites += 1;
+					if (interrupt && destinationWrites === 2) throw new DbBackupBudgetExceededError("test interruption", 3);
+					return await handle.write(...args);
+				});
+			},
+		});
+
+		await expect(backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 71, deps)).rejects.toBeInstanceOf(
+			DbBackupBudgetExceededError,
+		);
+		const backupPath = `${dbPath}.bak-v71-0`;
+		const cursor = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as { offset: number };
+		expect(cursor.offset).toBe(3);
+		const firstStatfsCalls = statfsCalls;
+		const firstProbeOpens = probeOpens;
+
+		interrupt = false;
+		await expect(backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 71, deps)).resolves.toBe(backupPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(existsSync(`${backupPath}.cursor.json`)).toBe(false);
+		expect(statfsCalls).toBeGreaterThan(firstStatfsCalls);
+		expect(probeOpens).toBeGreaterThan(firstProbeOpens);
+	});
+
+	test("throws the named budget error, persists the cursor, and completes on restart", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("absolute deadline migration backup fixture");
+		writeFileSync(dbPath, source);
+		let now = 0;
+		let cursorWrites = 0;
+		const deps = migrationBackupTestDeps({
+			chunkBytes: 3,
+			now: () => now,
+			writeFile: async (path, data, encoding) => {
+				await writeFileAsync(path, data, encoding);
+				if (String(path).includes(".cursor.json.tmp-") && cursorWrites++ === 0) now = 58_000;
+			},
+		});
+
+		await expect(backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 72, deps)).rejects.toBeInstanceOf(
+			DbBackupBudgetExceededError,
+		);
+		const backupPath = `${dbPath}.bak-v72-0`;
+		const cursor = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as { offset: number };
+		expect(cursor.offset).toBe(3);
+
+		now = 0;
+		await expect(backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 72, deps)).resolves.toBe(backupPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(existsSync(`${backupPath}.cursor.json`)).toBe(false);
+	});
+
 	test("resumes a chunked migration backup from its durable cursor", async () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));

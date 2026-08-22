@@ -968,10 +968,12 @@ async function streamedMigrationBackup(
 		return backupDest;
 	} catch (error) {
 		if (error instanceof DbBackupBudgetExceededError) {
-			await persistMigrationBackupCursorAfterBudget(
-				{ sourcePath: dbPath, sourceSize, sourceMtimeMs, destination: backupDest, offset },
-				deps,
-			);
+			if (!existsSync(`${backupDest}.cursor.json`)) {
+				await persistMigrationBackupCursorAfterBudget(
+					{ sourcePath: dbPath, sourceSize, sourceMtimeMs, destination: backupDest, offset },
+					deps,
+				);
+			}
 			throw error;
 		}
 		throw error;
@@ -1050,6 +1052,12 @@ async function persistMigrationBackupCursorAfterBudget(
 	deps: MigrationBackupDeps,
 ): Promise<void> {
 	try {
+		if (!existsSync(cursor.destination)) {
+			const open =
+				deps.open ?? (async (path, flags) => (await openAsync(path, flags)) as unknown as MigrationBackupFileHandle);
+			const destination = await open(cursor.destination, "w");
+			await destination.close();
+		}
 		await writeMigrationBackupCursor(cursor, deps);
 	} catch {
 		// Preserve the original budget error; a cursor write failure is reported
@@ -1223,6 +1231,10 @@ async function copyMigrationBackupChunks(
 			);
 			throw new MigrationBackupAdmissionError("space", "database backup copy ran out of space after admission", error);
 		}
+		await persistMigrationBackupCursorAfterBudget(
+			{ sourcePath: dbPath, sourceSize, sourceMtimeMs, destination: backupDest, offset },
+			deps,
+		);
 		throw error;
 	} finally {
 		await source.close();
