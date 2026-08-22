@@ -1084,18 +1084,20 @@ async function probeMigrationBackupThroughput(
 ): Promise<void> {
 	if (sourceSize === 0 || resumeOffset >= sourceSize) return;
 	const probeDest = `${backupDest}.probe-${process.pid}`;
-	let source: MigrationBackupFileHandle | undefined;
-	let probe: MigrationBackupFileHandle | undefined;
+	let sourceHandle: MigrationBackupFileHandle | undefined;
+	let probeHandle: MigrationBackupFileHandle | undefined;
 	const open =
 		deps.open ?? (async (path, flags) => (await openAsync(path, flags)) as unknown as MigrationBackupFileHandle);
 	const chunkBytes = deps.chunkBytes ?? MIGRATION_BACKUP_CHUNK_BYTES;
 	try {
-		source = await boundedIo(() => open(dbPath, "r"), deadlineAt, "throughput probe open", deps, resumeOffset);
-		probe = await boundedIo(() => open(probeDest, "w"), deadlineAt, "throughput probe open", deps, resumeOffset);
+		const source = await boundedIo(() => open(dbPath, "r"), deadlineAt, "throughput probe open", deps, resumeOffset);
+		sourceHandle = source;
+		const probe = await boundedIo(() => open(probeDest, "w"), deadlineAt, "throughput probe open", deps, resumeOffset);
+		probeHandle = probe;
 		const buffer = Buffer.allocUnsafe(Math.min(chunkBytes, sourceSize));
 		const startedAt = deps.now();
 		const result = await boundedIo(
-			() => source!.read(buffer, 0, buffer.length, resumeOffset),
+			() => source.read(buffer, 0, buffer.length, resumeOffset),
 			deadlineAt,
 			"throughput probe read",
 			deps,
@@ -1104,7 +1106,7 @@ async function probeMigrationBackupThroughput(
 		let probeWritten = 0;
 		while (probeWritten < result.bytesRead) {
 			const written = await boundedIo(
-				() => probe!.write(buffer, probeWritten, result.bytesRead - probeWritten, probeWritten),
+				() => probe.write(buffer, probeWritten, result.bytesRead - probeWritten, probeWritten),
 				deadlineAt,
 				"throughput probe write",
 				deps,
@@ -1113,7 +1115,7 @@ async function probeMigrationBackupThroughput(
 			if (written.bytesWritten === 0) throw new Error("Migration backup throughput probe write stalled");
 			probeWritten += written.bytesWritten;
 		}
-		await boundedIo(() => probe!.sync(), deadlineAt, "throughput probe fsync", deps, resumeOffset);
+		await boundedIo(() => probe.sync(), deadlineAt, "throughput probe fsync", deps, resumeOffset);
 		const elapsedMs = Math.max(1, deps.now() - startedAt);
 		const bytesPerMs = result.bytesRead / elapsedMs;
 		const remainingBytes = sourceSize - resumeOffset;
@@ -1136,8 +1138,8 @@ async function probeMigrationBackupThroughput(
 		}
 		throw error;
 	} finally {
-		await source?.close();
-		await probe?.close();
+		await sourceHandle?.close();
+		await probeHandle?.close();
 		try {
 			await (deps.unlink ?? unlinkAsync)(probeDest);
 		} catch {
