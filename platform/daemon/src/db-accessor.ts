@@ -30,7 +30,6 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
-	DEFAULT_EMBEDDING_DIMENSIONS,
 	createMemoriesFts,
 	findSqliteVecExtension,
 	hasPendingMigrations,
@@ -112,6 +111,8 @@ type SqliteDatabase = {
 	close(): void;
 	loadExtension?(path: string): void;
 };
+
+type SqliteWriteSurface = Pick<SqliteDatabase, "prepare" | "exec">;
 
 let Database: new (path: string, opts?: Record<string, unknown>) => SqliteDatabase;
 
@@ -381,6 +382,24 @@ let sqliteAttempt: string | null = null;
 let sqliteWarning: string | null = null;
 let vecLoaded = false;
 let vecLoadError: string | null = null;
+let databaseIntegrityWritesBlocked = false;
+
+export class DatabaseIntegrityCorruptError extends Error {
+	readonly code = "db-integrity-corrupt" as const;
+
+	constructor() {
+		super("Database writes are blocked because integrity verification confirmed corruption");
+		this.name = "DatabaseIntegrityCorruptError";
+	}
+}
+
+export function setDatabaseIntegrityWritesBlocked(blocked: boolean): void {
+	databaseIntegrityWritesBlocked = blocked;
+}
+
+function assertDatabaseIntegrityWritesAllowed(): void {
+	if (databaseIntegrityWritesBlocked) throw new DatabaseIntegrityCorruptError();
+}
 
 // ---------------------------------------------------------------------------
 // Initialisation
@@ -1727,9 +1746,10 @@ function finishDbAccessorInit(
 			console.warn("[db-accessor] vec0 unavailable after extension load:", vecLoadError);
 		}
 		if (vecLoaded) {
-			assertMigrationStartupBudget(deadlineAt, "vector embedding backfill");
 			try {
-				backfillVecEmbeddings(writeConn, vecDimensions, deadlineAt);
+				backfillVecEmbeddings(writeConn, vecDimensions, deadlineAt, {
+					maxBatches: VEC_EMBEDDING_STARTUP_MAX_BATCHES,
+				});
 			} catch (err) {
 				if (err instanceof MigrationBackupAdmissionError) throw err;
 				// Backfill failure is a data issue (e.g. bad row, schema mismatch),
@@ -1811,19 +1831,6 @@ export function ensureFtsTable(db: SqliteDatabase, options: { readonly deferBack
 // Vec table creation + backfill
 // ---------------------------------------------------------------------------
 
-function resolveVecEmbeddingDimensions(agentsDir?: string): number {
-	try {
-		const dimensions = loadMemoryConfig(agentsDir ?? resolveSqliteAgentsDir()).embedding.dimensions;
-		if (Number.isInteger(dimensions) && dimensions > 0) return dimensions;
-	} catch (err) {
-		console.warn(
-			"[db-accessor] Failed to read embedding dimensions from config; using default:",
-			err instanceof Error ? err.message : String(err),
-		);
-	}
-	return DEFAULT_EMBEDDING_DIMENSIONS;
-}
-
 export function readVecEmbeddingDimensions(sql: string | null | undefined): number | null {
 	if (!sql) return null;
 	const match = /\bembedding\s+FLOAT\s*\[\s*(\d+)\s*\]/i.exec(sql);
@@ -1859,7 +1866,7 @@ function ensureVecTable(db: SqliteDatabase, expectedDimensions: number): void {
 	`);
 }
 
-function vecRowidsTableAvailable(db: SqliteDatabase): boolean {
+function vecRowidsTableAvailable(db: SqliteWriteSurface): boolean {
 	try {
 		const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vec_embeddings_rowids'").get();
 		return row !== undefined;
@@ -1869,9 +1876,13 @@ function vecRowidsTableAvailable(db: SqliteDatabase): boolean {
 }
 
 const VEC_EMBEDDING_BACKFILL_BATCH_SIZE = 10_000;
+const VEC_EMBEDDING_STARTUP_MAX_BATCHES = 4;
+const VEC_EMBEDDING_POST_READY_BUDGET_MS = 5_000;
+
+let pendingVecBackfillDimensions: number | null = null;
 
 function missingVecEmbeddingsRows(
-	db: SqliteDatabase,
+	db: SqliteWriteSurface,
 	expectedDimensions: number,
 	lastId: string,
 	limit: number,
@@ -1893,39 +1904,53 @@ function missingVecEmbeddingsRows(
 		.all(expectedDimensions, lastId, limit) as Array<{ id: string; vector: Buffer }>;
 }
 
-function countSkippedVecEmbeddingsRows(db: SqliteDatabase, expectedDimensions: number): number {
-	const targetTable = vecRowidsTableAvailable(db) ? "vec_embeddings_rowids" : "vec_embeddings";
-	const skippedRow = db
-		.prepare(
-			`SELECT COUNT(*) AS n FROM embeddings e
-			 LEFT JOIN ${targetTable} v ON v.id = e.id
-			 WHERE v.id IS NULL AND e.dimensions != ?`,
-		)
-		.get(expectedDimensions) as { n: number } | undefined;
-	return skippedRow?.n ?? 0;
+export interface VecBackfillOptions {
+	readonly maxBatches?: number;
 }
 
-export function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number, deadlineAt?: number): void {
+export function backfillVecEmbeddings(
+	db: SqliteWriteSurface,
+	expectedDimensions: number,
+	deadlineAt?: number,
+	options: VecBackfillOptions = {},
+): void {
 	// Directly query for missing rows instead of comparing counts.
 	// Count comparison is racy — a row can exist in embeddings but not
 	// vec_embeddings even when counts match (e.g. after a crash mid-sync).
-	assertMigrationStartupBudget(deadlineAt, "vector embedding backfill query");
-	const skippedCount = countSkippedVecEmbeddingsRows(db, expectedDimensions);
-	if (skippedCount > 0) {
-		console.warn(
-			`[db-accessor] Skipped ${skippedCount} embeddings with dimensions that do not match FLOAT[${expectedDimensions}]`,
-		);
-	}
-
 	const insert = db.prepare("INSERT OR REPLACE INTO vec_embeddings (id, embedding) VALUES (?, ?)");
 	let lastId = "";
 	let migrated = 0;
 	let totalRows = 0;
+	let batches = 0;
+	let deferred = false;
+	let lastBatchSize = VEC_EMBEDDING_BACKFILL_BATCH_SIZE;
+	let remainingRowsAtLeast = 0;
+	const stopForBudget = (error: unknown, remainingHint = 1): boolean => {
+		if (!(error instanceof MigrationBackupAdmissionError) || error.reason !== "throughput") throw error;
+		deferred = true;
+		pendingVecBackfillDimensions = expectedDimensions;
+		remainingRowsAtLeast = remainingHint;
+		return true;
+	};
 	for (;;) {
 		// Keep both the anti-join and the transaction inside the startup budget.
-		assertMigrationStartupBudget(deadlineAt, "vector embedding backfill batch");
+		if (options.maxBatches !== undefined && batches >= options.maxBatches) {
+			if (lastBatchSize < VEC_EMBEDDING_BACKFILL_BATCH_SIZE) break;
+			deferred = true;
+			pendingVecBackfillDimensions = expectedDimensions;
+			remainingRowsAtLeast = 1;
+			break;
+		}
+		try {
+			assertMigrationStartupBudget(deadlineAt, "vector embedding backfill batch");
+		} catch (error) {
+			if (stopForBudget(error)) break;
+			throw error;
+		}
 		const rows = missingVecEmbeddingsRows(db, expectedDimensions, lastId, VEC_EMBEDDING_BACKFILL_BATCH_SIZE);
 		if (rows.length === 0) break;
+		lastBatchSize = rows.length;
+		batches++;
 		totalRows += rows.length;
 		try {
 			db.exec("BEGIN");
@@ -1948,6 +1973,7 @@ export function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: nu
 			} catch {
 				// Rollback failed — transaction already closed or rolled back
 			}
+			if (stopForBudget(e)) break;
 			throw e;
 		}
 		lastId = rows[rows.length - 1]?.id ?? lastId;
@@ -1958,8 +1984,19 @@ export function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: nu
 		// eslint-disable-next-line no-console
 		console.log(`[db-accessor] Backfilled ${migrated}/${totalRows} missing embeddings into vec_embeddings`);
 	}
+	if (deferred) {
+		console.warn(
+			`[db-accessor] Deferred vector embedding backfill after ${migrated} rows; remaining rows at least ${remainingRowsAtLeast} will be completed post-ready`,
+		);
+		return;
+	}
 
-	assertMigrationStartupBudget(deadlineAt, "vector embedding cleanup");
+	try {
+		assertMigrationStartupBudget(deadlineAt, "vector embedding cleanup");
+	} catch (error) {
+		if (stopForBudget(error, 0)) return;
+		throw error;
+	}
 	// Clean orphaned vec_embeddings rows (phantom IDs from prior sync bugs)
 	try {
 		const orphanRow = db
@@ -1978,6 +2015,24 @@ export function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: nu
 	} catch {
 		// vec_embeddings may not exist — non-fatal
 	}
+	pendingVecBackfillDimensions = null;
+}
+
+export function hasPendingVecBackfill(): boolean {
+	return pendingVecBackfillDimensions !== null;
+}
+
+export function pendingVecBackfillDimensionsValue(): number | null {
+	return pendingVecBackfillDimensions;
+}
+
+export function continuePendingVecBackfill(
+	db: SqliteWriteSurface,
+	deadlineAt = Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS,
+): void {
+	const dimensions = pendingVecBackfillDimensions;
+	if (dimensions === null) return;
+	backfillVecEmbeddings(db, dimensions, deadlineAt);
 }
 
 // ---------------------------------------------------------------------------
@@ -2235,6 +2290,7 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 	type WriteOperationMeta = Parameters<typeof runWriteOperation>[1];
 
 	function runWriteTx<T>(fn: (db: WriteDb) => T, meta: WriteOperationMeta = { operation: "db.write" }): T {
+		assertDatabaseIntegrityWritesAllowed();
 		return runWriteOperation(() => {
 			writeConn.exec("BEGIN IMMEDIATE");
 			try {
@@ -2249,16 +2305,19 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 	}
 
 	function runCheckpointWal(): void {
+		assertDatabaseIntegrityWritesAllowed();
 		writeConn.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 	}
 
 	function runIncrementalVacuum(): number {
+		assertDatabaseIntegrityWritesAllowed();
 		writeConn.exec("PRAGMA incremental_vacuum");
 		const row = writeConn.prepare("PRAGMA freelist_count").get() as { freelist_count?: number } | undefined;
 		return typeof row?.freelist_count === "number" ? row.freelist_count : 0;
 	}
 
 	function runVacuumConversion(): boolean {
+		assertDatabaseIntegrityWritesAllowed();
 		return convertToIncrementalVacuum(toMigrationDb(writeConn), { dbPath: dbPath ?? undefined });
 	}
 
@@ -2684,6 +2743,8 @@ export function registerDbOwnerHealthProvider(provider: (() => DbOwnerHealth) | 
 
 /** Tear down the singleton and its lazy DB-owner clients. Safe to call even if never initialised. */
 export async function closeDbAccessor(): Promise<void> {
+	databaseIntegrityWritesBlocked = false;
+	pendingVecBackfillDimensions = null;
 	dbOwnerHealthProvider = null;
 	if (accessor) {
 		accessor.close();

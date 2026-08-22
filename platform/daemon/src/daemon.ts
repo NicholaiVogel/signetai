@@ -59,17 +59,24 @@ import {
 	migrationVerifyCheckpointKey,
 	runMigrationIntegrityVerifyGate,
 } from "./migration-integrity-verify";
-import { resetGlobalIntegrityLatch, publishDatabaseIntegrityStatus } from "./database-integrity";
+import {
+	getDatabaseIntegrityStatus,
+	publishDatabaseIntegrityStatus,
+	resetGlobalIntegrityLatch,
+} from "./database-integrity";
 import {
 	closeDbAccessor,
+	continuePendingVecBackfill,
+	DatabaseIntegrityCorruptError,
 	getDbAccessor,
 	getVectorRuntimeStatus,
+	hasPendingVecBackfill,
 	pendingMigrationBackupPath,
-	pendingMigrationBackupSizeBytes,
 	initDbAccessorLite,
 	pruneMigrationBackupsAfterIntegrity,
 	resolveSqliteRuntimeConfig,
 	registerDbOwnerHealthProvider,
+	setDatabaseIntegrityWritesBlocked,
 	type WriteDb,
 } from "./db-accessor";
 import { type VacuumConversionHandle, startVacuumConversionWorker } from "./db-vacuum";
@@ -284,6 +291,7 @@ let httpServer: import("node:net").Server | null = null;
 let dbOwnerClient: DbOwnerClient | null = null;
 let dbOwnerMaintenanceHandle: DbOwnerMaintenance | null = null;
 let globalVerifyInFlight = false;
+let migrationIntegrityWritesBlocked = false;
 let dreamingWorkerHandle: DreamingWorkerHandle | null = null;
 let reflectionWorkerHandle: ReflectionWorkerHandle | null = null;
 let embeddingTrackerHandle: EmbeddingTrackerHandle | null = null;
@@ -312,6 +320,22 @@ export function countConnectorsActive(connectors: readonly { readonly status: st
 // ============================================================================
 
 export const app = new Hono();
+
+// Once migration verification has confirmed corruption, keep every mutating
+// HTTP surface fail-closed while continuing to serve readonly routes and the
+// existing repair guidance used by /health/ready.
+app.use("*", async (c, next) => {
+	if (["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return await next();
+	if (!migrationIntegrityWritesBlocked) return await next();
+	const databaseIntegrity = getDatabaseIntegrityStatus();
+	return c.json(
+		{
+			error: new DatabaseIntegrityCorruptError().message,
+			repairGuidance: databaseIntegrity.repairGuidance,
+		},
+		503,
+	);
+});
 
 // Resolve the custom SQLite runtime once so both owner lanes use the same
 // runtime selected for this daemon instance.
@@ -747,7 +771,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:750" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:774" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -790,7 +814,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:772" },
+			{ siteToken: "daemon.ts:796" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -867,7 +891,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:863" },
+			{ siteToken: "daemon.ts:887" },
 		);
 	} catch {
 		return false;
@@ -1491,7 +1515,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1477", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1501", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1559,7 +1583,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1560", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1584", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2080,21 +2104,60 @@ async function main() {
 	await dbOwnerClient.initialize(AGENTS_DIR);
 	const { extensionPath: initExtensionPath } = getVectorRuntimeStatus();
 	initDbAccessorLite(MEMORY_DB, initExtensionPath ?? "");
+	migrationIntegrityWritesBlocked = false;
+	setDatabaseIntegrityWritesBlocked(false);
+
+	// Read the retained migration verdict before any startup mutation. A
+	// confirmed-corrupt restart must keep the database readonly even before the
+	// deferred verify callback and HTTP server have had a chance to run.
+	const retainedMigrationBackupPath = pendingMigrationBackupPath(MEMORY_DB);
+	if (retainedMigrationBackupPath !== null) {
+		try {
+			const retainedCheckpoint = await readMigrationVerifyCheckpoint(
+				dbOwnerClient,
+				migrationVerifyCheckpointKey(retainedMigrationBackupPath),
+				5_000,
+			);
+			if (retainedCheckpoint.status === MIGRATION_VERIFY_FAILED_STATUS) {
+				migrationIntegrityWritesBlocked = true;
+				setDatabaseIntegrityWritesBlocked(true);
+				publishDatabaseIntegrityStatus("corrupt", ["global integrity verification previously failed"], dbOwnerClient);
+				logger.error(
+					"startup-recovery",
+					"Retained migration verification confirmed database corruption; startup writes disabled",
+				);
+			}
+		} catch (error) {
+			logger.warn(
+				"startup-recovery",
+				"Could not read retained migration verification checkpoint; startup writes remain enabled",
+				{
+					error: error instanceof Error ? error.message : String(error),
+				},
+			);
+			publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"], dbOwnerClient);
+		}
+	}
+
 	setSessionClaimStore(createSessionClaimStore(getDbAccessor()));
-	startSessionCleanup();
-	// Formal TTL lifecycle (#902): when stale-session cleanup evicts a claim
-	// whose harness never sent session-end, checkpoint the residual continuity
-	// state and mark the retained transcript complete instead of silently
-	// dropping the in-memory lifecycle state.
-	setSessionEvictionHandler(
-		createTtlEvictionHandler({
-			accessor: getDbAccessor(),
-			maxCheckpointsPerSession: loadMemoryConfig(AGENTS_DIR).pipelineV2.continuity.maxCheckpointsPerSession,
-		}),
-	);
-	const restoredSessions = await restorePersistedSessionsAsync();
-	if (restoredSessions.active > 0 || restoredSessions.expired > 0 || restoredSessions.ended > 0) {
-		logger.info("session-tracker", "Restored durable session lifecycle state", restoredSessions);
+	if (!migrationIntegrityWritesBlocked) {
+		startSessionCleanup();
+		// Formal TTL lifecycle (#902): when stale-session cleanup evicts a claim
+		// whose harness never sent session-end, checkpoint the residual continuity
+		// state and mark the retained transcript complete instead of silently
+		// dropping the in-memory lifecycle state.
+		setSessionEvictionHandler(
+			createTtlEvictionHandler({
+				accessor: getDbAccessor(),
+				maxCheckpointsPerSession: loadMemoryConfig(AGENTS_DIR).pipelineV2.continuity.maxCheckpointsPerSession,
+			}),
+		);
+		const restoredSessions = await restorePersistedSessionsAsync();
+		if (restoredSessions.active > 0 || restoredSessions.expired > 0 || restoredSessions.ended > 0) {
+			logger.info("session-tracker", "Restored durable session lifecycle state", restoredSessions);
+		}
+	} else {
+		logger.warn("startup-recovery", "Skipping session restoration and cleanup because database writes are fail-closed");
 	}
 	logFdSnapshot("post-db-init");
 	startEventLoopMonitor();
@@ -2104,7 +2167,7 @@ async function main() {
 	registerDbOwnerMaintenance(dbOwnerMaintenanceHandle);
 	// Clean accumulated crash-loop damage through the owner. This remains a
 	// deferred call, so owner startup and the bounded drain never delay readiness.
-	runStartupRecovery(getDbAccessor(), { owner: dbOwnerClient });
+	if (!migrationIntegrityWritesBlocked) runStartupRecovery(getDbAccessor(), { owner: dbOwnerClient });
 
 	// Source-deletion cleanup runs in the post-ready deferred lane below. Do not
 	// put it before binding the HTTP server: its lifecycle-state delete uses the
@@ -2178,7 +2241,8 @@ async function main() {
 		});
 	}
 
-	await syncAgentRoster(AGENTS_DIR);
+	if (!migrationIntegrityWritesBlocked) await syncAgentRoster(AGENTS_DIR);
+	else logger.warn("startup-recovery", "Skipping agent roster sync because database writes are fail-closed");
 
 	invalidateTraversalCache();
 
@@ -2197,7 +2261,7 @@ async function main() {
 
 	const memoryCfg = loadMemoryConfig(AGENTS_DIR);
 	let telemetryCollector: TelemetryCollector | undefined;
-	if (memoryCfg.pipelineV2.telemetryEnabled && !telemetryDisabledByEnv()) {
+	if (!migrationIntegrityWritesBlocked && memoryCfg.pipelineV2.telemetryEnabled && !telemetryDisabledByEnv()) {
 		const posthogApiKey = memoryCfg.pipelineV2.telemetry.posthogApiKey;
 		const resolvedTelemetryCfg = {
 			...memoryCfg.pipelineV2.telemetry,
@@ -2272,11 +2336,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2268", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2332", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2278",
+								siteToken: "daemon.ts:2342",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2359,11 +2423,31 @@ async function main() {
 		completeIntegrityOnCallback: false,
 	});
 
+	const schedulePendingVecBackfill = (): void => {
+		if (migrationIntegrityWritesBlocked || !hasPendingVecBackfill()) return;
+		deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
+			if (migrationIntegrityWritesBlocked || !hasPendingVecBackfill()) return;
+			await getDbAccessor().withWriteTxAsync((db) => continuePendingVecBackfill(db), {
+				siteToken: "daemon.ts:2430",
+				operation: "maintenance.vec-backfill",
+			});
+			logger.info("startup-recovery", "Post-ready vector embedding backfill slice complete", {
+				pending: hasPendingVecBackfill(),
+			});
+			if (hasPendingVecBackfill()) schedulePendingVecBackfill();
+		});
+	};
+	schedulePendingVecBackfill();
+
 	// Grace period: defer all background workers for 10s after startup so the
 	// event-loop monitor can calibrate and migrations can settle before any
 	// background write work piles on (#1059 thundering-herd prevention).
 	const startPostReadyRuntime = async (): Promise<void> => {
 		await deferredRuntimeGate.waitForIntegrity();
+		if (migrationIntegrityWritesBlocked) {
+			logger.warn("startup-recovery", "Skipping post-ready runtime startup because database writes are fail-closed");
+			return;
+		}
 		reportStartupGrace();
 		await startPipelineRuntime(memoryCfg, telemetryCollector);
 		logFdSnapshot("post-pipeline");
@@ -2458,15 +2542,22 @@ async function main() {
 	deferredRuntimeScheduler.schedulePipeline(startPostReadyRuntime);
 	// Cleanup is retryable maintenance. It must not hold up pipeline startup if
 	// the async writer is blocked or unavailable.
-	deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
-		try {
-			await cleanupSourceDeletionTombstones(AGENTS_DIR);
-		} catch (error) {
-			logger.error("daemon", "Deferred source-deletion tombstone cleanup failed; retry remains available", undefined, {
-				error: error instanceof Error ? error.message : String(error),
-			});
-		}
-	});
+	if (!migrationIntegrityWritesBlocked) {
+		deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
+			try {
+				await cleanupSourceDeletionTombstones(AGENTS_DIR);
+			} catch (error) {
+				logger.error(
+					"daemon",
+					"Deferred source-deletion tombstone cleanup failed; retry remains available",
+					undefined,
+					{
+						error: error instanceof Error ? error.message : String(error),
+					},
+				);
+			}
+		});
+	}
 
 	const REQUEST_BODY_LIMIT = 10 * 1_048_576;
 	const { createServer: nodeCreateServer } = await import("node:http");
@@ -2508,25 +2599,34 @@ async function main() {
 			port: info.port,
 		});
 		logger.info("daemon", "Daemon ready");
-		deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
-			const maintenance = dbOwnerMaintenanceHandle;
-			if (maintenance === null) throw new Error("DB owner maintenance is unavailable for FTS startup recovery");
-			const result = await completeFtsStartupRecovery({
-				backfill: maintenance.backfillFts,
-				backfillOptions: { checkpointKey: "fts.memories.startup" },
-				scheduleContinuation: (callback): void => {
-					const timer = setTimeout(callback, 0);
-					timer.unref?.();
-				},
+		if (!migrationIntegrityWritesBlocked) {
+			deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
+				const maintenance = dbOwnerMaintenanceHandle;
+				if (maintenance === null) throw new Error("DB owner maintenance is unavailable for FTS startup recovery");
+				const result = await completeFtsStartupRecovery({
+					backfill: maintenance.backfillFts,
+					backfillOptions: { checkpointKey: "fts.memories.startup" },
+					scheduleContinuation: (callback): void => {
+						const timer = setTimeout(callback, 0);
+						timer.unref?.();
+					},
+				});
+				logger.info("daemon", "FTS startup maintenance finished", { ...result });
 			});
-			logger.info("daemon", "FTS startup maintenance finished", { ...result });
-		});
+		}
 		deferredRuntimeScheduler.scheduleIntegrity(async (): Promise<void> => {
 			logFdSnapshot("server-ready");
 			writeDaemonLifecycle(AGENTS_DIR, buildLifecycleRecord("running"));
 			const owner = dbOwnerClient;
 			const migrationBackupPath = pendingMigrationBackupPath(MEMORY_DB);
-			const migrationBackupSizeBytes = pendingMigrationBackupSizeBytes(MEMORY_DB);
+			let currentDatabaseSizeBytes = 0;
+			try {
+				currentDatabaseSizeBytes = (await statAsync(MEMORY_DB)).size;
+			} catch (error) {
+				logger.warn("startup-recovery", "Could not stat current database for integrity budget", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
 			const migrationBackupPending = migrationBackupPath !== null;
 			if (owner === null) throw new Error("DB owner is unavailable for incremental integrity maintenance");
 			const startVacuumConversion = (): void => {
@@ -2559,13 +2659,37 @@ async function main() {
 				}, delayMs);
 				integritySliceTimer.unref?.();
 			};
+			let scheduledVerifyRuntimeGateReleased = false;
+			const publishMigrationVerifyStatus = (
+				state: "healthy" | "corrupt" | "degraded",
+				messages?: readonly string[],
+			): void => {
+				publishDatabaseIntegrityStatus(state, messages, owner);
+				if (state === "degraded" && !scheduledVerifyRuntimeGateReleased) {
+					scheduledVerifyRuntimeGateReleased = true;
+					deferredRuntimeGate.completeIntegrity();
+				}
+			};
 			if (migrationBackupPending && migrationBackupPath !== null) {
 				migrationIntegrityGateActive = true;
-				const migrationCheckpoint = await readMigrationVerifyCheckpoint(
-					owner,
-					migrationVerifyCheckpointKey(migrationBackupPath),
-					5_000,
-				);
+				let migrationCheckpoint: Awaited<ReturnType<typeof readMigrationVerifyCheckpoint>> = {
+					attemptCount: 0,
+					status: "running",
+				};
+				try {
+					migrationCheckpoint = await readMigrationVerifyCheckpoint(
+						owner,
+						migrationVerifyCheckpointKey(migrationBackupPath),
+						5_000,
+					);
+				} catch (error) {
+					logger.error(
+						"startup-recovery",
+						"Migration verification checkpoint read failed; retrying verification",
+						error instanceof Error ? error : undefined,
+					);
+					publishMigrationVerifyStatus("degraded", ["degraded:integrity-unverified"]);
+				}
 				const retainedTerminalCheckpoint =
 					migrationCheckpoint.status === MIGRATION_VERIFY_FAILED_STATUS ||
 					migrationCheckpoint.status === MIGRATION_VERIFY_PARKED_STATUS;
@@ -2576,17 +2700,6 @@ async function main() {
 					});
 				}
 				let runMigrationVerifyGate: () => Promise<Awaited<ReturnType<typeof runMigrationIntegrityVerifyGate>>>;
-				let scheduledVerifyRuntimeGateReleased = false;
-				const publishMigrationVerifyStatus = (
-					state: "healthy" | "corrupt" | "degraded",
-					messages?: readonly string[],
-				): void => {
-					publishDatabaseIntegrityStatus(state, messages, owner);
-					if (state === "degraded" && !scheduledVerifyRuntimeGateReleased) {
-						scheduledVerifyRuntimeGateReleased = true;
-						deferredRuntimeGate.completeIntegrity();
-					}
-				};
 				const releaseVerifyLatch = (): void => {
 					if (!globalVerifyInFlight) return;
 					globalVerifyInFlight = false;
@@ -2595,7 +2708,7 @@ async function main() {
 				const migrationVerifyGateOptions: Parameters<typeof runMigrationIntegrityVerifyGate>[0] = {
 					owner,
 					backupPath: migrationBackupPath,
-					databaseSizeBytes: migrationBackupSizeBytes ?? 0,
+					databaseSizeBytes: currentDatabaseSizeBytes,
 					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB, undefined, migrationBackupPath),
 					publishStatus: publishMigrationVerifyStatus,
 					resetGlobalLatch: resetGlobalIntegrityLatch,
