@@ -272,6 +272,8 @@ export type DbOwnerFailureCause = "provider_unavailable" | "internal_error";
 export interface DbOwnerSerializedError {
 	readonly name: string;
 	readonly message: string;
+	readonly code?: string | number;
+	readonly sqliteCode?: string | number;
 	readonly causeFamily?: DbOwnerFailureCause;
 }
 
@@ -295,11 +297,21 @@ function serializedCauseFamily(error: unknown): DbOwnerFailureCause | undefined 
 	return undefined;
 }
 
+function serializedErrorField(error: unknown, key: "code" | "sqliteCode"): string | number | undefined {
+	if (typeof error !== "object" || error === null) return undefined;
+	const value = (error as Record<string, unknown>)[key];
+	return typeof value === "string" || typeof value === "number" ? value : undefined;
+}
+
 export function serializeError(error: unknown): DbOwnerSerializedError {
 	const causeFamily = serializedCauseFamily(error);
+	const code = serializedErrorField(error, "code");
+	const sqliteCode = serializedErrorField(error, "sqliteCode");
 	return {
 		name: error instanceof Error ? error.name : "Error",
 		message: error instanceof Error ? error.message : String(error),
+		...(code === undefined ? {} : { code }),
+		...(sqliteCode === undefined ? {} : { sqliteCode }),
 		...(causeFamily === undefined ? {} : { causeFamily }),
 	};
 }

@@ -56,6 +56,26 @@ interface IntegrityCheckRow {
 
 const text = (value: unknown): string => String(value ?? "");
 
+type SqliteErrorCode = string | number;
+
+function sqliteErrorCode(error: unknown): SqliteErrorCode | undefined {
+	if (typeof error !== "object" || error === null) return undefined;
+	const record = error as Record<string, unknown>;
+	const value = record.sqliteCode ?? record.code;
+	return typeof value === "string" || typeof value === "number" ? value : undefined;
+}
+
+function isSqliteCorruptionCode(code: SqliteErrorCode): boolean {
+	if (typeof code === "number") return code === 11 || code === 26;
+	const normalized = code.toUpperCase();
+	return (
+		normalized === "11" ||
+		normalized === "26" ||
+		normalized.startsWith("SQLITE_CORRUPT") ||
+		normalized === "SQLITE_NOTADB"
+	);
+}
+
 /** Run one global integrity_check attempt on the owner's maintenance lane. */
 export async function runMigrationIntegrityVerify(options: MigrationVerifyOptions): Promise<MigrationVerifyResult> {
 	const attemptDeadlineMs = options.attemptDeadlineMs ?? MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS;
@@ -81,11 +101,13 @@ export async function runMigrationIntegrityVerify(options: MigrationVerifyOption
 		const message = error instanceof Error ? error.message : String(error);
 		const normalizedMessage = message.toLowerCase();
 		const isDeadline = message.includes("exceeded its deadline") || message.includes("DB_OWNER_DEADLINE");
-		const isRecognizedCorruption = [
-			"database disk image is malformed",
-			"file is not a database",
-			"database disk image malformed",
-		].some((signature) => normalizedMessage.includes(signature));
+		const code = sqliteErrorCode(error);
+		const isRecognizedCorruption =
+			code === undefined
+				? ["database disk image is malformed", "file is not a database", "database disk image malformed"].some(
+						(signature) => normalizedMessage.includes(signature),
+					)
+				: isSqliteCorruptionCode(code);
 		const result: MigrationVerifyResult = {
 			phase: isDeadline || !isRecognizedCorruption ? "incomplete" : "failed",
 			messages: [message],
@@ -255,8 +277,22 @@ export async function runMigrationIntegrityVerifyGate(
 		return { phase: "pass", attemptCount, scheduled: false };
 	}
 	if (result.phase === "failed") {
-		await store.markTerminal(MIGRATION_VERIFY_FAILED_STATUS);
+		// Publish the confirmed corruption before touching the checkpoint. A
+		// corrupt database or rejected owner must not erase the verdict that
+		// callers use to fail readiness closed.
 		options.publishStatus?.("corrupt", result.messages);
+		try {
+			await store.markTerminal(MIGRATION_VERIFY_FAILED_STATUS);
+		} catch (error) {
+			options.log?.("Global integrity check failed; terminal checkpoint persistence rejected", {
+				error: error instanceof Error ? error.message : String(error),
+				status: MIGRATION_VERIFY_FAILED_STATUS,
+			});
+			// Re-throw so the existing setup-retry controller retries terminal
+			// persistence; the corruption publication above remains durable in
+			// the process even when the checkpoint write is unavailable.
+			throw error;
+		}
 		options.log?.("Global integrity check FAILED; rollback backup retained", {
 			messages: result.messages,
 			elapsedMs: result.elapsedMs,

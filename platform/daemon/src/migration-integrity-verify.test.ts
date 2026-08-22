@@ -69,6 +69,18 @@ describe("migration integrity verify gate", () => {
 		expect(progress[0]?.phase).toBe("failed");
 	});
 
+	test("returns a failed result for a novel message with SQLITE_CORRUPT", async () => {
+		const failure = Object.assign(new Error("malformed database schema (novel variant)"), { code: "SQLITE_CORRUPT" });
+		const failingOwner = {
+			submit: () => ({ result: Promise.reject(failure), metrics: Promise.resolve(undefined), job: {} }),
+		} as unknown as DbOwnerClient;
+
+		await expect(runMigrationIntegrityVerify({ owner: failingOwner })).resolves.toMatchObject({
+			phase: "failed",
+			messages: ["malformed database schema (novel variant)"],
+		});
+	});
+
 	test("treats non-ok integrity rows as corruption", async () => {
 		const corruptOwner = {
 			submit: () => ({
@@ -253,6 +265,39 @@ describe("migration integrity verify gate", () => {
 			{ state: "degraded", messages: ["degraded:integrity-unverified"] },
 			{ state: "corrupt", messages: ["corrupt"] },
 		]);
+	});
+
+	test("publishes corruption before a terminal checkpoint write fails", async () => {
+		const { store } = fakeStore();
+		const events: string[] = [];
+		const publications: string[] = [];
+		const logs: string[] = [];
+		const failingStore: MigrationVerifyCheckpointStore = {
+			...store,
+			markTerminal: async () => {
+				events.push("mark-terminal");
+				throw new Error("checkpoint owner rejected");
+			},
+		};
+
+		await expect(
+			runMigrationIntegrityVerifyGate({
+				owner,
+				backupPath: "/tmp/memories.db.bak-v151-1234",
+				checkpointStore: failingStore,
+				runAttempt: async () => attempt("failed"),
+				pruneBackup: () => {},
+				publishStatus: (state) => {
+					events.push(`publish-${state}`);
+					publications.push(state);
+				},
+				log: (message) => logs.push(message),
+			}),
+		).rejects.toThrow("checkpoint owner rejected");
+
+		expect(events).toEqual(["publish-degraded", "publish-corrupt", "mark-terminal"]);
+		expect(publications).toEqual(["degraded", "corrupt"]);
+		expect(logs).toContain("Global integrity check failed; terminal checkpoint persistence rejected");
 	});
 
 	test("parks after eight incomplete attempts with degraded:integrity-unverified", async () => {

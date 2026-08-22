@@ -1148,6 +1148,9 @@ export async function copyMigrationBackupChunks(
 					throw new Error(`Migration backup write stalled at ${offset + chunkOffset} of ${sourceSize} bytes`);
 				chunkOffset += written.bytesWritten;
 			}
+			// Advance and persist the cursor before the post-chunk deadline fence.
+			// If the final chunk consumed the remaining budget, the cursor is the
+			// durable resume point and must not be removed by the caller.
 			offset += result.bytesRead;
 			await destination.sync();
 			await writeMigrationBackupCursor({
@@ -1157,6 +1160,12 @@ export async function copyMigrationBackupChunks(
 				destination: backupDest,
 				offset,
 			});
+		}
+		if (Date.now() >= deadlineAt) {
+			throw new MigrationBackupAdmissionError(
+				"throughput",
+				`migration backup copy exhausted its deadline at ${offset} of ${sourceSize} bytes; resume cursor retained`,
+			);
 		}
 	} catch (error) {
 		if (isDbFullError(error)) {
@@ -1360,7 +1369,7 @@ export async function initDbAccessorAsync(
 ): Promise<void> {
 	const writeConn = openDbAccessorConnection(path, opts);
 	const migrationBackup = await backupBeforePendingMigrationsAsync(writeConn, path, opts?.deadlineAt);
-	finishDbAccessorInit(writeConn, opts, migrationBackup);
+	finishDbAccessorInit(writeConn, opts, migrationBackup, opts?.deadlineAt);
 }
 
 function openDbAccessorConnection(path: string, opts?: { readonly agentsDir?: string }): SqliteDatabase {
@@ -1418,10 +1427,17 @@ function finishDbAccessorInit(
 	writeConn: SqliteDatabase,
 	opts?: { readonly agentsDir?: string },
 	migrationBackup?: string | null,
+	deadlineAt?: number,
 ): void {
 	// Run schema migrations — this is the sole schema authority.
 	// Failures here are fatal: the daemon must not start on bad schema.
 	const auditHighWaterMark = migrationAuditHighWaterMark(writeConn);
+	if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+		throw new MigrationBackupAdmissionError(
+			"throughput",
+			"migration backup startup budget exhausted before migrations; resume cursor retained",
+		);
+	}
 	runMigrations(toMigrationDb(writeConn));
 	if (migrationBackup !== null && migrationBackup !== undefined) {
 		// Startup only checks bounded schema artifacts for the migrations this

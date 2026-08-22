@@ -574,6 +574,10 @@ describe("integrity state severity merge", () => {
 		});
 		expect(getDatabaseIntegrityStatus().repairGuidance).toContain("back up the database");
 		publishDatabaseIntegrityStatus("healthy");
+		expect(getDatabaseIntegrityStatus()).toMatchObject({
+			state: "corrupt",
+			integrity: "confirmed corruption",
+		});
 	});
 
 	it("retains a corrupt global latch over a healthy incremental result", () => {

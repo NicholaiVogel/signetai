@@ -793,6 +793,44 @@ describe("DbAccessor", () => {
 			Date.now = realNow;
 		}
 	});
+	test("retains the cursor when the final chunk crosses the absolute deadline", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("slow final chunk fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const backupPath = `${dbPath}.bak-v74-9000`;
+		const realNow = Date.now;
+		const baseNow = realNow();
+		let fakeNow = baseNow;
+		Date.now = () => fakeNow;
+		try {
+			await expect(
+				copyMigrationBackupChunks(
+					dbPath,
+					backupPath,
+					source.length,
+					sourceStat.mtimeMs,
+					sourceStat.mode & 0o7777,
+					0,
+					baseNow + 6_000,
+					async (buffer, length) => {
+						buffer.fill(1, 0, length);
+						fakeNow = baseNow + 6_001;
+						return { bytesRead: length };
+					},
+				),
+			).rejects.toMatchObject({
+				name: "MigrationBackupAdmissionError",
+				reason: "throughput",
+			});
+			const cursor = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as { offset: number };
+			expect(cursor.offset).toBe(source.length);
+			expect(existsSync(`${backupPath}.cursor.json`)).toBe(true);
+		} finally {
+			Date.now = realNow;
+		}
+	});
 	test("persists a zero-offset cursor before the first migration backup chunk", async () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
