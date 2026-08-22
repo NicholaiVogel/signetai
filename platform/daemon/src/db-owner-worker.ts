@@ -271,6 +271,20 @@ export function runDbOwnerWorker(): void {
 		return withBusyRetry(() => enforceResultLimit(statement, prepared.run(...params)), context);
 	}
 
+	function executeReadOnlyStatement(statement: DbOwnerStatement): unknown {
+		if (statement.result === "run") throw new Error("DB owner readonly statements must return rows");
+		const readonlyDb = new Database(ownerDbPath, { readonly: true });
+		try {
+			const params = (statement.params ?? []).map(bindParameter);
+			const prepared = readonlyDb.prepare(statement.sql);
+			return statement.result === "all"
+				? enforceResultLimit(statement, prepared.all(...params))
+				: enforceResultLimit(statement, prepared.get(...params));
+		} finally {
+			readonlyDb.close();
+		}
+	}
+
 	function executeTransaction(
 		statements: readonly DbOwnerStatement[],
 		context?: JobExecutionContext,
@@ -695,7 +709,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:696" },
+			{ siteToken: "db-owner-worker.ts:710" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
@@ -724,14 +738,18 @@ export function runDbOwnerWorker(): void {
 			while (!existsSync(releaseMarker)) await new Promise((resolve) => setTimeout(resolve, 5));
 		}
 		const { initDbAccessorAsync } = await import("./db-accessor");
-		await initDbAccessorAsync(ownerDbPath, { agentsDir, deadlineAt: context?.deadlineAt });
+		const initialization = await initDbAccessorAsync(ownerDbPath, { agentsDir, deadlineAt: context?.deadlineAt });
 		if (context !== undefined) context.committed = true;
-		return { initialized: true };
+		return { initialized: true, pendingVecBackfill: initialization.pendingVecBackfill };
 	}
 
 	async function execute(job: DbOwnerJob, context: JobExecutionContext): Promise<unknown> {
 		if (job.request.kind === "initialize") return await executeInitialization(job.request.agentsDir, context);
-		if (job.request.kind === "query") return executeStatement(job.request.statement, context);
+		if (job.request.kind === "query") {
+			return job.request.statement.readonly
+				? executeReadOnlyStatement(job.request.statement)
+				: executeStatement(job.request.statement, context);
+		}
 		if (job.request.kind === "transaction") return executeTransaction(job.request.transaction.statements, context);
 		if (job.request.kind === "batch")
 			return executeBatch(job.request.statements, job.request.requireChanges === true, context);

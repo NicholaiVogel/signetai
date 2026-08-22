@@ -28,7 +28,9 @@ export interface DbOwnerStatement {
 	/** Maximum UTF-8 JSON payload for this result. The owner rejects larger results. */
 	readonly maxResultBytes?: number;
 	readonly transactional?: boolean;
-	/** Abort a transaction when this run statement changes zero rows. */
+	/** Execute this statement on a connection opened with readonly mode. */
+	readonly readonly?: boolean;
+	/** Abort a transaction when a run statement changes zero rows. */
 	readonly requireChanges?: boolean;
 }
 

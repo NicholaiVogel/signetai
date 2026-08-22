@@ -57,6 +57,11 @@ describe("daemon production DB owner wiring", () => {
 	it("gates startup writers on retained migration classification and starts vacuum only after pass", async () => {
 		const source = await Bun.file(daemonSourceUrl).text();
 
+		expect(source).toContain("initDbAccessorReadOnly");
+		expect(source).toContain("transactional: false");
+		expect(source.indexOf("readRetainedMigrationVerifyStatus")).toBeLessThan(
+			source.indexOf("owner.initialize(AGENTS_DIR)"),
+		);
 		expect(source).toContain("readMigrationVerifyCheckpoint");
 		expect(source).toContain("MIGRATION_VERIFY_FAILED_STATUS");
 		expect(source).toContain("MIGRATION_VERIFY_PARKED_STATUS");
@@ -70,6 +75,16 @@ describe("daemon production DB owner wiring", () => {
 			'result.phase === "terminal" && migrationCheckpoint.status === MIGRATION_VERIFY_FAILED_STATUS',
 		);
 		expect(source).toContain("Migration verification retained the rollback backup; VACUUM deferred");
+	});
+
+	it("arms the live corruption write block and carries owner backfill state", async () => {
+		const source = await Bun.file(daemonSourceUrl).text();
+
+		expect(source).toContain('if (state === "corrupt") armMigrationIntegrityWriteBlock();');
+		expect(source).toContain("pendingVecBackfillFromInitialization");
+		expect(source).toContain("ownerHasPendingVecBackfill(owner)");
+		expect(source).not.toContain("hasPendingVecBackfill()");
+		expect(source).not.toContain("continuePendingVecBackfill");
 	});
 
 	it("keeps a paused startup source partial instead of reporting success", async () => {

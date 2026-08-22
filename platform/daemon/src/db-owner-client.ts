@@ -93,9 +93,14 @@ export interface DbOwnerJobHandle<Result> {
 	readonly cancel: () => void;
 }
 
+export interface DbOwnerInitializationResult {
+	readonly initialized: true;
+	readonly pendingVecBackfill: boolean;
+}
+
 export interface DbOwnerClient {
 	start(): Promise<void>;
-	initialize(agentsDir?: string): Promise<void>;
+	initialize(agentsDir?: string): Promise<DbOwnerInitializationResult>;
 	submit<Result>(request: DbOwnerRequest, options: DbOwnerSubmitOptions): DbOwnerJobHandle<Result>;
 	awaitResult<Result>(handle: DbOwnerJobHandle<Result>, timeoutMs?: number): Promise<Result>;
 	cancel(jobId: string): void;
@@ -766,12 +771,12 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		}
 	}
 
-	async function initialize(agentsDir?: string): Promise<void> {
-		const handle = submit(
+	async function initialize(agentsDir?: string): Promise<DbOwnerInitializationResult> {
+		const handle = submit<DbOwnerInitializationResult>(
 			{ kind: "initialize", agentsDir },
 			{ operation: "db.initialize", lane: "maintenance", deadlineMs: 60_000, estimatedWorkUnits: 10_000 },
 		);
-		await awaitResult(handle, 60_000);
+		return await awaitResult<DbOwnerInitializationResult>(handle, 60_000);
 	}
 
 	return { start, initialize, submit, awaitResult, cancel, health: currentHealth, close };
@@ -862,8 +867,8 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 			if (closed) throw new DbOwnerError("DB_OWNER_CLOSED", "DB owner client is closed");
 			await Promise.all([readLane.start(), writeLane.start(), maintenanceLane.start()]);
 		},
-		async initialize(agentsDir?: string): Promise<void> {
-			await maintenanceLane.initialize(agentsDir);
+		async initialize(agentsDir?: string): Promise<DbOwnerInitializationResult> {
+			return await maintenanceLane.initialize(agentsDir);
 		},
 		submit<Result>(request: DbOwnerRequest, submitOptions: DbOwnerSubmitOptions): DbOwnerJobHandle<Result> {
 			return laneFor(submitOptions.lane, submitOptions.workloadClass).submit<Result>(request, submitOptions);

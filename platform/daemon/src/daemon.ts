@@ -66,13 +66,13 @@ import {
 } from "./database-integrity";
 import {
 	closeDbAccessor,
-	continuePendingVecBackfill,
+	backfillVecEmbeddings,
 	DatabaseIntegrityCorruptError,
 	getDbAccessor,
 	getVectorRuntimeStatus,
-	hasPendingVecBackfill,
 	pendingMigrationBackupPath,
 	initDbAccessorLite,
+	initDbAccessorReadOnly,
 	pruneMigrationBackupsAfterIntegrity,
 	resolveSqliteRuntimeConfig,
 	registerDbOwnerHealthProvider,
@@ -307,6 +307,65 @@ let transcriptRecoveryWorkerHandle: TranscriptRecoveryWorkerHandle | null = null
 let telemetryRef: TelemetryCollector | undefined;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let checkpointPruneTimer: ReturnType<typeof setInterval> | undefined;
+
+function armMigrationIntegrityWriteBlock(): void {
+	migrationIntegrityWritesBlocked = true;
+	setDatabaseIntegrityWritesBlocked(true);
+}
+
+async function readRetainedMigrationVerifyStatus(owner: DbOwnerClient, checkpointKey: string): Promise<string | null> {
+	const handle = owner.submit<{ readonly status?: unknown } | undefined>(
+		{
+			kind: "query",
+			statement: {
+				sql: "SELECT status FROM db_integrity_checkpoints WHERE checkpoint_key = ? LIMIT 1",
+				params: [checkpointKey],
+				result: "get",
+				transactional: false,
+				readonly: true,
+			},
+		},
+		{ operation: "startup.read-retained-integrity-checkpoint", lane: "read", deadlineMs: 5_000 },
+	);
+	const row = await owner.awaitResult(handle, 5_000);
+	return typeof row?.status === "string" ? row.status : null;
+}
+
+async function ownerHasPendingVecBackfill(owner: DbOwnerClient): Promise<boolean> {
+	try {
+		const rowidsHandle = owner.submit<{ readonly present?: number } | undefined>(
+			{
+				kind: "query",
+				statement: {
+					sql: "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'vec_embeddings_rowids' LIMIT 1",
+					result: "get",
+					transactional: false,
+					readonly: true,
+				},
+			},
+			{ operation: "maintenance.vec-backfill-probe-schema", lane: "read", deadlineMs: 5_000 },
+		);
+		const rowids = await owner.awaitResult(rowidsHandle, 5_000);
+		const targetTable = rowids === undefined ? "vec_embeddings" : "vec_embeddings_rowids";
+		const pendingHandle = owner.submit<{ readonly present?: number } | undefined>(
+			{
+				kind: "query",
+				statement: {
+					sql: `SELECT 1 AS present FROM embeddings e
+						LEFT JOIN ${targetTable} v ON v.id = e.id
+						WHERE v.id IS NULL LIMIT 1`,
+					result: "get",
+					transactional: false,
+					readonly: true,
+				},
+			},
+			{ operation: "maintenance.vec-backfill-probe", lane: "read", deadlineMs: 5_000 },
+		);
+		return (await owner.awaitResult(pendingHandle, 5_000)) !== undefined;
+	} catch {
+		return false;
+	}
+}
 
 export function countConnectorsActive(connectors: readonly { readonly status: string }[]): number {
 	// ConnectorStatus is "idle" | "syncing" | "error"; there is no "active"
@@ -771,7 +830,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:774" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:833" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -814,7 +873,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:796" },
+			{ siteToken: "daemon.ts:855" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -891,7 +950,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:887" },
+			{ siteToken: "daemon.ts:946" },
 		);
 	} catch {
 		return false;
@@ -1515,7 +1574,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1501", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1560", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1583,7 +1642,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1584", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1643", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2097,47 +2156,53 @@ async function main() {
 		});
 	}
 
-	// Expensive schema/FTS/vector initialization must execute in the killable
-	// owner process, not merely behind an async function on this isolate.
+	// Expensive schema/FTS initialization must execute in the killable owner
+	// process, not merely behind an async function on this isolate.
 	dbOwnerClient = createDbOwnerClient({ dbPath: MEMORY_DB, sqlitePath: sqliteRuntime.choice?.path });
 	await dbOwnerClient.start();
-	await dbOwnerClient.initialize(AGENTS_DIR);
-	const { extensionPath: initExtensionPath } = getVectorRuntimeStatus();
-	initDbAccessorLite(MEMORY_DB, initExtensionPath ?? "");
-	migrationIntegrityWritesBlocked = false;
-	setDatabaseIntegrityWritesBlocked(false);
+	const owner = dbOwnerClient;
 
-	// Read the retained migration verdict before any startup mutation. A
-	// confirmed-corrupt restart must keep the database readonly even before the
-	// deferred verify callback and HTTP server have had a chance to run.
+	// Read the retained migration verdict through a strictly read-only owner
+	// query before any mutating database initialization can run. A confirmed
+	// corrupt restart skips initialize() entirely and opens only a readonly
+	// accessor for status and recovery guidance.
 	const retainedMigrationBackupPath = pendingMigrationBackupPath(MEMORY_DB);
+	let retainedMigrationCorrupt = false;
+	let retainedMigrationReadFailed = false;
 	if (retainedMigrationBackupPath !== null) {
 		try {
-			const retainedCheckpoint = await readMigrationVerifyCheckpoint(
-				dbOwnerClient,
-				migrationVerifyCheckpointKey(retainedMigrationBackupPath),
-				5_000,
-			);
-			if (retainedCheckpoint.status === MIGRATION_VERIFY_FAILED_STATUS) {
-				migrationIntegrityWritesBlocked = true;
-				setDatabaseIntegrityWritesBlocked(true);
-				publishDatabaseIntegrityStatus("corrupt", ["global integrity verification previously failed"], dbOwnerClient);
-				logger.error(
-					"startup-recovery",
-					"Retained migration verification confirmed database corruption; startup writes disabled",
-				);
-			}
+			retainedMigrationCorrupt =
+				(await readRetainedMigrationVerifyStatus(owner, migrationVerifyCheckpointKey(retainedMigrationBackupPath))) ===
+				MIGRATION_VERIFY_FAILED_STATUS;
 		} catch (error) {
+			retainedMigrationReadFailed = true;
 			logger.warn(
 				"startup-recovery",
-				"Could not read retained migration verification checkpoint; startup writes remain enabled",
-				{
-					error: error instanceof Error ? error.message : String(error),
-				},
+				"Could not read retained migration verification checkpoint before initialization; continuing startup",
+				{ error: error instanceof Error ? error.message : String(error) },
 			);
-			publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"], dbOwnerClient);
 		}
 	}
+
+	const { extensionPath: initExtensionPath } = getVectorRuntimeStatus();
+	const initResult = retainedMigrationCorrupt ? null : await owner.initialize(AGENTS_DIR);
+	if (retainedMigrationCorrupt) {
+		armMigrationIntegrityWriteBlock();
+		publishDatabaseIntegrityStatus("corrupt", ["global integrity verification previously failed"], owner);
+		initDbAccessorReadOnly(MEMORY_DB, initExtensionPath ?? "", { agentsDir: AGENTS_DIR });
+		logger.error(
+			"startup-recovery",
+			"Retained migration verification confirmed database corruption; startup writes disabled before initialization",
+		);
+	} else {
+		initDbAccessorLite(MEMORY_DB, initExtensionPath ?? "");
+		migrationIntegrityWritesBlocked = false;
+		setDatabaseIntegrityWritesBlocked(false);
+		if (retainedMigrationReadFailed) {
+			publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"], owner);
+		}
+	}
+	const pendingVecBackfillFromInitialization = initResult?.pendingVecBackfill === true;
 
 	setSessionClaimStore(createSessionClaimStore(getDbAccessor()));
 	if (!migrationIntegrityWritesBlocked) {
@@ -2336,11 +2401,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2332", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2397", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2342",
+								siteToken: "daemon.ts:2407",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2423,21 +2488,45 @@ async function main() {
 		completeIntegrityOnCallback: false,
 	});
 
+	let daemonPendingVecBackfill = pendingVecBackfillFromInitialization;
+	let vecBackfillScheduled = false;
 	const schedulePendingVecBackfill = (): void => {
-		if (migrationIntegrityWritesBlocked || !hasPendingVecBackfill()) return;
-		deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
-			if (migrationIntegrityWritesBlocked || !hasPendingVecBackfill()) return;
-			await getDbAccessor().withWriteTxAsync((db) => continuePendingVecBackfill(db), {
-				siteToken: "daemon.ts:2430",
-				operation: "maintenance.vec-backfill",
+		if (migrationIntegrityWritesBlocked || vecBackfillScheduled) return;
+		void ownerHasPendingVecBackfill(owner).then((pending) => {
+			daemonPendingVecBackfill = pending;
+			if (!pending || migrationIntegrityWritesBlocked) return;
+			vecBackfillScheduled = true;
+			deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
+				try {
+					if (migrationIntegrityWritesBlocked || !(await ownerHasPendingVecBackfill(owner))) return;
+					const activeEmbedding = await getDbAccessor().withReadDbAsync(
+						(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
+						{ siteToken: "daemon.ts:2502", operation: "maintenance.vec-backfill-config" },
+					);
+					await getDbAccessor().withWriteTxAsync(
+						(db) => backfillVecEmbeddings(db, activeEmbedding.dimensions, Date.now() + 5_000),
+						{ siteToken: "daemon.ts:2506", operation: "maintenance.vec-backfill" },
+					);
+					logger.info("startup-recovery", "Post-ready vector embedding backfill slice complete", {
+						pending: daemonPendingVecBackfill,
+					});
+					const stillPending = await ownerHasPendingVecBackfill(owner);
+					vecBackfillScheduled = false;
+					if (stillPending) schedulePendingVecBackfill();
+				} finally {
+					vecBackfillScheduled = false;
+				}
 			});
-			logger.info("startup-recovery", "Post-ready vector embedding backfill slice complete", {
-				pending: hasPendingVecBackfill(),
-			});
-			if (hasPendingVecBackfill()) schedulePendingVecBackfill();
 		});
 	};
-	schedulePendingVecBackfill();
+	// The owner initialization result seeds daemon knowledge, while this probe
+	// remains authoritative so restarts and cross-process drift cannot strand a
+	// pending backfill behind the owner boundary.
+	if (daemonPendingVecBackfill) schedulePendingVecBackfill();
+	else
+		void ownerHasPendingVecBackfill(owner).then((pending) => {
+			if (pending) schedulePendingVecBackfill();
+		});
 
 	// Grace period: defer all background workers for 10s after startup so the
 	// event-loop monitor can calibrate and migrations can settle before any
@@ -2664,6 +2753,7 @@ async function main() {
 				state: "healthy" | "corrupt" | "degraded",
 				messages?: readonly string[],
 			): void => {
+				if (state === "corrupt") armMigrationIntegrityWriteBlock();
 				publishDatabaseIntegrityStatus(state, messages, owner);
 				if (state === "degraded" && !scheduledVerifyRuntimeGateReleased) {
 					scheduledVerifyRuntimeGateReleased = true;

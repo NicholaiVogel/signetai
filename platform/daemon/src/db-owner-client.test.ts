@@ -905,6 +905,18 @@ describe("DB owner client", () => {
 		await Promise.allSettled(handles.map((handle) => handle.result));
 	});
 
+	test("carries pending vector backfill state through the initialize protocol", async () => {
+		const database = makeMigratedDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+
+		await expect(client.initialize(database.directory)).resolves.toEqual({
+			initialized: true,
+			pendingVecBackfill: true,
+		});
+	});
+
 	test("rejects a result that exceeds the bounded wire payload", async () => {
 		const database = makeDb();
 		directory = database.directory;

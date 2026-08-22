@@ -1484,6 +1484,17 @@ describe("vec_embeddings schema repair", () => {
 		expect(vecEmbeddingsSchemaNeedsRepair(currentSql.replace("id TEXT PRIMARY KEY,", ""), 1536)).toBe(true);
 	});
 
+	test("does not run vector backfill during accessor initialization", () => {
+		const source = readFileSync(join(import.meta.dir, "db-accessor.ts"), "utf8");
+		const initStart = source.indexOf("function finishDbAccessorInit(");
+		const initEnd = source.indexOf("export function initDbAccessorLite", initStart);
+		const initSource = source.slice(initStart, initEnd);
+
+		expect(initSource).not.toContain("backfillVecEmbeddings(");
+		expect(initSource).toContain("pendingVecBackfill");
+		expect(initSource).toContain("hasMissingVecEmbeddings");
+	});
+
 	test("backfills missing embeddings in bounded keyset batches", () => {
 		const db = new Database(":memory:");
 		db.exec(

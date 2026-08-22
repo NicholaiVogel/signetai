@@ -1629,13 +1629,17 @@ export function initDbAccessor(path: string, opts?: { readonly agentsDir?: strin
 	finishDbAccessorInit(writeConn, opts, migrationBackup);
 }
 
+export interface DbAccessorInitializationResult {
+	readonly pendingVecBackfill: boolean;
+}
+
 export async function initDbAccessorAsync(
 	path: string,
 	opts?: { readonly agentsDir?: string; readonly deadlineAt?: number },
-): Promise<void> {
+): Promise<DbAccessorInitializationResult> {
 	const writeConn = openDbAccessorConnection(path, opts);
 	const migrationBackup = await backupBeforePendingMigrationsAsync(writeConn, path, opts?.deadlineAt);
-	finishDbAccessorInit(writeConn, opts, migrationBackup, opts?.deadlineAt);
+	return finishDbAccessorInit(writeConn, opts, migrationBackup, opts?.deadlineAt);
 }
 
 function openDbAccessorConnection(path: string, opts?: { readonly agentsDir?: string }): SqliteDatabase {
@@ -1694,7 +1698,7 @@ function finishDbAccessorInit(
 	opts?: { readonly agentsDir?: string },
 	migrationBackup?: string | null,
 	deadlineAt?: number,
-): void {
+): DbAccessorInitializationResult {
 	// Run schema migrations — this is the sole schema authority.
 	// Failures here are fatal: the daemon must not start on bad schema.
 	const auditHighWaterMark = migrationAuditHighWaterMark(writeConn);
@@ -1746,20 +1750,14 @@ function finishDbAccessorInit(
 			console.warn("[db-accessor] vec0 unavailable after extension load:", vecLoadError);
 		}
 		if (vecLoaded) {
-			try {
-				backfillVecEmbeddings(writeConn, vecDimensions, deadlineAt, {
-					maxBatches: VEC_EMBEDDING_STARTUP_MAX_BATCHES,
-				});
-			} catch (err) {
-				if (err instanceof MigrationBackupAdmissionError) throw err;
-				// Backfill failure is a data issue (e.g. bad row, schema mismatch),
-				// not a runtime unavailability — vector search stays enabled.
-				console.warn("[db-accessor] vec backfill partial:", err instanceof Error ? err.message : String(err));
-			}
+			const pendingVecBackfill = hasMissingVecEmbeddings(writeConn, vecDimensions);
+			accessor = createAccessor(writeConn);
+			return { pendingVecBackfill };
 		}
 	}
 
 	accessor = createAccessor(writeConn);
+	return { pendingVecBackfill: false };
 }
 
 export function initDbAccessorLite(dbPathParam: string, vecExtensionPath: string): void {
@@ -1787,6 +1785,26 @@ export function initDbAccessorLite(dbPathParam: string, vecExtensionPath: string
 	}
 
 	accessor = createAccessor(writeConn);
+}
+
+/**
+ * Open only the readonly accessor needed to serve recovery/status routes when
+ * startup retained a confirmed-corrupt migration checkpoint. Unlike the
+ * normal lite path this does not change pragmas or schema/index state.
+ */
+export function initDbAccessorReadOnly(
+	dbPathParam: string,
+	vecExtensionPath: string,
+	opts?: { readonly agentsDir?: string },
+): void {
+	if (accessor !== null) throw new Error("DbAccessor already initialised");
+
+	dbPath = dbPathParam;
+	vecExtPath = vecExtensionPath;
+	configureCustomSqlite(opts?.agentsDir);
+	const readConn = new Database(dbPathParam, { readonly: true });
+	loadVecExtension(readConn);
+	accessor = createAccessor(readConn);
 }
 
 // ---------------------------------------------------------------------------
@@ -1875,8 +1893,24 @@ function vecRowidsTableAvailable(db: SqliteWriteSurface): boolean {
 	}
 }
 
+function hasMissingVecEmbeddings(db: SqliteWriteSurface, expectedDimensions: number): boolean {
+	try {
+		const targetTable = vecRowidsTableAvailable(db) ? "vec_embeddings_rowids" : "vec_embeddings";
+		return (
+			db
+				.prepare(
+					`SELECT 1 FROM embeddings e
+					 LEFT JOIN ${targetTable} v ON v.id = e.id
+					 WHERE v.id IS NULL AND e.dimensions = ? LIMIT 1`,
+				)
+				.get(expectedDimensions) !== undefined
+		);
+	} catch {
+		return false;
+	}
+}
+
 const VEC_EMBEDDING_BACKFILL_BATCH_SIZE = 10_000;
-const VEC_EMBEDDING_STARTUP_MAX_BATCHES = 4;
 const VEC_EMBEDDING_POST_READY_BUDGET_MS = 5_000;
 
 let pendingVecBackfillDimensions: number | null = null;
