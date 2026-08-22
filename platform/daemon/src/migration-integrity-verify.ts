@@ -100,6 +100,7 @@ export interface MigrationVerifyGateOptions {
 	readonly pruneBackup: () => void | Promise<void>;
 	readonly scheduleNextAttempt?: (callback: () => void, delayMs: number) => void;
 	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
+	readonly publishStatus?: (state: "healthy" | "corrupt" | "degraded", messages?: readonly string[]) => void;
 	readonly log?: (message: string, details?: Record<string, unknown>) => void;
 }
 
@@ -137,6 +138,12 @@ export async function runMigrationIntegrityVerifyGate(
 	const store = options.checkpointStore ?? ownerCheckpointStore(options.owner, options.backupPath);
 	const checkpoint = await store.read();
 	if (checkpoint.status === MIGRATION_VERIFY_PARKED_STATUS || checkpoint.status === MIGRATION_VERIFY_FAILED_STATUS) {
+		options.publishStatus?.(
+			checkpoint.status === MIGRATION_VERIFY_FAILED_STATUS ? "corrupt" : "degraded",
+			checkpoint.status === MIGRATION_VERIFY_FAILED_STATUS
+				? ["global integrity verification previously failed"]
+				: ["degraded:integrity-unverified"],
+		);
 		options.log?.("Migration integrity verify terminal state retained", {
 			phase: checkpoint.status,
 			attemptCount: checkpoint.attemptCount,
@@ -162,11 +169,13 @@ export async function runMigrationIntegrityVerifyGate(
 	if (result.phase === "pass") {
 		await options.pruneBackup();
 		await store.markTerminal("complete");
+		options.publishStatus?.("healthy");
 		options.log?.("Global integrity check passed; rollback backup pruned", { elapsedMs: result.elapsedMs });
 		return { phase: "pass", attemptCount, scheduled: false };
 	}
 	if (result.phase === "failed") {
 		await store.markTerminal(MIGRATION_VERIFY_FAILED_STATUS);
+		options.publishStatus?.("corrupt", result.messages);
 		options.log?.("Global integrity check FAILED; rollback backup retained", {
 			messages: result.messages,
 			elapsedMs: result.elapsedMs,
@@ -176,6 +185,7 @@ export async function runMigrationIntegrityVerifyGate(
 
 	if (attemptCount >= MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS) {
 		await store.markTerminal(MIGRATION_VERIFY_PARKED_STATUS);
+		options.publishStatus?.("degraded", ["degraded:integrity-unverified"]);
 		options.log?.("degraded:integrity-unverified", {
 			attemptCount,
 			rollbackBackup: "retained",

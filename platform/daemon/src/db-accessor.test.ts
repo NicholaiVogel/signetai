@@ -3,7 +3,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isFtsIndexIncomplete } from "./fts-index-state";
@@ -24,6 +24,7 @@ import {
 	MIGRATION_BACKUP_CHUNK_BYTES,
 	backupBeforeMigration,
 	backupBeforeMigrationAsync,
+	copyMigrationBackupChunks,
 	closeDbAccessor,
 	getDbAccessor,
 	hasPendingMigrationBackup,
@@ -307,7 +308,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:297");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:298");
 	});
 
 	test("write statements expose the number of affected rows", () => {
@@ -749,6 +750,16 @@ describe("DbAccessor", () => {
 		expect(operations).toContain("unlink:test.db.bak-v65-7000");
 		expect(files.has("test.db.bak-v65-7000")).toBe(false);
 	});
+	test("creates streamed migration backups with the source file mode", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, "secured database contents");
+		chmodSync(dbPath, 0o600);
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 72);
+
+		expect(statSync(backupPath).mode & 0o7777).toBe(0o600);
+	});
 	test("uses the absolute admission window when copy outlasts the remaining budget", async () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
@@ -779,6 +790,35 @@ describe("DbAccessor", () => {
 		} finally {
 			Date.now = realNow;
 		}
+	});
+	test("persists a zero-offset cursor before the first migration backup chunk", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, "first chunk fixture");
+		const sourceStat = statSync(dbPath);
+		const backupPath = `${dbPath}.bak-v73-9000`;
+
+		await expect(
+			copyMigrationBackupChunks(
+				dbPath,
+				backupPath,
+				sourceStat.size,
+				sourceStat.mtimeMs,
+				sourceStat.mode & 0o7777,
+				0,
+				Date.now() + 60_000,
+				async () => {
+					throw new Error("simulated first-chunk interruption");
+				},
+			),
+		).rejects.toThrow("simulated first-chunk interruption");
+
+		const cursor = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as {
+			destination: string;
+			offset: number;
+		};
+		expect(cursor.offset).toBe(0);
+		expect(statSync(cursor.destination).size).toBe(0);
 	});
 
 	test("resumes a chunked migration backup from its durable cursor", async () => {

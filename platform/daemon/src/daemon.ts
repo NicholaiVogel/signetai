@@ -50,6 +50,7 @@ import { listConnectorsAsync } from "./connectors/registry";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
 import { runIncrementalDatabaseIntegrityCheck } from "./incremental-database-integrity";
 import { runMigrationIntegrityVerifyGate } from "./migration-integrity-verify";
+import { publishDatabaseIntegrityStatus } from "./database-integrity";
 import {
 	closeDbAccessor,
 	getDbAccessor,
@@ -735,7 +736,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:738" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:739" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -778,7 +779,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:760" },
+			{ siteToken: "daemon.ts:761" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -855,7 +856,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:851" },
+			{ siteToken: "daemon.ts:852" },
 		);
 	} catch {
 		return false;
@@ -1479,7 +1480,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1465", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1466", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1547,7 +1548,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1548", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1549", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2260,11 +2261,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2256", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2257", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2266",
+								siteToken: "daemon.ts:2267",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2519,6 +2520,9 @@ async function main() {
 					owner,
 					backupPath: migrationBackupPath,
 					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB),
+					publishStatus: (state, messages): void => {
+						publishDatabaseIntegrityStatus(state, messages, owner);
+					},
 					onProgress: (progress): void => {
 						logger.info("startup-recovery", "Migration integrity verify attempt", { ...progress });
 					},

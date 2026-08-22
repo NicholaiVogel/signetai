@@ -112,6 +112,7 @@ describe("migration integrity verify gate", () => {
 		const { store, state } = fakeStore();
 		let pruned = false;
 		let scheduled = false;
+		const publications: Array<{ state: string; messages: readonly string[] | undefined }> = [];
 		const result = await runMigrationIntegrityVerifyGate({
 			owner,
 			backupPath: "/tmp/memories.db.bak-v151-1234",
@@ -123,18 +124,23 @@ describe("migration integrity verify gate", () => {
 			scheduleNextAttempt: () => {
 				scheduled = true;
 			},
+			publishStatus: (publishedState, messages) => {
+				publications.push({ state: publishedState, messages });
+			},
 		});
 
 		expect(result.phase).toBe("failed");
 		expect(pruned).toBe(false);
 		expect(scheduled).toBe(false);
 		expect(state.terminal).toBe("failed:integrity-unverified");
+		expect(publications).toEqual([{ state: "corrupt", messages: ["corrupt"] }]);
 	});
 
 	test("parks after eight incomplete attempts with degraded:integrity-unverified", async () => {
 		const { store, state } = fakeStore(MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS - 1);
 		let pruned = false;
 		let scheduled = false;
+		const publications: Array<{ state: string; messages: readonly string[] | undefined }> = [];
 		const result = await runMigrationIntegrityVerifyGate({
 			owner,
 			backupPath: "/tmp/memories.db.bak-v151-1234",
@@ -146,6 +152,9 @@ describe("migration integrity verify gate", () => {
 			scheduleNextAttempt: () => {
 				scheduled = true;
 			},
+			publishStatus: (publishedState, messages) => {
+				publications.push({ state: publishedState, messages });
+			},
 		});
 
 		expect(result.phase).toBe("parked");
@@ -153,5 +162,6 @@ describe("migration integrity verify gate", () => {
 		expect(state.terminal).toBe(MIGRATION_VERIFY_PARKED_STATUS);
 		expect(pruned).toBe(false);
 		expect(scheduled).toBe(false);
+		expect(publications).toEqual([{ state: "degraded", messages: ["degraded:integrity-unverified"] }]);
 	});
 });

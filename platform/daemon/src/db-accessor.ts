@@ -930,6 +930,7 @@ async function streamedMigrationBackup(
 	const sourceStat = statSync(dbPath);
 	const sourceSize = sourceStat.size;
 	const sourceMtimeMs = sourceStat.mtimeMs;
+	const sourceMode = sourceStat.mode & 0o7777;
 	const resume = await readMigrationBackupCursor(dbPath, sourceSize, sourceMtimeMs);
 	const backupDest = resume?.destination ?? migrationBackupDestination(dbPath, schemaVersion, migrationBackupDeps);
 	const offset = resume?.offset ?? 0;
@@ -942,16 +943,39 @@ async function streamedMigrationBackup(
 			}
 			throw error;
 		}
-		const copyWindowMs = await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, 0, startedAt);
-		await copyMigrationBackupChunks(dbPath, backupDest, sourceSize, sourceMtimeMs, offset, Date.now() + copyWindowMs);
+		const copyWindowMs = await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, sourceMode, 0, startedAt);
+		await copyMigrationBackupChunks(
+			dbPath,
+			backupDest,
+			sourceSize,
+			sourceMtimeMs,
+			sourceMode,
+			offset,
+			Date.now() + copyWindowMs,
+		);
 	} else {
 		// Admission holds across restarts too: free space and disk throughput
 		// can change between processes (the partial copy already consumed
 		// `offset` bytes), so a resume re-preflights the remaining bytes and
 		// re-probes the remaining copy budget before writing anything.
 		preflightResumedMigrationBackupSpace(dbPath, sourceSize, offset, migrationBackupDeps);
-		const copyWindowMs = await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, offset, startedAt);
-		await copyMigrationBackupChunks(dbPath, backupDest, sourceSize, sourceMtimeMs, offset, Date.now() + copyWindowMs);
+		const copyWindowMs = await probeMigrationBackupThroughput(
+			dbPath,
+			sourceSize,
+			backupDest,
+			sourceMode,
+			offset,
+			startedAt,
+		);
+		await copyMigrationBackupChunks(
+			dbPath,
+			backupDest,
+			sourceSize,
+			sourceMtimeMs,
+			sourceMode,
+			offset,
+			Date.now() + copyWindowMs,
+		);
 	}
 	finishMigrationBackup(dbPath, backupDest, migrationBackupDeps);
 	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, migrationBackupDeps);
@@ -1012,6 +1036,7 @@ async function probeMigrationBackupThroughput(
 	dbPath: string,
 	sourceSize: number,
 	backupDest: string,
+	sourceMode: number,
 	resumeOffset = 0,
 	startedAt = Date.now(),
 ): Promise<number> {
@@ -1023,7 +1048,7 @@ async function probeMigrationBackupThroughput(
 	let probe: Awaited<ReturnType<typeof openAsync>> | undefined;
 	try {
 		source = await openAsync(dbPath, "r");
-		probe = await openAsync(probeDest, "w");
+		probe = await openAsync(probeDest, "w", sourceMode);
 		const buffer = Buffer.allocUnsafe(Math.min(MIGRATION_BACKUP_CHUNK_BYTES, sourceSize));
 		const probeStartedAt = performance.now();
 		const result = await source.read(buffer, 0, buffer.length, resumeOffset);
@@ -1075,20 +1100,37 @@ async function probeMigrationBackupThroughput(
 	}
 }
 
-async function copyMigrationBackupChunks(
+type MigrationBackupReadChunk = (
+	buffer: Buffer,
+	length: number,
+	position: number,
+) => Promise<{ readonly bytesRead: number }>;
+
+export async function copyMigrationBackupChunks(
 	dbPath: string,
 	backupDest: string,
 	sourceSize: number,
 	sourceMtimeMs: number,
+	sourceMode: number,
 	offset: number,
 	deadlineAt: number,
+	readChunk?: MigrationBackupReadChunk,
 ): Promise<void> {
 	const source = await openAsync(dbPath, "r");
 	let destination: Awaited<ReturnType<typeof openAsync>> | undefined;
 	try {
-		destination = await openAsync(backupDest, offset === 0 ? "w" : "r+");
+		destination = await openAsync(backupDest, offset === 0 ? "w" : "r+", sourceMode);
 		if (destination === undefined) throw new Error("Migration backup destination did not open");
 		await destination.truncate(offset);
+		if (offset === 0) {
+			await writeMigrationBackupCursor({
+				sourcePath: dbPath,
+				sourceSize,
+				sourceMtimeMs,
+				destination: backupDest,
+				offset: 0,
+			});
+		}
 		// The measured rate is admission, not a leash: the deadline owns the
 		// hard stop. This wall-clock check makes budget exhaustion mid-copy a
 		// named admission error with a resumable cursor, instead of letting
@@ -1101,7 +1143,10 @@ async function copyMigrationBackupChunks(
 					`migration backup copy exceeded its budget at ${offset} of ${sourceSize} bytes; resume cursor retained`,
 				);
 			}
-			const result = await source.read(buffer, 0, Math.min(buffer.length, sourceSize - offset), offset);
+			const length = Math.min(buffer.length, sourceSize - offset);
+			const result = await (readChunk === undefined
+				? source.read(buffer, 0, length, offset)
+				: readChunk(buffer, length, offset));
 			if (result.bytesRead === 0) throw new Error(`Migration backup source ended at ${offset} of ${sourceSize} bytes`);
 			let chunkOffset = 0;
 			while (chunkOffset < result.bytesRead) {

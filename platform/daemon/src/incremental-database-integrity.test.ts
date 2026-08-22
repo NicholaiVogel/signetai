@@ -9,7 +9,11 @@ import {
 	readMigrationVerifyCheckpoint,
 	type IncrementalIntegrityProgress,
 } from "./incremental-database-integrity";
-import { getDatabaseIntegrityStatus } from "./database-integrity";
+import {
+	getDatabaseIntegrityStatus,
+	publishDatabaseIntegrityStatus,
+	updateDatabaseIntegrityStatus,
+} from "./database-integrity";
 
 const resources: Array<{ readonly directory: string; readonly owner: ReturnType<typeof createDbOwnerClient> }> = [];
 
@@ -296,5 +300,32 @@ describe("incremental database integrity maintenance (#1683)", () => {
 		expect(resumed.phase).toBe("complete");
 		expect(resumed.checkedObjects).toBe(3);
 		expect(scans.filter((object) => object === "table:alpha")).toHaveLength(1);
+	});
+
+	it("does not let an incremental healthy publication mask global corruption", () => {
+		const quickCheckBefore = getDatabaseIntegrityStatus().quickCheck;
+		publishDatabaseIntegrityStatus("corrupt", ["global integrity failure"]);
+		updateDatabaseIntegrityStatus({
+			checkpointKey: "database.quick-check",
+			phase: "complete",
+			checkedObjects: 3,
+			failedObjects: 0,
+			remainingObjects: 0,
+			lastObject: "table:gamma",
+			databasePagesObserved: 3,
+			databaseBytesObserved: 12_288,
+			elapsedMs: 4,
+			ownerQueueAdmissionMs: 0,
+			ownerExecutionMs: 1,
+			cancellationReason: null,
+			degradationReason: null,
+		});
+
+		expect(getDatabaseIntegrityStatus()).toMatchObject({
+			state: "corrupt",
+			integrity: "global integrity failure",
+			quickCheck: quickCheckBefore,
+		});
+		publishDatabaseIntegrityStatus("healthy");
 	});
 });
