@@ -20,13 +20,12 @@ import {
 	resolvePrimaryPackageManager,
 	syncWorkspaceSourceRepoAsync,
 } from "@signet/core";
-import { logger } from "./logger";
-import { getActiveTelemetry } from "./telemetry";
 import {
 	UPDATE_INSTALL_TIMEOUT_MS,
 	type UpdateInstallDeps,
 	type UpdateInstallErrorCode,
 	UpdateInstallFailure,
+	type UpdateLogger,
 	type UpdateProcessOptions,
 	type UpdateProcessResult,
 	VERSION_VERIFY_TIMEOUT_MS,
@@ -151,6 +150,13 @@ const DEFAULT_UPDATE_INTERVAL_SECONDS = 21600;
 // Module state
 // ---------------------------------------------------------------------------
 
+const SILENT_UPDATE_LOGGER: UpdateLogger = {
+	info: () => undefined,
+	warn: () => undefined,
+};
+
+let updateLogger: UpdateLogger = SILENT_UPDATE_LOGGER;
+let onUpdateUpgraded: ((from: string, to: string) => void) | null = null;
 let currentVersion = "0.0.0";
 let agentsDir = "";
 let initialized = false;
@@ -174,13 +180,21 @@ let restartCallback: ((preferredExecutablePath?: string) => void) | null = null;
 // Init / accessors
 // ---------------------------------------------------------------------------
 
+export interface UpdateSystemRuntime {
+	readonly logger?: UpdateLogger;
+	readonly onUpgraded?: (from: string, to: string) => void;
+}
+
 export function initUpdateSystem(
 	version: string,
 	dir: string,
 	onRestartNeeded?: (preferredExecutablePath?: string) => void,
+	runtime: UpdateSystemRuntime = {},
 ): void {
 	currentVersion = version;
 	agentsDir = dir;
+	updateLogger = runtime.logger ?? SILENT_UPDATE_LOGGER;
+	onUpdateUpgraded = runtime.onUpgraded ?? null;
 	updateConfig = loadUpdateConfig();
 	restartCallback = onRestartNeeded ?? null;
 	initialized = true;
@@ -390,7 +404,7 @@ export function persistUpdateConfig(config: UpdateConfig): boolean {
 
 			return true;
 		} catch (e) {
-			logger.warn("system", "Failed to persist update config", {
+			updateLogger.warn("system", "Failed to persist update config", {
 				path: p,
 				error: (e as Error).message,
 			});
@@ -506,7 +520,7 @@ export async function checkForUpdates(): Promise<UpdateInfo> {
 
 	if (!result.latestVersion && errors.length > 0) {
 		result.checkError = errors.join(" | ");
-		logger.warn("system", "Update check failed", {
+		updateLogger.warn("system", "Update check failed", {
 			error: result.checkError,
 		});
 	}
@@ -515,7 +529,7 @@ export async function checkForUpdates(): Promise<UpdateInfo> {
 	lastUpdateCheckTime = new Date();
 
 	if (result.updateAvailable) {
-		logger.info("system", `Update available: v${result.latestVersion}`);
+		updateLogger.info("system", `Update available: v${result.latestVersion}`);
 	}
 
 	return result;
@@ -787,12 +801,12 @@ export async function finalizeSuccessfulUpdateInstall(
 		};
 	}
 	if (repoSync.status === "error") {
-		logger.warn("system", "Workspace Signet source checkout sync failed after update", {
+		updateLogger.warn("system", "Workspace Signet source checkout sync failed after update", {
 			path: repoSync.path,
 			message: repoSync.message,
 		});
 	} else if (repoSync.status !== "current") {
-		logger.info("system", "Workspace Signet source checkout sync result", {
+		updateLogger.info("system", "Workspace Signet source checkout sync result", {
 			path: repoSync.path,
 			status: repoSync.status,
 			message: repoSync.message,
@@ -815,14 +829,14 @@ export async function finalizeSuccessfulUpdateInstall(
 		};
 	}
 	if (desktopUpdate.status === "updated") {
-		logger.info("update", desktopUpdate.message);
+		updateLogger.info("update", desktopUpdate.message);
 	} else if (desktopUpdate.status === "error") {
-		logger.warn("update", desktopUpdate.message);
+		updateLogger.warn("update", desktopUpdate.message);
 	} else {
-		logger.info("update", desktopUpdate.message);
+		updateLogger.info("update", desktopUpdate.message);
 	}
 
-	logger.info("system", "Update installed successfully");
+	updateLogger.info("system", "Update installed successfully");
 	deps.onUpgraded?.(currentVersion, installedVersion);
 	return {
 		success: true,
@@ -871,25 +885,26 @@ export async function runUpdate(targetVersion?: string, deps: RunUpdateDeps = {}
 
 		const installMethod: SignetInstallMethod = target.kind === "native" ? "native" : target.family;
 		const deadline = Date.now() + UPDATE_INSTALL_TIMEOUT_MS;
-		logger.info("update", "Installing update for active executable", {
+		updateLogger.info("update", "Installing update for active executable", {
 			version: normalizedTargetVersion,
 			installMethod,
 			activeExecutablePath: target.executablePath,
 		});
 
 		let output = "";
+		const installDeps: UpdateInstallDeps = { ...deps, logger: deps.logger ?? updateLogger };
 		try {
 			output = await installUpdateTarget(
 				target,
 				normalizedTargetVersion,
 				deadline,
 				{ packageName: NPM_PACKAGE, githubRepo: GITHUB_REPO },
-				deps,
+				installDeps,
 			);
 		} catch (error) {
 			const code = error instanceof UpdateInstallFailure ? error.code : "install_failed";
 			const message = error instanceof Error ? error.message : String(error);
-			logger.warn("update", "Update install failed", {
+			updateLogger.warn("update", "Update install failed", {
 				errorCode: code,
 				message,
 				installMethod,
@@ -919,7 +934,7 @@ export async function runUpdate(targetVersion?: string, deps: RunUpdateDeps = {}
 			});
 		}
 		if (!verification.ok) {
-			logger.warn("update", "Active executable verification failed", {
+			updateLogger.warn("update", "Active executable verification failed", {
 				reason: verification.message,
 				installMethod,
 				activeExecutablePath: target.executablePath,
@@ -947,7 +962,7 @@ export async function runUpdate(targetVersion?: string, deps: RunUpdateDeps = {}
 			);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			logger.warn("update", "Update post-install handling failed", {
+			updateLogger.warn("update", "Update post-install handling failed", {
 				message,
 				installMethod,
 				activeExecutablePath: target.executablePath,
@@ -979,37 +994,37 @@ async function runAutoUpdateCycle(): Promise<void> {
 	}
 
 	if (updateCheckInProgress || updateInstallInProgress) {
-		logger.info("update", "Auto-update cycle skipped — check or install already in progress");
+		updateLogger.info("update", "Auto-update cycle skipped — check or install already in progress");
 		return;
 	}
 
 	updateCheckInProgress = true;
-	logger.info("update", "Auto-update cycle started");
+	updateLogger.info("update", "Auto-update cycle started");
 
 	try {
 		const checkResult = await checkForUpdates();
 
 		if (checkResult.checkError) {
 			lastAutoUpdateError = categorizeUpdateError(checkResult.checkError);
-			logger.warn("update", "Auto-update check returned error", {
+			updateLogger.warn("update", "Auto-update check returned error", {
 				error: checkResult.checkError,
 			});
 			return;
 		}
 
-		logger.info("update", "Update check complete", {
+		updateLogger.info("update", "Update check complete", {
 			current: currentVersion,
 			latest: checkResult.latestVersion ?? "unknown",
 			updateAvailable: checkResult.updateAvailable,
 		});
 
 		if (!checkResult.updateAvailable || !checkResult.latestVersion) {
-			logger.info("update", "No update available — skipping install");
+			updateLogger.info("update", "No update available — skipping install");
 			return;
 		}
 
 		if (isMajorUpgrade(currentVersion, checkResult.latestVersion)) {
-			logger.warn("update", "Major upgrade available — skipping auto-install (manual install required)", {
+			updateLogger.warn("update", "Major upgrade available — skipping auto-install (manual install required)", {
 				current: currentVersion,
 				latest: checkResult.latestVersion,
 			});
@@ -1017,25 +1032,28 @@ async function runAutoUpdateCycle(): Promise<void> {
 			return;
 		}
 
-		logger.info("update", `Auto-installing update v${checkResult.latestVersion}`);
+		updateLogger.info("update", `Auto-installing update v${checkResult.latestVersion}`);
 		const installResult = await runUpdate(checkResult.latestVersion, {
-			onUpgraded: (from, to) => getActiveTelemetry()?.record("version.upgraded", { from, to }),
+			onUpgraded: onUpdateUpgraded ?? undefined,
 		});
 
 		if (installResult.success) {
 			lastAutoUpdateAt = new Date();
 			lastAutoUpdateError = null;
-			logger.info("update", `Auto-update installed v${checkResult.latestVersion}. Triggering daemon restart.`);
+			updateLogger.info("update", `Auto-update installed v${checkResult.latestVersion}. Triggering daemon restart.`);
 
 			stopUpdateTimer();
 
 			if (restartCallback) {
-				logger.info("update", "Invoking restart callback to spawn replacement daemon");
+				updateLogger.info("update", "Invoking restart callback to spawn replacement daemon");
 				restartCallback(installResult.success ? installResult.activeExecutablePath : undefined);
 			} else {
 				// Fallback: clean exit — systemd/launchd Restart=always will respawn.
 				// Without a restart callback, the daemon simply exits.
-				logger.warn("update", "No restart callback registered — exiting and relying on service manager to restart");
+				updateLogger.warn(
+					"update",
+					"No restart callback registered — exiting and relying on service manager to restart",
+				);
 				setTimeout(() => {
 					process.exit(0);
 				}, 500);
@@ -1044,12 +1062,12 @@ async function runAutoUpdateCycle(): Promise<void> {
 		}
 
 		lastAutoUpdateError = categorizeUpdateError(installResult.message);
-		logger.warn("update", "Auto-update install failed", {
+		updateLogger.warn("update", "Auto-update install failed", {
 			error: installResult.message,
 		});
 	} catch (e) {
 		lastAutoUpdateError = categorizeUpdateError((e as Error).message);
-		logger.warn("update", "Auto-update cycle failed", {
+		updateLogger.warn("update", "Auto-update cycle failed", {
 			error: lastAutoUpdateError,
 		});
 	} finally {
@@ -1069,11 +1087,11 @@ export function startUpdateTimer(): void {
 	}
 
 	if (!updateConfig.autoInstall || updateConfig.checkInterval <= 0) {
-		logger.info("system", "Auto-updates not enabled. Run `signet update enable` to enable.");
+		updateLogger.info("system", "Auto-updates not enabled. Run `signet update enable` to enable.");
 		return;
 	}
 
-	logger.info(
+	updateLogger.info(
 		"update",
 		`Update timer started: checking every ${updateConfig.checkInterval}s, autoInstall=${updateConfig.autoInstall}, channel=${updateConfig.channel}`,
 	);

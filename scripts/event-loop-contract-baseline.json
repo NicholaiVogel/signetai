@@ -564,21 +564,21 @@
     },
     {
       "path": "daemon.ts",
-      "line": 2578,
+      "line": 2586,
       "api": "existsSync",
       "source": "if (existsSync(healthStampPath)) {",
       "category": "hot-path"
     },
     {
       "path": "daemon.ts",
-      "line": 2579,
+      "line": 2587,
       "api": "readFileSync",
       "source": "const prev = JSON.parse(readFileSync(healthStampPath, \"utf-8\"));",
       "category": "hot-path"
     },
     {
       "path": "daemon.ts",
-      "line": 2582,
+      "line": 2590,
       "api": "writeFileSync",
       "source": "writeFileSync(",
       "category": "hot-path"
@@ -6605,98 +6605,98 @@
     },
     {
       "path": "update-system.ts",
-      "line": 327,
+      "line": 341,
       "api": "existsSync",
       "source": "if (!existsSync(p)) continue;",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 329,
+      "line": 343,
       "api": "readFileSync",
       "source": "const yaml = parseSimpleYaml(readFileSync(p, \"utf-8\"));",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 373,
+      "line": 387,
       "api": "existsSync",
       "source": "if (!existsSync(p)) continue;",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 376,
+      "line": 390,
       "api": "readFileSync",
       "source": "const current = readFileSync(p, \"utf-8\");",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 388,
+      "line": 402,
       "api": "writeFileSync",
       "source": "writeFileSync(p, updated);",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 615,
+      "line": 629,
       "api": "existsSync",
       "source": "existsSync: (path) => existsSync(path),",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 616,
+      "line": 630,
       "api": "readFileSync",
       "source": "readFileSync: (path, encoding) => readFileSync(path, { encoding }),",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 621,
+      "line": 635,
       "api": "existsSync",
       "source": "const launcherExists = deps.existsSync(launcherPath);",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 622,
+      "line": 636,
       "api": "existsSync",
       "source": "const appImageExists = deps.existsSync(appImagePath);",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 645,
+      "line": 659,
       "api": "readFileSync",
       "source": "const launcher = deps.readFileSync(launcherPath, \"utf-8\");",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 676,
+      "line": 690,
       "api": "existsSync",
       "source": "existsSync: deps.existsSync ?? ((path: string) => existsSync(path)),",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 677,
+      "line": 691,
       "api": "readFileSync",
       "source": "readFileSync: deps.readFileSync ?? ((path: string, encoding: BufferEncoding) => readFileSync(path, { encoding })),",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 700,
+      "line": 714,
       "api": "existsSync",
       "source": "if (!fsDeps.existsSync(deps.signetCliPath)) {",
       "category": "hot-path"
     },
     {
       "path": "update-system.ts",
-      "line": 722,
+      "line": 736,
       "api": "existsSync",
       "source": "if (!fsDeps.existsSync(signetBin)) {",
       "category": "hot-path"
