@@ -24,6 +24,8 @@ export interface DbOwnerMaintenanceOptions {
 	readonly deadlineMs?: number;
 	readonly estimatedWorkUnits?: number;
 	readonly onOwnerMetrics?: (metrics: DbOwnerMaintenanceMetrics) => void | Promise<void>;
+	/** Called when the owner worker has emitted its terminal result. */
+	readonly onOwnerJobSettled?: () => void | Promise<void>;
 }
 
 export interface DbOwnerMaintenanceMetrics {
@@ -61,6 +63,23 @@ async function runOwnerJob<Result>(
 	options: DbOwnerMaintenanceOptions = {},
 ): Promise<Result> {
 	const handle: DbOwnerJobHandle<Result> = owner.submit<Result>(request, submitOptions(operation, lane, options));
+	let notified = false;
+	const notifySettled = (): void => {
+		if (notified) return;
+		notified = true;
+		void Promise.resolve(options.onOwnerJobSettled?.()).catch(() => {
+			// Completion notification is advisory and must not alter the owner result.
+		});
+	};
+	void handle.metrics?.then(notifySettled, () => {
+		// A dead owner has no worker left to wait for.
+		notifySettled();
+	});
+	void handle.result.catch((error: unknown) => {
+		// Deadline rejection abandons the client promise but not a dispatched
+		// synchronous worker; its metrics promise remains the completion fence.
+		if (!(error instanceof DbOwnerDeadlineError)) notifySettled();
+	});
 	const result = await handle.result;
 	const metrics = await handle.metrics;
 	if (metrics !== undefined) {

@@ -2347,6 +2347,7 @@ async function main() {
 				cause: "fts_index_incomplete",
 			});
 		},
+		completeIntegrityOnCallback: false,
 	});
 
 	// Grace period: defer all background workers for 10s after startup so the
@@ -2528,6 +2529,8 @@ async function main() {
 			// verification of this generation.
 			let integritySliceTimer: ReturnType<typeof setTimeout> | null = null;
 			let integritySlicePending = false;
+			let migrationIntegrityGateActive = false;
+			let integrityGateCompleted = false;
 			let runIntegritySlice: () => Promise<void>;
 			const scheduleIntegritySlice = (delayMs: number): void => {
 				integritySlicePending = true;
@@ -2543,16 +2546,13 @@ async function main() {
 				integritySliceTimer.unref?.();
 			};
 			if (migrationBackupPending && migrationBackupPath !== null) {
-				const runMigrationVerifyGate = async (): Promise<unknown> => {
-					globalVerifyInFlight = true;
-					try {
-						return await runMigrationIntegrityVerifyGate(migrationVerifyGateOptions);
-					} finally {
-						globalVerifyInFlight = false;
-						if (integritySlicePending) scheduleIntegritySlice(0);
-					}
+				migrationIntegrityGateActive = true;
+				let runMigrationVerifyGate: () => Promise<Awaited<ReturnType<typeof runMigrationIntegrityVerifyGate>>>;
+				const releaseVerifyLatch = (): void => {
+					if (!globalVerifyInFlight) return;
+					globalVerifyInFlight = false;
+					if (integritySlicePending) scheduleIntegritySlice(0);
 				};
-				let setupRetry: ReturnType<typeof createMigrationVerifySetupRetry>;
 				const migrationVerifyGateOptions: Parameters<typeof runMigrationIntegrityVerifyGate>[0] = {
 					owner,
 					backupPath: migrationBackupPath,
@@ -2565,11 +2565,32 @@ async function main() {
 					onProgress: (progress): void => {
 						logger.info("startup-recovery", "Migration integrity verify attempt", { ...progress });
 					},
+					continuation: () => runMigrationVerifyGate(),
 					log: (message, details): void => {
 						logger.info("startup-recovery", message, details);
 					},
 					onContinuationRejection: (callback, error): void => setupRetry.handleRejection(callback, error),
 				};
+				runMigrationVerifyGate = async (): Promise<Awaited<ReturnType<typeof runMigrationIntegrityVerifyGate>>> => {
+					globalVerifyInFlight = true;
+					let resolveWorker: () => void = () => {};
+					const workerSettled = new Promise<void>((resolve) => {
+						resolveWorker = resolve;
+					});
+					try {
+						const result = await runMigrationIntegrityVerifyGate({
+							...migrationVerifyGateOptions,
+							onWorkerSettled: resolveWorker,
+						});
+						if (result.phase === "incomplete") void workerSettled.then(releaseVerifyLatch);
+						else releaseVerifyLatch();
+						return result;
+					} catch (error) {
+						releaseVerifyLatch();
+						throw error;
+					}
+				};
+				let setupRetry: ReturnType<typeof createMigrationVerifySetupRetry>;
 				setupRetry = createMigrationVerifySetupRetry({
 					run: runMigrationVerifyGate,
 					publishStatus: (state, messages): void => {
@@ -2607,8 +2628,16 @@ async function main() {
 				if (result.phase === "running" || result.phase === "timed_out" || result.phase === "unavailable") {
 					scheduleIntegritySlice(result.phase === "running" ? 0 : 1000);
 				}
+				if (migrationIntegrityGateActive && !integrityGateCompleted) {
+					integrityGateCompleted = true;
+					deferredRuntimeGate.completeIntegrity();
+				}
 			};
 			scheduleIntegritySlice(0);
+			if (!migrationIntegrityGateActive) {
+				integrityGateCompleted = true;
+				deferredRuntimeGate.completeIntegrity();
+			}
 			if (owner.health().state === "failed") {
 				logger.error("startup-recovery", "DB owner failed during incremental integrity maintenance", undefined, {
 					ownerState: owner.health().state,

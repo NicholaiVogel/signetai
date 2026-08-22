@@ -256,6 +256,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		`${CANCEL_REGISTRY_PREFIX}${process.pid}-${randomUUID()}`,
 	);
 	const pending = new Map<string, PendingJob<unknown>>();
+	const abandonedMetrics = new Map<string, (value: DbOwnerJobMetrics | undefined) => void>();
 
 	function unlinkCancellationRegistry(): void {
 		try {
@@ -374,6 +375,8 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		startupReject = null;
 		rejectStartup?.(error);
 		if (!closed) rejectAll(error, dispatchedOnly);
+		for (const resolveMetrics of abandonedMetrics.values()) resolveMetrics(undefined);
+		abandonedMetrics.clear();
 		unlinkCancellationRegistry();
 		if (retired !== null) {
 			try {
@@ -409,6 +412,11 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		}
 		const pendingJob = pending.get(event.jobId);
 		pendingJob?.resolveMetrics(event.metrics);
+		const abandonedResolveMetrics = abandonedMetrics.get(event.jobId);
+		if (abandonedResolveMetrics !== undefined) {
+			abandonedMetrics.delete(event.jobId);
+			abandonedResolveMetrics(event.metrics);
+		}
 		if (pendingJob?.job.request.kind === "initialize") {
 			initialization = event.outcome === "completed" ? "ready" : "failed";
 		}
@@ -662,6 +670,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 				const owner = child;
 				const dispatched = entry.dispatched;
 				settle(job.id, (settledJob) => {
+					if (dispatched) abandonedMetrics.set(job.id, settledJob.resolveMetrics);
 					if (!settledJob.settled) {
 						settledJob.settled = true;
 						settledJob.reject(new DbOwnerDeadlineError(job.id));

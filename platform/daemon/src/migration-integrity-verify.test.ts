@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DbOwnerClient } from "./db-owner-client";
+import { DbOwnerDeadlineError } from "./db-owner-client";
 import {
 	MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS,
 	MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS,
@@ -90,7 +91,7 @@ describe("migration integrity verify gate", () => {
 			}),
 		} as unknown as DbOwnerClient;
 
-		await expect(runMigrationIntegrityVerify({ owner: corruptOwner })).resolves.toMatchObject({ phase: "failed" });
+		expect(await runMigrationIntegrityVerify({ owner: corruptOwner })).toMatchObject({ phase: "failed" });
 	});
 
 	test("treats infrastructure errors as incomplete so they remain retryable", async () => {
@@ -103,6 +104,36 @@ describe("migration integrity verify gate", () => {
 			phase: "incomplete",
 			messages: ["owner queue rejected transiently"],
 		});
+	});
+
+	test("keeps deadline completion tied to the owner worker result", async () => {
+		let resolveMetrics: () => void = () => {};
+		const metrics = new Promise<void>((resolve) => {
+			resolveMetrics = resolve;
+		});
+		const settled: boolean[] = [];
+		const deadlineOwner = {
+			submit: () => ({
+				result: Promise.reject(new DbOwnerDeadlineError("integrity-job")),
+				metrics,
+				job: { enqueuedAt: Date.now() },
+			}),
+		} as unknown as DbOwnerClient;
+
+		await expect(
+			runMigrationIntegrityVerify({
+				owner: deadlineOwner,
+				onWorkerSettled: () => {
+					settled.push(true);
+				},
+			}),
+		).resolves.toMatchObject({
+			phase: "incomplete",
+		});
+		expect(settled).toEqual([]);
+		resolveMetrics();
+		await Bun.sleep(0);
+		expect(settled).toEqual([true]);
 	});
 
 	test("scopes checkpoint state to the backup generation", () => {
@@ -239,6 +270,30 @@ describe("migration integrity verify gate", () => {
 		expect(scheduledDelay).toBe(MIGRATION_VERIFY_RETRY_INTERVAL_MS);
 		expect(state.checkpoint.attemptCount).toBe(1);
 		expect(publications).toEqual([{ state: "degraded", messages: ["degraded:integrity-unverified"] }]);
+	});
+
+	test("routes continuation retries through the injected wrapped runner", async () => {
+		const { store } = fakeStore();
+		let scheduled: (() => void) | undefined;
+		let wrappedCalls = 0;
+		await runMigrationIntegrityVerifyGate({
+			owner,
+			backupPath: "/tmp/memories.db.bak-v151-wrapped",
+			checkpointStore: store,
+			runAttempt: async () => attempt("incomplete"),
+			pruneBackup: () => {},
+			scheduleNextAttempt: (callback) => {
+				scheduled = callback;
+			},
+			continuation: async () => {
+				wrappedCalls += 1;
+				return { phase: "terminal", attemptCount: 1, scheduled: false };
+			},
+		});
+
+		scheduled?.();
+		await Bun.sleep(0);
+		expect(wrappedCalls).toBe(1);
 	});
 
 	test("retains the rollback backup and stops immediately after a failed result", async () => {

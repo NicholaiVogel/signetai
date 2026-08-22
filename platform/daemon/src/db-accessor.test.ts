@@ -690,6 +690,39 @@ describe("DbAccessor", () => {
 		expect(operations.slice(0, 2)).toEqual([`unlink:${staleName}`, `unlink:${staleName}.cursor.json`]);
 		expect(operations[2]).toContain("copy:test.db.bak-v62-6000");
 	});
+
+	test("reclaims stale migration probes before the free-space admission check", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const dbDir = join(dbPath, "..");
+		writeFileSync(dbPath, "database");
+		const staleName = "test.db.bak-v62-5000.probe-1";
+		const currentName = `test.db.bak-v62-5000.probe-${process.pid}`;
+		const files = new Set([staleName, currentName]);
+		const operations: string[] = [];
+
+		backupBeforeMigration({ exec: () => {} }, dbPath, 63, {
+			copyFileSync: (_source, destination) => {
+				operations.push(`copy:${String(destination).slice(dbDir.length + 1)}`);
+			},
+			readdirSync: () => [...files],
+			statSync: (path) => ({
+				mtimeMs: 1,
+				size: String(path).endsWith("test.db") ? 8 : 0,
+			}),
+			statfsSync: () => ({ bavail: 200_000_000, bsize: 1 }),
+			unlinkSync: (path) => {
+				const name = String(path).slice(dbDir.length + 1);
+				operations.push(`unlink:${name}`);
+				files.delete(name);
+			},
+			now: () => 6000,
+			log: () => {},
+		});
+
+		expect(operations).toContain(`unlink:${staleName}`);
+		expect(operations).not.toContain(`unlink:${currentName}`);
+	});
 	test("refuses a migration backup when statfs is degenerate instead of copy-probing", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
@@ -1027,6 +1060,30 @@ describe("DbAccessor", () => {
 		expect(readFileSync(backupPath)).toEqual(source);
 		expect(existsSync(staleBackupPath)).toBe(false);
 		expect(existsSync(`${staleBackupPath}.cursor.json`)).toBe(false);
+	});
+
+	test("truncates an oversized destination to the durable cursor before resuming", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("oversized migration backup resume fixture with a valid prefix");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const backupPath = `${dbPath}.bak-v77-9000`;
+		const offset = 20;
+		writeFileSync(backupPath, Buffer.concat([source.subarray(0, offset), Buffer.from("torn suffix")]));
+		writeFileSync(
+			`${backupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: backupPath,
+				offset,
+			}),
+		);
+
+		await expect(backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 77)).resolves.toBe(backupPath);
+		expect(readFileSync(backupPath)).toEqual(source);
 	});
 
 	test("resumes a chunked migration backup from its durable cursor", async () => {

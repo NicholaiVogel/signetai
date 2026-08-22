@@ -19,6 +19,8 @@ export interface DeferredRuntimeSchedulerOptions {
 	readonly schedule: (callback: () => void, delayMs: number) => unknown;
 	readonly onPipelineError: (error: unknown) => void;
 	readonly onMaintenanceError: (error: unknown) => void;
+	/** Set false when the integrity callback will release the gate itself. */
+	readonly completeIntegrityOnCallback?: boolean;
 }
 
 export interface DeferredRuntimeScheduler {
@@ -48,10 +50,12 @@ export function createDeferredRuntimeGate(): DeferredRuntimeGate {
 /** Create the production scheduler used by both same-delay callbacks. */
 export function createDeferredRuntimeScheduler(options: DeferredRuntimeSchedulerOptions): DeferredRuntimeScheduler {
 	const delayMs = options.delayMs ?? 30_000;
+	const completeIntegrityOnCallback = options.completeIntegrityOnCallback ?? true;
 	return {
 		scheduleIntegrity: (callback): void => {
 			options.schedule(() => {
-				void callback().finally(options.gate.completeIntegrity);
+				const completion = completeIntegrityOnCallback ? options.gate.completeIntegrity : undefined;
+				void callback().finally(completion);
 			}, delayMs);
 		},
 		schedulePipeline: (callback): void => {

@@ -42,6 +42,8 @@ export interface MigrationVerifyOptions {
 	/** Per-attempt owner deadline. Production derives this from the database size. */
 	readonly attemptDeadlineMs?: number;
 	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
+	/** Fires when the owner worker, including a deadline-abandoned scan, is done. */
+	readonly onWorkerSettled?: () => void | Promise<void>;
 }
 
 export function migrationVerifyAttemptDeadlineMs(databaseSizeBytes: number): number {
@@ -86,7 +88,7 @@ export async function runMigrationIntegrityVerify(options: MigrationVerifyOption
 			"integrity.migration-verify.global",
 			"PRAGMA integrity_check",
 			[],
-			{ deadlineMs: attemptDeadlineMs, estimatedWorkUnits: 64 },
+			{ deadlineMs: attemptDeadlineMs, estimatedWorkUnits: 64, onOwnerJobSettled: options.onWorkerSettled },
 		);
 		const messages = rows.map((row) => text(row.integrity_check));
 		const result: MigrationVerifyResult = {
@@ -138,10 +140,14 @@ export interface MigrationVerifyGateOptions {
 	readonly pruneBackup: () => void | Promise<void>;
 	readonly scheduleNextAttempt?: (callback: () => void, delayMs: number) => void;
 	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
+	/** Fires when the owner worker, including a deadline-abandoned scan, is done. */
+	readonly onWorkerSettled?: () => void | Promise<void>;
 	readonly publishStatus?: (state: "healthy" | "corrupt" | "degraded", messages?: readonly string[]) => void;
 	/** Reset a stronger global latch only after a confirmed clean pass. */
 	readonly resetGlobalLatch?: () => void;
 	readonly log?: (message: string, details?: Record<string, unknown>) => void;
+	/** Wrapped gate runner used for continuations and rejection retries. */
+	readonly continuation?: () => Promise<MigrationVerifyGateResult>;
 	readonly onContinuationRejection?: (callback: () => Promise<unknown>, error: unknown) => void;
 }
 
@@ -260,6 +266,7 @@ export async function runMigrationIntegrityVerifyGate(
 				owner: options.owner,
 				attemptDeadlineMs,
 				onProgress: options.onProgress,
+				onWorkerSettled: options.onWorkerSettled,
 			}))
 	)();
 	if (options.runAttempt !== undefined) await options.onProgress?.(result);
@@ -318,7 +325,7 @@ export async function runMigrationIntegrityVerifyGate(
 	}
 
 	const schedule = options.scheduleNextAttempt ?? defaultScheduleNextAttempt;
-	const continuation = (): Promise<unknown> => runMigrationIntegrityVerifyGate(options);
+	const continuation = options.continuation ?? (() => runMigrationIntegrityVerifyGate(options));
 	schedule(() => {
 		void continuation().catch((error) => {
 			if (options.onContinuationRejection !== undefined) {

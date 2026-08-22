@@ -14,6 +14,7 @@ import {
 	readdirSync,
 	statSync,
 	statfsSync,
+	truncateSync,
 	unlinkSync,
 } from "node:fs";
 import {
@@ -1039,27 +1040,28 @@ async function readMigrationBackupCursor(
 				basename(destination).startsWith(`${base}.bak-v`);
 			const destinationExists = destination !== undefined && existsSync(destination);
 			const destinationSize = destinationExists ? statSync(destination).size : undefined;
-			if (
-				!cursorMatchesSource ||
-				!safeDestination ||
-				typeof parsed.offset !== "number" ||
-				parsed.offset < 0 ||
-				parsed.offset > sourceSize ||
-				!destinationExists ||
-				destinationSize !== parsed.offset
-			) {
+			const cursorOffsetValid =
+				typeof parsed.offset === "number" &&
+				Number.isInteger(parsed.offset) &&
+				parsed.offset >= 0 &&
+				parsed.offset <= sourceSize;
+			const destinationSizeValid =
+				destinationExists && destinationSize !== undefined && cursorOffsetValid && destinationSize >= parsed.offset;
+			if (!cursorMatchesSource || !safeDestination || !cursorOffsetValid || !destinationSizeValid) {
 				if (
 					cursorMatchesSource &&
 					safeDestination &&
-					typeof parsed.offset === "number" &&
+					cursorOffsetValid &&
 					destinationExists &&
-					destinationSize !== parsed.offset
+					destinationSize !== undefined &&
+					destinationSize < parsed.offset
 				) {
 					await rmAsync(destination, { force: true, recursive: true });
 					await rmAsync(cursorPath, { force: true });
 				}
 				continue;
 			}
+			if (destinationSize > parsed.offset) truncateSync(destination, parsed.offset);
 			return { ...parsed, destination } as MigrationBackupCursor;
 		} catch {
 			// A torn cursor is ignored; the next admission creates a fresh backup.
@@ -1235,6 +1237,34 @@ export async function copyMigrationBackupChunks(
 	}
 }
 
+function sweepStaleMigrationBackupProbes(dbPath: string, deps: MigrationBackupDeps): void {
+	const dir = dirname(dbPath);
+	const base = basename(dbPath);
+	let entries: string[];
+	try {
+		entries = deps.readdirSync(dir);
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (
+			!entry.startsWith(`${base}.bak-v`) ||
+			(!entry.includes(".probe-") && !entry.includes(".space-probe-")) ||
+			entry.endsWith(`.probe-${process.pid}`) ||
+			entry.endsWith(`.space-probe-${process.pid}`)
+		)
+			continue;
+		const path = join(dir, entry);
+		try {
+			deps.unlinkSync(path);
+			deps.log(`[db-accessor] Reclaimed stale migration backup probe: ${entry}`);
+		} catch {
+			// Probe cleanup is deliberately best effort: admission remains
+			// authoritative and must not fail because a stale scratch file races.
+		}
+	}
+}
+
 function prepareMigrationBackup(
 	db: { exec(sql: string): unknown },
 	dbPath: string,
@@ -1256,6 +1286,7 @@ function prepareMigrationBackup(
 		// The space preflight remains authoritative when metadata collection races
 		// with a source or backup disappearing.
 	}
+	sweepStaleMigrationBackupProbes(dbPath, deps);
 	return preflightMigrationBackupSpace(dbPath, deps);
 }
 

@@ -81,4 +81,34 @@ describe("deferred runtime startup contention (#1609)", () => {
 		await Bun.sleep(0);
 		expect(events).toEqual(["maintenance:start"]);
 	});
+
+	it("can hold integrity completion until an observed slice result", async () => {
+		const gate = createDeferredRuntimeGate();
+		const callbacks: Array<() => void> = [];
+		let integrityFinished = false;
+		let pipelineStarted = false;
+		const scheduler = createDeferredRuntimeScheduler({
+			gate,
+			completeIntegrityOnCallback: false,
+			schedule: (callback) => callbacks.push(callback),
+			onPipelineError: () => {},
+			onMaintenanceError: () => {},
+		});
+		scheduler.scheduleIntegrity(async () => {
+			integrityFinished = true;
+		});
+		scheduler.schedulePipeline(async () => {
+			pipelineStarted = true;
+			expect(integrityFinished).toBe(true);
+		});
+
+		callbacks[0]?.();
+		callbacks[1]?.();
+		await Bun.sleep(0);
+		expect(integrityFinished).toBe(true);
+		expect(pipelineStarted).toBe(false);
+		gate.completeIntegrity();
+		await Bun.sleep(0);
+		expect(pipelineStarted).toBe(true);
+	});
 });
