@@ -10,6 +10,7 @@
  */
 
 import type { DbOwnerClient } from "./db-owner-client";
+import { DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS } from "./db-owner-protocol";
 import { basename } from "node:path";
 import {
 	incrementMigrationVerifyAttempt,
@@ -25,8 +26,7 @@ export const MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS = 300_000;
 export const MIGRATION_VERIFY_RETRY_INTERVAL_MS = 30 * 60_000;
 export const MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS = 8;
 export const MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS = 3;
-const MIGRATION_VERIFY_SCAN_BYTES_PER_SECOND = 10 * 1024 * 1024;
-const MIGRATION_VERIFY_MAX_ATTEMPT_DEADLINE_MS = 15 * 60_000;
+const MIGRATION_VERIFY_SCAN_BYTES_PER_SECOND = 64 * 1024 * 1024;
 export { MIGRATION_VERIFY_PARKED_STATUS, MIGRATION_VERIFY_FAILED_STATUS };
 
 export interface MigrationVerifyResult {
@@ -53,12 +53,10 @@ export interface MigrationVerifyOptions {
 export function migrationVerifyAttemptDeadlineMs(databaseSizeBytes: number): number {
 	const sizeBytes = Number.isFinite(databaseSizeBytes) ? Math.max(0, databaseSizeBytes) : 0;
 	const sizeAllowanceMs = Math.ceil(sizeBytes / MIGRATION_VERIFY_SCAN_BYTES_PER_SECOND) * 1000;
-	// The hard cap bounds the base case for small databases; size scaling stays
-	// uncapped so a large database can still receive the time its scan demands.
 	const sizeDerivedBudgetMs = MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS + sizeAllowanceMs;
-	return Math.max(
-		sizeDerivedBudgetMs,
-		Math.min(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS, MIGRATION_VERIFY_MAX_ATTEMPT_DEADLINE_MS),
+	return Math.min(
+		Math.max(sizeDerivedBudgetMs, MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS),
+		DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS,
 	);
 }
 

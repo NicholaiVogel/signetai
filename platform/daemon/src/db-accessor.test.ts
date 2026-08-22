@@ -610,6 +610,21 @@ describe("DbAccessor", () => {
 		expect(files.size).toBe(1);
 	});
 
+	test("excludes non-regular migration backups from integrity pruning", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, "database");
+		const regularBackupPath = `${dbPath}.bak-v90-1000`;
+		const directoryBackupPath = `${dbPath}.bak-v91-2000`;
+		writeFileSync(regularBackupPath, "backup");
+		mkdirSync(directoryBackupPath);
+
+		pruneMigrationBackupsAfterIntegrity(dbPath);
+
+		expect(existsSync(regularBackupPath)).toBe(false);
+		expect(existsSync(directoryBackupPath)).toBe(true);
+	});
+
 	test("blocks a migration backup before deleting retained backups when headroom is insufficient", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));

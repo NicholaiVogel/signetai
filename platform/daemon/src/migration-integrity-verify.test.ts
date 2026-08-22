@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { DbOwnerClient } from "./db-owner-client";
 import { DbOwnerAdmissionError, DbOwnerDeadlineError } from "./db-owner-client";
+import { DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS } from "./db-owner-protocol";
 import {
 	MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS,
 	MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS,
@@ -171,13 +172,14 @@ describe("migration integrity verify gate", () => {
 		);
 	});
 
-	test("derives a larger attempt budget from the database size", () => {
+	test("derives an admissible attempt budget from the database size", () => {
 		expect(migrationVerifyAttemptDeadlineMs(0)).toBe(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS);
 		expect(migrationVerifyAttemptDeadlineMs(10 * 1024 * 1024)).toBe(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS + 1000);
-		expect(migrationVerifyAttemptDeadlineMs(20 * 1024 * 1024)).toBeGreaterThan(migrationVerifyAttemptDeadlineMs(1024));
-		expect(migrationVerifyAttemptDeadlineMs(7 * 1024 * 1024 * 1024)).toBe(
-			MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS + 717_000,
-		);
+		expect(migrationVerifyAttemptDeadlineMs(128 * 1024 * 1024)).toBeGreaterThan(migrationVerifyAttemptDeadlineMs(1024));
+		const largeDatabaseBudget = migrationVerifyAttemptDeadlineMs(7.8 * 1024 ** 3);
+		expect(largeDatabaseBudget).toBeGreaterThanOrEqual(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS);
+		expect(largeDatabaseBudget).toBeLessThanOrEqual(DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS);
+		expect(migrationVerifyAttemptDeadlineMs(Number.MAX_VALUE)).toBe(DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS);
 		expect(MIGRATION_VERIFY_RETRY_INTERVAL_MS).toBe(30 * 60_000);
 	});
 

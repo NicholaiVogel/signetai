@@ -2640,16 +2640,12 @@ async function main() {
 				if (result.phase === "running" || result.phase === "timed_out" || result.phase === "unavailable") {
 					scheduleIntegritySlice(result.phase === "running" ? 0 : 1000);
 				}
-				if (migrationIntegrityGateActive && !integrityGateCompleted) {
+				if (!migrationIntegrityGateActive && !integrityGateCompleted) {
 					integrityGateCompleted = true;
 					deferredRuntimeGate.completeIntegrity();
 				}
 			};
 			scheduleIntegritySlice(0);
-			if (!migrationIntegrityGateActive) {
-				integrityGateCompleted = true;
-				deferredRuntimeGate.completeIntegrity();
-			}
 			if (owner.health().state === "failed") {
 				logger.error("startup-recovery", "DB owner failed during incremental integrity maintenance", undefined, {
 					ownerState: owner.health().state,

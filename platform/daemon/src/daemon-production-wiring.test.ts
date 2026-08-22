@@ -34,6 +34,10 @@ describe("daemon production DB owner wiring", () => {
 		expect(source).toContain("const publishMigrationVerifyStatus =");
 		expect(source).toContain("scheduledVerifyRuntimeGateReleased");
 		expect(source).toContain("deferredRuntimeGate.completeIntegrity();");
+		expect(source).toContain("if (!migrationIntegrityGateActive && !integrityGateCompleted) {");
+		expect(source).not.toContain(
+			"if (!migrationIntegrityGateActive) {\n				integrityGateCompleted = true;\n				deferredRuntimeGate.completeIntegrity();\n			}",
+		);
 		expect(source).toContain('if (result.phase === "incomplete" && result.admitted)');
 		expect(source).not.toContain("runDeferredIntegrityCheck");
 	});

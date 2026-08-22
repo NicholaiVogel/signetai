@@ -733,6 +733,11 @@ export interface MigrationBackupDeps {
 	readonly copyFileSync: (source: string, destination: string) => void;
 	readonly readdirSync: (path: string) => string[];
 	readonly statSync: (path: string) => { readonly mtimeMs: number; readonly size?: number };
+	readonly lstatSync?: (path: string) => {
+		readonly mtimeMs: number;
+		readonly size?: number;
+		readonly isFile: () => boolean;
+	};
 	readonly statfsSync?: (path: string) => { readonly bavail: number; readonly bsize: number };
 	readonly unlinkSync: (path: string) => void;
 	readonly now: () => number;
@@ -743,6 +748,7 @@ const migrationBackupDeps: MigrationBackupDeps = {
 	copyFileSync,
 	readdirSync,
 	statSync,
+	lstatSync,
 	statfsSync,
 	unlinkSync,
 	now: Date.now,
@@ -774,7 +780,16 @@ function migrationBackups(
 		)
 		.flatMap((f) => {
 			try {
-				const stat = deps.statSync(join(dir, f));
+				const path = join(dir, f);
+				if (deps.lstatSync !== undefined) {
+					const stat = deps.lstatSync(path);
+					if (!stat.isFile()) {
+						deps.log(`[db-accessor] Skipped non-regular migration backup: ${f}`);
+						return [];
+					}
+					return [{ name: f, mtime: stat.mtimeMs, size: stat.size ?? 0 }];
+				}
+				const stat = deps.statSync(path);
 				return [{ name: f, mtime: stat.mtimeMs, size: stat.size ?? 0 }];
 			} catch (err) {
 				if (isMissingPathError(err)) return [];
