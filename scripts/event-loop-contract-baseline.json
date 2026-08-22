@@ -564,49 +564,49 @@
     },
     {
       "path": "daemon.ts",
-      "line": 2586,
+      "line": 2624,
       "api": "existsSync",
       "source": "if (existsSync(healthStampPath)) {",
       "category": "hot-path"
     },
     {
       "path": "daemon.ts",
-      "line": 2587,
+      "line": 2625,
       "api": "readFileSync",
       "source": "const prev = JSON.parse(readFileSync(healthStampPath, \"utf-8\"));",
       "category": "hot-path"
     },
     {
       "path": "daemon.ts",
-      "line": 2590,
+      "line": 2628,
       "api": "writeFileSync",
       "source": "writeFileSync(",
       "category": "hot-path"
     },
     {
       "path": "database-integrity.ts",
-      "line": 441,
+      "line": 471,
       "api": "existsSync",
       "source": "if (existsSync(bundled)) return bundled;",
       "category": "hot-path"
     },
     {
       "path": "database-integrity.ts",
-      "line": 521,
+      "line": 551,
       "api": "withWriteTxAsync",
-      "source": "return accessor.withWriteTxAsync(processBatch, { siteToken: \"database-integrity.ts:521\" });",
+      "source": "return accessor.withWriteTxAsync(processBatch, { siteToken: \"database-integrity.ts:551\" });",
       "category": "hot-path"
     },
     {
       "path": "database-integrity.ts",
-      "line": 682,
+      "line": 712,
       "api": "withReadDbAsync",
       "source": "return await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "database-integrity.ts",
-      "line": 800,
+      "line": 830,
       "api": "withReadDbAsync",
       "source": "? await accessor.withReadDbAsync(async (db) => check(db, \"integrity_check\", \"telemetry_events\"), {",
       "category": "hot-path"

@@ -49,7 +49,7 @@ import {
 import { listConnectorsAsync } from "./connectors/registry";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
 import { runIncrementalDatabaseIntegrityCheck } from "./incremental-database-integrity";
-import { runMigrationIntegrityVerifyGate } from "./migration-integrity-verify";
+import { MIGRATION_VERIFY_RETRY_INTERVAL_MS, runMigrationIntegrityVerifyGate } from "./migration-integrity-verify";
 import { publishDatabaseIntegrityStatus } from "./database-integrity";
 import {
 	closeDbAccessor,
@@ -2489,6 +2489,7 @@ async function main() {
 	const INCREMENTAL_INTEGRITY_TABLES_PER_RUN = 8;
 	const INCREMENTAL_INTEGRITY_RUN_BUDGET_MS = 5_000;
 	const INCREMENTAL_INTEGRITY_OWNER_DEADLINE_MS = 1_000;
+	const MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS = 3;
 
 	const onListening = (info: { address: string; port: number }): void => {
 		logger.info("daemon", "Server listening", {
@@ -2524,7 +2525,7 @@ async function main() {
 			// checkpoint key, so a parked or failed prior generation cannot suppress
 			// verification of this generation.
 			if (migrationBackupPending && migrationBackupPath !== null) {
-				void runMigrationIntegrityVerifyGate({
+				const migrationVerifyGateOptions: Parameters<typeof runMigrationIntegrityVerifyGate>[0] = {
 					owner,
 					backupPath: migrationBackupPath,
 					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB),
@@ -2537,9 +2538,46 @@ async function main() {
 					log: (message, details): void => {
 						logger.info("startup-recovery", message, details);
 					},
-				}).catch((error) => {
-					logger.error("startup-recovery", "Migration integrity verify rejected", error);
-				});
+				};
+				let setupRejectionAttempts = 0;
+				const runMigrationVerifyGate = (): Promise<unknown> =>
+					runMigrationIntegrityVerifyGate(migrationVerifyGateOptions);
+				const handleSetupRejection = (error: unknown): void => {
+					const attemptCount = setupRejectionAttempts + 1;
+					setupRejectionAttempts = attemptCount;
+					const rejectionError = error instanceof Error ? error : new Error(String(error));
+					publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"], owner);
+					if (attemptCount >= MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS) {
+						logger.error(
+							"startup-recovery",
+							"Migration integrity verify setup rejected; retry cap reached",
+							rejectionError,
+							{
+								attemptCount,
+								maxAttempts: MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS,
+							},
+						);
+						return;
+					}
+					logger.warn("startup-recovery", "Migration integrity verify setup rejected; retry scheduled", {
+						attemptCount,
+						retryDelayMs: MIGRATION_VERIFY_RETRY_INTERVAL_MS,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					const timer = setTimeout(() => {
+						void runMigrationVerifyGate()
+							.then(() => {
+								setupRejectionAttempts = 0;
+							})
+							.catch(handleSetupRejection);
+					}, MIGRATION_VERIFY_RETRY_INTERVAL_MS);
+					timer.unref?.();
+				};
+				void runMigrationVerifyGate()
+					.then(() => {
+						setupRejectionAttempts = 0;
+					})
+					.catch(handleSetupRejection);
 			}
 
 			const runIntegritySlice = async (): Promise<void> => {

@@ -96,6 +96,25 @@ type GlobalIntegrityState = "corrupt" | "degraded";
 let globalIntegrityState: GlobalIntegrityState | null = null;
 let globalIntegrityMessage: string | null = null;
 
+const INTEGRITY_STATE_SEVERITY: Record<DatabaseIntegrityState, number> = {
+	unknown: 0,
+	healthy: 1,
+	repaired: 1,
+	degraded: 2,
+	unavailable: 3,
+	corrupt: 4,
+};
+
+function mergeIntegrityState(
+	globalState: GlobalIntegrityState | null,
+	incrementalState: DatabaseIntegrityState,
+): DatabaseIntegrityState {
+	if (globalState === null) return incrementalState;
+	return INTEGRITY_STATE_SEVERITY[incrementalState] > INTEGRITY_STATE_SEVERITY[globalState]
+		? incrementalState
+		: globalState;
+}
+
 function check(db: ReadDb, pragma: "quick_check" | "integrity_check", table?: string): IntegrityCheckStatus {
 	const sql = table === undefined ? `PRAGMA ${pragma}` : `PRAGMA ${pragma}(${table})`;
 	const key = pragma === "quick_check" ? "quick_check" : "integrity_check";
@@ -174,13 +193,24 @@ export function updateDatabaseIntegrityStatus(
 					: progress.phase === "degraded"
 						? "degraded"
 						: "complete";
-	const publishedState: DatabaseIntegrityState = globalIntegrityState ?? state;
+	const publishedState = mergeIntegrityState(globalIntegrityState, state);
+	const incrementalIntegrity =
+		errors.length > 0
+			? errors.join("; ")
+			: degraded
+				? progress.degradationReason
+				: failed
+					? "incremental integrity check failed"
+					: operationalFailure
+						? "incremental integrity check unavailable"
+						: null;
+	const globalStateWins = globalIntegrityState !== null && publishedState === globalIntegrityState;
 	latestStatus = {
 		...latestStatus,
 		checkedAt: new Date().toISOString(),
 		state: publishedState,
 		phase,
-		integrity: globalIntegrityMessage ?? (degraded ? progress.degradationReason : null),
+		integrity: globalStateWins ? globalIntegrityMessage : incrementalIntegrity,
 		quickCheck: failed
 			? { ok: false, messages: errors.length > 0 ? errors : ["incremental integrity check failed"] }
 			: globalIntegrityState !== null
@@ -518,7 +548,7 @@ async function runKillableTelemetryRepair(
 }
 
 async function writeAsync<Result>(accessor: DbAccessor, processBatch: (db: WriteDb) => Result): Promise<Result> {
-	return accessor.withWriteTxAsync(processBatch, { siteToken: "database-integrity.ts:521" });
+	return accessor.withWriteTxAsync(processBatch, { siteToken: "database-integrity.ts:551" });
 }
 
 /**
@@ -685,7 +715,7 @@ async function readIntegrityChecks(
 				telemetry: check(db, "integrity_check", "telemetry_events"),
 				indexes: listTelemetryIndexes(db),
 			}),
-			{ siteToken: "database-integrity.ts:682" },
+			{ siteToken: "database-integrity.ts:712" },
 		);
 	}
 	const deadlineMs = options.repairTimeoutMs ?? DEFAULT_INTEGRITY_TIMEOUT_MS;
@@ -798,7 +828,7 @@ export async function repairTelemetryIndexes(
 			const verifiedTelemetry =
 				options?.owner === undefined
 					? await accessor.withReadDbAsync(async (db) => check(db, "integrity_check", "telemetry_events"), {
-							siteToken: "database-integrity.ts:800",
+							siteToken: "database-integrity.ts:830",
 						})
 					: ownerCheck(
 							await ownerQueryAll<Record<string, unknown>>(
