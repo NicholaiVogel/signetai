@@ -163,8 +163,7 @@ async function ensureCheckpoint(
 		owner,
 		"integrity.checkpoint.ensure",
 		[
-			ownerRunStatement(
-				`CREATE TABLE IF NOT EXISTS ${CHECKPOINT_TABLE} (
+			ownerRunStatement(`CREATE TABLE IF NOT EXISTS ${CHECKPOINT_TABLE} (
 					checkpoint_key TEXT PRIMARY KEY,
 					cursor TEXT NOT NULL DEFAULT '',
 					checked_tables INTEGER NOT NULL DEFAULT 0,
@@ -174,17 +173,14 @@ async function ensureCheckpoint(
 					attempt_count INTEGER NOT NULL DEFAULT 0,
 					status TEXT NOT NULL DEFAULT 'running',
 					updated_at TEXT NOT NULL
-				)`,
-			),
-			ownerRunStatement(
-				`INSERT OR IGNORE INTO ${CHECKPOINT_TABLE}
-					(checkpoint_key, cursor, checked_tables, failed_tables, pages_checked, bytes_checked, attempt_count, status, updated_at)
-					VALUES (?, '', 0, 0, 0, 0, 0, 'running', ?)`,
-				[key, new Date().toISOString()],
-			),
+				)`),
 		],
 		{ deadlineMs, estimatedWorkUnits: 1, onOwnerMetrics },
 	);
+	// Upgrade the column before any statement references it: on a legacy table
+	// (created before attempt_count existed) the INSERT below would otherwise
+	// throw "table has no column named attempt_count" and kill integrity
+	// maintenance on upgraded installs.
 	const columns = await ownerQueryAll<{ readonly name?: unknown }>(
 		owner,
 		"integrity.checkpoint.columns",
@@ -200,6 +196,19 @@ async function ensureCheckpoint(
 			{ deadlineMs, estimatedWorkUnits: 1, onOwnerMetrics },
 		);
 	}
+	await ownerTransaction(
+		owner,
+		"integrity.checkpoint.ensure",
+		[
+			ownerRunStatement(
+				`INSERT OR IGNORE INTO ${CHECKPOINT_TABLE}
+					(checkpoint_key, cursor, checked_tables, failed_tables, pages_checked, bytes_checked, attempt_count, status, updated_at)
+					VALUES (?, '', 0, 0, 0, 0, 0, 'running', ?)`,
+				[key, new Date().toISOString()],
+			),
+		],
+		{ deadlineMs, estimatedWorkUnits: 1, onOwnerMetrics },
+	);
 }
 
 async function readCheckpoint(
