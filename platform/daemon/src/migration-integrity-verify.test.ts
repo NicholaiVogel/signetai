@@ -5,6 +5,7 @@ import {
 	MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS,
 	MIGRATION_VERIFY_PARKED_STATUS,
 	MIGRATION_VERIFY_RETRY_INTERVAL_MS,
+	migrationVerifyCheckpointKey,
 	runMigrationIntegrityVerifyGate,
 	type MigrationVerifyCheckpointStore,
 	type MigrationVerifyResult,
@@ -42,6 +43,15 @@ function fakeStore(initialAttemptCount = 0): {
 }
 
 describe("migration integrity verify gate", () => {
+	test("scopes checkpoint state to the backup generation", () => {
+		expect(migrationVerifyCheckpointKey("/tmp/memories.db.bak-v151-1234")).toBe(
+			"database.migration-verify:memories.db.bak-v151-1234",
+		);
+		expect(migrationVerifyCheckpointKey("/tmp/memories.db.bak-v152-5678")).not.toBe(
+			migrationVerifyCheckpointKey("/tmp/memories.db.bak-v151-1234"),
+		);
+	});
+
 	test("uses one 300-second attempt and a fixed 30-minute continuation interval", () => {
 		expect(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS).toBe(300_000);
 		expect(MIGRATION_VERIFY_RETRY_INTERVAL_MS).toBe(30 * 60_000);
@@ -52,6 +62,7 @@ describe("migration integrity verify gate", () => {
 		let pruned = false;
 		const result = await runMigrationIntegrityVerifyGate({
 			owner,
+			backupPath: "/tmp/memories.db.bak-v151-1234",
 			checkpointStore: store,
 			runAttempt: async () => attempt("pass"),
 			pruneBackup: () => {
@@ -70,6 +81,7 @@ describe("migration integrity verify gate", () => {
 		let scheduledDelay = 0;
 		const result = await runMigrationIntegrityVerifyGate({
 			owner,
+			backupPath: "/tmp/memories.db.bak-v151-1234",
 			checkpointStore: store,
 			runAttempt: async () => attempt("incomplete"),
 			pruneBackup: () => {
@@ -93,6 +105,7 @@ describe("migration integrity verify gate", () => {
 		let scheduled = false;
 		const result = await runMigrationIntegrityVerifyGate({
 			owner,
+			backupPath: "/tmp/memories.db.bak-v151-1234",
 			checkpointStore: store,
 			runAttempt: async () => attempt("failed"),
 			pruneBackup: () => {
@@ -115,6 +128,7 @@ describe("migration integrity verify gate", () => {
 		let scheduled = false;
 		const result = await runMigrationIntegrityVerifyGate({
 			owner,
+			backupPath: "/tmp/memories.db.bak-v151-1234",
 			checkpointStore: store,
 			runAttempt: async () => attempt("incomplete"),
 			pruneBackup: () => {

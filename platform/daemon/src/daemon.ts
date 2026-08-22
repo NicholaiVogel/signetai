@@ -54,7 +54,7 @@ import {
 	closeDbAccessor,
 	getDbAccessor,
 	getVectorRuntimeStatus,
-	hasPendingMigrationBackup,
+	pendingMigrationBackupPath,
 	initDbAccessorLite,
 	pruneMigrationBackupsAfterIntegrity,
 	resolveSqliteRuntimeConfig,
@@ -2505,16 +2505,19 @@ async function main() {
 			writeDaemonLifecycle(AGENTS_DIR, buildLifecycleRecord("running"));
 			vacuumConversionHandle = startVacuumConversionWorker(getDbAccessor(), { owner: dbOwnerClient ?? undefined });
 			const owner = dbOwnerClient;
-			const migrationBackupPending = hasPendingMigrationBackup(MEMORY_DB);
+			const migrationBackupPath = pendingMigrationBackupPath(MEMORY_DB);
+			const migrationBackupPending = migrationBackupPath !== null;
 			if (owner === null) throw new Error("DB owner is unavailable for incremental integrity maintenance");
 
 			// ── Migration backup prune gate ──────────────────────────────────
-			// A global integrity_check is the ONLY result that may delete the
-			// rollback backup. It runs once per maintenance tick with a generous
-			// deadline; incomplete attempts are persisted and retried every 30m.
-			if (migrationBackupPending) {
+			// Global `PRAGMA integrity_check` is the ONLY result that may delete
+			// the rollback backup. Each completed backup generation gets its own
+			// checkpoint key, so a parked or failed prior generation cannot suppress
+			// verification of this generation.
+			if (migrationBackupPending && migrationBackupPath !== null) {
 				void runMigrationIntegrityVerifyGate({
 					owner,
+					backupPath: migrationBackupPath,
 					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB),
 					onProgress: (progress): void => {
 						logger.info("startup-recovery", "Migration integrity verify attempt", { ...progress });

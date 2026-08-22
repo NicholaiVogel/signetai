@@ -10,6 +10,7 @@
  */
 
 import type { DbOwnerClient } from "./db-owner-client";
+import { basename } from "node:path";
 import {
 	incrementMigrationVerifyAttempt,
 	markMigrationVerifyTerminal,
@@ -23,7 +24,6 @@ import { ownerQueryAll } from "./db-owner-maintenance";
 export const MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS = 300_000;
 export const MIGRATION_VERIFY_RETRY_INTERVAL_MS = 30 * 60_000;
 export const MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS = 8;
-export const MIGRATION_VERIFY_CHECKPOINT_KEY = "database.migration-verify";
 export { MIGRATION_VERIFY_PARKED_STATUS, MIGRATION_VERIFY_FAILED_STATUS };
 
 export interface MigrationVerifyResult {
@@ -93,6 +93,8 @@ export interface MigrationVerifyCheckpointStore {
 
 export interface MigrationVerifyGateOptions {
 	readonly owner: DbOwnerClient;
+	/** Completed backup generation this gate is verifying. */
+	readonly backupPath: string;
 	readonly checkpointStore?: MigrationVerifyCheckpointStore;
 	readonly runAttempt?: () => Promise<MigrationVerifyResult>;
 	readonly pruneBackup: () => void | Promise<void>;
@@ -112,11 +114,16 @@ function defaultScheduleNextAttempt(callback: () => void): void {
 	(timer as unknown as { unref?: () => void }).unref?.();
 }
 
-function ownerCheckpointStore(owner: DbOwnerClient): MigrationVerifyCheckpointStore {
+export function migrationVerifyCheckpointKey(backupPath: string): string {
+	return `database.migration-verify:${basename(backupPath)}`;
+}
+
+function ownerCheckpointStore(owner: DbOwnerClient, backupPath: string): MigrationVerifyCheckpointStore {
+	const checkpointKey = migrationVerifyCheckpointKey(backupPath);
 	return {
-		read: () => readMigrationVerifyCheckpoint(owner, MIGRATION_VERIFY_CHECKPOINT_KEY, 5_000),
-		incrementIncompleteAttempt: () => incrementMigrationVerifyAttempt(owner, MIGRATION_VERIFY_CHECKPOINT_KEY, 5_000),
-		markTerminal: (status) => markMigrationVerifyTerminal(owner, status, MIGRATION_VERIFY_CHECKPOINT_KEY, 5_000),
+		read: () => readMigrationVerifyCheckpoint(owner, checkpointKey, 5_000),
+		incrementIncompleteAttempt: () => incrementMigrationVerifyAttempt(owner, checkpointKey, 5_000),
+		markTerminal: (status) => markMigrationVerifyTerminal(owner, status, checkpointKey, 5_000),
 	};
 }
 
@@ -127,7 +134,7 @@ function ownerCheckpointStore(owner: DbOwnerClient): MigrationVerifyCheckpointSt
 export async function runMigrationIntegrityVerifyGate(
 	options: MigrationVerifyGateOptions,
 ): Promise<MigrationVerifyGateResult> {
-	const store = options.checkpointStore ?? ownerCheckpointStore(options.owner);
+	const store = options.checkpointStore ?? ownerCheckpointStore(options.owner, options.backupPath);
 	const checkpoint = await store.read();
 	if (checkpoint.status === MIGRATION_VERIFY_PARKED_STATUS || checkpoint.status === MIGRATION_VERIFY_FAILED_STATUS) {
 		options.log?.("Migration integrity verify terminal state retained", {
