@@ -419,7 +419,7 @@
       "path": "daemon.ts",
       "line": 738,
       "api": "withWriteTxAsync",
-      "source": "return accessor.withWriteTxAsync(fn, { siteToken: \"daemon.ts:737\" });",
+      "source": "return accessor.withWriteTxAsync(fn, { siteToken: \"daemon.ts:738\" });",
       "category": "hot-path"
     },
     {
