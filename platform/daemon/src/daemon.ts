@@ -2548,6 +2548,17 @@ async function main() {
 			if (migrationBackupPending && migrationBackupPath !== null) {
 				migrationIntegrityGateActive = true;
 				let runMigrationVerifyGate: () => Promise<Awaited<ReturnType<typeof runMigrationIntegrityVerifyGate>>>;
+				let scheduledVerifyRuntimeGateReleased = false;
+				const publishMigrationVerifyStatus = (
+					state: "healthy" | "corrupt" | "degraded",
+					messages?: readonly string[],
+				): void => {
+					publishDatabaseIntegrityStatus(state, messages, owner);
+					if (state === "degraded" && !scheduledVerifyRuntimeGateReleased) {
+						scheduledVerifyRuntimeGateReleased = true;
+						deferredRuntimeGate.completeIntegrity();
+					}
+				};
 				const releaseVerifyLatch = (): void => {
 					if (!globalVerifyInFlight) return;
 					globalVerifyInFlight = false;
@@ -2558,9 +2569,7 @@ async function main() {
 					backupPath: migrationBackupPath,
 					databaseSizeBytes: migrationBackupSizeBytes ?? 0,
 					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB),
-					publishStatus: (state, messages): void => {
-						publishDatabaseIntegrityStatus(state, messages, owner);
-					},
+					publishStatus: publishMigrationVerifyStatus,
 					resetGlobalLatch: resetGlobalIntegrityLatch,
 					onProgress: (progress): void => {
 						logger.info("startup-recovery", "Migration integrity verify attempt", { ...progress });
@@ -2581,8 +2590,13 @@ async function main() {
 						const result = await runMigrationIntegrityVerifyGate({
 							...migrationVerifyGateOptions,
 							onWorkerSettled: resolveWorker,
+							onAdmissionFailure: () => {
+								// No owner job exists to settle after a synchronous admission
+								// rejection, so the integrity lane can be released now.
+								releaseVerifyLatch();
+							},
 						});
-						if (result.phase === "incomplete") void workerSettled.then(releaseVerifyLatch);
+						if (result.phase === "incomplete" && result.admitted) void workerSettled.then(releaseVerifyLatch);
 						else releaseVerifyLatch();
 						return result;
 					} catch (error) {
@@ -2593,9 +2607,7 @@ async function main() {
 				let setupRetry: ReturnType<typeof createMigrationVerifySetupRetry>;
 				setupRetry = createMigrationVerifySetupRetry({
 					run: runMigrationVerifyGate,
-					publishStatus: (state, messages): void => {
-						publishDatabaseIntegrityStatus(state, messages, owner);
-					},
+					publishStatus: publishMigrationVerifyStatus,
 					logWarn: (message, details): void => logger.warn("startup-recovery", message, details),
 					logError: (message, error, details): void => logger.error("startup-recovery", message, error, details),
 				});

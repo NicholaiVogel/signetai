@@ -884,6 +884,27 @@ describe("DB owner client", () => {
 		await Promise.allSettled(handles.map((handle) => handle.result));
 	});
 
+	test("preserves the named admission error through production initialize", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		const owner = client;
+		if (owner === null) throw new Error("owner client not created");
+		const handles: ReturnType<typeof owner.submit>[] = [];
+		for (let index = 0; index < MAX_DB_OWNER_PENDING_JOBS; index += 1) {
+			handles.push(
+				owner.submit(
+					{ kind: "sleep", durationMs: 50 },
+					{ operation: "maintenance.initialize-admission-test", lane: "maintenance", deadlineMs: 2_000 },
+				),
+			);
+		}
+
+		await expect(owner.initialize(database.directory)).rejects.toBeInstanceOf(DbOwnerAdmissionError);
+		for (const handle of handles) handle.cancel();
+		await Promise.allSettled(handles.map((handle) => handle.result));
+	});
+
 	test("rejects a result that exceeds the bounded wire payload", async () => {
 		const database = makeDb();
 		directory = database.directory;

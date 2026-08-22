@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createDbOwnerClient } from "./db-owner-client";
 import { isFtsIndexIncomplete } from "./fts-index-state";
 import {
 	getEventLoopLiveness,
@@ -81,24 +82,16 @@ describe("DbAccessor", () => {
 		fixture.close();
 		const sourceSizeBeforeInit = statSync(dbPath).size;
 
-		const prototype = Database.prototype as unknown as {
-			prepare: (this: unknown, sql: string) => unknown;
-		};
-		const originalPrepare = prototype.prepare;
-		let integrityChecks = 0;
-		prototype.prepare = function (this: unknown, sql: string): unknown {
-			if (sql.replaceAll(/\\s+/g, " ").trim().toLowerCase() === "pragma integrity_check") integrityChecks += 1;
-			return Reflect.apply(originalPrepare, this, [sql]);
-		};
+		const owner = createDbOwnerClient({ dbPath });
+		const started = performance.now();
 		try {
-			const started = performance.now();
-			await initDbAccessorAsync(dbPath, { deadlineAt: Date.now() + 120_000 });
-			expect(performance.now() - started).toBeLessThan(120_000);
+			await owner.start();
+			await owner.initialize(join(dbPath, ".."));
 		} finally {
-			prototype.prepare = originalPrepare;
+			await owner.close();
 		}
+		expect(performance.now() - started).toBeLessThan(45_000);
 
-		expect(integrityChecks).toBe(0);
 		const backupsAfterInit = readdirSync(join(dbPath, ".."))
 			.filter((name) => name.startsWith("test.db.bak-v") && !name.endsWith(".cursor.json"))
 			.sort();
@@ -361,7 +354,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:351");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:344");
 	});
 
 	test("write statements expose the number of affected rows", () => {

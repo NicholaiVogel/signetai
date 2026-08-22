@@ -26,6 +26,8 @@ export interface DbOwnerMaintenanceOptions {
 	readonly onOwnerMetrics?: (metrics: DbOwnerMaintenanceMetrics) => void | Promise<void>;
 	/** Called when the owner worker has emitted its terminal result. */
 	readonly onOwnerJobSettled?: () => void | Promise<void>;
+	/** Called when admission rejects before an owner job is created. */
+	readonly onOwnerJobAdmissionFailure?: (error: unknown) => void;
 }
 
 export interface DbOwnerMaintenanceMetrics {
@@ -62,7 +64,13 @@ async function runOwnerJob<Result>(
 	lane: "read" | "write" | "maintenance",
 	options: DbOwnerMaintenanceOptions = {},
 ): Promise<Result> {
-	const handle: DbOwnerJobHandle<Result> = owner.submit<Result>(request, submitOptions(operation, lane, options));
+	let handle: DbOwnerJobHandle<Result>;
+	try {
+		handle = owner.submit<Result>(request, submitOptions(operation, lane, options));
+	} catch (error) {
+		options.onOwnerJobAdmissionFailure?.(error);
+		throw error;
+	}
 	let notified = false;
 	const notifySettled = (): void => {
 		if (notified) return;

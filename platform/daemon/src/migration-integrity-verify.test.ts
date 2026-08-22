@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DbOwnerClient } from "./db-owner-client";
-import { DbOwnerDeadlineError } from "./db-owner-client";
+import { DbOwnerAdmissionError, DbOwnerDeadlineError } from "./db-owner-client";
 import {
 	MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS,
 	MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS,
@@ -19,7 +19,13 @@ import type { MigrationVerifyCheckpoint } from "./incremental-database-integrity
 const owner = {} as DbOwnerClient;
 
 function attempt(phase: MigrationVerifyResult["phase"]): MigrationVerifyResult {
-	return { phase, messages: phase === "failed" ? ["corrupt"] : [], elapsedMs: 12, attemptDeadlineMs: 300_000 };
+	return {
+		phase,
+		admitted: true,
+		messages: phase === "failed" ? ["corrupt"] : [],
+		elapsedMs: 12,
+		attemptDeadlineMs: 300_000,
+	};
 }
 
 function fakeStore(
@@ -106,6 +112,25 @@ describe("migration integrity verify gate", () => {
 		});
 	});
 
+	test("releases admission failures without waiting for a nonexistent worker", async () => {
+		let admissionFailures = 0;
+		const admissionOwner = {
+			submit: () => {
+				throw new DbOwnerAdmissionError("DB_OWNER_QUEUE_FULL", "maintenance queue is full");
+			},
+		} as unknown as DbOwnerClient;
+
+		const result = await runMigrationIntegrityVerify({
+			owner: admissionOwner,
+			onAdmissionFailure: () => {
+				admissionFailures += 1;
+			},
+		});
+
+		expect(result).toMatchObject({ phase: "incomplete", admitted: false });
+		expect(admissionFailures).toBe(1);
+	});
+
 	test("keeps deadline completion tied to the owner worker result", async () => {
 		let resolveMetrics: () => void = () => {};
 		const metrics = new Promise<void>((resolve) => {
@@ -129,6 +154,7 @@ describe("migration integrity verify gate", () => {
 			}),
 		).resolves.toMatchObject({
 			phase: "incomplete",
+			admitted: true,
 		});
 		expect(settled).toEqual([]);
 		resolveMetrics();
@@ -287,7 +313,7 @@ describe("migration integrity verify gate", () => {
 			},
 			continuation: async () => {
 				wrappedCalls += 1;
-				return { phase: "terminal", attemptCount: 1, scheduled: false };
+				return { phase: "terminal", attemptCount: 1, admitted: false, scheduled: false };
 			},
 		});
 

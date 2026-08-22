@@ -32,6 +32,8 @@ export { MIGRATION_VERIFY_PARKED_STATUS, MIGRATION_VERIFY_FAILED_STATUS };
 export interface MigrationVerifyResult {
 	/** "pass" — global integrity_check returned a single "ok" row. */
 	readonly phase: "pass" | "incomplete" | "failed";
+	/** Whether the owner accepted the integrity job before it settled. */
+	readonly admitted: boolean;
 	readonly messages: readonly string[];
 	readonly elapsedMs: number;
 	readonly attemptDeadlineMs: number;
@@ -44,6 +46,8 @@ export interface MigrationVerifyOptions {
 	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
 	/** Fires when the owner worker, including a deadline-abandoned scan, is done. */
 	readonly onWorkerSettled?: () => void | Promise<void>;
+	/** Fires when owner admission rejects before a worker job exists. */
+	readonly onAdmissionFailure?: (error: unknown) => void;
 }
 
 export function migrationVerifyAttemptDeadlineMs(databaseSizeBytes: number): number {
@@ -82,17 +86,27 @@ function isSqliteCorruptionCode(code: SqliteErrorCode): boolean {
 export async function runMigrationIntegrityVerify(options: MigrationVerifyOptions): Promise<MigrationVerifyResult> {
 	const attemptDeadlineMs = options.attemptDeadlineMs ?? MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS;
 	const startedAt = Date.now();
+	let admitted = true;
 	try {
 		const rows = await ownerQueryAll<IntegrityCheckRow>(
 			options.owner,
 			"integrity.migration-verify.global",
 			"PRAGMA integrity_check",
 			[],
-			{ deadlineMs: attemptDeadlineMs, estimatedWorkUnits: 64, onOwnerJobSettled: options.onWorkerSettled },
+			{
+				deadlineMs: attemptDeadlineMs,
+				estimatedWorkUnits: 64,
+				onOwnerJobSettled: options.onWorkerSettled,
+				onOwnerJobAdmissionFailure: (error): void => {
+					admitted = false;
+					options.onAdmissionFailure?.(error);
+				},
+			},
 		);
 		const messages = rows.map((row) => text(row.integrity_check));
 		const result: MigrationVerifyResult = {
 			phase: messages.length === 1 && messages[0] === "ok" ? "pass" : "failed",
+			admitted,
 			messages,
 			elapsedMs: Date.now() - startedAt,
 			attemptDeadlineMs,
@@ -112,6 +126,7 @@ export async function runMigrationIntegrityVerify(options: MigrationVerifyOption
 				: isSqliteCorruptionCode(code);
 		const result: MigrationVerifyResult = {
 			phase: isDeadline || !isRecognizedCorruption ? "incomplete" : "failed",
+			admitted,
 			messages: [message],
 			elapsedMs: Date.now() - startedAt,
 			attemptDeadlineMs,
@@ -142,6 +157,8 @@ export interface MigrationVerifyGateOptions {
 	readonly onProgress?: (result: MigrationVerifyResult) => void | Promise<void>;
 	/** Fires when the owner worker, including a deadline-abandoned scan, is done. */
 	readonly onWorkerSettled?: () => void | Promise<void>;
+	/** Fires when owner admission rejects before a worker job exists. */
+	readonly onAdmissionFailure?: (error: unknown) => void;
 	readonly publishStatus?: (state: "healthy" | "corrupt" | "degraded", messages?: readonly string[]) => void;
 	/** Reset a stronger global latch only after a confirmed clean pass. */
 	readonly resetGlobalLatch?: () => void;
@@ -154,6 +171,7 @@ export interface MigrationVerifyGateOptions {
 export interface MigrationVerifyGateResult {
 	readonly phase: MigrationVerifyResult["phase"] | "parked" | "terminal";
 	readonly attemptCount: number;
+	readonly admitted: boolean;
 	readonly scheduled: boolean;
 }
 
@@ -249,7 +267,7 @@ export async function runMigrationIntegrityVerifyGate(
 			phase: checkpoint.status,
 			attemptCount: checkpoint.attemptCount,
 		});
-		return { phase: "terminal", attemptCount: checkpoint.attemptCount, scheduled: false };
+		return { phase: "terminal", attemptCount: checkpoint.attemptCount, admitted: false, scheduled: false };
 	}
 
 	options.publishStatus?.("degraded", ["degraded:integrity-unverified"]);
@@ -267,6 +285,7 @@ export async function runMigrationIntegrityVerifyGate(
 				attemptDeadlineMs,
 				onProgress: options.onProgress,
 				onWorkerSettled: options.onWorkerSettled,
+				onAdmissionFailure: options.onAdmissionFailure,
 			}))
 	)();
 	if (options.runAttempt !== undefined) await options.onProgress?.(result);
@@ -284,7 +303,7 @@ export async function runMigrationIntegrityVerifyGate(
 		options.resetGlobalLatch?.();
 		options.publishStatus?.("healthy");
 		options.log?.("Global integrity check passed; rollback backup pruned", { elapsedMs: result.elapsedMs });
-		return { phase: "pass", attemptCount, scheduled: false };
+		return { phase: "pass", attemptCount, admitted: result.admitted, scheduled: false };
 	}
 	if (result.phase === "failed") {
 		// Publish the confirmed corruption before touching the checkpoint. A
@@ -307,7 +326,7 @@ export async function runMigrationIntegrityVerifyGate(
 			messages: result.messages,
 			elapsedMs: result.elapsedMs,
 		});
-		return { phase: "failed", attemptCount, scheduled: false };
+		return { phase: "failed", attemptCount, admitted: result.admitted, scheduled: false };
 	}
 
 	options.log?.("degraded:integrity-unverified", {
@@ -321,7 +340,7 @@ export async function runMigrationIntegrityVerifyGate(
 			rollbackBackup: "retained",
 			operatorSignal: true,
 		});
-		return { phase: "parked", attemptCount, scheduled: false };
+		return { phase: "parked", attemptCount, admitted: result.admitted, scheduled: false };
 	}
 
 	const schedule = options.scheduleNextAttempt ?? defaultScheduleNextAttempt;
@@ -342,5 +361,5 @@ export async function runMigrationIntegrityVerifyGate(
 		intervalMs: MIGRATION_VERIFY_RETRY_INTERVAL_MS,
 		elapsedMs: result.elapsedMs,
 	});
-	return { phase: "incomplete", attemptCount, scheduled: true };
+	return { phase: "incomplete", attemptCount, admitted: result.admitted, scheduled: true };
 }
