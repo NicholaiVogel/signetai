@@ -3,7 +3,17 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbOwnerClient } from "./db-owner-client";
@@ -354,7 +364,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:344");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:354");
 	});
 
 	test("write statements expose the number of affected rows", () => {
@@ -1053,6 +1063,61 @@ describe("DbAccessor", () => {
 		expect(readFileSync(backupPath)).toEqual(source);
 		expect(existsSync(staleBackupPath)).toBe(false);
 		expect(existsSync(`${staleBackupPath}.cursor.json`)).toBe(false);
+	});
+
+	test("rejects a cursor whose destination is a symlink without truncating its target", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("symlink migration backup resume fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const targetPath = `${dbPath}.target`;
+		const symlinkPath = `${dbPath}.bak-v76-9000`;
+		writeFileSync(targetPath, Buffer.from("target must remain intact"));
+		symlinkSync(targetPath, symlinkPath);
+		writeFileSync(
+			`${symlinkPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: symlinkPath,
+				offset: 8,
+			}),
+		);
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 77);
+
+		expect(backupPath).not.toBe(symlinkPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(readFileSync(targetPath)).toEqual(Buffer.from("target must remain intact"));
+		expect(existsSync(symlinkPath)).toBe(false);
+	});
+
+	test("rejects a cursor whose destination is a directory without deleting it", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("directory migration backup resume fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const directoryPath = `${dbPath}.bak-v78-9000`;
+		mkdirSync(directoryPath);
+		writeFileSync(
+			`${directoryPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: directoryPath,
+				offset: 8,
+			}),
+		);
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 79);
+
+		expect(backupPath).not.toBe(directoryPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(statSync(directoryPath).isDirectory()).toBe(true);
 	});
 
 	test("truncates an oversized destination to the durable cursor before resuming", async () => {

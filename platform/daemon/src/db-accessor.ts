@@ -9,6 +9,7 @@
 import {
 	copyFileSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readFileSync,
 	readdirSync,
@@ -711,6 +712,15 @@ export class MigrationBackupAdmissionError extends Error {
 	}
 }
 
+function assertMigrationStartupBudget(deadlineAt: number | undefined, stage: string): void {
+	if (deadlineAt !== undefined && Date.now() >= deadlineAt - MIGRATION_BACKUP_STARTUP_RESERVE_MS) {
+		throw new MigrationBackupAdmissionError(
+			"throughput",
+			`migration backup startup budget exhausted before ${stage}; resume cursor retained`,
+		);
+	}
+}
+
 interface MigrationBackupCursor {
 	readonly sourcePath: string;
 	readonly sourceSize: number;
@@ -1038,25 +1048,61 @@ async function readMigrationBackupCursor(
 				destination !== undefined &&
 				destination === join(dir, basename(destination)) &&
 				basename(destination).startsWith(`${base}.bak-v`);
-			const destinationExists = destination !== undefined && existsSync(destination);
-			const destinationSize = destinationExists ? statSync(destination).size : undefined;
+			let destinationStat: ReturnType<typeof lstatSync> | undefined;
+			let destinationExists = false;
+			if (destination !== undefined) {
+				try {
+					destinationStat = lstatSync(destination);
+					destinationExists = true;
+				} catch (error) {
+					if (!isMissingPathError(error)) throw error;
+				}
+			}
+			const regularDestinationStat = destinationStat?.isFile() === true ? destinationStat : undefined;
+			const destinationIsRegularFile = regularDestinationStat !== undefined;
+			const destinationSize = regularDestinationStat?.size;
 			const cursorOffsetValid =
 				typeof parsed.offset === "number" &&
 				Number.isInteger(parsed.offset) &&
 				parsed.offset >= 0 &&
 				parsed.offset <= sourceSize;
 			const destinationSizeValid =
-				destinationExists && destinationSize !== undefined && cursorOffsetValid && destinationSize >= parsed.offset;
+				destinationIsRegularFile &&
+				destinationSize !== undefined &&
+				cursorOffsetValid &&
+				destinationSize >= parsed.offset;
+			if (
+				cursorMatchesSource &&
+				safeDestination &&
+				cursorOffsetValid &&
+				destinationExists &&
+				!destinationIsRegularFile
+			) {
+				try {
+					// A cursor must never be allowed to remove a directory or follow a
+					// symlink. unlinkSync removes only the named directory entry.
+					unlinkSync(destination);
+				} catch (error) {
+					migrationBackupDeps.log(
+						`[db-accessor] Ignored non-regular migration backup destination ${destination}: ${readErrorMessage(error)}`,
+					);
+				}
+				try {
+					unlinkSync(cursorPath);
+				} catch (error) {
+					if (!isMissingPathError(error)) throw error;
+				}
+			}
 			if (!cursorMatchesSource || !safeDestination || !cursorOffsetValid || !destinationSizeValid) {
 				if (
 					cursorMatchesSource &&
 					safeDestination &&
 					cursorOffsetValid &&
-					destinationExists &&
+					destinationIsRegularFile &&
 					destinationSize !== undefined &&
 					destinationSize < parsed.offset
 				) {
-					await rmAsync(destination, { force: true, recursive: true });
+					await rmAsync(destination, { force: true });
 					await rmAsync(cursorPath, { force: true });
 				}
 				continue;
@@ -1529,14 +1575,10 @@ function finishDbAccessorInit(
 	// Run schema migrations — this is the sole schema authority.
 	// Failures here are fatal: the daemon must not start on bad schema.
 	const auditHighWaterMark = migrationAuditHighWaterMark(writeConn);
-	if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
-		throw new MigrationBackupAdmissionError(
-			"throughput",
-			"migration backup startup budget exhausted before migrations; resume cursor retained",
-		);
-	}
+	assertMigrationStartupBudget(deadlineAt, "migrations");
 	runMigrations(toMigrationDb(writeConn));
 	if (migrationBackup !== null && migrationBackup !== undefined) {
+		assertMigrationStartupBudget(deadlineAt, "migration artifact verification");
 		// Startup only checks bounded schema artifacts for the migrations this
 		// run applied. The retained rollback point is pruned by post-ready
 		// incremental integrity maintenance after it passes.
@@ -1546,10 +1588,12 @@ function finishDbAccessorInit(
 	// Record one-time conversion state only after migrations have succeeded.
 	// The conversion itself is deliberately post-ready because VACUUM can
 	// block the event loop for minutes on a large legacy database (#1493).
+	assertMigrationStartupBudget(deadlineAt, "vacuum conversion state");
 	ensureVacuumConversionState(toMigrationDb(writeConn));
 
 	// Ensure FTS5 virtual table exists — may be missing on upgrades from
 	// older installs where the table was dropped or never created.
+	assertMigrationStartupBudget(deadlineAt, "FTS setup");
 	resetFtsIndexState();
 	ensureFtsTable(writeConn, { deferBackfill: true });
 	const ftsIntegrity = readMemoriesFtsIntegrity(toFtsSchemaQueryDb(writeConn));
@@ -1567,6 +1611,7 @@ function finishDbAccessorInit(
 	// Ensure vec_embeddings virtual table exists with the configured dimensions.
 	// Older tables may lack the TEXT id column or carry stale FLOAT[N] dims.
 	if (vecExtPath) {
+		assertMigrationStartupBudget(deadlineAt, "vector setup");
 		const vecDimensions = embeddingIndexState.active.dimensions;
 		try {
 			ensureVecTable(writeConn, vecDimensions);
@@ -1578,9 +1623,11 @@ function finishDbAccessorInit(
 			console.warn("[db-accessor] vec0 unavailable after extension load:", vecLoadError);
 		}
 		if (vecLoaded) {
+			assertMigrationStartupBudget(deadlineAt, "vector embedding backfill");
 			try {
-				backfillVecEmbeddings(writeConn, vecDimensions);
+				backfillVecEmbeddings(writeConn, vecDimensions, deadlineAt);
 			} catch (err) {
+				if (err instanceof MigrationBackupAdmissionError) throw err;
 				// Backfill failure is a data issue (e.g. bad row, schema mismatch),
 				// not a runtime unavailability — vector search stays enabled.
 				console.warn("[db-accessor] vec backfill partial:", err instanceof Error ? err.message : String(err));
@@ -1749,7 +1796,7 @@ function countSkippedVecEmbeddingsRows(db: SqliteDatabase, expectedDimensions: n
 	return skippedRow?.n ?? 0;
 }
 
-function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number): void {
+function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number, deadlineAt?: number): void {
 	// Directly query for missing rows instead of comparing counts.
 	// Count comparison is racy — a row can exist in embeddings but not
 	// vec_embeddings even when counts match (e.g. after a crash mid-sync).
@@ -1769,7 +1816,8 @@ function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number): 
 	let migrated = 0;
 	try {
 		db.exec("BEGIN");
-		for (const row of rows) {
+		for (const [index, row] of rows.entries()) {
+			if (index % 100 === 0) assertMigrationStartupBudget(deadlineAt, "vector embedding backfill");
 			try {
 				const vec = new Float32Array(
 					row.vector.buffer.slice(row.vector.byteOffset, row.vector.byteOffset + row.vector.byteLength),
@@ -1795,6 +1843,7 @@ function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number): 
 		console.log(`[db-accessor] Backfilled ${migrated}/${rows.length} missing embeddings into vec_embeddings`);
 	}
 
+	assertMigrationStartupBudget(deadlineAt, "vector embedding cleanup");
 	// Clean orphaned vec_embeddings rows (phantom IDs from prior sync bugs)
 	try {
 		const orphanRow = db

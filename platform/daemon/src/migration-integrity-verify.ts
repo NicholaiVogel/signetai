@@ -53,7 +53,13 @@ export interface MigrationVerifyOptions {
 export function migrationVerifyAttemptDeadlineMs(databaseSizeBytes: number): number {
 	const sizeBytes = Number.isFinite(databaseSizeBytes) ? Math.max(0, databaseSizeBytes) : 0;
 	const sizeAllowanceMs = Math.ceil(sizeBytes / MIGRATION_VERIFY_SCAN_BYTES_PER_SECOND) * 1000;
-	return Math.min(MIGRATION_VERIFY_MAX_ATTEMPT_DEADLINE_MS, MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS + sizeAllowanceMs);
+	// The hard cap bounds the base case for small databases; size scaling stays
+	// uncapped so a large database can still receive the time its scan demands.
+	const sizeDerivedBudgetMs = MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS + sizeAllowanceMs;
+	return Math.max(
+		sizeDerivedBudgetMs,
+		Math.min(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS, MIGRATION_VERIFY_MAX_ATTEMPT_DEADLINE_MS),
+	);
 }
 
 interface IntegrityCheckRow {

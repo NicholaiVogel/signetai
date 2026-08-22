@@ -175,6 +175,9 @@ describe("migration integrity verify gate", () => {
 		expect(migrationVerifyAttemptDeadlineMs(0)).toBe(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS);
 		expect(migrationVerifyAttemptDeadlineMs(10 * 1024 * 1024)).toBe(MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS + 1000);
 		expect(migrationVerifyAttemptDeadlineMs(20 * 1024 * 1024)).toBeGreaterThan(migrationVerifyAttemptDeadlineMs(1024));
+		expect(migrationVerifyAttemptDeadlineMs(7 * 1024 * 1024 * 1024)).toBe(
+			MIGRATION_VERIFY_ATTEMPT_DEADLINE_MS + 717_000,
+		);
 		expect(MIGRATION_VERIFY_RETRY_INTERVAL_MS).toBe(30 * 60_000);
 	});
 
