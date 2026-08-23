@@ -11,6 +11,7 @@
 
 import type { DbOwnerClient } from "./db-owner-client";
 import { DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS } from "./db-owner-protocol";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import {
 	incrementMigrationVerifyAttempt,
@@ -28,6 +29,45 @@ export const MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS = 8;
 export const MIGRATION_VERIFY_SETUP_REJECTION_MAX_ATTEMPTS = 3;
 const MIGRATION_VERIFY_SCAN_BYTES_PER_SECOND = 64 * 1024 * 1024;
 export { MIGRATION_VERIFY_PARKED_STATUS, MIGRATION_VERIFY_FAILED_STATUS };
+
+export function migrationVerifyVerdictPath(backupPath: string): string {
+	return `${backupPath}.verdict.json`;
+}
+
+export function readMigrationVerifySidecarStatus(backupPath: string): string | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(migrationVerifyVerdictPath(backupPath), "utf8")) as {
+			status?: unknown;
+		};
+		return typeof parsed.status === "string" ? parsed.status : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function writeMigrationVerifyTerminalVerdict(
+	backupPath: string,
+	status: typeof MIGRATION_VERIFY_PARKED_STATUS | typeof MIGRATION_VERIFY_FAILED_STATUS,
+	findingsCount: number,
+	log?: (message: string, details?: Record<string, unknown>) => void,
+): void {
+	const verdictPath = migrationVerifyVerdictPath(backupPath);
+	const tempPath = `${verdictPath}.tmp-${process.pid}`;
+	try {
+		writeFileSync(
+			tempPath,
+			`${JSON.stringify({ status, classifiedAt: new Date().toISOString(), findingsCount })}\n`,
+			"utf8",
+		);
+		renameSync(tempPath, verdictPath);
+	} catch (error) {
+		log?.("Migration integrity terminal verdict sidecar write failed", {
+			status,
+			verdictPath,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
 
 export interface MigrationVerifyResult {
 	/** "pass" — global integrity_check returned a single "ok" row. */
@@ -314,6 +354,12 @@ export async function runMigrationIntegrityVerifyGate(
 		// corrupt database or rejected owner must not erase the verdict that
 		// callers use to fail readiness closed.
 		options.publishStatus?.("corrupt", result.messages);
+		writeMigrationVerifyTerminalVerdict(
+			options.backupPath,
+			MIGRATION_VERIFY_FAILED_STATUS,
+			result.messages.length,
+			options.log,
+		);
 		try {
 			await store.markTerminal(MIGRATION_VERIFY_FAILED_STATUS);
 		} catch (error) {
@@ -338,6 +384,12 @@ export async function runMigrationIntegrityVerifyGate(
 		rollbackBackup: "retained",
 	});
 	if (attemptCount >= MIGRATION_VERIFY_MAX_INCOMPLETE_ATTEMPTS) {
+		writeMigrationVerifyTerminalVerdict(
+			options.backupPath,
+			MIGRATION_VERIFY_PARKED_STATUS,
+			result.messages.length,
+			options.log,
+		);
 		await store.markTerminal(MIGRATION_VERIFY_PARKED_STATUS);
 		options.log?.("degraded:integrity-unverified", {
 			attemptCount,

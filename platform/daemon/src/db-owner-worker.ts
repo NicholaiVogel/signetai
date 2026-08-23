@@ -207,6 +207,7 @@ export function runDbOwnerWorker(): void {
 	let foregroundStreak = 0;
 	const MAX_FOREGROUND_BURST = 8;
 	let activeJobId: string | null = null;
+	let writeBlocked = false;
 	let draining = false;
 
 	function nextJob(): DbOwnerJob | undefined {
@@ -670,6 +671,11 @@ export function runDbOwnerWorker(): void {
 	let recallAccessorReady = false;
 
 	async function executeRecall(payload: DbOwnerRecallPayload): Promise<unknown> {
+		if (writeBlocked) {
+			const error = new Error("DB owner writes are blocked while database integrity is unresolved");
+			error.name = "DB_OWNER_WRITES_BLOCKED";
+			throw error;
+		}
 		if (process.env.SIGNET_DB_OWNER_RECALL_WORKER !== "1") {
 			throw new Error("DB owner recall jobs require a recall worker");
 		}
@@ -709,7 +715,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:710" },
+			{ siteToken: "db-owner-worker.ts:716" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
@@ -878,6 +884,18 @@ export function runDbOwnerWorker(): void {
 		if (command.type === "cancel") {
 			if (!shouldRecordDbOwnerCancellation(command.jobId, activeJobId, foregroundQueue, maintenanceQueue)) return;
 			cancelled.add(command.jobId);
+			return;
+		}
+		if (command.type === "set_write_blocked") {
+			writeBlocked = command.blocked;
+			return;
+		}
+		if (writeBlocked && command.job.lane !== "read") {
+			failed(
+				command.job.id,
+				"DB_OWNER_WRITES_BLOCKED",
+				"DB owner writes are blocked while database integrity is unresolved",
+			);
 			return;
 		}
 		const maxDeadlineMs =

@@ -267,6 +267,7 @@ export interface DbOwnerJobMetrics {
 export type DbOwnerCommand =
 	| { readonly type: "submit"; readonly job: DbOwnerJob }
 	| { readonly type: "cancel"; readonly jobId: string }
+	| { readonly type: "set_write_blocked"; readonly blocked: boolean }
 	| { readonly type: "shutdown" };
 
 export type DbOwnerFailureCause = "provider_unavailable" | "internal_error";

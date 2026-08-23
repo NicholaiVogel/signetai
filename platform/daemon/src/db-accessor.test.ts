@@ -745,8 +745,12 @@ describe("DbAccessor", () => {
 			readVerificationCheckpoint: () => "complete",
 		});
 
-		expect(operations.slice(0, 2)).toEqual([`unlink:${staleName}`, `unlink:${staleName}.cursor.json`]);
-		expect(operations[2]).toContain("copy:test.db.bak-v62-6000");
+		expect(operations.slice(0, 3)).toEqual([
+			`unlink:${staleName}`,
+			`unlink:${staleName}.verdict.json`,
+			`unlink:${staleName}.cursor.json`,
+		]);
+		expect(operations[3]).toContain("copy:test.db.bak-v62-6000");
 	});
 
 	test("preserves and refuses a stale rollback point with a failed checkpoint", () => {

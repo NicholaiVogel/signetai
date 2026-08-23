@@ -57,6 +57,7 @@ import {
 import {
 	createMigrationVerifySetupRetry,
 	migrationVerifyCheckpointKey,
+	readMigrationVerifySidecarStatus,
 	runMigrationIntegrityVerifyGate,
 } from "./migration-integrity-verify";
 import {
@@ -293,6 +294,7 @@ let dbOwnerClient: DbOwnerClient | null = null;
 let dbOwnerMaintenanceHandle: DbOwnerMaintenance | null = null;
 let globalVerifyInFlight = false;
 let migrationIntegrityWritesBlocked = false;
+let recallDbOwner: DbOwnerClient | null = null;
 let dreamingWorkerHandle: DreamingWorkerHandle | null = null;
 let reflectionWorkerHandle: ReflectionWorkerHandle | null = null;
 let embeddingTrackerHandle: EmbeddingTrackerHandle | null = null;
@@ -312,9 +314,17 @@ let checkpointPruneTimer: ReturnType<typeof setInterval> | undefined;
 function armMigrationIntegrityWriteBlock(): void {
 	migrationIntegrityWritesBlocked = true;
 	setDatabaseIntegrityWritesBlocked(true);
+	dbOwnerClient?.setWriteBlocked(true);
+	recallDbOwner?.setWriteBlocked(true);
 }
 
-async function readRetainedMigrationVerifyStatus(owner: DbOwnerClient, checkpointKey: string): Promise<string | null> {
+async function readRetainedMigrationVerifyStatus(
+	owner: DbOwnerClient,
+	checkpointKey: string,
+	backupPath: string,
+): Promise<string | null> {
+	const sidecarStatus = readMigrationVerifySidecarStatus(backupPath);
+	if (sidecarStatus !== undefined) return sidecarStatus;
 	const handle = owner.submit<{ readonly status?: unknown } | undefined>(
 		{
 			kind: "query",
@@ -408,7 +418,8 @@ export function createRecallDbOwnerOptions(sqlitePath: string | undefined): DbOw
 
 // Recall uses its own child-process lane so request reads never wait behind
 // maintenance or write work in the generic owner.
-const recallDbOwner = createDbOwnerClient(createRecallDbOwnerOptions(sqliteRuntime.choice?.path));
+const recallOwner = createDbOwnerClient(createRecallDbOwnerOptions(sqliteRuntime.choice?.path));
+recallDbOwner = recallOwner;
 
 registerGlobalMiddleware(app);
 getOrCreateInferenceRouter(resolveDefaultBasePath());
@@ -417,7 +428,7 @@ mountHealthRoutes(app);
 mountMcpRoute(app);
 registerAuthRoutes(app);
 
-registerMemoryRoutes(app, { recallOwner: recallDbOwner });
+registerMemoryRoutes(app, { recallOwner });
 registerHooksRoutes(app);
 registerKnowledgeRoutes(app);
 registerOntologyRoutes(app);
@@ -832,7 +843,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:835" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:846" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -875,7 +886,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:857" },
+			{ siteToken: "daemon.ts:868" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -952,7 +963,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:948" },
+			{ siteToken: "daemon.ts:959" },
 		);
 	} catch {
 		return false;
@@ -1576,7 +1587,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1562", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1573", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1644,7 +1655,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1645", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1656", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -1966,7 +1977,8 @@ async function cleanup() {
 		await dbOwnerClient.close();
 		dbOwnerClient = null;
 	}
-	await recallDbOwner.close();
+	await recallDbOwner?.close();
+	recallDbOwner = null;
 	closeDbAccessor();
 
 	if (watcher) {
@@ -2170,12 +2182,18 @@ async function main() {
 	// accessor for status and recovery guidance.
 	const retainedMigrationBackupPath = pendingMigrationBackupPath(MEMORY_DB);
 	let retainedMigrationCorrupt = false;
+	let retainedMigrationStatus: string | null = null;
 	let retainedMigrationReadFailed = false;
 	if (retainedMigrationBackupPath !== null) {
 		try {
+			retainedMigrationStatus = await readRetainedMigrationVerifyStatus(
+				owner,
+				migrationVerifyCheckpointKey(retainedMigrationBackupPath),
+				retainedMigrationBackupPath,
+			);
 			retainedMigrationCorrupt =
-				(await readRetainedMigrationVerifyStatus(owner, migrationVerifyCheckpointKey(retainedMigrationBackupPath))) ===
-				MIGRATION_VERIFY_FAILED_STATUS;
+				retainedMigrationStatus === MIGRATION_VERIFY_FAILED_STATUS ||
+				retainedMigrationStatus === MIGRATION_VERIFY_PARKED_STATUS;
 		} catch (error) {
 			retainedMigrationReadFailed = true;
 			logger.warn(
@@ -2190,7 +2208,15 @@ async function main() {
 	const initResult = retainedMigrationCorrupt ? null : await owner.initialize(AGENTS_DIR);
 	if (retainedMigrationCorrupt) {
 		armMigrationIntegrityWriteBlock();
-		publishDatabaseIntegrityStatus("corrupt", ["global integrity verification previously failed"], owner);
+		publishDatabaseIntegrityStatus(
+			retainedMigrationStatus === MIGRATION_VERIFY_FAILED_STATUS ? "corrupt" : "degraded",
+			[
+				retainedMigrationStatus === MIGRATION_VERIFY_FAILED_STATUS
+					? "global integrity verification previously failed"
+					: "degraded:integrity-unverified",
+			],
+			owner,
+		);
 		initDbAccessorReadOnly(MEMORY_DB, initExtensionPath ?? "", { agentsDir: AGENTS_DIR });
 		logger.error(
 			"startup-recovery",
@@ -2246,14 +2272,18 @@ async function main() {
 		? bundled
 		: (resolveEmbeddedWorkerPath("synthesis-render-worker") ?? join(__dirname, "synthesis-render-worker.ts"));
 	let synthWorker: Worker | null = null;
-	try {
-		synthWorker = new Worker(workerPath);
-	} catch (err) {
-		logger.warn(
-			"daemon",
-			"synthesis worker creation failed — using sync rendering",
-			err instanceof Error ? err : undefined,
-		);
+	if (!migrationIntegrityWritesBlocked) {
+		try {
+			synthWorker = new Worker(workerPath);
+		} catch (err) {
+			logger.warn(
+				"daemon",
+				"synthesis worker creation failed — using sync rendering",
+				err instanceof Error ? err : undefined,
+			);
+		}
+	} else {
+		logger.warn("startup-recovery", "Skipping synthesis worker initialization because database writes are fail-closed");
 	}
 	let synthWorkerReady = false;
 	if (synthWorker) {
@@ -2403,11 +2433,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2399", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2429", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2409",
+								siteToken: "daemon.ts:2439",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2499,51 +2529,83 @@ async function main() {
 	let daemonPendingVecBackfill = pendingVecBackfillFromInitialization;
 	let vecBackfillScheduled = false;
 	const probePendingVecBackfill = async (): Promise<boolean> => {
+		if (migrationIntegrityWritesBlocked) return false;
 		const activeEmbedding = await getDbAccessor().withReadDbAsync(
 			(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-			{ siteToken: "daemon.ts:2502", operation: "maintenance.vec-backfill-config" },
+			{ siteToken: "daemon.ts:2533", operation: "maintenance.vec-backfill-config" },
 		);
 		return await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions);
 	};
+	const probePendingVecBackfillWithRetry = async (): Promise<boolean> => {
+		for (let attempt = 0; attempt < 2; attempt++) {
+			if (migrationIntegrityWritesBlocked) return false;
+			try {
+				return await probePendingVecBackfill();
+			} catch (error) {
+				logger.warn("startup-recovery", "Vector backfill probe failed", {
+					attempt: attempt + 1,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				if (attempt === 0) await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+			}
+		}
+		logger.error("startup-recovery", "Vector backfill probe gave up after one retry");
+		return false;
+	};
 	const schedulePendingVecBackfill = (): void => {
 		if (migrationIntegrityWritesBlocked || vecBackfillScheduled) return;
-		void probePendingVecBackfill().then((pending) => {
-			daemonPendingVecBackfill = pending;
-			if (!pending || migrationIntegrityWritesBlocked) return;
-			vecBackfillScheduled = true;
-			deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
-				try {
-					const activeEmbedding = await getDbAccessor().withReadDbAsync(
-						(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-						{ siteToken: "daemon.ts:2516", operation: "maintenance.vec-backfill-config" },
-					);
-					if (migrationIntegrityWritesBlocked || !(await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions)))
-						return;
-					await getDbAccessor().withWriteDbAsync(
-						(db) =>
-							backfillVecEmbeddings(db, activeEmbedding.dimensions, Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS),
-						{ siteToken: "daemon.ts:2521", operation: "maintenance.vec-backfill" },
-					);
-					logger.info("startup-recovery", "Post-ready vector embedding backfill slice complete", {
-						pending: daemonPendingVecBackfill,
-					});
-					const stillPending = await probePendingVecBackfill();
-					vecBackfillScheduled = false;
-					if (stillPending) schedulePendingVecBackfill();
-				} finally {
-					vecBackfillScheduled = false;
-				}
+		void probePendingVecBackfillWithRetry()
+			.then((pending) => {
+				daemonPendingVecBackfill = pending;
+				if (!pending || migrationIntegrityWritesBlocked) return;
+				vecBackfillScheduled = true;
+				deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
+					try {
+						const activeEmbedding = await getDbAccessor().withReadDbAsync(
+							(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
+							{ siteToken: "daemon.ts:2564", operation: "maintenance.vec-backfill-config" },
+						);
+						if (
+							migrationIntegrityWritesBlocked ||
+							!(await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions))
+						)
+							return;
+						await getDbAccessor().withWriteDbAsync(
+							(db) =>
+								backfillVecEmbeddings(db, activeEmbedding.dimensions, Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS),
+							{ siteToken: "daemon.ts:2521", operation: "maintenance.vec-backfill" },
+						);
+						logger.info("startup-recovery", "Post-ready vector embedding backfill slice complete", {
+							pending: daemonPendingVecBackfill,
+						});
+						const stillPending = await probePendingVecBackfillWithRetry();
+						vecBackfillScheduled = false;
+						if (stillPending) schedulePendingVecBackfill();
+					} finally {
+						vecBackfillScheduled = false;
+					}
+				});
+			})
+			.catch((error: unknown) => {
+				logger.error("startup-recovery", "Vector backfill probe unexpectedly rejected", undefined, {
+					error: error instanceof Error ? error.message : String(error),
+				});
 			});
-		});
 	};
 	// The owner initialization result seeds daemon knowledge, while this probe
 	// remains authoritative so restarts and cross-process drift cannot strand a
 	// pending backfill behind the owner boundary.
 	if (daemonPendingVecBackfill) schedulePendingVecBackfill();
 	else
-		void probePendingVecBackfill().then((pending) => {
-			if (pending) schedulePendingVecBackfill();
-		});
+		void probePendingVecBackfillWithRetry()
+			.then((pending) => {
+				if (pending) schedulePendingVecBackfill();
+			})
+			.catch((error: unknown) => {
+				logger.error("startup-recovery", "Vector backfill probe unexpectedly rejected", undefined, {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 
 	// Grace period: defer all background workers for 10s after startup so the
 	// event-loop monitor can calibrate and migrations can settle before any
