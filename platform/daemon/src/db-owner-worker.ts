@@ -746,7 +746,11 @@ export function runDbOwnerWorker(): void {
 		const { initDbAccessorAsync } = await import("./db-accessor");
 		const initialization = await initDbAccessorAsync(ownerDbPath, { agentsDir, deadlineAt: context?.deadlineAt });
 		if (context !== undefined) context.committed = true;
-		return { initialized: true, pendingVecBackfill: initialization.pendingVecBackfill };
+		return {
+			initialized: true,
+			pendingVecBackfill: initialization.pendingVecBackfill,
+			...(initialization.deferredMigrationVerification ? { deferredMigrationVerification: true } : {}),
+		};
 	}
 
 	async function execute(job: DbOwnerJob, context: JobExecutionContext): Promise<unknown> {

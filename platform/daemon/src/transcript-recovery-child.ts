@@ -10,6 +10,9 @@ interface ChildInput {
 }
 
 async function main(): Promise<void> {
+	if (process.env.SIGNET_DB_WRITES_BLOCKED === "1") {
+		throw new Error("Transcript recovery child refused writable accessor because database writes are blocked");
+	}
 	const encoded = process.env.SIGNET_TRANSCRIPT_RECOVERY_INPUT;
 	if (encoded === undefined) throw new Error("Transcript recovery child input is missing");
 	const input = JSON.parse(encoded) as ChildInput;

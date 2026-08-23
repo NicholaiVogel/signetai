@@ -204,6 +204,8 @@ export interface MigrationVerifyGateOptions {
 	/** Fires when owner admission rejects before a worker job exists. */
 	readonly onAdmissionFailure?: (error: unknown) => void;
 	readonly publishStatus?: (state: "healthy" | "corrupt" | "degraded", messages?: readonly string[]) => void;
+	/** Arm the process-wide write block only after the terminal verdict is durable. */
+	readonly armWriteBlock?: () => void;
 	/** Reset a stronger global latch only after a confirmed clean pass. */
 	readonly resetGlobalLatch?: () => void;
 	readonly log?: (message: string, details?: Record<string, unknown>) => void;
@@ -350,9 +352,10 @@ export async function runMigrationIntegrityVerifyGate(
 		return { phase: "pass", attemptCount, admitted: result.admitted, scheduled: false };
 	}
 	if (result.phase === "failed") {
-		// Publish the confirmed corruption before touching the checkpoint. A
-		// corrupt database or rejected owner must not erase the verdict that
-		// callers use to fail readiness closed.
+		// Persist both terminal fallbacks before arming the process-wide write
+		// block. Once armed, the owner rejects every non-read submission, so
+		// publishing first and marking afterward can leave neither verdict
+		// durable across a restart.
 		options.publishStatus?.("corrupt", result.messages);
 		writeMigrationVerifyTerminalVerdict(
 			options.backupPath,
@@ -360,18 +363,20 @@ export async function runMigrationIntegrityVerifyGate(
 			result.messages.length,
 			options.log,
 		);
+		let persistenceError: unknown;
 		try {
 			await store.markTerminal(MIGRATION_VERIFY_FAILED_STATUS);
 		} catch (error) {
+			persistenceError = error;
 			options.log?.("Global integrity check failed; terminal checkpoint persistence rejected", {
 				error: error instanceof Error ? error.message : String(error),
 				status: MIGRATION_VERIFY_FAILED_STATUS,
 			});
-			// Re-throw so the existing setup-retry controller retries terminal
-			// persistence; the corruption publication above remains durable in
-			// the process even when the checkpoint write is unavailable.
-			throw error;
 		}
+		// Memory safety takes precedence over checkpoint persistence. The
+		// sidecar above remains the durable fallback when the owner is down.
+		options.armWriteBlock?.();
+		if (persistenceError !== undefined) throw persistenceError;
 		options.log?.("Global integrity check FAILED; rollback backup retained", {
 			messages: result.messages,
 			elapsedMs: result.elapsedMs,

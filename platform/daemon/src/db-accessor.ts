@@ -1690,12 +1690,19 @@ function verifyMigrationArtifacts(writeConn: SqliteDatabase, auditHighWaterMark:
 export function initDbAccessor(path: string, opts?: { readonly agentsDir?: string }): void {
 	const writeConn = openDbAccessorConnection(path, opts);
 	const deferMigrations = shouldDeferPendingMigration(path, toMigrationDb(writeConn) as never, migrationBackupDeps);
+	if (deferMigrations) {
+		writeConn.close();
+		initDbAccessorReadOnly(path, vecExtPath ?? "", opts);
+		return;
+	}
 	const migrationBackup = deferMigrations ? null : backupBeforePendingMigrations(writeConn, path);
 	finishDbAccessorInit(writeConn, opts, migrationBackup, undefined, deferMigrations);
 }
 
 export interface DbAccessorInitializationResult {
 	readonly pendingVecBackfill: boolean;
+	/** Prior-generation verification is still running; this accessor is readonly. */
+	readonly deferredMigrationVerification: boolean;
 }
 
 export async function initDbAccessorAsync(
@@ -1704,10 +1711,15 @@ export async function initDbAccessorAsync(
 ): Promise<DbAccessorInitializationResult> {
 	const writeConn = openDbAccessorConnection(path, opts);
 	const deferMigrations = shouldDeferPendingMigration(path, toMigrationDb(writeConn) as never, migrationBackupDeps);
+	if (deferMigrations) {
+		writeConn.close();
+		initDbAccessorReadOnly(path, vecExtPath ?? "", opts);
+		return { pendingVecBackfill: false, deferredMigrationVerification: true };
+	}
 	const migrationBackup = deferMigrations
 		? null
 		: await backupBeforePendingMigrationsAsync(writeConn, path, opts?.deadlineAt);
-	return finishDbAccessorInit(writeConn, opts, migrationBackup, opts?.deadlineAt, deferMigrations);
+	return finishDbAccessorInit(writeConn, opts, migrationBackup, opts?.deadlineAt, false);
 }
 
 function openDbAccessorConnection(path: string, opts?: { readonly agentsDir?: string }): SqliteDatabase {
@@ -1823,12 +1835,12 @@ function finishDbAccessorInit(
 		if (vecLoaded) {
 			const pendingVecBackfill = hasMissingVecEmbeddings(writeConn, vecDimensions);
 			accessor = createAccessor(writeConn);
-			return { pendingVecBackfill };
+			return { pendingVecBackfill, deferredMigrationVerification: false };
 		}
 	}
 
 	accessor = createAccessor(writeConn);
-	return { pendingVecBackfill: false };
+	return { pendingVecBackfill: false, deferredMigrationVerification: false };
 }
 
 export function initDbAccessorLite(dbPathParam: string, vecExtensionPath: string): void {
@@ -2012,6 +2024,8 @@ function missingVecEmbeddingsRows(
 
 export interface VecBackfillOptions {
 	readonly maxBatches?: number;
+	/** Bound one synchronous writer turn so the daemon can yield between slices. */
+	readonly batchSize?: number;
 }
 
 export function backfillVecEmbeddings(
@@ -2023,13 +2037,17 @@ export function backfillVecEmbeddings(
 	// Directly query for missing rows instead of comparing counts.
 	// Count comparison is racy — a row can exist in embeddings but not
 	// vec_embeddings even when counts match (e.g. after a crash mid-sync).
+	const batchSize = Math.max(
+		1,
+		Math.min(options.batchSize ?? VEC_EMBEDDING_BACKFILL_BATCH_SIZE, VEC_EMBEDDING_BACKFILL_BATCH_SIZE),
+	);
 	const insert = db.prepare("INSERT OR REPLACE INTO vec_embeddings (id, embedding) VALUES (?, ?)");
 	let lastId = "";
 	let migrated = 0;
 	let totalRows = 0;
 	let batches = 0;
 	let deferred = false;
-	let lastBatchSize = VEC_EMBEDDING_BACKFILL_BATCH_SIZE;
+	let lastBatchSize = batchSize;
 	let remainingRowsAtLeast = 0;
 	const stopForBudget = (error: unknown, remainingHint = 1): boolean => {
 		if (!(error instanceof MigrationBackupAdmissionError) || error.reason !== "throughput") throw error;
@@ -2041,7 +2059,7 @@ export function backfillVecEmbeddings(
 	for (;;) {
 		// Keep both the anti-join and the transaction inside the startup budget.
 		if (options.maxBatches !== undefined && batches >= options.maxBatches) {
-			if (lastBatchSize < VEC_EMBEDDING_BACKFILL_BATCH_SIZE) break;
+			if (lastBatchSize < batchSize) break;
 			deferred = true;
 			pendingVecBackfillDimensions = expectedDimensions;
 			remainingRowsAtLeast = 1;
@@ -2053,7 +2071,7 @@ export function backfillVecEmbeddings(
 			if (stopForBudget(error)) break;
 			throw error;
 		}
-		const rows = missingVecEmbeddingsRows(db, expectedDimensions, lastId, VEC_EMBEDDING_BACKFILL_BATCH_SIZE);
+		const rows = missingVecEmbeddingsRows(db, expectedDimensions, lastId, batchSize);
 		if (rows.length === 0) break;
 		lastBatchSize = rows.length;
 		batches++;
@@ -2104,7 +2122,7 @@ export function backfillVecEmbeddings(
 			}
 			throw e;
 		}
-		if (rows.length < VEC_EMBEDDING_BACKFILL_BATCH_SIZE) break;
+		if (rows.length < batchSize) break;
 	}
 
 	if (migrated > 0) {

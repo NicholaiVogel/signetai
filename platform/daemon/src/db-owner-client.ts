@@ -96,6 +96,7 @@ export interface DbOwnerJobHandle<Result> {
 export interface DbOwnerInitializationResult {
 	readonly initialized: true;
 	readonly pendingVecBackfill: boolean;
+	readonly deferredMigrationVerification?: boolean;
 }
 
 export interface DbOwnerClient {

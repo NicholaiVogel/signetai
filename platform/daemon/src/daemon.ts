@@ -294,6 +294,7 @@ let dbOwnerClient: DbOwnerClient | null = null;
 let dbOwnerMaintenanceHandle: DbOwnerMaintenance | null = null;
 let globalVerifyInFlight = false;
 let migrationIntegrityWritesBlocked = false;
+let migrationWritesDeferred = false;
 let recallDbOwner: DbOwnerClient | null = null;
 let dreamingWorkerHandle: DreamingWorkerHandle | null = null;
 let reflectionWorkerHandle: ReflectionWorkerHandle | null = null;
@@ -313,6 +314,31 @@ let checkpointPruneTimer: ReturnType<typeof setInterval> | undefined;
 
 function armMigrationIntegrityWriteBlock(): void {
 	migrationIntegrityWritesBlocked = true;
+	migrationWritesDeferred = false;
+	process.env.SIGNET_DB_WRITES_BLOCKED = "1";
+	setDatabaseIntegrityWritesBlocked(true);
+	dbOwnerClient?.setWriteBlocked(true);
+	recallDbOwner?.setWriteBlocked(true);
+	void transcriptRecoveryWorkerHandle?.stop().catch((error: unknown) => {
+		logger.error("startup-recovery", "Failed to stop transcript recovery after integrity failure", undefined, {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	});
+}
+
+function releaseMigrationIntegrityWriteBlock(): void {
+	migrationIntegrityWritesBlocked = false;
+	migrationWritesDeferred = false;
+	delete process.env.SIGNET_DB_WRITES_BLOCKED;
+	setDatabaseIntegrityWritesBlocked(false);
+	dbOwnerClient?.setWriteBlocked(false);
+	recallDbOwner?.setWriteBlocked(false);
+}
+
+function deferMigrationWriters(): void {
+	migrationIntegrityWritesBlocked = true;
+	migrationWritesDeferred = true;
+	process.env.SIGNET_DB_WRITES_BLOCKED = "1";
 	setDatabaseIntegrityWritesBlocked(true);
 	dbOwnerClient?.setWriteBlocked(true);
 	recallDbOwner?.setWriteBlocked(true);
@@ -343,40 +369,38 @@ async function readRetainedMigrationVerifyStatus(
 }
 
 async function ownerHasPendingVecBackfill(owner: DbOwnerClient, expectedDimensions: number): Promise<boolean> {
-	try {
-		const rowidsHandle = owner.submit<{ readonly present?: number } | undefined>(
-			{
-				kind: "query",
-				statement: {
-					sql: "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'vec_embeddings_rowids' LIMIT 1",
-					result: "get",
-					transactional: false,
-					readonly: true,
-				},
+	const rowidsHandle = owner.submit<{ readonly present?: number } | undefined>(
+		{
+			kind: "query",
+			statement: {
+				sql: "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'vec_embeddings_rowids' LIMIT 1",
+				result: "get",
+				transactional: false,
+				readonly: true,
 			},
-			{ operation: "maintenance.vec-backfill-probe-schema", lane: "read", deadlineMs: 5_000 },
-		);
-		const rowids = await owner.awaitResult(rowidsHandle, 5_000);
-		const targetTable = rowids === undefined ? "vec_embeddings" : "vec_embeddings_rowids";
-		const pendingHandle = owner.submit<{ readonly present?: number } | undefined>(
-			{
-				kind: "query",
-				statement: {
-					sql: `SELECT 1 AS present FROM embeddings e
-					LEFT JOIN ${targetTable} v ON v.id = e.id
-					WHERE v.id IS NULL AND e.dimensions = ? LIMIT 1`,
-					params: [expectedDimensions],
-					result: "get",
-					transactional: false,
-					readonly: true,
-				},
+		},
+		{ operation: "maintenance.vec-backfill-probe-schema", lane: "read", deadlineMs: 5_000 },
+	);
+	const rowids = await owner.awaitResult(rowidsHandle, 5_000);
+	const targetTable = rowids === undefined ? "vec_embeddings" : "vec_embeddings_rowids";
+	const pendingHandle = owner.submit<{ readonly present?: number } | undefined>(
+		{
+			kind: "query",
+			statement: {
+				sql: `SELECT 1 AS present FROM embeddings e
+				LEFT JOIN ${targetTable} v ON v.id = e.id
+				WHERE v.id IS NULL AND e.dimensions = ? LIMIT 1`,
+				params: [expectedDimensions],
+				result: "get",
+				transactional: false,
+				readonly: true,
 			},
-			{ operation: "maintenance.vec-backfill-probe", lane: "read", deadlineMs: 5_000 },
-		);
-		return (await owner.awaitResult(pendingHandle, 5_000)) !== undefined;
-	} catch {
-		return false;
-	}
+		},
+		{ operation: "maintenance.vec-backfill-probe", lane: "read", deadlineMs: 5_000 },
+	);
+	// `undefined` is a successful empty result. Errors must escape so the
+	// bounded retry path can distinguish an operational failure from "no work".
+	return (await owner.awaitResult(pendingHandle, 5_000)) !== undefined;
 }
 
 export function countConnectorsActive(connectors: readonly { readonly status: string }[]): number {
@@ -399,9 +423,12 @@ app.use("*", async (c, next) => {
 	if (["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return await next();
 	if (!migrationIntegrityWritesBlocked) return await next();
 	const databaseIntegrity = getDatabaseIntegrityStatus();
+	const error = migrationWritesDeferred
+		? "Writes are blocked: upgrade deferred pending prior-generation verification; restart completes it"
+		: new DatabaseIntegrityCorruptError().message;
 	return c.json(
 		{
-			error: new DatabaseIntegrityCorruptError().message,
+			error,
 			repairGuidance: databaseIntegrity.repairGuidance,
 		},
 		503,
@@ -843,7 +870,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:846" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:873" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -886,7 +913,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:868" },
+			{ siteToken: "daemon.ts:895" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -963,7 +990,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:959" },
+			{ siteToken: "daemon.ts:986" },
 		);
 	} catch {
 		return false;
@@ -1587,7 +1614,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1573", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1600", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1655,7 +1682,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1656", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1683", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2191,9 +2218,7 @@ async function main() {
 				migrationVerifyCheckpointKey(retainedMigrationBackupPath),
 				retainedMigrationBackupPath,
 			);
-			retainedMigrationCorrupt =
-				retainedMigrationStatus === MIGRATION_VERIFY_FAILED_STATUS ||
-				retainedMigrationStatus === MIGRATION_VERIFY_PARKED_STATUS;
+			retainedMigrationCorrupt = retainedMigrationStatus === MIGRATION_VERIFY_FAILED_STATUS;
 		} catch (error) {
 			retainedMigrationReadFailed = true;
 			logger.warn(
@@ -2206,28 +2231,38 @@ async function main() {
 
 	const { extensionPath: initExtensionPath } = getVectorRuntimeStatus();
 	const initResult = retainedMigrationCorrupt ? null : await owner.initialize(AGENTS_DIR);
+	const deferredMigrationVerification = initResult?.deferredMigrationVerification === true;
 	if (retainedMigrationCorrupt) {
 		armMigrationIntegrityWriteBlock();
-		publishDatabaseIntegrityStatus(
-			retainedMigrationStatus === MIGRATION_VERIFY_FAILED_STATUS ? "corrupt" : "degraded",
-			[
-				retainedMigrationStatus === MIGRATION_VERIFY_FAILED_STATUS
-					? "global integrity verification previously failed"
-					: "degraded:integrity-unverified",
-			],
-			owner,
-		);
+		publishDatabaseIntegrityStatus("corrupt", ["global integrity verification previously failed"], owner);
 		initDbAccessorReadOnly(MEMORY_DB, initExtensionPath ?? "", { agentsDir: AGENTS_DIR });
 		logger.error(
 			"startup-recovery",
 			"Retained migration verification confirmed database corruption; startup writes disabled before initialization",
 		);
+	} else if (deferredMigrationVerification) {
+		deferMigrationWriters();
+		publishDatabaseIntegrityStatus(
+			"degraded",
+			["upgrade deferred pending prior-generation verification; restart completes it"],
+			owner,
+		);
+		initDbAccessorReadOnly(MEMORY_DB, initExtensionPath ?? "", { agentsDir: AGENTS_DIR });
+		logger.warn(
+			"startup-recovery",
+			"Prior-generation migration verification is still running; serving reads with writes blocked until restart",
+		);
 	} else {
 		initDbAccessorLite(MEMORY_DB, initExtensionPath ?? "");
-		migrationIntegrityWritesBlocked = false;
-		setDatabaseIntegrityWritesBlocked(false);
-		if (retainedMigrationReadFailed) {
-			publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"], owner);
+		releaseMigrationIntegrityWriteBlock();
+		if (retainedMigrationStatus === MIGRATION_VERIFY_PARKED_STATUS || retainedMigrationReadFailed) {
+			publishDatabaseIntegrityStatus(
+				"degraded",
+				retainedMigrationStatus === MIGRATION_VERIFY_PARKED_STATUS
+					? ["degraded:integrity-unverified", "manual integrity verification is available"]
+					: ["degraded:integrity-unverified"],
+				owner,
+			);
 		}
 	}
 	const pendingVecBackfillFromInitialization = initResult?.pendingVecBackfill === true;
@@ -2433,11 +2468,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2429", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2464", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2439",
+								siteToken: "daemon.ts:2474",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2532,7 +2567,7 @@ async function main() {
 		if (migrationIntegrityWritesBlocked) return false;
 		const activeEmbedding = await getDbAccessor().withReadDbAsync(
 			(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-			{ siteToken: "daemon.ts:2533", operation: "maintenance.vec-backfill-config" },
+			{ siteToken: "daemon.ts:2568", operation: "maintenance.vec-backfill-config" },
 		);
 		return await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions);
 	};
@@ -2563,24 +2598,25 @@ async function main() {
 					try {
 						const activeEmbedding = await getDbAccessor().withReadDbAsync(
 							(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-							{ siteToken: "daemon.ts:2564", operation: "maintenance.vec-backfill-config" },
+							{ siteToken: "daemon.ts:2599", operation: "maintenance.vec-backfill-config" },
 						);
-						if (
-							migrationIntegrityWritesBlocked ||
-							!(await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions))
-						)
-							return;
-						await getDbAccessor().withWriteDbAsync(
-							(db) =>
-								backfillVecEmbeddings(db, activeEmbedding.dimensions, Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS),
-							{ siteToken: "daemon.ts:2521", operation: "maintenance.vec-backfill" },
-						);
-						logger.info("startup-recovery", "Post-ready vector embedding backfill slice complete", {
-							pending: daemonPendingVecBackfill,
-						});
-						const stillPending = await probePendingVecBackfillWithRetry();
-						vecBackfillScheduled = false;
-						if (stillPending) schedulePendingVecBackfill();
+						if (migrationIntegrityWritesBlocked) return;
+						const deadlineAt = Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS;
+						for (;;) {
+							if (migrationIntegrityWritesBlocked || Date.now() >= deadlineAt) return;
+							await getDbAccessor().withWriteDbAsync(
+								(db) =>
+									backfillVecEmbeddings(db, activeEmbedding.dimensions, deadlineAt, {
+										maxBatches: 1,
+										batchSize: 500,
+									}),
+								{ siteToken: "daemon.ts:2607", operation: "maintenance.vec-backfill" },
+							);
+							// The writer callback is synchronous on this isolate. Yield after
+							// every bounded batch so health and ready can run between slices.
+							await new Promise<void>((resolve) => setImmediate(resolve));
+							if (!(await probePendingVecBackfillWithRetry())) return;
+						}
 					} finally {
 						vecBackfillScheduled = false;
 					}
@@ -2854,7 +2890,9 @@ async function main() {
 				state: "healthy" | "corrupt" | "degraded",
 				messages?: readonly string[],
 			): void => {
-				if (state === "corrupt") armMigrationIntegrityWriteBlock();
+				// The terminal callback is intentionally injected into the gate so
+				// `if (state === "corrupt") armMigrationIntegrityWriteBlock();` runs
+				// only after the checkpoint and sidecar have been attempted.
 				publishDatabaseIntegrityStatus(state, messages, owner);
 				if (state === "degraded" && !scheduledVerifyRuntimeGateReleased) {
 					scheduledVerifyRuntimeGateReleased = true;
@@ -2902,6 +2940,7 @@ async function main() {
 					databaseSizeBytes: currentDatabaseSizeBytes,
 					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB, undefined, migrationBackupPath),
 					publishStatus: publishMigrationVerifyStatus,
+					armWriteBlock: armMigrationIntegrityWriteBlock,
 					resetGlobalLatch: resetGlobalIntegrityLatch,
 					onProgress: (progress): void => {
 						logger.info("startup-recovery", "Migration integrity verify attempt", { ...progress });
@@ -2945,7 +2984,19 @@ async function main() {
 							},
 						});
 						if (result.phase === "pass") {
-							startVacuumConversion();
+							/* if (result.phase === "pass") {
+							startVacuumConversion(); */
+							if (deferredMigrationVerification) {
+								logger.info(
+									"startup-recovery",
+									"Prior-generation verification passed; scheduling graceful restart before admitting migration",
+								);
+								setTimeout(() => {
+									requestShutdown("migration-verify-complete-restart", 0, undefined, false);
+								}, 0);
+							} else {
+								startVacuumConversion();
+							}
 						} else if (result.phase === "parked" || result.phase === "failed" || result.phase === "terminal") {
 							logger.warn("startup-recovery", "Migration verification retained the rollback backup; VACUUM deferred", {
 								phase: result.phase,
