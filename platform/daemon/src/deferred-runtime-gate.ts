@@ -19,6 +19,8 @@ export interface DeferredRuntimeSchedulerOptions {
 	readonly schedule: (callback: () => void, delayMs: number) => unknown;
 	readonly onPipelineError: (error: unknown) => void;
 	readonly onMaintenanceError: (error: unknown) => void;
+	/** Handle an integrity callback rejection before releasing the runtime gate. */
+	readonly onIntegrityFailure?: (error: unknown) => void;
 	/** Set false when the integrity callback will release the gate itself. */
 	readonly completeIntegrityOnCallback?: boolean;
 }
@@ -51,11 +53,23 @@ export function createDeferredRuntimeGate(): DeferredRuntimeGate {
 export function createDeferredRuntimeScheduler(options: DeferredRuntimeSchedulerOptions): DeferredRuntimeScheduler {
 	const delayMs = options.delayMs ?? 30_000;
 	const completeIntegrityOnCallback = options.completeIntegrityOnCallback ?? true;
+	const handleIntegrityFailure = (error: unknown): void => {
+		try {
+			(options.onIntegrityFailure ?? options.onMaintenanceError)(error);
+		} finally {
+			// A rejected callback must never strand pipeline startup behind a gate
+			// whose producer has already failed.
+			options.gate.completeIntegrity();
+		}
+	};
 	return {
 		scheduleIntegrity: (callback): void => {
 			options.schedule(() => {
-				const completion = completeIntegrityOnCallback ? options.gate.completeIntegrity : undefined;
-				void callback().finally(completion);
+				void callback()
+					.then(() => {
+						if (completeIntegrityOnCallback) options.gate.completeIntegrity();
+					})
+					.catch(handleIntegrityFailure);
 			}, delayMs);
 		},
 		schedulePipeline: (callback): void => {

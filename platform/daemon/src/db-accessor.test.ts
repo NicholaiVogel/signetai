@@ -51,6 +51,7 @@ import {
 	vecEmbeddingsSchemaNeedsRepair,
 	isGeneratedMigrationBackupName,
 	backfillVecEmbeddings,
+	VEC_EMBEDDING_POST_READY_BUDGET_MS,
 } from "./db-accessor";
 
 function tmpDbPath(): string {
@@ -224,6 +225,32 @@ describe("DbAccessor", () => {
 		expect(result?.val).toBe("hello");
 	});
 
+	test("withWriteDbAsync admits autocommit writes without a nested transaction", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+		const acc = getDbAccessor();
+
+		await acc.withWriteTxAsync((db) => {
+			db.exec("CREATE TABLE autocommit_test (id TEXT PRIMARY KEY)");
+		});
+
+		await acc.withWriteDbAsync(
+			(db) => {
+				db.exec("BEGIN");
+				db.prepare("INSERT INTO autocommit_test (id) VALUES (?)").run("autocommit");
+				db.exec("COMMIT");
+			},
+			{ operation: "test.vec-backfill-autocommit" },
+		);
+
+		const result = await acc.withReadDbAsync(
+			(db) =>
+				db.prepare("SELECT COUNT(*) AS count FROM autocommit_test WHERE id = ?").get("autocommit") as { count: number },
+		);
+		expect(result.count).toBe(1);
+	});
+
 	test("attributes a wedged parent sync call with its file and line", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
@@ -367,7 +394,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:357");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:384");
 	});
 
 	test("write statements expose the number of affected rows", () => {
@@ -1493,6 +1520,28 @@ describe("vec_embeddings schema repair", () => {
 		expect(initSource).not.toContain("backfillVecEmbeddings(");
 		expect(initSource).toContain("pendingVecBackfill");
 		expect(initSource).toContain("hasMissingVecEmbeddings");
+	});
+
+	test("post-ready backfill budget leaves room for a real batch", () => {
+		const db = new Database(":memory:");
+		db.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB NOT NULL); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)").run("post-ready", 2, vector);
+
+		backfillVecEmbeddings(
+			{
+				exec: (sql: string) => db.exec(sql),
+				prepare: (sql: string) => db.prepare(sql),
+			} as never,
+			2,
+			Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS,
+			{ maxBatches: 1 },
+		);
+
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(1);
+		db.close();
 	});
 
 	test("backfills missing embeddings in bounded keyset batches", () => {

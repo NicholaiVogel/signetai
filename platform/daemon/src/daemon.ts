@@ -70,6 +70,7 @@ import {
 	DatabaseIntegrityCorruptError,
 	getDbAccessor,
 	getVectorRuntimeStatus,
+	VEC_EMBEDDING_POST_READY_BUDGET_MS,
 	pendingMigrationBackupPath,
 	initDbAccessorLite,
 	initDbAccessorReadOnly,
@@ -331,7 +332,7 @@ async function readRetainedMigrationVerifyStatus(owner: DbOwnerClient, checkpoin
 	return typeof row?.status === "string" ? row.status : null;
 }
 
-async function ownerHasPendingVecBackfill(owner: DbOwnerClient): Promise<boolean> {
+async function ownerHasPendingVecBackfill(owner: DbOwnerClient, expectedDimensions: number): Promise<boolean> {
 	try {
 		const rowidsHandle = owner.submit<{ readonly present?: number } | undefined>(
 			{
@@ -352,8 +353,9 @@ async function ownerHasPendingVecBackfill(owner: DbOwnerClient): Promise<boolean
 				kind: "query",
 				statement: {
 					sql: `SELECT 1 AS present FROM embeddings e
-						LEFT JOIN ${targetTable} v ON v.id = e.id
-						WHERE v.id IS NULL LIMIT 1`,
+					LEFT JOIN ${targetTable} v ON v.id = e.id
+					WHERE v.id IS NULL AND e.dimensions = ? LIMIT 1`,
+					params: [expectedDimensions],
 					result: "get",
 					transactional: false,
 					readonly: true,
@@ -830,7 +832,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:833" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:835" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -873,7 +875,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:855" },
+			{ siteToken: "daemon.ts:857" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -950,7 +952,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:946" },
+			{ siteToken: "daemon.ts:948" },
 		);
 	} catch {
 		return false;
@@ -1574,7 +1576,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1560", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1562", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1642,7 +1644,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1643", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1645", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2401,11 +2403,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2397", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2399", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2407",
+								siteToken: "daemon.ts:2409",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2485,32 +2487,47 @@ async function main() {
 				cause: "fts_index_incomplete",
 			});
 		},
+		onIntegrityFailure: (error): void => {
+			logger.error("startup-recovery", "Deferred integrity maintenance rejected", undefined, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-callback-rejected"], dbOwnerClient ?? undefined);
+		},
 		completeIntegrityOnCallback: false,
 	});
 
 	let daemonPendingVecBackfill = pendingVecBackfillFromInitialization;
 	let vecBackfillScheduled = false;
+	const probePendingVecBackfill = async (): Promise<boolean> => {
+		const activeEmbedding = await getDbAccessor().withReadDbAsync(
+			(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
+			{ siteToken: "daemon.ts:2502", operation: "maintenance.vec-backfill-config" },
+		);
+		return await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions);
+	};
 	const schedulePendingVecBackfill = (): void => {
 		if (migrationIntegrityWritesBlocked || vecBackfillScheduled) return;
-		void ownerHasPendingVecBackfill(owner).then((pending) => {
+		void probePendingVecBackfill().then((pending) => {
 			daemonPendingVecBackfill = pending;
 			if (!pending || migrationIntegrityWritesBlocked) return;
 			vecBackfillScheduled = true;
 			deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
 				try {
-					if (migrationIntegrityWritesBlocked || !(await ownerHasPendingVecBackfill(owner))) return;
 					const activeEmbedding = await getDbAccessor().withReadDbAsync(
 						(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-						{ siteToken: "daemon.ts:2502", operation: "maintenance.vec-backfill-config" },
+						{ siteToken: "daemon.ts:2516", operation: "maintenance.vec-backfill-config" },
 					);
-					await getDbAccessor().withWriteTxAsync(
-						(db) => backfillVecEmbeddings(db, activeEmbedding.dimensions, Date.now() + 5_000),
-						{ siteToken: "daemon.ts:2506", operation: "maintenance.vec-backfill" },
+					if (migrationIntegrityWritesBlocked || !(await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions)))
+						return;
+					await getDbAccessor().withWriteDbAsync(
+						(db) =>
+							backfillVecEmbeddings(db, activeEmbedding.dimensions, Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS),
+						{ siteToken: "daemon.ts:2521", operation: "maintenance.vec-backfill" },
 					);
 					logger.info("startup-recovery", "Post-ready vector embedding backfill slice complete", {
 						pending: daemonPendingVecBackfill,
 					});
-					const stillPending = await ownerHasPendingVecBackfill(owner);
+					const stillPending = await probePendingVecBackfill();
 					vecBackfillScheduled = false;
 					if (stillPending) schedulePendingVecBackfill();
 				} finally {
@@ -2524,7 +2541,7 @@ async function main() {
 	// pending backfill behind the owner boundary.
 	if (daemonPendingVecBackfill) schedulePendingVecBackfill();
 	else
-		void ownerHasPendingVecBackfill(owner).then((pending) => {
+		void probePendingVecBackfill().then((pending) => {
 			if (pending) schedulePendingVecBackfill();
 		});
 
@@ -2703,7 +2720,19 @@ async function main() {
 				logger.info("daemon", "FTS startup maintenance finished", { ...result });
 			});
 		}
+		let retainedCorruptMaintenanceLogged = false;
 		deferredRuntimeScheduler.scheduleIntegrity(async (): Promise<void> => {
+			if (retainedMigrationCorrupt) {
+				if (!retainedCorruptMaintenanceLogged) {
+					retainedCorruptMaintenanceLogged = true;
+					logger.warn(
+						"startup-recovery",
+						"Skipping all mutating post-ready maintenance because database corruption is retained",
+					);
+				}
+				deferredRuntimeGate.completeIntegrity();
+				return;
+			}
 			logFdSnapshot("server-ready");
 			writeDaemonLifecycle(AGENTS_DIR, buildLifecycleRecord("running"));
 			const owner = dbOwnerClient;
@@ -2736,6 +2765,16 @@ async function main() {
 			let migrationWritersAllowed = Promise.resolve(true);
 			let runIntegritySlice: () => Promise<void>;
 			const scheduleIntegritySlice = (delayMs: number): void => {
+				if (retainedMigrationCorrupt) {
+					if (!retainedCorruptMaintenanceLogged) {
+						retainedCorruptMaintenanceLogged = true;
+						logger.warn(
+							"startup-recovery",
+							"Skipping incremental integrity maintenance because database corruption is retained",
+						);
+					}
+					return;
+				}
 				integritySlicePending = true;
 				if (globalVerifyInFlight || integritySliceTimer !== null) return;
 				integritySliceTimer = setTimeout(() => {
@@ -2876,6 +2915,17 @@ async function main() {
 			}
 
 			runIntegritySlice = async (): Promise<void> => {
+				if (retainedMigrationCorrupt) {
+					if (!retainedCorruptMaintenanceLogged) {
+						retainedCorruptMaintenanceLogged = true;
+						logger.warn(
+							"startup-recovery",
+							"Skipping incremental integrity maintenance because database corruption is retained",
+						);
+					}
+					integritySlicePending = false;
+					return;
+				}
 				if (globalVerifyInFlight) {
 					integritySlicePending = true;
 					return;

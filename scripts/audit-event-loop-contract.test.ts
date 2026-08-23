@@ -19,8 +19,8 @@ test("the deterministic ledger retains the exact current source inventory", () =
 	expect(baseline).toHaveLength(984);
 	expect(baseline.filter((site) => site.api === "withWriteTx")).toHaveLength(73);
 	expect(baseline.filter((site) => site.api === "withReadDb")).toHaveLength(115);
-	expect(baseline.filter((site) => site.api === "withWriteTxAsync")).toHaveLength(60);
-	expect(baseline.filter((site) => site.api === "withReadDbAsync")).toHaveLength(226);
+	expect(baseline.filter((site) => site.api === "withWriteTxAsync")).toHaveLength(59);
+	expect(baseline.filter((site) => site.api === "withReadDbAsync")).toHaveLength(227);
 });
 
 test("the event-loop ledger exactly equals the current source inventory", () => {

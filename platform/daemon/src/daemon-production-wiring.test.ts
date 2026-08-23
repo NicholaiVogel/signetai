@@ -82,8 +82,12 @@ describe("daemon production DB owner wiring", () => {
 
 		expect(source).toContain('if (state === "corrupt") armMigrationIntegrityWriteBlock();');
 		expect(source).toContain("pendingVecBackfillFromInitialization");
-		expect(source).toContain("ownerHasPendingVecBackfill(owner)");
-		expect(source).not.toContain("hasPendingVecBackfill()");
+		expect(source).toContain("ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions)");
+		expect(source).toContain("WHERE v.id IS NULL AND e.dimensions = ? LIMIT 1");
+		expect(source).toContain("withWriteDbAsync");
+		expect(source).toContain("VEC_EMBEDDING_POST_READY_BUDGET_MS");
+		expect(source).toContain("if (retainedMigrationCorrupt)");
+		expect(source).toContain("Skipping incremental integrity maintenance because database corruption is retained");
 		expect(source).not.toContain("continuePendingVecBackfill");
 	});
 

@@ -314,6 +314,9 @@ export interface AsyncDbAccessor {
 	/** Admit a write transaction through the bounded async writer queue. */
 	withWriteTxAsync<T>(fn: (db: WriteDb) => T, options?: WriteAdmissionOptions): Promise<T>;
 
+	/** Admit an autocommit write session through the bounded async writer queue. */
+	withWriteDbAsync<T>(fn: (db: WriteDb) => T, options?: WriteAdmissionOptions): Promise<T>;
+
 	/** Admit a WAL checkpoint through the bounded async writer queue. */
 	checkpointWalAsync?(options?: WriteAdmissionOptions): Promise<void>;
 
@@ -1911,7 +1914,8 @@ function hasMissingVecEmbeddings(db: SqliteWriteSurface, expectedDimensions: num
 }
 
 const VEC_EMBEDDING_BACKFILL_BATCH_SIZE = 10_000;
-const VEC_EMBEDDING_POST_READY_BUDGET_MS = 5_000;
+// The migration reserve is 5s, leaving a 60s post-ready work window.
+export const VEC_EMBEDDING_POST_READY_BUDGET_MS = 65_000;
 
 let pendingVecBackfillDimensions: number | null = null;
 
@@ -2534,6 +2538,22 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 					endSyncDbCall(attribution);
 				}
 			}, options);
+		},
+
+		withWriteDbAsync<T>(fn: (db: WriteDb) => T, options?: WriteAdmissionOptions): Promise<T> {
+			return enqueueWrite(
+				() => {
+					const attribution = beginSyncDbCall("withWriteDbAsync", Date.now(), options?.siteToken);
+					try {
+						assertDatabaseIntegrityWritesAllowed();
+						return fn(writeConn);
+					} finally {
+						endSyncDbCall(attribution);
+					}
+				},
+				options,
+				false,
+			);
 		},
 
 		checkpointWalAsync(options?: WriteAdmissionOptions): Promise<void> {

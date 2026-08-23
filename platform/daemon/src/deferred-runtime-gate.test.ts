@@ -111,4 +111,31 @@ describe("deferred runtime startup contention (#1609)", () => {
 		await Bun.sleep(0);
 		expect(pipelineStarted).toBe(true);
 	});
+
+	it("releases the gate and reports a rejected integrity callback", async () => {
+		const gate = createDeferredRuntimeGate();
+		const callbacks: Array<() => void> = [];
+		const events: string[] = [];
+		const scheduler = createDeferredRuntimeScheduler({
+			gate,
+			completeIntegrityOnCallback: false,
+			schedule: (callback) => callbacks.push(callback),
+			onPipelineError: (error) => events.push(`pipeline-error:${String(error)}`),
+			onMaintenanceError: (error) => events.push(`maintenance-error:${String(error)}`),
+			onIntegrityFailure: (error) => events.push(`integrity-error:${String(error)}`),
+		});
+		scheduler.scheduleIntegrity(async () => {
+			throw new Error("integrity failed");
+		});
+		scheduler.schedulePipeline(async () => {
+			events.push("pipeline:start");
+		});
+
+		callbacks[1]?.();
+		callbacks[0]?.();
+		await Bun.sleep(0);
+		await Bun.sleep(0);
+
+		expect(events).toEqual(["integrity-error:Error: integrity failed", "pipeline:start"]);
+	});
 });
