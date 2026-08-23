@@ -886,7 +886,7 @@ describe("DbAccessor", () => {
 		expect(operations).toContain(`unlink:${staleName}`);
 		expect(operations).not.toContain(`unlink:${currentName}`);
 	});
-	test("refuses a migration backup when statfs is degenerate instead of copy-probing", () => {
+	test("proceeds when statfs reports zero-sized blocks", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
 		const dbDir = join(dbPath, "..");
@@ -895,73 +895,74 @@ describe("DbAccessor", () => {
 		const files = new Map<string, number>();
 		const operations: string[] = [];
 
-		expect(() =>
-			backupBeforeMigration({ exec: () => {} }, dbPath, 64, {
-				copyFileSync: () => {
-					operations.push("copy");
-				},
-				readdirSync: () => Array.from(files.keys()),
-				statSync: (path) => ({ mtimeMs: files.get(String(path).slice(dbDir.length + 1)) ?? 0, size: 8 }),
-				statfsSync: () => ({ bavail: 0, bsize: 0 }),
-				unlinkSync: () => {
-					operations.push("unlink");
-				},
-				now: () => 6000,
-				log: () => {},
-			}),
-		).toThrow(DbSpacePreflightError);
-		// Admission never falls back to an unbounded copy probe: it refuses
-		// with the metrics it has and writes nothing.
-		expect(operations).toEqual([]);
-		expect(files.has("test.db.bak-v64-6000")).toBe(false);
+		const backupPath = backupBeforeMigration({ exec: () => {} }, dbPath, 64, {
+			copyFileSync: (_source, destination) => {
+				operations.push("copy");
+				files.set(String(destination).slice(dbDir.length + 1), 1);
+			},
+			readdirSync: () => Array.from(files.keys()),
+			statSync: (path) => ({ mtimeMs: files.get(String(path).slice(dbDir.length + 1)) ?? 0, size: 8 }),
+			statfsSync: () => ({ bavail: 0, bsize: 0 }),
+			unlinkSync: (path) => {
+				operations.push("unlink");
+				files.delete(String(path).slice(dbDir.length + 1));
+			},
+			now: () => 6000,
+			log: () => {},
+		});
+		expect(backupPath).toBe(`${dbPath}.bak-v64-6000`);
+		expect(operations).toEqual(["copy"]);
+		expect(files.has("test.db.bak-v64-6000")).toBe(true);
 	});
 
-	test("refuses when statfs returns a degenerate block size instead of write-probing", () => {
+	test("proceeds when statfs returns a degenerate block size", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
 		writeFileSync(dbPath, "database");
 		const operations: string[] = [];
 
-		expect(() =>
-			backupBeforeMigration({ exec: () => {} }, dbPath, 65, {
-				copyFileSync: () => {
-					operations.push("copy");
-				},
-				readdirSync: () => [],
-				statSync: () => ({ mtimeMs: 0, size: 1024 * 1024 + 1 }),
-				statfsSync: () => ({ bavail: 244199454, bsize: 0 }),
-				unlinkSync: () => {
-					operations.push("unlink");
-				},
-				now: () => 7000,
-				log: () => {},
-			}),
-		).toThrow(DbSpacePreflightError);
-		expect(operations).toEqual([]);
+		const backupPath = backupBeforeMigration({ exec: () => {} }, dbPath, 65, {
+			copyFileSync: () => {
+				operations.push("copy");
+			},
+			readdirSync: () => [],
+			statSync: () => ({ mtimeMs: 0, size: 1024 * 1024 + 1 }),
+			statfsSync: () => ({ bavail: 244199454, bsize: 0 }),
+			unlinkSync: () => {
+				operations.push("unlink");
+			},
+			now: () => 7000,
+			log: () => {},
+		});
+		expect(backupPath).toBe(`${dbPath}.bak-v65-7000`);
+		expect(operations).toEqual(["copy"]);
 	});
 
-	test("does not fabricate free space when statfs is degenerate", () => {
+	test("proceeds with a warning when statfs free space is unknown", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
+		const dbDir = join(dbPath, "..");
 		writeFileSync(dbPath, "database");
+		const files = new Map<string, number>();
+		const warnings: string[] = [];
 
-		let error: DbSpacePreflightError | undefined;
-		try {
-			backupBeforeMigration({ exec: () => {} }, dbPath, 65, {
-				copyFileSync: () => {},
-				readdirSync: () => [],
-				statSync: () => ({ mtimeMs: 0, size: 8 }),
-				statfsSync: () => ({ bavail: 0, bsize: 0 }),
-				unlinkSync: () => {},
-				now: () => 7000,
-				log: () => {},
-			});
-		} catch (err) {
-			error = err as DbSpacePreflightError;
-		}
-		expect(error).toBeInstanceOf(DbSpacePreflightError);
-		if (!error) throw new Error("expected DbSpacePreflightError");
-		expect((error.metrics as unknown as { freeBytes: number | null }).freeBytes).toBeNull();
+		const backupPath = backupBeforeMigration({ exec: () => {} }, dbPath, 65, {
+			copyFileSync: (_source, destination) => {
+				files.set(String(destination).slice(dbDir.length + 1), 1);
+			},
+			readdirSync: () => Array.from(files.keys()),
+			statSync: (path) => ({ mtimeMs: 0, size: files.get(String(path).slice(dbDir.length + 1)) ?? 8 }),
+			statfsSync: () => ({ bavail: 0, bsize: 0 }),
+			unlinkSync: (path) => {
+				files.delete(String(path).slice(dbDir.length + 1));
+			},
+			now: () => 7000,
+			log: (message) => warnings.push(message),
+		});
+
+		expect(backupPath).toBe(`${dbPath}.bak-v65-7000`);
+		expect(files.has("test.db.bak-v65-7000")).toBe(true);
+		expect(warnings.some((message) => message.includes("free space is unknown"))).toBe(true);
 	});
 
 	test("still blocks a genuinely verified-full migration backup", () => {
