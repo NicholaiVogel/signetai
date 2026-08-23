@@ -336,14 +336,14 @@ export function getVacuumConversionStatus(accessor: DbAccessor): VacuumConversio
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
 	return accessor.withReadDb(
 		(db: import("./db-accessor").ReadDb) => readStatusFromDb(toPragmaReadDb(db)),
-		"db-vacuum.ts:335",
+		"db-vacuum.ts:337",
 	);
 }
 
 /** Async durable conversion-state lookup for background workers. */
 export async function getVacuumConversionStatusAsync(accessor: DbAccessor): Promise<VacuumConversionStatus> {
 	return await accessor.withReadDbAsync((db) => readStatusFromDb(toPragmaReadDb(db)), {
-		siteToken: "db-vacuum.ts:343",
+		siteToken: "db-vacuum.ts:345",
 		operation: "maintenance.vacuum.status",
 	});
 }
@@ -451,7 +451,7 @@ export async function reclaimIncrementalVacuum(
 		if (opts.owner) remaining = await dbOwnerIncrementalVacuum(opts.owner, batchPages);
 		else {
 			if (!accessor.incrementalVacuumAsync) throw new Error("incremental vacuum operation is unavailable");
-			remaining = await accessor.incrementalVacuumAsync({ siteToken: "db-vacuum.ts:452" });
+			remaining = await accessor.incrementalVacuumAsync({ siteToken: "db-vacuum.ts:454" });
 		}
 		const progressed = before === null ? Math.max(0, batchPages) : Math.max(0, before - remaining);
 		reclaimed += progressed;
@@ -504,7 +504,7 @@ export function startVacuumConversionWorker(
 						lastError: null,
 					});
 				},
-				{ siteToken: "db-vacuum.ts:490", operation: "maintenance.vacuum.mark-running" },
+				{ siteToken: "db-vacuum.ts:492", operation: "maintenance.vacuum.mark-running" },
 			);
 
 			const running = await getVacuumConversionStatusAsync(accessor);
@@ -519,7 +519,7 @@ export function startVacuumConversionWorker(
 					await dbOwnerVacuumConversion(opts.owner);
 				} else {
 					if (!accessor.vacuumConversionAsync) throw new Error("VACUUM conversion operation is unavailable");
-					await accessor.vacuumConversionAsync({ siteToken: "db-vacuum.ts:520" });
+					await accessor.vacuumConversionAsync({ siteToken: "db-vacuum.ts:522" });
 				}
 				await accessor.withWriteTxAsync(
 					(db) => {
@@ -534,7 +534,7 @@ export function startVacuumConversionWorker(
 							lastError: null,
 						});
 					},
-					{ siteToken: "db-vacuum.ts:522", operation: "maintenance.vacuum.mark-completed" },
+					{ siteToken: "db-vacuum.ts:524", operation: "maintenance.vacuum.mark-completed" },
 				);
 				logger.info("db-vacuum", "Post-ready conversion worker completed");
 			} catch (error) {
@@ -552,7 +552,7 @@ export function startVacuumConversionWorker(
 							lastError: message.slice(0, 500),
 						});
 					},
-					{ siteToken: "db-vacuum.ts:540", operation: "maintenance.vacuum.mark-failed" },
+					{ siteToken: "db-vacuum.ts:542", operation: "maintenance.vacuum.mark-failed" },
 				);
 				logger.error(
 					"db-vacuum",
