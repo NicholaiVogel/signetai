@@ -78,7 +78,9 @@ describe("DbAccessor", () => {
 		initDbAccessor(dbPath);
 		const acc = getDbAccessor();
 		expect(acc).toBeTruthy();
-		expect(readdirSync(join(dbPath, "..")).filter((name) => name.includes(".bak-v"))).toHaveLength(1);
+		expect(
+			readdirSync(join(dbPath, "..")).filter((name) => name.includes(".bak-v") && !name.endsWith(".cursor.json")),
+		).toHaveLength(1);
 	});
 
 	test("initializes a multi-chunk pending-migration database without inline global verification", async () => {
@@ -87,6 +89,9 @@ describe("DbAccessor", () => {
 
 		initDbAccessor(dbPath);
 		closeDbAccessor();
+		for (const name of readdirSync(join(dbPath, ".."))) {
+			if (name.startsWith("test.db.bak-v") && !name.endsWith(".cursor.json")) rmSync(join(dbPath, "..", name));
+		}
 		const fixture = new Database(dbPath);
 		fixture.exec("CREATE TABLE migration_large_fixture (payload BLOB NOT NULL)");
 		fixture
@@ -181,7 +186,7 @@ describe("DbAccessor", () => {
 		initDbAccessor(dbPath);
 		expect(isFtsIndexIncomplete()).toBe(true);
 	});
-	test("retains the pre-migration backup when migration fails", () => {
+	test("defers migration when a retained rollback backup is unverified", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
 
@@ -200,11 +205,13 @@ describe("DbAccessor", () => {
 			db.close();
 		}
 
-		expect(() => initDbAccessor(dbPath)).toThrow();
+		expect(() => initDbAccessor(dbPath)).not.toThrow();
 
-		const backupNames = readdirSync(join(dbPath, "..")).filter((name) => name.includes(".bak-v"));
+		const backupNames = readdirSync(join(dbPath, "..")).filter(
+			(name) => name.includes(".bak-v") && !name.endsWith(".cursor.json"),
+		);
 		expect(backupNames).toHaveLength(1);
-		expect(statSync(join(dbPath, "..", backupNames[0])).size).toBe(statSync(dbPath).size);
+		expect(existsSync(join(dbPath, "..", backupNames[0]))).toBe(true);
 	});
 
 	test("withWriteTx provides working write access", () => {
@@ -394,7 +401,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:384");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:391");
 	});
 
 	test("write statements expose the number of affected rows", () => {
@@ -600,7 +607,7 @@ describe("DbAccessor", () => {
 		closeDbAccessor();
 	});
 
-	test("prunes old migration backups before copying a new one", () => {
+	test("preserves cursorless legacy migration backups during pruning", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
 		const dbDir = join(dbPath, "..");
@@ -631,13 +638,18 @@ describe("DbAccessor", () => {
 			log: () => {},
 		});
 
-		// Existing rollback points remain intact through admission and are pruned
-		// only after the replacement backup is complete on disk.
-		expect(operations[0]).toContain("copy:");
-		expect(operations).toContain("unlink:test.db.bak-v61-4000");
-		expect(operations).toContain("unlink:test.db.bak-v58-1000");
-		expect(Array.from(files.keys()).sort()).toEqual(["test.db.bak-v62-6000"]);
-		expect(files.size).toBe(1);
+		// Cursorless generated-name backups are legacy rollback points and remain
+		// protected until their own verification pass classifies them.
+		expect(operations).toEqual([operations[0]]);
+		expect(Array.from(files.keys()).sort()).toEqual([
+			"test.db.bak-v58-1000",
+			"test.db.bak-v59-2000",
+			"test.db.bak-v60-3000",
+			"test.db.bak-v61-4000",
+			"test.db.bak-v62-5000",
+			"test.db.bak-v62-6000",
+		]);
+		expect(files.size).toBe(6);
 	});
 
 	test("excludes non-regular migration backups from integrity pruning", () => {
@@ -653,9 +665,23 @@ describe("DbAccessor", () => {
 
 		pruneMigrationBackupsAfterIntegrity(dbPath);
 
-		expect(existsSync(regularBackupPath)).toBe(false);
+		expect(existsSync(regularBackupPath)).toBe(true);
 		expect(existsSync(directoryBackupPath)).toBe(true);
 		expect(existsSync(operatorBackupPath)).toBe(true);
+	});
+
+	test("protects a cursorless legacy backup until its verification pass", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, "database");
+		const legacyBackupPath = `${dbPath}.bak-v89-1000`;
+		writeFileSync(legacyBackupPath, "legacy rollback");
+
+		pruneMigrationBackupsAfterIntegrity(dbPath);
+		expect(existsSync(legacyBackupPath)).toBe(true);
+
+		pruneMigrationBackupsAfterIntegrity(dbPath, undefined, legacyBackupPath);
+		expect(existsSync(legacyBackupPath)).toBe(false);
 	});
 
 	test("shares the exact generated backup-name predicate", () => {
@@ -691,6 +717,9 @@ describe("DbAccessor", () => {
 					const name = String(path).slice(dbDir.length + 1);
 					files.delete(name);
 				},
+				now: () => 6000,
+				log: () => {},
+				readVerificationCheckpoint: () => "complete",
 			}),
 		).toThrow(DbSpacePreflightError);
 		// Admission refusal must preserve the only completed-unverified rollback
@@ -1266,6 +1295,17 @@ describe("DbAccessor", () => {
 		const oldBackupPath = `${dbPath}.bak-v70-7000`;
 		writeFileSync(oldBackupPath, source);
 		const sourceStat = statSync(dbPath);
+		writeFileSync(
+			`${oldBackupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length - 1,
+				sourceMtimeMs: sourceStat.mtimeMs - 1,
+				destination: oldBackupPath,
+				offset: source.length,
+			}),
+		);
+		writeFileSync(`${oldBackupPath}.verdict.json`, JSON.stringify({ status: "complete" }));
 		const resumablePath = `${dbPath}.bak-v71-8000`;
 		mkdirSync(resumablePath);
 		const offset = 4;
@@ -1312,6 +1352,7 @@ describe("DbAccessor", () => {
 			},
 			now: () => 0,
 			log: () => {},
+			readVerificationCheckpoint: () => "complete",
 		};
 
 		expect(() => pruneMigrationBackupsAfterIntegrity(dbPath, deps)).toThrow("unlink denied");
@@ -1573,6 +1614,50 @@ describe("vec_embeddings schema repair", () => {
 
 		expect(batchQueries).toBeGreaterThan(1);
 		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(10_001);
+		db.close();
+	});
+
+	test("quarantines malformed rows and continues backfill around them", () => {
+		const db = new Database(":memory:");
+		db.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB NOT NULL); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
+		);
+		db.exec(
+			"CREATE TRIGGER reject_malformed_vec BEFORE INSERT ON vec_embeddings WHEN NEW.id = 'bad-row' BEGIN SELECT RAISE(ABORT, 'malformed vector'); END",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		const insert = db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)");
+		insert.run("good-1", 2, vector);
+		insert.run("bad-row", 2, vector);
+		insert.run("good-2", 2, vector);
+
+		backfillVecEmbeddings(
+			{
+				exec: (sql: string) => db.exec(sql),
+				prepare: (sql: string) => db.prepare(sql),
+			} as never,
+			2,
+		);
+
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(2);
+		expect(
+			db.prepare("SELECT rowid, dimensions, reason, quarantinedAt FROM vec_embeddings_quarantine").all(),
+		).toMatchObject([
+			{
+				rowid: "bad-row",
+				dimensions: 2,
+				reason: "malformed vector",
+			},
+		]);
+		// A follow-up probe sees no eligible pending row for the quarantined ID.
+		backfillVecEmbeddings(
+			{
+				exec: (sql: string) => db.exec(sql),
+				prepare: (sql: string) => db.prepare(sql),
+			} as never,
+			2,
+		);
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(2);
 		db.close();
 	});
 });

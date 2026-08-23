@@ -903,6 +903,16 @@ function migrationBackupCursor(
 	}
 }
 
+/**
+ * Backups emitted by releases before cursor sidecars existed are still valid
+ * rollback points. Treat a generated name with no cursor as an unverified
+ * legacy backup; malformed cursor sidecars remain a separate, unclassified
+ * case and are never admitted as evidence.
+ */
+function isCursorlessLegacyMigrationBackup(backupPath: string, cursor: unknown): boolean {
+	return cursor === undefined && !existsSync(`${backupPath}.cursor.json`);
+}
+
 /** Reclaim only backups whose retained cursor proves an older source generation. */
 function pruneStaleMigrationBackups(
 	dbPath: string,
@@ -914,6 +924,13 @@ function pruneStaleMigrationBackups(
 	for (const backup of migrationBackups(dbPath, deps)) {
 		const backupPath = join(dirname(dbPath), backup.name);
 		const cursor = migrationBackupCursor(dbPath, backupPath);
+		if (isCursorlessLegacyMigrationBackup(backupPath, cursor)) {
+			const legacyStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+			if (legacyStatus !== MIGRATION_CHECKPOINT_COMPLETE_STATUS) {
+				deps.log(`[db-accessor] Preserving unverified legacy rollback point: ${backup.name}`);
+				continue;
+			}
+		}
 		if (cursor === undefined || (cursor.sourceSize === sourceSize && cursor.sourceMtimeMs === sourceMtimeMs)) continue;
 		const checkpointStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
 		if (checkpointStatus !== MIGRATION_CHECKPOINT_COMPLETE_STATUS) {
@@ -950,6 +967,15 @@ function assertNoRetainedUnverifiedMigrationBackup(
 	for (const backup of migrationBackups(dbPath, deps)) {
 		const backupPath = join(dirname(dbPath), backup.name);
 		const cursor = migrationBackupCursor(dbPath, backupPath);
+		if (isCursorlessLegacyMigrationBackup(backupPath, cursor)) {
+			const legacyStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+			if (legacyStatus !== MIGRATION_CHECKPOINT_COMPLETE_STATUS) {
+				throw new MigrationBackupAdmissionError(
+					"retained-unverified-backup",
+					`retained legacy rollback file ${backup.name} is unverified; restore or rename the retained file before retrying`,
+				);
+			}
+		}
 		if (cursor === undefined || (cursor.sourceSize === sourceSize && cursor.sourceMtimeMs === sourceMtimeMs)) continue;
 		const checkpointStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
 		if (checkpointStatus === MIGRATION_CHECKPOINT_COMPLETE_STATUS) continue;
@@ -972,6 +998,18 @@ function shouldDeferPendingMigration(dbPath: string, db: MigrationBackupDb, deps
 	for (const backup of migrationBackups(dbPath, deps)) {
 		const backupPath = join(dirname(dbPath), backup.name);
 		const cursor = migrationBackupCursor(dbPath, backupPath);
+		if (isCursorlessLegacyMigrationBackup(backupPath, cursor)) {
+			const legacyStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+			if (legacyStatus === MIGRATION_CHECKPOINT_COMPLETE_STATUS) continue;
+			if (isTerminalMigrationBackupStatus(legacyStatus)) {
+				throw new MigrationBackupAdmissionError(
+					"retained-unverified-backup",
+					`retained legacy rollback file ${backup.name} has terminal verification status ${legacyStatus}; operator repair is required`,
+				);
+			}
+			deferred = true;
+			continue;
+		}
 		if (cursor === undefined || (cursor.sourceSize === source.size && cursor.sourceMtimeMs === source.mtimeMs))
 			continue;
 		const status = readMigrationBackupCheckpointStatus(backupPath, db, deps);
@@ -1004,12 +1042,16 @@ function pruneMigrationBackups(
 		try {
 			const backupPath = join(dir, old.name);
 			const cursor = migrationBackupCursor(dbPath, backupPath);
+			const legacyUnverified =
+				isCursorlessLegacyMigrationBackup(backupPath, cursor) && backupPath !== verifiedBackupPath;
 			if (
-				cursor !== undefined &&
+				(legacyUnverified || cursor !== undefined) &&
 				backupPath !== verifiedBackupPath &&
 				readMigrationBackupCheckpointStatus(backupPath, db, deps) !== MIGRATION_CHECKPOINT_COMPLETE_STATUS
 			) {
-				deps.log(`[db-accessor] Preserving unverified rollback point: ${old.name}`);
+				deps.log(
+					`[db-accessor] Preserving ${legacyUnverified ? "unverified legacy " : "unverified "}rollback point: ${old.name}`,
+				);
 				continue;
 			}
 			try {
@@ -1952,13 +1994,27 @@ export function vecEmbeddingsSchemaNeedsRepair(sql: string | null | undefined, e
 	return readVecEmbeddingDimensions(sql) !== expectedDimensions;
 }
 
+function ensureVecEmbeddingsQuarantineTable(db: SqliteWriteSurface): void {
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS vec_embeddings_quarantine (
+			rowid TEXT PRIMARY KEY,
+			dimensions INTEGER NOT NULL,
+			reason TEXT NOT NULL,
+			quarantinedAt TEXT NOT NULL
+		)
+	`);
+}
+
 function ensureVecTable(db: SqliteDatabase, expectedDimensions: number): void {
 	const existing = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'vec_embeddings' AND type = 'table'").get() as
 		| { sql: string }
 		| undefined;
 
 	if (existing) {
-		if (!vecEmbeddingsSchemaNeedsRepair(existing.sql, expectedDimensions)) return;
+		if (!vecEmbeddingsSchemaNeedsRepair(existing.sql, expectedDimensions)) {
+			ensureVecEmbeddingsQuarantineTable(db);
+			return;
+		}
 		if (/\bid\s+TEXT\b/i.test(existing.sql)) {
 			console.warn(`[db-accessor] vec_embeddings schema drift detected; recreating with FLOAT[${expectedDimensions}]`);
 		}
@@ -1971,6 +2027,7 @@ function ensureVecTable(db: SqliteDatabase, expectedDimensions: number): void {
 			embedding FLOAT[${expectedDimensions}] distance_metric=cosine
 		);
 	`);
+	ensureVecEmbeddingsQuarantineTable(db);
 }
 
 function vecRowidsTableAvailable(db: SqliteWriteSurface): boolean {
@@ -1990,7 +2047,8 @@ function hasMissingVecEmbeddings(db: SqliteWriteSurface, expectedDimensions: num
 				.prepare(
 					`SELECT 1 FROM embeddings e
 					 LEFT JOIN ${targetTable} v ON v.id = e.id
-					 WHERE v.id IS NULL AND e.dimensions = ? LIMIT 1`,
+					 LEFT JOIN vec_embeddings_quarantine q ON q.rowid = e.id
+					 WHERE v.id IS NULL AND q.rowid IS NULL AND e.dimensions = ? LIMIT 1`,
 				)
 				.get(expectedDimensions) !== undefined
 		);
@@ -2022,7 +2080,8 @@ function missingVecEmbeddingsRows(
 		.prepare(
 			`SELECT e.id, e.vector FROM embeddings e
 			 LEFT JOIN ${targetTable} v ON v.id = e.id
-			 WHERE v.id IS NULL AND e.dimensions = ? AND e.id > ?
+			 LEFT JOIN vec_embeddings_quarantine q ON q.rowid = e.id
+			 WHERE v.id IS NULL AND q.rowid IS NULL AND e.dimensions = ? AND e.id > ?
 			 ORDER BY e.id LIMIT ?`,
 		)
 		.all(expectedDimensions, lastId, limit) as Array<{ id: string; vector: Buffer }>;
@@ -2040,6 +2099,9 @@ export function backfillVecEmbeddings(
 	deadlineAt?: number,
 	options: VecBackfillOptions = {},
 ): void {
+	// Keep quarantine state durable across restarts and exclude it from every
+	// subsequent pending probe. The table contains IDs and diagnostics only.
+	ensureVecEmbeddingsQuarantineTable(db);
 	// Directly query for missing rows instead of comparing counts.
 	// Count comparison is racy — a row can exist in embeddings but not
 	// vec_embeddings even when counts match (e.g. after a crash mid-sync).
@@ -2048,6 +2110,9 @@ export function backfillVecEmbeddings(
 		Math.min(options.batchSize ?? VEC_EMBEDDING_BACKFILL_BATCH_SIZE, VEC_EMBEDDING_BACKFILL_BATCH_SIZE),
 	);
 	const insert = db.prepare("INSERT OR REPLACE INTO vec_embeddings (id, embedding) VALUES (?, ?)");
+	const quarantine = db.prepare(
+		"INSERT OR IGNORE INTO vec_embeddings_quarantine (rowid, dimensions, reason, quarantinedAt) VALUES (?, ?, ?, ?)",
+	);
 	let lastId = "";
 	let migrated = 0;
 	let totalRows = 0;
@@ -2094,8 +2159,13 @@ export function backfillVecEmbeddings(
 					);
 					insert.run(row.id, vec);
 					migrated++;
-				} catch {
-					// Skip malformed rows
+				} catch (error) {
+					const reason = (error instanceof Error ? error.message : String(error)).slice(0, 1_000);
+					const result = quarantine.run(row.id, expectedDimensions, reason, new Date().toISOString());
+					if (result.changes > 0) {
+						// Log once per durable quarantine row; retries do not spam logs.
+						console.warn(`[db-accessor] Quarantined malformed embedding row ${row.id}: ${reason}`);
+					}
 				}
 				batchLastId = row.id;
 				processedRows++;

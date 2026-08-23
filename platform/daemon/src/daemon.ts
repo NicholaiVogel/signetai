@@ -58,9 +58,9 @@ import {
 import {
 	createMigrationVerifySetupRetry,
 	migrationVerifyCheckpointKey,
-	readMigrationVerifySidecarStatus,
 	runMigrationIntegrityVerifyGate,
 } from "./migration-integrity-verify";
+import { readRetainedMigrationVerifyStatus } from "./daemon-migration-startup";
 import {
 	getDatabaseIntegrityStatus,
 	publishDatabaseIntegrityStatus,
@@ -346,30 +346,6 @@ function deferMigrationWriters(): void {
 	recallDbOwner?.setWriteBlocked(true);
 }
 
-async function readRetainedMigrationVerifyStatus(
-	owner: DbOwnerClient,
-	checkpointKey: string,
-	backupPath: string,
-): Promise<string | null> {
-	const sidecarStatus = readMigrationVerifySidecarStatus(backupPath);
-	if (sidecarStatus !== undefined) return sidecarStatus;
-	const handle = owner.submit<{ readonly status?: unknown } | undefined>(
-		{
-			kind: "query",
-			statement: {
-				sql: "SELECT status FROM db_integrity_checkpoints WHERE checkpoint_key = ? LIMIT 1",
-				params: [checkpointKey],
-				result: "get",
-				transactional: false,
-				readonly: true,
-			},
-		},
-		{ operation: "startup.read-retained-integrity-checkpoint", lane: "read", deadlineMs: 5_000 },
-	);
-	const row = await owner.awaitResult(handle, 5_000);
-	return typeof row?.status === "string" ? row.status : null;
-}
-
 async function ownerHasPendingVecBackfill(owner: DbOwnerClient, expectedDimensions: number): Promise<boolean> {
 	const rowidsHandle = owner.submit<{ readonly present?: number } | undefined>(
 		{
@@ -391,7 +367,8 @@ async function ownerHasPendingVecBackfill(owner: DbOwnerClient, expectedDimensio
 			statement: {
 				sql: `SELECT 1 AS present FROM embeddings e
 				LEFT JOIN ${targetTable} v ON v.id = e.id
-				WHERE v.id IS NULL AND e.dimensions = ? LIMIT 1`,
+				LEFT JOIN vec_embeddings_quarantine q ON q.rowid = e.id
+				WHERE v.id IS NULL AND q.rowid IS NULL AND e.dimensions = ? LIMIT 1`,
 				params: [expectedDimensions],
 				result: "get",
 				transactional: false,
@@ -872,7 +849,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:875" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:852" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -915,7 +892,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:897" },
+			{ siteToken: "daemon.ts:874" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -992,7 +969,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:988" },
+			{ siteToken: "daemon.ts:965" },
 		);
 	} catch {
 		return false;
@@ -1616,7 +1593,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1602", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1579", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1684,7 +1661,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1685", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1662", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2225,13 +2202,14 @@ async function main() {
 			retainedMigrationReadFailed = true;
 			logger.warn(
 				"startup-recovery",
-				"Could not read retained migration verification checkpoint before initialization; continuing startup",
+				"Could not read retained migration verification checkpoint before initialization; deferring mutating startup",
 				{ error: error instanceof Error ? error.message : String(error) },
 			);
 		}
 	}
 
-	const initResult = retainedMigrationCorrupt ? null : await owner.initialize(AGENTS_DIR);
+	const initResult =
+		retainedMigrationCorrupt || retainedMigrationReadFailed ? null : await owner.initialize(AGENTS_DIR);
 	// The owner resolves sqlite-vec in its own process. Carry that path across
 	// the protocol so the parent accessor loads the same extension; retained
 	// paths still fall back to local discovery for older owner protocols.
@@ -2245,6 +2223,14 @@ async function main() {
 		logger.error(
 			"startup-recovery",
 			"Retained migration verification confirmed database corruption; startup writes disabled before initialization",
+		);
+	} else if (retainedMigrationReadFailed) {
+		deferMigrationWriters();
+		publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"], owner);
+		initDbAccessorReadOnly(MEMORY_DB, initExtensionPath ?? "", { agentsDir: AGENTS_DIR });
+		logger.warn(
+			"startup-recovery",
+			"Retained migration verification could not be read; serving reads with writes blocked until verification recovers",
 		);
 	} else if (deferredMigrationVerification) {
 		deferMigrationWriters();
@@ -2474,11 +2460,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2470", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2456", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2480",
+								siteToken: "daemon.ts:2466",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2573,7 +2559,7 @@ async function main() {
 		if (migrationIntegrityWritesBlocked) return false;
 		const activeEmbedding = await getDbAccessor().withReadDbAsync(
 			(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-			{ siteToken: "daemon.ts:2574", operation: "maintenance.vec-backfill-config" },
+			{ siteToken: "daemon.ts:2560", operation: "maintenance.vec-backfill-config" },
 		);
 		return await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions);
 	};
@@ -2605,7 +2591,7 @@ async function main() {
 					try {
 						const activeEmbedding = await getDbAccessor().withReadDbAsync(
 							(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-							{ siteToken: "daemon.ts:2606", operation: "maintenance.vec-backfill-config" },
+							{ siteToken: "daemon.ts:2592", operation: "maintenance.vec-backfill-config" },
 						);
 						if (migrationIntegrityWritesBlocked) return;
 						if (!isVectorRuntimeUsable()) {
@@ -2625,7 +2611,7 @@ async function main() {
 										maxBatches: 1,
 										batchSize: 500,
 									}),
-								{ siteToken: "daemon.ts:2607", operation: "maintenance.vec-backfill" },
+								{ siteToken: "daemon.ts:2608", operation: "maintenance.vec-backfill" },
 							);
 							// The writer callback is synchronous on this isolate. Yield after
 							// every bounded batch so health and ready can run between slices.
