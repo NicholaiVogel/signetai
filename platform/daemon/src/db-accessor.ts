@@ -885,7 +885,7 @@ function readMigrationBackupCheckpointStatus(
 function migrationBackupCursor(
 	dbPath: string,
 	backupPath: string,
-): Pick<MigrationBackupCursor, "sourceSize" | "sourceMtimeMs"> | undefined {
+): Pick<MigrationBackupCursor, "sourceSize" | "sourceMtimeMs" | "offset"> | undefined {
 	try {
 		const parsed = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as Partial<MigrationBackupCursor>;
 		if (
@@ -894,15 +894,17 @@ function migrationBackupCursor(
 			typeof parsed.sourceSize !== "number" ||
 			!Number.isFinite(parsed.sourceSize) ||
 			typeof parsed.sourceMtimeMs !== "number" ||
-			!Number.isFinite(parsed.sourceMtimeMs)
+			!Number.isFinite(parsed.sourceMtimeMs) ||
+			typeof parsed.offset !== "number" ||
+			!Number.isInteger(parsed.offset) ||
+			parsed.offset < 0
 		)
 			return undefined;
-		return { sourceSize: parsed.sourceSize, sourceMtimeMs: parsed.sourceMtimeMs };
+		return { sourceSize: parsed.sourceSize, sourceMtimeMs: parsed.sourceMtimeMs, offset: parsed.offset };
 	} catch {
 		return undefined;
 	}
 }
-
 /**
  * Backups emitted by releases before cursor sidecars existed are still valid
  * rollback points. Treat a generated name with no cursor as an unverified
@@ -1005,6 +1007,17 @@ function shouldDeferPendingMigration(dbPath: string, db: MigrationBackupDb, deps
 				throw new MigrationBackupAdmissionError(
 					"retained-unverified-backup",
 					`retained legacy rollback file ${backup.name} has terminal verification status ${legacyStatus}; operator repair is required`,
+				);
+			}
+			deferred = true;
+			continue;
+		}
+		if (cursor?.offset === 0) {
+			const status = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+			if (isTerminalMigrationBackupStatus(status)) {
+				throw new MigrationBackupAdmissionError(
+					"retained-unverified-backup",
+					`retained rollback file ${backup.name} has terminal verification status ${status}; operator repair is required`,
 				);
 			}
 			deferred = true;
@@ -2005,6 +2018,27 @@ function ensureVecEmbeddingsQuarantineTable(db: SqliteWriteSurface): void {
 	`);
 }
 
+function decodeBackfillVector(
+	vector: Buffer,
+	expectedDimensions: number,
+): { readonly vector: Float32Array } | { readonly reason: string } {
+	const expectedBytes = expectedDimensions * Float32Array.BYTES_PER_ELEMENT;
+	if (vector.byteLength !== expectedBytes) {
+		return {
+			reason: `embedding blob has ${vector.byteLength} bytes; expected ${expectedBytes} for ${expectedDimensions} dimensions`,
+		};
+	}
+	try {
+		const decoded = new Float32Array(vector.buffer.slice(vector.byteOffset, vector.byteOffset + vector.byteLength));
+		if (decoded.some((value) => !Number.isFinite(value))) {
+			return { reason: "embedding vector contains a non-finite value" };
+		}
+		return { vector: decoded };
+	} catch (error) {
+		return { reason: `embedding blob could not be decoded: ${error instanceof Error ? error.message : String(error)}` };
+	}
+}
+
 function ensureVecTable(db: SqliteDatabase, expectedDimensions: number): void {
 	const existing = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'vec_embeddings' AND type = 'table'").get() as
 		| { sql: string }
@@ -2153,19 +2187,20 @@ export function backfillVecEmbeddings(
 			db.exec("BEGIN");
 			for (const [index, row] of rows.entries()) {
 				if (index % 100 === 0) assertMigrationStartupBudget(deadlineAt, "vector embedding backfill");
-				try {
-					const vec = new Float32Array(
-						row.vector.buffer.slice(row.vector.byteOffset, row.vector.byteOffset + row.vector.byteLength),
-					);
-					insert.run(row.id, vec);
-					migrated++;
-				} catch (error) {
-					const reason = (error instanceof Error ? error.message : String(error)).slice(0, 1_000);
+				const decoded = decodeBackfillVector(row.vector, expectedDimensions);
+				if ("reason" in decoded) {
+					const reason = decoded.reason.slice(0, 1_000);
 					const result = quarantine.run(row.id, expectedDimensions, reason, new Date().toISOString());
 					if (result.changes > 0) {
-						// Log once per durable quarantine row; retries do not spam logs.
+						// Log once per validated malformed row; retries do not spam logs.
 						console.warn(`[db-accessor] Quarantined malformed embedding row ${row.id}: ${reason}`);
 					}
+				} else {
+					// Insert failures are operational errors (for example, SQLITE_BUSY).
+					// Let the outer transaction handler roll back and let the caller retry;
+					// only validated data-shape failures enter durable quarantine.
+					insert.run(row.id, decoded.vector);
+					migrated++;
 				}
 				batchLastId = row.id;
 				processedRows++;

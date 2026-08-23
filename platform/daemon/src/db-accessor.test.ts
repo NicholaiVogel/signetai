@@ -214,6 +214,47 @@ describe("DbAccessor", () => {
 		expect(existsSync(join(dbPath, "..", backupNames[0]))).toBe(true);
 	});
 
+	test("defers migration when a matching rollback cursor is still at byte zero", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+
+		initDbAccessor(dbPath);
+		closeDbAccessor();
+		const initialBackup = readdirSync(join(dbPath, "..")).find(
+			(name) => name.includes(".bak-v") && !name.endsWith(".cursor.json"),
+		);
+		if (!initialBackup) throw new Error("initial migration backup was not created");
+
+		const db = new Database(dbPath);
+		try {
+			db.exec("DELETE FROM schema_migrations WHERE version = 128");
+			db.exec("DROP INDEX IF EXISTS idx_memory_jobs_diagnostics_status_created_at");
+			db.exec("DROP INDEX IF EXISTS idx_memory_jobs_diagnostics_error_updated_at");
+			db.exec("ALTER TABLE memory_jobs RENAME TO memory_jobs_original");
+			db.exec("CREATE TABLE memory_jobs (id TEXT PRIMARY KEY)");
+			db.exec("DROP TABLE memory_jobs_original");
+		} finally {
+			db.close();
+		}
+
+		const backupPath = join(dbPath, "..", initialBackup);
+		const source = statSync(dbPath);
+		writeFileSync(backupPath, Buffer.alloc(0));
+		writeFileSync(
+			`${backupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.size,
+				sourceMtimeMs: source.mtimeMs,
+				destination: backupPath,
+				offset: 0,
+			}),
+		);
+
+		const result = await initDbAccessorAsync(dbPath);
+		expect(result.deferredMigrationVerification).toBe(true);
+	});
+
 	test("withWriteTx provides working write access", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
@@ -401,7 +442,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:391");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:432");
 	});
 
 	test("write statements expose the number of affected rows", () => {
@@ -1622,13 +1663,10 @@ describe("vec_embeddings schema repair", () => {
 		db.exec(
 			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB NOT NULL); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
 		);
-		db.exec(
-			"CREATE TRIGGER reject_malformed_vec BEFORE INSERT ON vec_embeddings WHEN NEW.id = 'bad-row' BEGIN SELECT RAISE(ABORT, 'malformed vector'); END",
-		);
 		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
 		const insert = db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)");
 		insert.run("good-1", 2, vector);
-		insert.run("bad-row", 2, vector);
+		insert.run("bad-row", 2, Buffer.from([1, 2, 3]));
 		insert.run("good-2", 2, vector);
 
 		backfillVecEmbeddings(
@@ -1646,7 +1684,7 @@ describe("vec_embeddings schema repair", () => {
 			{
 				rowid: "bad-row",
 				dimensions: 2,
-				reason: "malformed vector",
+				reason: "embedding blob has 3 bytes; expected 8 for 2 dimensions",
 			},
 		]);
 		// A follow-up probe sees no eligible pending row for the quarantined ID.
@@ -1658,6 +1696,34 @@ describe("vec_embeddings schema repair", () => {
 			2,
 		);
 		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(2);
+		db.close();
+	});
+
+	test("rethrows operational vector insert failures instead of quarantining rows", () => {
+		const db = new Database(":memory:");
+		db.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB NOT NULL); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
+		);
+		db.exec(
+			"CREATE TRIGGER reject_locked_vec BEFORE INSERT ON vec_embeddings WHEN NEW.id = 'locked-row' BEGIN SELECT RAISE(ABORT, 'database is locked'); END",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		const insert = db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)");
+		insert.run("good-row", 2, vector);
+		insert.run("locked-row", 2, vector);
+
+		expect(() =>
+			backfillVecEmbeddings(
+				{
+					exec: (sql: string) => db.exec(sql),
+					prepare: (sql: string) => db.prepare(sql),
+				} as never,
+				2,
+			),
+		).toThrow("database is locked");
+
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(0);
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings_quarantine").get() as { n: number }).n).toBe(0);
 		db.close();
 	});
 });
