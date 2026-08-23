@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-23
+- Bug fixes: harden vector backfill and migration cursors; validate backup cursors and quarantine only malformed vectors; legacy backup classification and quarantined backfill; verifiable bridge state and equipped backfill; ordered verdicts, blocked children, yielding backfill; process-wide corruption block and recoverable verification; progress-capable backfill and corruption-safe maintenance; pre-init corruption gate and owner-spanning backfill; fail-close corrupt writes and defer heavy backfill; gate runtime writers and vacuum on verification outcome; preserve unverified rollback points and bound backfill; admissible scan budgets and regular-file backup inventory; uncapped size budgets, staged startup fencing, safe destinations; unblock runtime on scheduled verify and test production deadline; honest scan exclusion and crash-safe backup resume; monotonic corruption latch and verified backup resume; serialize verify maintenance and keep backup lifecycle honest; keep corruption verdicts and startup budgets honest; scope verify outcomes honestly and confirm prune results; severity-merge integrity states and retry verify gate setup; bind migration budgets to owner deadline and surface verify failures; harden migration backup recovery status; close migration startup races; upgrade checkpoint attempt_count column before first reference; preserve unverified rollback point and scope verify checkpoint per generation; lint-clean probe handles; no non-null assertions; complete r6 bounded-verify and absolute-deadline fixes; make post-migration verification full-equivalent and resume admission-closed; scope artifact verification and close probe write gap; close admission gaps flagged in review of #1709; bound startup migration work behind admission guarantees.
+
 ### 2026-08-22
 - Bug fixes: let commands exit cleanly.
 
@@ -30,13 +33,46 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Features: enforce memory policy mutations; add Hermes profile connect and disconnect; add explicit target resolution; wire Dreaming head capability and manifest; add Dreaming curated head.
 - Bug fixes: validate agent policy route fields; harden policy route validation; repair retired synthesis hook regressions; restore Dreaming memory publication; close synthesis publication side doors; retire idle-gap head publication; validate profile descendant paths; enforce Hermes profile ownership; preserve detached resume checkout; bound release resume tag length; safely resume releases from exact tag; make nightly release resumable; contain uninstall profile mutations; close explicit target registration gaps; harden explicit target writes; enforce explicit target ownership; route memory head curation through async writer; make head curation atomic; reap orphaned db owner workers; fence valid addon versions during sweep; use hash-keyed addon materialization; preserve live addon during publish retries; publish embedded addons safely on Windows; repair Windows keyring asset and materialization parity; enforce compiled keyring asset contracts; require keyring native addon by absolute path in compiled builds; finish memory lineage lifecycle; retire legacy writer protocol; enforce curated head authority and agent scope; await memory head database access; report missing head commits; enforce Dreaming head provenance; report import cleanup failures; restore generation-safe import cleanup; migrate import extraction write; migrate source purge to async owner; route import writes through owner; honor tombstone contract in lifecycle cleanup; scope lifecycle cleanup generations; CAS dashboard import cleanup; CAS source deletion generations; retain legacy deletion barriers; make legacy tombstones unknown; use durable lifecycle generations; gate source tombstones by generation; retain deletion tombstones; hide tombstoned sources; defer tombstone cleanup; await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
 
-### 2026-08-16
-- Features: restore prompt clock signal; attach to live dreaming passes.
-- Bug fixes: make source deletion resumable; atomize lifecycle telemetry; route sources through db owner; satisfy source routing audit; finish source owner routing; route native sources through owner; expose source graph owner operations; route snapshot import through owner; preserve aggregate recall partials; repair FTS mutation drift; recover partial FTS loss; recover lost FTS checkpoints; cache FTS completeness; bound partial FTS recall; surface partial FTS recall; bridge deferred FTS recall; normalize prompt clock replay; repair prompt clock adapters; gate deferred startup callbacks; serialize deferred owner work; defer cold-start runtime work; isolate startup scan environment; forward CPU profile options; repair native inspector handoff; preserve routed outage causes; map recall outages to 503; propagate reranker failures; restore recall reranking; serialize migration reads; await rehearsal boost; order telemetry repair audit; wire maintenance owner startup; reconcile owner lanes after rebase; isolate owner maintenance lanes; route FTS maintenance to owner; route exhaustion failure to owner; route embedding work to owner; preserve recall during cutover; prevent embedding resurrection; close embedding swap write race; resume vector projection rebuild; harden vector rebuild; chunk embedding promotion; route integrity through owner; recover crashed DB owner submission; recover DB owner after deadline kill; run compiled DB owner smoke; verify native DB owner client; dispatch native DB owner worker; bound DB owner admission; fall back for headless secret exec; release read lease before await; release read leases before awaits; bound database admission.
-- Refactoring: route recall through owner; add process DB owner.
-- Docs: fix profiling cold start; make profiling launch linear; wait for inspector readiness.
-
 ## Release Ledger
+
+## [0.214.9] - 2026-08-23
+
+Release summary: 31 bug fixes.
+Tag range: `v0.214.8..v0.214.9`.
+
+### Bug Fixes
+
+- **daemon**: harden vector backfill and migration cursors
+- **daemon**: validate backup cursors and quarantine only malformed vectors
+- **daemon**: legacy backup classification and quarantined backfill
+- **daemon**: verifiable bridge state and equipped backfill
+- **daemon**: ordered verdicts, blocked children, yielding backfill
+- **daemon**: process-wide corruption block and recoverable verification
+- **daemon**: progress-capable backfill and corruption-safe maintenance
+- **daemon**: pre-init corruption gate and owner-spanning backfill
+- **daemon**: fail-close corrupt writes and defer heavy backfill
+- **daemon**: gate runtime writers and vacuum on verification outcome
+- **daemon**: preserve unverified rollback points and bound backfill
+- **daemon**: admissible scan budgets and regular-file backup inventory
+- **daemon**: uncapped size budgets, staged startup fencing, safe destinations
+- **daemon**: unblock runtime on scheduled verify and test production deadline
+- **daemon**: honest scan exclusion and crash-safe backup resume
+- **daemon**: monotonic corruption latch and verified backup resume
+- **daemon**: serialize verify maintenance and keep backup lifecycle honest
+- **daemon**: keep corruption verdicts and startup budgets honest
+- **daemon**: scope verify outcomes honestly and confirm prune results
+- **daemon**: severity-merge integrity states and retry verify gate setup
+- **daemon**: bind migration budgets to owner deadline and surface verify failures
+- **daemon**: harden migration backup recovery status
+- **daemon**: close migration startup races
+- **daemon**: upgrade checkpoint attempt_count column before first reference
+- **daemon**: preserve unverified rollback point and scope verify checkpoint per generation
+- **daemon**: lint-clean probe handles; no non-null assertions
+- **daemon**: complete r6 bounded-verify and absolute-deadline fixes
+- **daemon**: make post-migration verification full-equivalent and resume admission-closed
+- **daemon**: scope artifact verification and close probe write gap
+- **daemon**: close admission gaps flagged in review of #1709
+- **daemon**: bound startup migration work behind admission guarantees
 
 ## [0.214.8] - 2026-08-22
 
