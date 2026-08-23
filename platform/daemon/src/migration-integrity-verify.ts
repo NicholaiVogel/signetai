@@ -303,12 +303,15 @@ export async function runMigrationIntegrityVerifyGate(
 	const store = options.checkpointStore ?? ownerCheckpointStore(options.owner, options.backupPath);
 	const checkpoint = await store.read();
 	if (checkpoint.status === MIGRATION_VERIFY_PARKED_STATUS || checkpoint.status === MIGRATION_VERIFY_FAILED_STATUS) {
+		const failed = checkpoint.status === MIGRATION_VERIFY_FAILED_STATUS;
 		options.publishStatus?.(
-			checkpoint.status === MIGRATION_VERIFY_FAILED_STATUS ? "corrupt" : "degraded",
-			checkpoint.status === MIGRATION_VERIFY_FAILED_STATUS
-				? ["global integrity verification previously failed"]
-				: ["degraded:integrity-unverified"],
+			failed ? "corrupt" : "degraded",
+			failed ? ["global integrity verification previously failed"] : ["degraded:integrity-unverified"],
 		);
+		// A checkpoint can be discovered after startup if the pre-init read was
+		// transiently unavailable. Match the fresh failed-scan path and fail-close
+		// all application writers immediately when that durable verdict is found.
+		if (failed) options.armWriteBlock?.();
 		options.log?.("Migration integrity verify terminal state retained", {
 			phase: checkpoint.status,
 			attemptCount: checkpoint.attemptCount,

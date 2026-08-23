@@ -1701,6 +1701,8 @@ export function initDbAccessor(path: string, opts?: { readonly agentsDir?: strin
 
 export interface DbAccessorInitializationResult {
 	readonly pendingVecBackfill: boolean;
+	/** sqlite-vec path resolved while opening the owner connection. */
+	readonly extensionPath?: string | null;
 	/** Prior-generation verification is still running; this accessor is readonly. */
 	readonly deferredMigrationVerification: boolean;
 }
@@ -1714,7 +1716,11 @@ export async function initDbAccessorAsync(
 	if (deferMigrations) {
 		writeConn.close();
 		initDbAccessorReadOnly(path, vecExtPath ?? "", opts);
-		return { pendingVecBackfill: false, deferredMigrationVerification: true };
+		return {
+			pendingVecBackfill: false,
+			extensionPath: vecExtPath ?? null,
+			deferredMigrationVerification: true,
+		};
 	}
 	const migrationBackup = deferMigrations
 		? null
@@ -1835,12 +1841,12 @@ function finishDbAccessorInit(
 		if (vecLoaded) {
 			const pendingVecBackfill = hasMissingVecEmbeddings(writeConn, vecDimensions);
 			accessor = createAccessor(writeConn);
-			return { pendingVecBackfill, deferredMigrationVerification: false };
+			return { pendingVecBackfill, extensionPath: vecExtPath ?? null, deferredMigrationVerification: false };
 		}
 	}
 
 	accessor = createAccessor(writeConn);
-	return { pendingVecBackfill: false, deferredMigrationVerification: false };
+	return { pendingVecBackfill: false, extensionPath: vecExtPath ?? null, deferredMigrationVerification: false };
 }
 
 export function initDbAccessorLite(dbPathParam: string, vecExtensionPath: string): void {

@@ -20,6 +20,7 @@ import {
 	DbOwnerCancelledError,
 	DbOwnerDeadlineError,
 	DbOwnerDiedError,
+	DbOwnerWritesBlockedError,
 	MAX_DB_OWNER_PENDING_JOBS,
 	MAX_DB_OWNER_WORK_UNITS,
 } from "./db-owner-client";
@@ -905,6 +906,27 @@ describe("DB owner client", () => {
 		await Promise.allSettled(handles.map((handle) => handle.result));
 	});
 
+	test("keeps verification jobs usable while application writes are blocked", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+		client.setWriteBlocked(true);
+
+		expect(() =>
+			client?.submit(
+				{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "get" } },
+				{ operation: "application.write-block-test", lane: "maintenance", deadlineMs: 1_000 },
+			),
+		).toThrow(DbOwnerWritesBlockedError);
+		await expect(
+			client.submit<{ readonly value: number } | undefined>(
+				{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "get", readonly: true } },
+				{ operation: "integrity.verify-block-test", lane: "verify", deadlineMs: 1_000 },
+			).result,
+		).resolves.toEqual({ value: 1 });
+	});
+
 	test("carries pending vector backfill state through the initialize protocol", async () => {
 		const database = makeMigratedDb();
 		directory = database.directory;
@@ -914,6 +936,7 @@ describe("DB owner client", () => {
 		await expect(client.initialize(database.directory)).resolves.toEqual({
 			initialized: true,
 			pendingVecBackfill: true,
+			extensionPath: findSqliteVecExtension(),
 		});
 	});
 

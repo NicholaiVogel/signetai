@@ -23,6 +23,8 @@ import { setFtsIndexIncomplete } from "./fts-index-state";
 export interface DbOwnerMaintenanceOptions {
 	readonly deadlineMs?: number;
 	readonly estimatedWorkUnits?: number;
+	/** Verification maintenance is admitted while application writes are blocked. */
+	readonly lane?: "maintenance" | "verify";
 	readonly onOwnerMetrics?: (metrics: DbOwnerMaintenanceMetrics) => void | Promise<void>;
 	/** Called when the owner worker has emitted its terminal result. */
 	readonly onOwnerJobSettled?: () => void | Promise<void>;
@@ -41,11 +43,11 @@ const DEFAULT_OWNER_DEADLINE_MS = 5_000;
 
 function submitOptions(
 	operation: string,
-	lane: "read" | "write" | "maintenance",
+	lane: "read" | "write" | "maintenance" | "verify",
 	options: DbOwnerMaintenanceOptions,
 ): {
 	readonly operation: string;
-	readonly lane: "read" | "write" | "maintenance";
+	readonly lane: "read" | "write" | "maintenance" | "verify";
 	readonly deadlineMs: number;
 	readonly estimatedWorkUnits?: number;
 } {
@@ -66,7 +68,10 @@ async function runOwnerJob<Result>(
 ): Promise<Result> {
 	let handle: DbOwnerJobHandle<Result>;
 	try {
-		handle = owner.submit<Result>(request, submitOptions(operation, lane, options));
+		// Integrity checks and their durable checkpoints are the recovery path
+		// that must remain usable while application writes are fail-closed.
+		const effectiveLane = options.lane ?? (operation.startsWith("integrity.") ? "verify" : lane);
+		handle = owner.submit<Result>(request, submitOptions(operation, effectiveLane, options));
 	} catch (error) {
 		options.onOwnerJobAdmissionFailure?.(error);
 		throw error;

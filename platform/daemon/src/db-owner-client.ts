@@ -96,6 +96,8 @@ export interface DbOwnerJobHandle<Result> {
 export interface DbOwnerInitializationResult {
 	readonly initialized: true;
 	readonly pendingVecBackfill: boolean;
+	/** sqlite-vec path resolved in the owner process, if available. */
+	readonly extensionPath?: string | null;
 	readonly deferredMigrationVerification?: boolean;
 }
 
@@ -634,12 +636,15 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	}
 
 	function submit<Result>(request: DbOwnerRequest, submitOptions: DbOwnerSubmitOptions): DbOwnerJobHandle<Result> {
-		if (writeBlocked && submitOptions.lane !== "read") throw new DbOwnerWritesBlockedError();
+		if (writeBlocked && submitOptions.lane !== "read" && submitOptions.lane !== "verify")
+			throw new DbOwnerWritesBlockedError();
 		if (!Number.isFinite(submitOptions.deadlineMs) || submitOptions.deadlineMs <= 0) {
 			throw new RangeError("DB owner deadlineMs must be a positive finite number");
 		}
 		const maxDeadlineMs =
-			submitOptions.lane === "maintenance" ? DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS : MAX_DB_OWNER_DEADLINE_MS;
+			submitOptions.lane === "maintenance" || submitOptions.lane === "verify"
+				? DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS
+				: MAX_DB_OWNER_DEADLINE_MS;
 		if (submitOptions.deadlineMs > maxDeadlineMs) {
 			throw new DbOwnerAdmissionError(
 				"DB_OWNER_WORK_BUDGET",
@@ -657,7 +662,8 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			);
 		}
 		const workloadClass =
-			submitOptions.workloadClass ?? (submitOptions.lane === "maintenance" ? "maintenance" : "foreground");
+			submitOptions.workloadClass ??
+			(submitOptions.lane === "maintenance" || submitOptions.lane === "verify" ? "maintenance" : "foreground");
 		const classJobs = [...pending.values()].filter((entry) => entry.job.workloadClass === workloadClass).length;
 		const maxClassJobs = workloadClass === "foreground" ? MAX_DB_OWNER_FOREGROUND_JOBS : MAX_DB_OWNER_MAINTENANCE_JOBS;
 		if (classJobs >= maxClassJobs) {
@@ -671,6 +677,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			id: `db-owner-${process.pid}-${++sequence}`,
 			operation: submitOptions.operation,
 			lane: submitOptions.lane,
+			...(submitOptions.lane === "verify" ? { allowWriteBlocked: true } : {}),
 			workloadClass,
 			enqueuedAt: now,
 			deadlineAt: now + submitOptions.deadlineMs,
@@ -743,10 +750,11 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	function setWriteBlocked(blocked: boolean): void {
 		writeBlocked = blocked;
 		if (blocked) {
-			// Do not leave already-admitted write work queued behind the control
-			// message. Read jobs remain available for recovery/status surfaces.
+			// Do not leave already-admitted application writes queued behind the
+			// control message. Read and verification jobs remain available for
+			// recovery/status surfaces.
 			for (const entry of [...pending.values()]) {
-				if (entry.job.lane !== "read") cancel(entry.job.id);
+				if (entry.job.lane !== "read" && entry.job.lane !== "verify") cancel(entry.job.id);
 			}
 		}
 		if (state !== "ready" || child === null) return;
@@ -831,7 +839,8 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 	let closed = false;
 
 	function laneFor(requestLane: DbOwnerLane, workloadClass?: DbOwnerWorkloadClass): DbOwnerClient {
-		if (workloadClass === "maintenance" || requestLane === "maintenance") return maintenanceLane;
+		if (workloadClass === "maintenance" || requestLane === "maintenance" || requestLane === "verify")
+			return maintenanceLane;
 		return requestLane === "read" ? readLane : writeLane;
 	}
 

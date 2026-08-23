@@ -7,7 +7,7 @@
  * owner. `lane` selects that scheduling boundary.
  */
 
-export type DbOwnerLane = "read" | "write" | "maintenance";
+export type DbOwnerLane = "read" | "write" | "maintenance" | "verify";
 /** Scheduling class inside an owner process. */
 export type DbOwnerWorkloadClass = "foreground" | "maintenance";
 export const DB_OWNER_MAX_QUEUE_DEPTH = 64;
@@ -250,6 +250,8 @@ export interface DbOwnerJob {
 	readonly id: string;
 	readonly operation: string;
 	readonly lane: DbOwnerLane;
+	/** Verification jobs may run while application writes are fail-closed. */
+	readonly allowWriteBlocked?: boolean;
 	readonly workloadClass: DbOwnerWorkloadClass;
 	readonly enqueuedAt: number;
 	readonly deadlineAt: number;

@@ -47,6 +47,7 @@ import {
 	migrateSessionSynthesisRoute,
 } from "./config-migration";
 import { listConnectorsAsync } from "./connectors/registry";
+import { findSqliteVecExtension } from "@signet/core";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
 import {
 	MIGRATION_VERIFY_FAILED_STATUS,
@@ -75,6 +76,7 @@ import {
 	pendingMigrationBackupPath,
 	initDbAccessorLite,
 	initDbAccessorReadOnly,
+	isVectorRuntimeUsable,
 	pruneMigrationBackupsAfterIntegrity,
 	resolveSqliteRuntimeConfig,
 	registerDbOwnerHealthProvider,
@@ -870,7 +872,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:873" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:875" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -913,7 +915,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:895" },
+			{ siteToken: "daemon.ts:897" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -990,7 +992,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:986" },
+			{ siteToken: "daemon.ts:988" },
 		);
 	} catch {
 		return false;
@@ -1614,7 +1616,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1600", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1602", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1682,7 +1684,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1683", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1685", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2229,8 +2231,12 @@ async function main() {
 		}
 	}
 
-	const { extensionPath: initExtensionPath } = getVectorRuntimeStatus();
 	const initResult = retainedMigrationCorrupt ? null : await owner.initialize(AGENTS_DIR);
+	// The owner resolves sqlite-vec in its own process. Carry that path across
+	// the protocol so the parent accessor loads the same extension; retained
+	// paths still fall back to local discovery for older owner protocols.
+	const initExtensionPath =
+		initResult?.extensionPath ?? getVectorRuntimeStatus().extensionPath ?? findSqliteVecExtension() ?? "";
 	const deferredMigrationVerification = initResult?.deferredMigrationVerification === true;
 	if (retainedMigrationCorrupt) {
 		armMigrationIntegrityWriteBlock();
@@ -2468,11 +2474,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2464", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2470", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2474",
+								siteToken: "daemon.ts:2480",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2567,7 +2573,7 @@ async function main() {
 		if (migrationIntegrityWritesBlocked) return false;
 		const activeEmbedding = await getDbAccessor().withReadDbAsync(
 			(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-			{ siteToken: "daemon.ts:2568", operation: "maintenance.vec-backfill-config" },
+			{ siteToken: "daemon.ts:2574", operation: "maintenance.vec-backfill-config" },
 		);
 		return await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions);
 	};
@@ -2595,15 +2601,24 @@ async function main() {
 				if (!pending || migrationIntegrityWritesBlocked) return;
 				vecBackfillScheduled = true;
 				deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
+					let budgetExpired = false;
 					try {
 						const activeEmbedding = await getDbAccessor().withReadDbAsync(
 							(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-							{ siteToken: "daemon.ts:2599", operation: "maintenance.vec-backfill-config" },
+							{ siteToken: "daemon.ts:2606", operation: "maintenance.vec-backfill-config" },
 						);
 						if (migrationIntegrityWritesBlocked) return;
+						if (!isVectorRuntimeUsable()) {
+							logger.warn("startup-recovery", "Skipping vector backfill slice because sqlite-vec is unavailable");
+							return;
+						}
 						const deadlineAt = Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS;
 						for (;;) {
-							if (migrationIntegrityWritesBlocked || Date.now() >= deadlineAt) return;
+							if (migrationIntegrityWritesBlocked) return;
+							if (Date.now() >= deadlineAt) {
+								budgetExpired = true;
+								return;
+							}
 							await getDbAccessor().withWriteDbAsync(
 								(db) =>
 									backfillVecEmbeddings(db, activeEmbedding.dimensions, deadlineAt, {
@@ -2619,6 +2634,13 @@ async function main() {
 						}
 					} finally {
 						vecBackfillScheduled = false;
+						if (budgetExpired && !migrationIntegrityWritesBlocked) {
+							// Probe after the bounded slice and give the serialized
+							// maintenance scheduler a short breather before arming the
+							// next slice. Errors are handled by the bounded probe retry.
+							const timer = setTimeout(() => schedulePendingVecBackfill(), 100);
+							timer.unref?.();
+						}
 					}
 				});
 			})

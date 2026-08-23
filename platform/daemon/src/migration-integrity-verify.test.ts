@@ -358,6 +358,28 @@ describe("migration integrity verify gate", () => {
 		]);
 	});
 
+	test("arms the write block when a durable failed checkpoint is discovered late", async () => {
+		const { store, state } = fakeStore();
+		state.checkpoint = { attemptCount: 4, status: "failed:integrity-unverified" };
+		let armed = 0;
+		const published: string[] = [];
+
+		const result = await runMigrationIntegrityVerifyGate({
+			owner,
+			backupPath: "/tmp/memories.db.bak-v151-late-failure",
+			checkpointStore: store,
+			pruneBackup: () => {},
+			armWriteBlock: () => {
+				armed += 1;
+			},
+			publishStatus: (status) => published.push(status),
+		});
+
+		expect(result.phase).toBe("terminal");
+		expect(armed).toBe(1);
+		expect(published).toEqual(["corrupt"]);
+	});
+
 	test("publishes corruption before a terminal checkpoint write fails", async () => {
 		const { store } = fakeStore();
 		const events: string[] = [];

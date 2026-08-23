@@ -749,6 +749,7 @@ export function runDbOwnerWorker(): void {
 		return {
 			initialized: true,
 			pendingVecBackfill: initialization.pendingVecBackfill,
+			...(initialization.extensionPath !== undefined ? { extensionPath: initialization.extensionPath } : {}),
 			...(initialization.deferredMigrationVerification ? { deferredMigrationVerification: true } : {}),
 		};
 	}
@@ -894,7 +895,7 @@ export function runDbOwnerWorker(): void {
 			writeBlocked = command.blocked;
 			return;
 		}
-		if (writeBlocked && command.job.lane !== "read") {
+		if (writeBlocked && command.job.lane !== "read" && command.job.allowWriteBlocked !== true) {
 			failed(
 				command.job.id,
 				"DB_OWNER_WRITES_BLOCKED",
@@ -903,7 +904,9 @@ export function runDbOwnerWorker(): void {
 			return;
 		}
 		const maxDeadlineMs =
-			command.job.lane === "maintenance" ? DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS : DB_OWNER_MAX_DEADLINE_MS;
+			command.job.lane === "maintenance" || command.job.lane === "verify"
+				? DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS
+				: DB_OWNER_MAX_DEADLINE_MS;
 		if (command.job.deadlineAt - command.job.enqueuedAt > maxDeadlineMs) {
 			failed(command.job.id, "DB_OWNER_WORK_BUDGET", `DB owner deadline exceeds ${maxDeadlineMs}ms`);
 			return;
@@ -917,7 +920,8 @@ export function runDbOwnerWorker(): void {
 			return;
 		}
 		const workloadClass =
-			command.job.workloadClass ?? (command.job.lane === "maintenance" ? "maintenance" : "foreground");
+			command.job.workloadClass ??
+			(command.job.lane === "maintenance" || command.job.lane === "verify" ? "maintenance" : "foreground");
 		const queue = workloadClass === "foreground" ? foregroundQueue : maintenanceQueue;
 		if (queue.length >= DB_OWNER_MAX_QUEUE_DEPTH) {
 			failed(
