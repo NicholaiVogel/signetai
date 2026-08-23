@@ -9,22 +9,32 @@
 import {
 	copyFileSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readFileSync,
 	readdirSync,
 	statSync,
 	statfsSync,
+	truncateSync,
 	unlinkSync,
 } from "node:fs";
-import { copyFile as copyFileAsync, unlink as unlinkAsync } from "node:fs/promises";
+import {
+	open as openAsync,
+	rm as rmAsync,
+	readFile as readFileAsync,
+	rename as renameAsync,
+	unlink as unlinkAsync,
+	writeFile as writeFileAsync,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
-	DEFAULT_EMBEDDING_DIMENSIONS,
 	createMemoriesFts,
 	findSqliteVecExtension,
 	hasPendingMigrations,
+	LATEST_SCHEMA_VERSION,
+	MIGRATIONS,
 	memoriesFtsIntegrityIsComplete,
 	memoriesFtsNeedsTokenizerRepair,
 	readMemoriesFtsIntegrity,
@@ -101,6 +111,8 @@ type SqliteDatabase = {
 	close(): void;
 	loadExtension?(path: string): void;
 };
+
+type SqliteWriteSurface = Pick<SqliteDatabase, "prepare" | "exec">;
 
 let Database: new (path: string, opts?: Record<string, unknown>) => SqliteDatabase;
 
@@ -302,6 +314,9 @@ export interface AsyncDbAccessor {
 	/** Admit a write transaction through the bounded async writer queue. */
 	withWriteTxAsync<T>(fn: (db: WriteDb) => T, options?: WriteAdmissionOptions): Promise<T>;
 
+	/** Admit an autocommit write session through the bounded async writer queue. */
+	withWriteDbAsync<T>(fn: (db: WriteDb) => T, options?: WriteAdmissionOptions): Promise<T>;
+
 	/** Admit a WAL checkpoint through the bounded async writer queue. */
 	checkpointWalAsync?(options?: WriteAdmissionOptions): Promise<void>;
 
@@ -370,6 +385,24 @@ let sqliteAttempt: string | null = null;
 let sqliteWarning: string | null = null;
 let vecLoaded = false;
 let vecLoadError: string | null = null;
+let databaseIntegrityWritesBlocked = false;
+
+export class DatabaseIntegrityCorruptError extends Error {
+	readonly code = "db-integrity-corrupt" as const;
+
+	constructor() {
+		super("Database writes are blocked because integrity verification confirmed corruption");
+		this.name = "DatabaseIntegrityCorruptError";
+	}
+}
+
+export function setDatabaseIntegrityWritesBlocked(blocked: boolean): void {
+	databaseIntegrityWritesBlocked = blocked;
+}
+
+function assertDatabaseIntegrityWritesAllowed(): void {
+	if (databaseIntegrityWritesBlocked) throw new DatabaseIntegrityCorruptError();
+}
 
 // ---------------------------------------------------------------------------
 // Initialisation
@@ -678,21 +711,87 @@ export function isVectorRuntimeUsable(): boolean {
 }
 
 const MAX_MIGRATION_BACKUPS = 1;
+export const MIGRATION_BACKUP_CHUNK_BYTES = 64 * 1024 * 1024;
+const MIGRATION_BACKUP_SPACE_MARGIN_BYTES = MIGRATION_BACKUP_CHUNK_BYTES * 2;
+/**
+ * Startup deadline headroom reserved for migration execution and post-copy
+ * bookkeeping inside the initialize job's deadline.
+ */
+const MIGRATION_BACKUP_STARTUP_RESERVE_MS = 5_000;
 
-interface MigrationBackupDeps {
+export type MigrationBackupAdmissionReason = "space" | "throughput" | "retained-unverified-backup";
+
+const MIGRATION_CHECKPOINT_TABLE = "db_integrity_checkpoints";
+const MIGRATION_CHECKPOINT_COMPLETE_STATUS = "complete";
+const MIGRATION_CHECKPOINT_PARKED_STATUS = "degraded:integrity-unverified";
+const MIGRATION_CHECKPOINT_FAILED_STATUS = "failed:integrity-unverified";
+const MIGRATION_VERIFY_CHECKPOINT_PREFIX = "database.migration-verify:";
+
+/** Match only names emitted by migrationBackupDestination. */
+export function isGeneratedMigrationBackupName(base: string, name: string): boolean {
+	const escapedBase = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`^${escapedBase}\\.bak-v\\d+-\\d+$`).test(name);
+}
+
+type MigrationBackupDb = {
+	exec(sql: string): unknown;
+	prepare?: (sql: string) => {
+		get(...params: unknown[]): Record<string, unknown> | undefined;
+	};
+};
+
+export class MigrationBackupAdmissionError extends Error {
+	readonly code = "DB_MIGRATION_BACKUP_ADMISSION_FAILED" as const;
+
+	constructor(
+		readonly reason: MigrationBackupAdmissionReason,
+		message: string,
+		cause?: unknown,
+	) {
+		super(`[migration_backup] admission refused (${reason}): ${message}`, cause === undefined ? undefined : { cause });
+		this.name = "MigrationBackupAdmissionError";
+	}
+}
+
+function assertMigrationStartupBudget(deadlineAt: number | undefined, stage: string): void {
+	if (deadlineAt !== undefined && Date.now() >= deadlineAt - MIGRATION_BACKUP_STARTUP_RESERVE_MS) {
+		throw new MigrationBackupAdmissionError(
+			"throughput",
+			`migration backup startup budget exhausted before ${stage}; resume cursor retained`,
+		);
+	}
+}
+
+interface MigrationBackupCursor {
+	readonly sourcePath: string;
+	readonly sourceSize: number;
+	readonly sourceMtimeMs: number;
+	readonly destination: string;
+	readonly offset: number;
+}
+
+export interface MigrationBackupDeps {
 	readonly copyFileSync: (source: string, destination: string) => void;
 	readonly readdirSync: (path: string) => string[];
 	readonly statSync: (path: string) => { readonly mtimeMs: number; readonly size?: number };
+	readonly lstatSync?: (path: string) => {
+		readonly mtimeMs: number;
+		readonly size?: number;
+		readonly isFile: () => boolean;
+	};
 	readonly statfsSync?: (path: string) => { readonly bavail: number; readonly bsize: number };
 	readonly unlinkSync: (path: string) => void;
 	readonly now: () => number;
 	readonly log: (message: string) => void;
+	/** Test seam and optional alternate checkpoint source for backup admission. */
+	readonly readVerificationCheckpoint?: (backupPath: string) => string | undefined;
 }
 
 const migrationBackupDeps: MigrationBackupDeps = {
 	copyFileSync,
 	readdirSync,
 	statSync,
+	lstatSync,
 	statfsSync,
 	unlinkSync,
 	now: Date.now,
@@ -715,10 +814,25 @@ function migrationBackups(
 	const base = basename(dbPath);
 	return deps
 		.readdirSync(dir)
-		.filter((f) => f.startsWith(`${base}.bak-v`))
+		.filter(
+			(f) =>
+				isGeneratedMigrationBackupName(base, f) &&
+				!f.endsWith(".cursor.json") &&
+				!f.includes(".probe-") &&
+				!f.includes(".space-probe-"),
+		)
 		.flatMap((f) => {
 			try {
-				const stat = deps.statSync(join(dir, f));
+				const path = join(dir, f);
+				if (deps.lstatSync !== undefined) {
+					const stat = deps.lstatSync(path);
+					if (!stat.isFile()) {
+						deps.log(`[db-accessor] Skipped non-regular migration backup: ${f}`);
+						return [];
+					}
+					return [{ name: f, mtime: stat.mtimeMs, size: stat.size ?? 0 }];
+				}
+				const stat = deps.statSync(path);
 				return [{ name: f, mtime: stat.mtimeMs, size: stat.size ?? 0 }];
 			} catch (err) {
 				if (isMissingPathError(err)) return [];
@@ -728,14 +842,254 @@ function migrationBackups(
 		.sort((a, b) => b.mtime - a.mtime);
 }
 
-function pruneMigrationBackups(dbPath: string, keep: number, deps: MigrationBackupDeps): void {
-	const dir = dirname(dbPath);
-	for (const old of migrationBackups(dbPath, deps).slice(Math.max(0, keep))) {
+/** Read the corruption verdict without opening the database. */
+export function readMigrationBackupVerdictStatus(backupPath: string): string | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(`${backupPath}.verdict.json`, "utf8")) as { status?: unknown };
+		return typeof parsed.status === "string" ? parsed.status : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function isTerminalMigrationBackupStatus(status: string | undefined): boolean {
+	return (
+		status === MIGRATION_CHECKPOINT_FAILED_STATUS ||
+		status === MIGRATION_CHECKPOINT_PARKED_STATUS ||
+		status === "failed" ||
+		status === "parked"
+	);
+}
+
+function readMigrationBackupCheckpointStatus(
+	backupPath: string,
+	db: MigrationBackupDb | undefined,
+	deps: MigrationBackupDeps,
+): string | undefined {
+	const sidecarStatus = readMigrationBackupVerdictStatus(backupPath);
+	if (sidecarStatus !== undefined) return sidecarStatus;
+	const overridden = deps.readVerificationCheckpoint?.(backupPath);
+	if (overridden !== undefined) return overridden;
+	if (db?.prepare === undefined) return undefined;
+	try {
+		const row = db
+			.prepare(`SELECT status FROM ${MIGRATION_CHECKPOINT_TABLE} WHERE checkpoint_key = ?`)
+			.get(`${MIGRATION_VERIFY_CHECKPOINT_PREFIX}${basename(backupPath)}`);
+		return typeof row?.status === "string" ? row.status : undefined;
+	} catch {
+		// A missing/legacy checkpoint is unverified by definition.
+		return undefined;
+	}
+}
+
+function migrationBackupCursor(
+	dbPath: string,
+	backupPath: string,
+): Pick<MigrationBackupCursor, "sourceSize" | "sourceMtimeMs" | "offset"> | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as Partial<MigrationBackupCursor>;
+		if (
+			parsed.sourcePath !== dbPath ||
+			parsed.destination !== backupPath ||
+			typeof parsed.sourceSize !== "number" ||
+			!Number.isFinite(parsed.sourceSize) ||
+			typeof parsed.sourceMtimeMs !== "number" ||
+			!Number.isFinite(parsed.sourceMtimeMs) ||
+			typeof parsed.offset !== "number" ||
+			!Number.isInteger(parsed.offset) ||
+			parsed.offset < 0 ||
+			parsed.offset > parsed.sourceSize
+		)
+			return undefined;
+		return { sourceSize: parsed.sourceSize, sourceMtimeMs: parsed.sourceMtimeMs, offset: parsed.offset };
+	} catch {
+		return undefined;
+	}
+}
+/**
+ * Backups emitted by releases before cursor sidecars existed are still valid
+ * rollback points. Treat a generated name with no cursor as an unverified
+ * legacy backup; malformed cursor sidecars remain a separate, unclassified
+ * case and are never admitted as evidence.
+ */
+function isCursorlessLegacyMigrationBackup(backupPath: string, cursor: unknown): boolean {
+	return cursor === undefined && !existsSync(`${backupPath}.cursor.json`);
+}
+
+/** Reclaim only backups whose retained cursor proves an older source generation. */
+function pruneStaleMigrationBackups(
+	dbPath: string,
+	sourceSize: number,
+	sourceMtimeMs: number,
+	deps: MigrationBackupDeps,
+	db?: MigrationBackupDb,
+): void {
+	for (const backup of migrationBackups(dbPath, deps)) {
+		const backupPath = join(dirname(dbPath), backup.name);
+		const cursor = migrationBackupCursor(dbPath, backupPath);
+		if (isCursorlessLegacyMigrationBackup(backupPath, cursor)) {
+			const legacyStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+			if (legacyStatus !== MIGRATION_CHECKPOINT_COMPLETE_STATUS) {
+				deps.log(`[db-accessor] Preserving unverified legacy rollback point: ${backup.name}`);
+				continue;
+			}
+		}
+		if (cursor === undefined || (cursor.sourceSize === sourceSize && cursor.sourceMtimeMs === sourceMtimeMs)) continue;
+		const checkpointStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+		if (checkpointStatus !== MIGRATION_CHECKPOINT_COMPLETE_STATUS) {
+			deps.log(`[db-accessor] Preserving unverified rollback point: ${backup.name}`);
+			continue;
+		}
 		try {
-			deps.unlinkSync(join(dir, old.name));
+			deps.unlinkSync(backupPath);
+		} catch (error) {
+			if (!isMissingPathError(error)) throw error;
+			continue;
+		}
+		try {
+			deps.unlinkSync(`${backupPath}.verdict.json`);
+		} catch (error) {
+			if (!isMissingPathError(error)) throw error;
+		}
+		try {
+			deps.unlinkSync(`${backupPath}.cursor.json`);
+		} catch (error) {
+			if (!isMissingPathError(error)) throw error;
+		}
+		deps.log(`[db-accessor] Reclaimed stale migration backup: ${backup.name}`);
+	}
+}
+
+function assertNoRetainedUnverifiedMigrationBackup(
+	dbPath: string,
+	sourceSize: number,
+	sourceMtimeMs: number,
+	deps: MigrationBackupDeps,
+	db?: MigrationBackupDb,
+): void {
+	for (const backup of migrationBackups(dbPath, deps)) {
+		const backupPath = join(dirname(dbPath), backup.name);
+		const cursor = migrationBackupCursor(dbPath, backupPath);
+		if (isCursorlessLegacyMigrationBackup(backupPath, cursor)) {
+			const legacyStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+			if (legacyStatus !== MIGRATION_CHECKPOINT_COMPLETE_STATUS) {
+				throw new MigrationBackupAdmissionError(
+					"retained-unverified-backup",
+					`retained legacy rollback file ${backup.name} is unverified; restore or rename the retained file before retrying`,
+				);
+			}
+		}
+		if (cursor === undefined || (cursor.sourceSize === sourceSize && cursor.sourceMtimeMs === sourceMtimeMs)) continue;
+		const checkpointStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+		if (checkpointStatus === MIGRATION_CHECKPOINT_COMPLETE_STATUS) continue;
+		throw new MigrationBackupAdmissionError(
+			"retained-unverified-backup",
+			`retained rollback file ${backup.name} is unverified; restore or rename the retained file before retrying`,
+		);
+	}
+}
+
+/**
+ * A prior-generation backup that is merely unverified is recoverable: defer
+ * this boot's new migration and let the post-ready verifier decide its fate.
+ * Terminal failed/parked generations remain a hard admission refusal.
+ */
+function shouldDeferPendingMigration(dbPath: string, db: MigrationBackupDb, deps: MigrationBackupDeps): boolean {
+	if (!existsSync(dbPath) || !hasPendingMigrations(db as never)) return false;
+	const source = deps.statSync(dbPath);
+	let deferred = false;
+	for (const backup of migrationBackups(dbPath, deps)) {
+		const backupPath = join(dirname(dbPath), backup.name);
+		const cursor = migrationBackupCursor(dbPath, backupPath);
+		if (isCursorlessLegacyMigrationBackup(backupPath, cursor)) {
+			const legacyStatus = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+			if (legacyStatus === MIGRATION_CHECKPOINT_COMPLETE_STATUS) continue;
+			if (isTerminalMigrationBackupStatus(legacyStatus)) {
+				throw new MigrationBackupAdmissionError(
+					"retained-unverified-backup",
+					`retained legacy rollback file ${backup.name} has terminal verification status ${legacyStatus}; operator repair is required`,
+				);
+			}
+			deferred = true;
+			continue;
+		}
+		if (cursor?.offset === 0 && (source.size ?? 0) > 0) {
+			const status = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+			if (isTerminalMigrationBackupStatus(status)) {
+				throw new MigrationBackupAdmissionError(
+					"retained-unverified-backup",
+					`retained rollback file ${backup.name} has terminal verification status ${status}; operator repair is required`,
+				);
+			}
+			if (status !== MIGRATION_CHECKPOINT_COMPLETE_STATUS) deferred = true;
+			continue;
+		}
+		if (cursor === undefined || (cursor.sourceSize === source.size && cursor.sourceMtimeMs === source.mtimeMs))
+			continue;
+		const status = readMigrationBackupCheckpointStatus(backupPath, db, deps);
+		if (status === MIGRATION_CHECKPOINT_COMPLETE_STATUS) continue;
+		if (isTerminalMigrationBackupStatus(status)) {
+			throw new MigrationBackupAdmissionError(
+				"retained-unverified-backup",
+				`retained rollback file ${backup.name} has terminal verification status ${status}; operator repair is required`,
+			);
+		}
+		deferred = true;
+	}
+	if (deferred) deps.log("[db-accessor] migration deferred pending prior-generation verification");
+	return deferred;
+}
+
+function pruneMigrationBackups(
+	dbPath: string,
+	keep: number,
+	deps: MigrationBackupDeps,
+	keepName?: string,
+	strict = false,
+	db?: MigrationBackupDb,
+	verifiedBackupPath?: string,
+): void {
+	const dir = dirname(dbPath);
+	for (const old of migrationBackups(dbPath, deps)
+		.filter((backup) => backup.name !== keepName)
+		.slice(Math.max(0, keep))) {
+		try {
+			const backupPath = join(dir, old.name);
+			const cursor = migrationBackupCursor(dbPath, backupPath);
+			const legacyUnverified =
+				isCursorlessLegacyMigrationBackup(backupPath, cursor) && backupPath !== verifiedBackupPath;
+			if (
+				(legacyUnverified || cursor !== undefined) &&
+				backupPath !== verifiedBackupPath &&
+				readMigrationBackupCheckpointStatus(backupPath, db, deps) !== MIGRATION_CHECKPOINT_COMPLETE_STATUS
+			) {
+				deps.log(
+					`[db-accessor] Preserving ${legacyUnverified ? "unverified legacy " : "unverified "}rollback point: ${old.name}`,
+				);
+				continue;
+			}
+			try {
+				deps.unlinkSync(backupPath);
+			} catch (err) {
+				if (!isMissingPathError(err)) throw err;
+			}
+			if (migrationBackups(dbPath, deps).some((backup) => backup.name === old.name)) {
+				throw new Error(`Migration backup still exists after unlink: ${backupPath}`);
+			}
+			try {
+				deps.unlinkSync(`${backupPath}.cursor.json`);
+			} catch {
+				// A completed backup has no cursor; stale cursor cleanup is best effort.
+			}
+			try {
+				deps.unlinkSync(`${backupPath}.verdict.json`);
+			} catch {
+				// Terminal verdict cleanup is best effort after the backup is gone.
+			}
 			deps.log(`[db-accessor] Pruned old backup: ${old.name}`);
-		} catch {
-			// Best effort.
+		} catch (error) {
+			if (strict) throw error;
+			// Best effort during pre-migration pruning; the integrity gate uses strict mode.
 		}
 	}
 }
@@ -779,25 +1133,19 @@ function preflightMigrationBackupSpace(dbPath: string, deps: MigrationBackupDeps
 	const dbBytes = fileSize(dbPath, deps);
 	const freeBytes = availableBytes(dirname(dbPath), deps);
 	if (dbBytes === null) return null;
-	const metrics = { dbBytes, freeBytes, requiredBytes: dbBytes } as DbSpaceMetrics;
+	const metrics = {
+		dbBytes,
+		freeBytes,
+		requiredBytes: dbBytes + MIGRATION_BACKUP_SPACE_MARGIN_BYTES,
+	} as DbSpaceMetrics;
 	if (freeBytes === null) {
-		const probeDest = `${dbPath}.space-probe-${deps.now()}`;
-		try {
-			// A degenerate statfs reading is not reliable. Copy the actual database
-			// before proceeding so this outcome is authorized by a real write.
-			deps.copyFileSync(dbPath, probeDest);
-			return { ...metrics, freeBytes: dbBytes };
-		} catch (err) {
-			throw new DbSpacePreflightError("migration_backup", metrics, err);
-		} finally {
-			try {
-				deps.unlinkSync(probeDest);
-			} catch {
-				// Best effort cleanup of the preflight probe.
-			}
-		}
+		// A degenerate statfs reading is not a license to proceed. Unbounded
+		// copy-probing inside admission would violate the startup deadline, and
+		// an unknown free-space figure cannot satisfy the space margin, so the
+		// honest outcome is refusal with the metrics we do have.
+		throw new DbSpacePreflightError("migration_backup", metrics);
 	}
-	if (freeBytes < dbBytes) throw new DbSpacePreflightError("migration_backup", metrics);
+	if (freeBytes < metrics.requiredBytes) throw new DbSpacePreflightError("migration_backup", metrics);
 	return metrics;
 }
 
@@ -814,8 +1162,8 @@ function migrationBackupSpaceError(
 /**
  * Back up the database file before running migrations.
  * Flushes WAL first, then copies the main file. Prunes old
- * backups after the space preflight, so a failed preflight keeps existing
- * recovery backups intact.
+ * stale backups before admission, then prunes old backups after the copy is
+ * complete so a failed preflight keeps current-generation recovery intact.
  */
 export function backupBeforeMigration(
 	db: { exec(sql: string): unknown },
@@ -835,6 +1183,7 @@ export function backupBeforeMigration(
 		throw migrationBackupError(backupDest, err);
 	}
 	finishMigrationBackup(dbPath, backupDest, deps);
+	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, deps, undefined, false, db);
 	return backupDest;
 }
 
@@ -843,28 +1192,361 @@ export async function backupBeforeMigrationAsync(
 	dbPath: string,
 	schemaVersion: number,
 	deps: MigrationBackupDeps = migrationBackupDeps,
+	deadlineAt = Number.POSITIVE_INFINITY,
 ): Promise<string> {
-	const space = prepareMigrationBackup(db, dbPath, deps);
-	const backupDest = migrationBackupDestination(dbPath, schemaVersion, deps);
-	try {
-		if (deps === migrationBackupDeps) {
-			await copyFileAsync(dbPath, backupDest);
-		} else {
+	if (deps !== migrationBackupDeps) {
+		const space = prepareMigrationBackup(db, dbPath, deps);
+		const backupDest = migrationBackupDestination(dbPath, schemaVersion, deps);
+		try {
 			deps.copyFileSync(dbPath, backupDest);
+		} catch (err) {
+			await cleanupPartialMigrationBackupAsync(backupDest, deps);
+			if (isDbFullError(err) && space !== null) {
+				throw migrationBackupSpaceError(dbPath, space, deps, err);
+			}
+			throw migrationBackupError(backupDest, err);
 		}
-	} catch (err) {
-		await cleanupPartialMigrationBackupAsync(backupDest, deps);
-		if (isDbFullError(err) && space !== null) {
-			throw migrationBackupSpaceError(dbPath, space, deps, err);
-		}
-		throw migrationBackupError(backupDest, err);
+		finishMigrationBackup(dbPath, backupDest, deps);
+		pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, deps, undefined, false, db);
+		return backupDest;
 	}
-	finishMigrationBackup(dbPath, backupDest, deps);
+	return await streamedMigrationBackup(db, dbPath, schemaVersion, deadlineAt);
+}
+
+async function streamedMigrationBackup(
+	db: { exec(sql: string): unknown },
+	dbPath: string,
+	schemaVersion: number,
+	deadlineAt: number,
+): Promise<string> {
+	try {
+		db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+	} catch {
+		// Non-fatal — the backup remains useful when WAL cannot be truncated.
+	}
+	const sourceStat = statSync(dbPath);
+	const sourceSize = sourceStat.size;
+	const sourceMtimeMs = sourceStat.mtimeMs;
+	const sourceMode = sourceStat.mode & 0o7777;
+	const resume = await readMigrationBackupCursor(dbPath, sourceSize, sourceMtimeMs);
+	const backupDest = resume?.destination ?? migrationBackupDestination(dbPath, schemaVersion, migrationBackupDeps);
+	const offset = resume?.offset ?? 0;
+	if (resume === undefined) {
+		try {
+			prepareMigrationBackup(db, dbPath, migrationBackupDeps);
+		} catch (error) {
+			if (error instanceof DbSpacePreflightError) {
+				throw new MigrationBackupAdmissionError("space", error.message, error);
+			}
+			throw error;
+		}
+		await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, sourceMode, 0, deadlineAt);
+		await copyMigrationBackupChunks(dbPath, backupDest, sourceSize, sourceMtimeMs, sourceMode, offset, deadlineAt);
+	} else {
+		// Admission holds across restarts too: free space and disk throughput
+		// can change between processes (the partial copy already consumed
+		// `offset` bytes), so a resume re-preflights the remaining bytes and
+		// re-probes the remaining copy budget before writing anything.
+		pruneStaleMigrationBackups(dbPath, sourceSize, sourceMtimeMs, migrationBackupDeps, db);
+		preflightResumedMigrationBackupSpace(dbPath, sourceSize, offset, migrationBackupDeps);
+		await probeMigrationBackupThroughput(dbPath, sourceSize, backupDest, sourceMode, offset, deadlineAt);
+		await copyMigrationBackupChunks(dbPath, backupDest, sourceSize, sourceMtimeMs, sourceMode, offset, deadlineAt);
+	}
+	finishMigrationBackup(dbPath, backupDest, migrationBackupDeps);
+	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, migrationBackupDeps, undefined, false, db);
 	return backupDest;
 }
 
+async function readMigrationBackupCursor(
+	dbPath: string,
+	sourceSize: number,
+	sourceMtimeMs: number,
+): Promise<MigrationBackupCursor | undefined> {
+	const dir = dirname(dbPath);
+	const base = basename(dbPath);
+	for (const name of readdirSync(dir).filter(
+		(entry) =>
+			entry.endsWith(".cursor.json") && isGeneratedMigrationBackupName(base, entry.slice(0, -".cursor.json".length)),
+	)) {
+		const cursorPath = join(dir, name);
+		try {
+			const parsed = JSON.parse(await readFileAsync(cursorPath, "utf8")) as Partial<MigrationBackupCursor>;
+			const cursorMatchesSource =
+				parsed.sourcePath === dbPath && parsed.sourceSize === sourceSize && parsed.sourceMtimeMs === sourceMtimeMs;
+			const destination = typeof parsed.destination === "string" ? parsed.destination : undefined;
+			const safeDestination =
+				destination !== undefined &&
+				destination === join(dir, basename(destination)) &&
+				basename(destination).startsWith(`${base}.bak-v`);
+			let destinationStat: ReturnType<typeof lstatSync> | undefined;
+			let destinationExists = false;
+			if (destination !== undefined) {
+				try {
+					destinationStat = lstatSync(destination);
+					destinationExists = true;
+				} catch (error) {
+					if (!isMissingPathError(error)) throw error;
+				}
+			}
+			const regularDestinationStat = destinationStat?.isFile() === true ? destinationStat : undefined;
+			const destinationIsRegularFile = regularDestinationStat !== undefined;
+			const destinationSize = regularDestinationStat?.size;
+			const cursorOffsetValid =
+				typeof parsed.offset === "number" &&
+				Number.isInteger(parsed.offset) &&
+				parsed.offset >= 0 &&
+				parsed.offset <= sourceSize;
+			const destinationSizeValid =
+				destinationIsRegularFile &&
+				destinationSize !== undefined &&
+				cursorOffsetValid &&
+				destinationSize >= parsed.offset;
+			if (
+				cursorMatchesSource &&
+				safeDestination &&
+				cursorOffsetValid &&
+				destinationExists &&
+				!destinationIsRegularFile
+			) {
+				try {
+					// A cursor must never be allowed to remove a directory or follow a
+					// symlink. unlinkSync removes only the named directory entry.
+					unlinkSync(destination);
+				} catch (error) {
+					migrationBackupDeps.log(
+						`[db-accessor] Ignored non-regular migration backup destination ${destination}: ${readErrorMessage(error)}`,
+					);
+				}
+				try {
+					unlinkSync(cursorPath);
+				} catch (error) {
+					if (!isMissingPathError(error)) throw error;
+				}
+			}
+			if (!cursorMatchesSource || !safeDestination || !cursorOffsetValid || !destinationSizeValid) {
+				if (
+					cursorMatchesSource &&
+					safeDestination &&
+					cursorOffsetValid &&
+					destinationIsRegularFile &&
+					destinationSize !== undefined &&
+					destinationSize < parsed.offset
+				) {
+					await rmAsync(destination, { force: true });
+					await rmAsync(cursorPath, { force: true });
+				}
+				continue;
+			}
+			if (destinationSize > parsed.offset) truncateSync(destination, parsed.offset);
+			return { ...parsed, destination } as MigrationBackupCursor;
+		} catch {
+			// A torn cursor is ignored; the next admission creates a fresh backup.
+		}
+	}
+	return undefined;
+}
+
+async function writeMigrationBackupCursor(cursor: MigrationBackupCursor): Promise<void> {
+	const cursorPath = `${cursor.destination}.cursor.json`;
+	const tempPath = `${cursorPath}.tmp-${process.pid}`;
+	await writeFileAsync(tempPath, `${JSON.stringify(cursor)}\n`, "utf8");
+	await renameAsync(tempPath, cursorPath);
+}
+
+async function probeMigrationBackupThroughput(
+	dbPath: string,
+	sourceSize: number,
+	backupDest: string,
+	sourceMode: number,
+	resumeOffset = 0,
+	deadlineAt: number,
+): Promise<void> {
+	if (sourceSize === 0 || resumeOffset >= sourceSize) return;
+	if (Date.now() >= deadlineAt - MIGRATION_BACKUP_STARTUP_RESERVE_MS) {
+		throw new MigrationBackupAdmissionError(
+			"throughput",
+			"migration backup throughput probe reached the owner deadline reserve",
+		);
+	}
+	const probeDest = `${backupDest}.probe-${process.pid}`;
+	let source: Awaited<ReturnType<typeof openAsync>> | undefined;
+	let probe: Awaited<ReturnType<typeof openAsync>> | undefined;
+	try {
+		source = await openAsync(dbPath, "r");
+		probe = await openAsync(probeDest, "w", sourceMode);
+		const buffer = Buffer.allocUnsafe(Math.min(MIGRATION_BACKUP_CHUNK_BYTES, sourceSize));
+		const probeStartedAt = performance.now();
+		const result = await source.read(buffer, 0, buffer.length, resumeOffset);
+		let probeWritten = 0;
+		while (probeWritten < result.bytesRead) {
+			const written = await probe.write(buffer, probeWritten, result.bytesRead - probeWritten, probeWritten);
+			if (written.bytesWritten === 0) {
+				throw new Error("Migration backup throughput probe write stalled");
+			}
+			probeWritten += written.bytesWritten;
+		}
+		await probe.sync();
+		const probeElapsedMs = Math.max(1, performance.now() - probeStartedAt);
+		const bytesPerMs = result.bytesRead / probeElapsedMs;
+		const remainingBytes = sourceSize - resumeOffset;
+		const estimatedMs = Math.ceil(remainingBytes / bytesPerMs);
+		// The initialize job's deadline covers admission + probe + copy +
+		// migration + startup bookkeeping. The copy may only claim the window
+		// left after the probe spent its time and the reserve is kept for the
+		// migration itself. (The copy loop re-checks this window every chunk;
+		// a stall mid-copy surfaces as the deadline error, never a silent wedge.)
+		const copyWindowMs = deadlineAt - Date.now() - MIGRATION_BACKUP_STARTUP_RESERVE_MS;
+		if (!Number.isFinite(estimatedMs) || copyWindowMs <= 0 || estimatedMs > copyWindowMs) {
+			throw new MigrationBackupAdmissionError(
+				"throughput",
+				`measured copy rate predicts ${estimatedMs}ms for the remaining ${remainingBytes} of ${sourceSize} bytes; copy window is ${copyWindowMs}ms after probe time and startup reserve`,
+			);
+		}
+	} catch (error) {
+		if (error instanceof MigrationBackupAdmissionError) throw error;
+		if (isDbFullError(error)) {
+			throw new MigrationBackupAdmissionError(
+				"space",
+				"throughput probe could not write its bounded scratch chunk",
+				error,
+			);
+		}
+		throw error;
+	} finally {
+		await source?.close();
+		await probe?.close();
+		try {
+			await unlinkAsync(probeDest);
+		} catch {
+			// Best effort probe cleanup. Preserve the admission/copy error above.
+		}
+	}
+}
+
+type MigrationBackupReadChunk = (
+	buffer: Buffer,
+	length: number,
+	position: number,
+) => Promise<{ readonly bytesRead: number }>;
+
+export async function copyMigrationBackupChunks(
+	dbPath: string,
+	backupDest: string,
+	sourceSize: number,
+	sourceMtimeMs: number,
+	sourceMode: number,
+	offset: number,
+	deadlineAt: number,
+	readChunk?: MigrationBackupReadChunk,
+): Promise<void> {
+	const source = await openAsync(dbPath, "r");
+	let destination: Awaited<ReturnType<typeof openAsync>> | undefined;
+	try {
+		destination = await openAsync(backupDest, offset === 0 ? "w" : "r+", sourceMode);
+		if (destination === undefined) throw new Error("Migration backup destination did not open");
+		await destination.truncate(offset);
+		if (offset === 0) {
+			await writeMigrationBackupCursor({
+				sourcePath: dbPath,
+				sourceSize,
+				sourceMtimeMs,
+				destination: backupDest,
+				offset: 0,
+			});
+		}
+		// The measured rate is admission, not a leash: the deadline owns the
+		// hard stop. This wall-clock check makes budget exhaustion mid-copy a
+		// named admission error with a resumable cursor, instead of letting
+		// the copy run until the deadline kills the job.
+		const buffer = Buffer.allocUnsafe(Math.min(MIGRATION_BACKUP_CHUNK_BYTES, Math.max(1, sourceSize)));
+		while (offset < sourceSize) {
+			if (Date.now() >= deadlineAt - MIGRATION_BACKUP_STARTUP_RESERVE_MS) {
+				throw new MigrationBackupAdmissionError(
+					"throughput",
+					`migration backup copy exceeded its budget at ${offset} of ${sourceSize} bytes; resume cursor retained`,
+				);
+			}
+			const length = Math.min(buffer.length, sourceSize - offset);
+			const result = await (readChunk === undefined
+				? source.read(buffer, 0, length, offset)
+				: readChunk(buffer, length, offset));
+			if (result.bytesRead === 0) throw new Error(`Migration backup source ended at ${offset} of ${sourceSize} bytes`);
+			let chunkOffset = 0;
+			while (chunkOffset < result.bytesRead) {
+				const written = await destination.write(
+					buffer,
+					chunkOffset,
+					result.bytesRead - chunkOffset,
+					offset + chunkOffset,
+				);
+				if (written.bytesWritten === 0)
+					throw new Error(`Migration backup write stalled at ${offset + chunkOffset} of ${sourceSize} bytes`);
+				chunkOffset += written.bytesWritten;
+			}
+			// Advance and persist the cursor before the post-chunk deadline fence.
+			// If the final chunk consumed the remaining budget, the cursor is the
+			// durable resume point and must not be removed by the caller.
+			offset += result.bytesRead;
+			await destination.sync();
+			await writeMigrationBackupCursor({
+				sourcePath: dbPath,
+				sourceSize,
+				sourceMtimeMs,
+				destination: backupDest,
+				offset,
+			});
+		}
+		if (Date.now() >= deadlineAt - MIGRATION_BACKUP_STARTUP_RESERVE_MS) {
+			throw new MigrationBackupAdmissionError(
+				"throughput",
+				`migration backup copy exhausted its deadline reserve at ${offset} of ${sourceSize} bytes; resume cursor retained`,
+			);
+		}
+	} catch (error) {
+		if (isDbFullError(error)) {
+			throw new MigrationBackupAdmissionError("space", "database backup copy ran out of space after admission", error);
+		}
+		throw error;
+	} finally {
+		await source.close();
+		await destination?.close();
+	}
+}
+
+function sweepStaleMigrationBackupProbes(dbPath: string, deps: MigrationBackupDeps): void {
+	const dir = dirname(dbPath);
+	const base = basename(dbPath);
+	let entries: string[];
+	try {
+		entries = deps.readdirSync(dir);
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		const isProbe = entry.includes(".probe-") || entry.includes(".space-probe-");
+		const probeName = entry.includes(".space-probe-")
+			? entry.slice(0, entry.indexOf(".space-probe-"))
+			: entry.slice(0, entry.indexOf(".probe-"));
+		if (
+			!isGeneratedMigrationBackupName(base, probeName) ||
+			!isProbe ||
+			entry.endsWith(`.probe-${process.pid}`) ||
+			entry.endsWith(`.space-probe-${process.pid}`)
+		)
+			continue;
+		const path = join(dir, entry);
+		try {
+			deps.unlinkSync(path);
+			deps.log(`[db-accessor] Reclaimed stale migration backup probe: ${entry}`);
+		} catch {
+			// Probe cleanup is deliberately best effort: admission remains
+			// authoritative and must not fail because a stale scratch file races.
+		}
+	}
+}
+
 function prepareMigrationBackup(
-	db: { exec(sql: string): unknown },
+	db: MigrationBackupDb,
 	dbPath: string,
 	deps: MigrationBackupDeps,
 ): DbSpaceMetrics | null {
@@ -875,13 +1557,44 @@ function prepareMigrationBackup(
 		// Non-fatal — backup still useful even with WAL.
 	}
 
-	// Check space before pruning or copying. A failed preflight must not remove
-	// the only retained backup that the operator may need for recovery.
-	const space = preflightMigrationBackupSpace(dbPath, deps);
+	try {
+		const source = deps.statSync(dbPath);
+		if (typeof source.size === "number" && Number.isFinite(source.size)) {
+			assertNoRetainedUnverifiedMigrationBackup(dbPath, source.size, source.mtimeMs, deps, db);
+			pruneStaleMigrationBackups(dbPath, source.size, source.mtimeMs, deps, db);
+		}
+	} catch (error) {
+		if (error instanceof MigrationBackupAdmissionError) throw error;
+		// The space preflight remains authoritative when metadata collection races
+		// with a source or backup disappearing.
+	}
+	sweepStaleMigrationBackupProbes(dbPath, deps);
+	return preflightMigrationBackupSpace(dbPath, deps);
+}
 
-	// Make room for the incoming backup only after the preflight has passed.
-	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, deps);
-	return space;
+/**
+ * Resume admission: the remaining bytes still need headroom on this disk,
+ * now, after the partial copy already consumed `offset` bytes. The
+ * in-progress backup itself is the current attempt's rollback point, so it
+ * is not pruned; only its remaining growth must fit. Degenerate statfs
+ * readings refuse, exactly like the fresh-copy preflight.
+ */
+function preflightResumedMigrationBackupSpace(
+	dbPath: string,
+	sourceSize: number,
+	offset: number,
+	deps: MigrationBackupDeps,
+): void {
+	const remaining = sourceSize - offset;
+	if (remaining <= 0) return;
+	const freeBytes = availableBytes(dirname(dbPath), deps);
+	const metrics = {
+		dbBytes: sourceSize,
+		freeBytes,
+		requiredBytes: remaining + MIGRATION_BACKUP_SPACE_MARGIN_BYTES,
+	} as DbSpaceMetrics;
+	if (freeBytes === null) throw new DbSpacePreflightError("migration_backup", metrics);
+	if (freeBytes < metrics.requiredBytes) throw new DbSpacePreflightError("migration_backup", metrics);
 }
 
 function migrationBackupDestination(dbPath: string, schemaVersion: number, deps: MigrationBackupDeps): string {
@@ -912,28 +1625,117 @@ function migrationBackupError(backupDest: string, err: unknown): Error {
 	);
 }
 
-function finishMigrationBackup(dbPath: string, backupDest: string, deps: MigrationBackupDeps): void {
+function finishMigrationBackup(_dbPath: string, backupDest: string, deps: MigrationBackupDeps): void {
 	deps.log(`[db-accessor] Pre-migration backup: ${backupDest}`);
-	// Final retention pass in case another process wrote backups concurrently.
-	pruneMigrationBackups(dbPath, MAX_MIGRATION_BACKUPS, deps);
 }
 
-function verifyPostMigrationIntegrity(writeConn: SqliteDatabase): void {
-	const rows = writeConn.prepare("PRAGMA integrity_check").all() as ReadonlyArray<Record<string, unknown>>;
-	const messages = rows.map((row) => String(row.integrity_check ?? ""));
-	if (messages.length === 1 && messages[0] === "ok") return;
-	throw new Error(`Post-migration integrity check failed: ${messages.join("; ") || "no result"}`);
+/** Return whether startup still has a migration rollback point awaiting verification. */
+export function hasPendingMigrationBackup(dbPath: string): boolean {
+	return migrationBackups(dbPath, migrationBackupDeps).length > 0;
 }
 
-function cleanupMigrationBackupAfterSuccess(backupDest: string, deps: MigrationBackupDeps): void {
-	try {
-		deps.unlinkSync(backupDest);
-		deps.log(`[db-accessor] Removed verified migration backup: ${backupDest}`);
-	} catch (err) {
-		if (!isMissingPathError(err)) {
-			deps.log(`[db-accessor] Retained verified migration backup after cleanup failure: ${backupDest}`);
+/** Return the newest rollback backup awaiting post-ready verification. */
+export function pendingMigrationBackupPath(dbPath: string): string | null {
+	const pending = migrationBackups(dbPath, migrationBackupDeps)[0];
+	return pending === undefined ? null : join(dirname(dbPath), pending.name);
+}
+
+/** Return the size of the newest rollback backup awaiting post-ready verification. */
+export function pendingMigrationBackupSizeBytes(dbPath: string): number | null {
+	const pending = migrationBackups(dbPath, migrationBackupDeps)[0];
+	return pending?.size ?? null;
+}
+
+/** Remove rollback points only after post-ready integrity maintenance passes. */
+export function pruneMigrationBackupsAfterIntegrity(
+	dbPath: string,
+	deps: MigrationBackupDeps = migrationBackupDeps,
+	verifiedBackupPath?: string,
+): void {
+	pruneMigrationBackups(dbPath, 0, deps, undefined, true, undefined, verifiedBackupPath);
+	const dir = dirname(dbPath);
+	const base = basename(dbPath);
+	for (const name of deps
+		.readdirSync(dir)
+		.filter(
+			(entry) =>
+				entry.endsWith(".cursor.json") && isGeneratedMigrationBackupName(base, entry.slice(0, -".cursor.json".length)),
+		)) {
+		const backupName = name.slice(0, -".cursor.json".length);
+		if (migrationBackups(dbPath, deps).some((backup) => backup.name === backupName)) continue;
+		try {
+			deps.unlinkSync(join(dir, name));
+		} catch {
+			// Best effort cleanup; retaining a cursor is safer than deleting evidence.
 		}
 	}
+}
+
+/**
+ * Rowid high-water mark of the migration audit log, read before migrations run.
+ * The audit table is an append-only autoincrement log, so rows above this mark
+ * are exactly the migrations this startup applied.
+ */
+function migrationAuditHighWaterMark(writeConn: SqliteDatabase): number {
+	try {
+		const row = writeConn.prepare("SELECT MAX(id) AS maxId FROM schema_migrations_audit").get() as
+			| { maxId?: unknown }
+			| undefined;
+		const maxId = Number(row?.maxId);
+		return Number.isFinite(maxId) && maxId > 0 ? maxId : 0;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * Versions applied by this startup's migration run, scoped by the audit
+ * high-water mark captured before migrations ran.
+ */
+function appliedMigrationVersions(writeConn: SqliteDatabase, auditHighWaterMark: number): Set<number> {
+	try {
+		const rows = writeConn
+			.prepare("SELECT version FROM schema_migrations_audit WHERE id > ?")
+			.all(auditHighWaterMark) as ReadonlyArray<{ version?: unknown }>;
+		return new Set(rows.map((row) => Number(row.version)).filter((v) => Number.isFinite(v)));
+	} catch {
+		// Audit table missing or unreadable: verify every migration so this
+		// fails loudly rather than silently skipping artifact verification.
+		return new Set(MIGRATIONS.map((m) => m.version));
+	}
+}
+
+function verifyMigrationArtifacts(writeConn: SqliteDatabase, auditHighWaterMark: number): void {
+	const version = readCurrentSchemaVersion(writeConn);
+	if (version !== LATEST_SCHEMA_VERSION) {
+		throw new Error(
+			`Migration artifact verification found schema version ${version}; expected ${LATEST_SCHEMA_VERSION}`,
+		);
+	}
+	const missing: string[] = [];
+	// Only migrations applied during this startup are verified here. Core
+	// migration logic deliberately accepts legacy inline-migrated v1 databases
+	// whose baseline artifacts (conversations, embeddings) were never created;
+	// verifying all migrations unconditionally would reject that supported
+	// shape. Earlier versions were verified by the startup that applied them.
+	const appliedVersions = appliedMigrationVersions(writeConn, auditHighWaterMark);
+	for (const migration of MIGRATIONS) {
+		if (!appliedVersions.has(migration.version)) continue;
+		for (const table of migration.artifacts?.tables ?? []) {
+			const row = writeConn.prepare("SELECT 1 AS present FROM sqlite_schema WHERE name = ? LIMIT 1").get(table);
+			if (row === undefined) missing.push(`table ${table} (migration ${migration.version})`);
+		}
+		for (const column of migration.artifacts?.columns ?? []) {
+			const rows = writeConn.prepare(`PRAGMA table_info(${JSON.stringify(column.table)})`).all() as ReadonlyArray<{
+				name?: unknown;
+			}>;
+			const tableExists = rows.length > 0;
+			if (!tableExists && column.optional === true) continue;
+			if (!rows.some((row) => row.name === column.column))
+				missing.push(`column ${column.table}.${column.column} (migration ${migration.version})`);
+		}
+	}
+	if (missing.length > 0) throw new Error(`Migration artifact verification failed: ${missing.join(", ")}`);
 }
 
 /**
@@ -943,14 +1745,43 @@ function cleanupMigrationBackupAfterSuccess(backupDest: string, deps: MigrationB
  */
 export function initDbAccessor(path: string, opts?: { readonly agentsDir?: string }): void {
 	const writeConn = openDbAccessorConnection(path, opts);
-	const migrationBackup = backupBeforePendingMigrations(writeConn, path);
-	finishDbAccessorInit(writeConn, opts, migrationBackup);
+	const deferMigrations = shouldDeferPendingMigration(path, toMigrationDb(writeConn) as never, migrationBackupDeps);
+	if (deferMigrations) {
+		writeConn.close();
+		initDbAccessorReadOnly(path, vecExtPath ?? "", opts);
+		return;
+	}
+	const migrationBackup = deferMigrations ? null : backupBeforePendingMigrations(writeConn, path);
+	finishDbAccessorInit(writeConn, opts, migrationBackup, undefined, deferMigrations);
 }
 
-export async function initDbAccessorAsync(path: string, opts?: { readonly agentsDir?: string }): Promise<void> {
+export interface DbAccessorInitializationResult {
+	readonly pendingVecBackfill: boolean;
+	/** sqlite-vec path resolved while opening the owner connection. */
+	readonly extensionPath?: string | null;
+	/** Prior-generation verification is still running; this accessor is readonly. */
+	readonly deferredMigrationVerification: boolean;
+}
+
+export async function initDbAccessorAsync(
+	path: string,
+	opts?: { readonly agentsDir?: string; readonly deadlineAt?: number },
+): Promise<DbAccessorInitializationResult> {
 	const writeConn = openDbAccessorConnection(path, opts);
-	const migrationBackup = await backupBeforePendingMigrationsAsync(writeConn, path);
-	finishDbAccessorInit(writeConn, opts, migrationBackup);
+	const deferMigrations = shouldDeferPendingMigration(path, toMigrationDb(writeConn) as never, migrationBackupDeps);
+	if (deferMigrations) {
+		writeConn.close();
+		initDbAccessorReadOnly(path, vecExtPath ?? "", opts);
+		return {
+			pendingVecBackfill: false,
+			extensionPath: vecExtPath ?? null,
+			deferredMigrationVerification: true,
+		};
+	}
+	const migrationBackup = deferMigrations
+		? null
+		: await backupBeforePendingMigrationsAsync(writeConn, path, opts?.deadlineAt);
+	return finishDbAccessorInit(writeConn, opts, migrationBackup, opts?.deadlineAt, false);
 }
 
 function openDbAccessorConnection(path: string, opts?: { readonly agentsDir?: string }): SqliteDatabase {
@@ -987,9 +1818,19 @@ function backupBeforePendingMigrations(writeConn: SqliteDatabase, path: string):
 	return null;
 }
 
-async function backupBeforePendingMigrationsAsync(writeConn: SqliteDatabase, path: string): Promise<string | null> {
+async function backupBeforePendingMigrationsAsync(
+	writeConn: SqliteDatabase,
+	path: string,
+	deadlineAt?: number,
+): Promise<string | null> {
 	if (existsSync(path) && hasPendingMigrations(toMigrationDb(writeConn))) {
-		return await backupBeforeMigrationAsync(writeConn, path, readCurrentSchemaVersion(writeConn));
+		return await backupBeforeMigrationAsync(
+			writeConn,
+			path,
+			readCurrentSchemaVersion(writeConn),
+			migrationBackupDeps,
+			deadlineAt,
+		);
 	}
 	return null;
 }
@@ -998,24 +1839,33 @@ function finishDbAccessorInit(
 	writeConn: SqliteDatabase,
 	opts?: { readonly agentsDir?: string },
 	migrationBackup?: string | null,
-): void {
+	deadlineAt?: number,
+	skipMigrations = false,
+): DbAccessorInitializationResult {
 	// Run schema migrations — this is the sole schema authority.
 	// Failures here are fatal: the daemon must not start on bad schema.
-	runMigrations(toMigrationDb(writeConn));
-	if (migrationBackup !== null && migrationBackup !== undefined) {
-		// Keep the rollback point until migration and a full integrity check both
-		// succeed. Any thrown error leaves it available for recovery.
-		verifyPostMigrationIntegrity(writeConn);
-		cleanupMigrationBackupAfterSuccess(migrationBackup, migrationBackupDeps);
+	const auditHighWaterMark = migrationAuditHighWaterMark(writeConn);
+	if (!skipMigrations) {
+		assertMigrationStartupBudget(deadlineAt, "migrations");
+		runMigrations(toMigrationDb(writeConn));
+	}
+	if (!skipMigrations && migrationBackup !== null && migrationBackup !== undefined) {
+		assertMigrationStartupBudget(deadlineAt, "migration artifact verification");
+		// Startup only checks bounded schema artifacts for the migrations this
+		// run applied. The retained rollback point is pruned by post-ready
+		// incremental integrity maintenance after it passes.
+		verifyMigrationArtifacts(writeConn, auditHighWaterMark);
 	}
 
 	// Record one-time conversion state only after migrations have succeeded.
 	// The conversion itself is deliberately post-ready because VACUUM can
 	// block the event loop for minutes on a large legacy database (#1493).
+	assertMigrationStartupBudget(deadlineAt, "vacuum conversion state");
 	ensureVacuumConversionState(toMigrationDb(writeConn));
 
 	// Ensure FTS5 virtual table exists — may be missing on upgrades from
 	// older installs where the table was dropped or never created.
+	assertMigrationStartupBudget(deadlineAt, "FTS setup");
 	resetFtsIndexState();
 	ensureFtsTable(writeConn, { deferBackfill: true });
 	const ftsIntegrity = readMemoriesFtsIntegrity(toFtsSchemaQueryDb(writeConn));
@@ -1033,6 +1883,7 @@ function finishDbAccessorInit(
 	// Ensure vec_embeddings virtual table exists with the configured dimensions.
 	// Older tables may lack the TEXT id column or carry stale FLOAT[N] dims.
 	if (vecExtPath) {
+		assertMigrationStartupBudget(deadlineAt, "vector setup");
 		const vecDimensions = embeddingIndexState.active.dimensions;
 		try {
 			ensureVecTable(writeConn, vecDimensions);
@@ -1044,17 +1895,14 @@ function finishDbAccessorInit(
 			console.warn("[db-accessor] vec0 unavailable after extension load:", vecLoadError);
 		}
 		if (vecLoaded) {
-			try {
-				backfillVecEmbeddings(writeConn, vecDimensions);
-			} catch (err) {
-				// Backfill failure is a data issue (e.g. bad row, schema mismatch),
-				// not a runtime unavailability — vector search stays enabled.
-				console.warn("[db-accessor] vec backfill partial:", err instanceof Error ? err.message : String(err));
-			}
+			const pendingVecBackfill = hasMissingVecEmbeddings(writeConn, vecDimensions);
+			accessor = createAccessor(writeConn);
+			return { pendingVecBackfill, extensionPath: vecExtPath ?? null, deferredMigrationVerification: false };
 		}
 	}
 
 	accessor = createAccessor(writeConn);
+	return { pendingVecBackfill: false, extensionPath: vecExtPath ?? null, deferredMigrationVerification: false };
 }
 
 export function initDbAccessorLite(dbPathParam: string, vecExtensionPath: string): void {
@@ -1082,6 +1930,26 @@ export function initDbAccessorLite(dbPathParam: string, vecExtensionPath: string
 	}
 
 	accessor = createAccessor(writeConn);
+}
+
+/**
+ * Open only the readonly accessor needed to serve recovery/status routes when
+ * startup retained a confirmed-corrupt migration checkpoint. Unlike the
+ * normal lite path this does not change pragmas or schema/index state.
+ */
+export function initDbAccessorReadOnly(
+	dbPathParam: string,
+	vecExtensionPath: string,
+	opts?: { readonly agentsDir?: string },
+): void {
+	if (accessor !== null) throw new Error("DbAccessor already initialised");
+
+	dbPath = dbPathParam;
+	vecExtPath = vecExtensionPath;
+	configureCustomSqlite(opts?.agentsDir);
+	const readConn = new Database(dbPathParam, { readonly: true });
+	loadVecExtension(readConn);
+	accessor = createAccessor(readConn);
 }
 
 // ---------------------------------------------------------------------------
@@ -1126,19 +1994,6 @@ export function ensureFtsTable(db: SqliteDatabase, options: { readonly deferBack
 // Vec table creation + backfill
 // ---------------------------------------------------------------------------
 
-function resolveVecEmbeddingDimensions(agentsDir?: string): number {
-	try {
-		const dimensions = loadMemoryConfig(agentsDir ?? resolveSqliteAgentsDir()).embedding.dimensions;
-		if (Number.isInteger(dimensions) && dimensions > 0) return dimensions;
-	} catch (err) {
-		console.warn(
-			"[db-accessor] Failed to read embedding dimensions from config; using default:",
-			err instanceof Error ? err.message : String(err),
-		);
-	}
-	return DEFAULT_EMBEDDING_DIMENSIONS;
-}
-
 export function readVecEmbeddingDimensions(sql: string | null | undefined): number | null {
 	if (!sql) return null;
 	const match = /\bembedding\s+FLOAT\s*\[\s*(\d+)\s*\]/i.exec(sql);
@@ -1153,13 +2008,52 @@ export function vecEmbeddingsSchemaNeedsRepair(sql: string | null | undefined, e
 	return readVecEmbeddingDimensions(sql) !== expectedDimensions;
 }
 
+function ensureVecEmbeddingsQuarantineTable(db: SqliteWriteSurface): void {
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS vec_embeddings_quarantine (
+			rowid TEXT PRIMARY KEY,
+			dimensions INTEGER NOT NULL,
+			reason TEXT NOT NULL,
+			quarantinedAt TEXT NOT NULL
+		)
+	`);
+}
+
+function decodeBackfillVector(
+	vector: unknown,
+	expectedDimensions: number,
+): { readonly vector: Float32Array } | { readonly reason: string } {
+	if (vector === null || vector === undefined) return { reason: "embedding blob is NULL" };
+	// bun:sqlite exposes BLOB columns as Uint8Array (and Buffer is a subtype),
+	// while text/number values from a legacy nullable table are not decodable.
+	if (!(vector instanceof Uint8Array)) return { reason: "embedding blob is not a binary buffer" };
+	const expectedBytes = expectedDimensions * Float32Array.BYTES_PER_ELEMENT;
+	if (vector.byteLength !== expectedBytes) {
+		return {
+			reason: `embedding blob has ${vector.byteLength} bytes; expected ${expectedBytes} for ${expectedDimensions} dimensions`,
+		};
+	}
+	try {
+		const decoded = new Float32Array(vector.buffer.slice(vector.byteOffset, vector.byteOffset + vector.byteLength));
+		if (decoded.some((value) => !Number.isFinite(value))) {
+			return { reason: "embedding vector contains a non-finite value" };
+		}
+		return { vector: decoded };
+	} catch (error) {
+		return { reason: `embedding blob could not be decoded: ${error instanceof Error ? error.message : String(error)}` };
+	}
+}
+
 function ensureVecTable(db: SqliteDatabase, expectedDimensions: number): void {
 	const existing = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'vec_embeddings' AND type = 'table'").get() as
 		| { sql: string }
 		| undefined;
 
 	if (existing) {
-		if (!vecEmbeddingsSchemaNeedsRepair(existing.sql, expectedDimensions)) return;
+		if (!vecEmbeddingsSchemaNeedsRepair(existing.sql, expectedDimensions)) {
+			ensureVecEmbeddingsQuarantineTable(db);
+			return;
+		}
 		if (/\bid\s+TEXT\b/i.test(existing.sql)) {
 			console.warn(`[db-accessor] vec_embeddings schema drift detected; recreating with FLOAT[${expectedDimensions}]`);
 		}
@@ -1172,9 +2066,10 @@ function ensureVecTable(db: SqliteDatabase, expectedDimensions: number): void {
 			embedding FLOAT[${expectedDimensions}] distance_metric=cosine
 		);
 	`);
+	ensureVecEmbeddingsQuarantineTable(db);
 }
 
-function vecRowidsTableAvailable(db: SqliteDatabase): boolean {
+function vecRowidsTableAvailable(db: SqliteWriteSurface): boolean {
 	try {
 		const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vec_embeddings_rowids'").get();
 		return row !== undefined;
@@ -1183,10 +2078,36 @@ function vecRowidsTableAvailable(db: SqliteDatabase): boolean {
 	}
 }
 
+function hasMissingVecEmbeddings(db: SqliteWriteSurface, expectedDimensions: number): boolean {
+	try {
+		const targetTable = vecRowidsTableAvailable(db) ? "vec_embeddings_rowids" : "vec_embeddings";
+		return (
+			db
+				.prepare(
+					`SELECT 1 FROM embeddings e
+					 LEFT JOIN ${targetTable} v ON v.id = e.id
+					 LEFT JOIN vec_embeddings_quarantine q ON q.rowid = e.id
+					 WHERE v.id IS NULL AND q.rowid IS NULL AND e.dimensions = ? LIMIT 1`,
+				)
+				.get(expectedDimensions) !== undefined
+		);
+	} catch {
+		return false;
+	}
+}
+
+const VEC_EMBEDDING_BACKFILL_BATCH_SIZE = 10_000;
+// The migration reserve is 5s, leaving a 60s post-ready work window.
+export const VEC_EMBEDDING_POST_READY_BUDGET_MS = 65_000;
+
+let pendingVecBackfillDimensions: number | null = null;
+
 function missingVecEmbeddingsRows(
-	db: SqliteDatabase,
+	db: SqliteWriteSurface,
 	expectedDimensions: number,
-): Array<{ id: string; vector: Buffer }> {
+	lastId: string,
+	limit: number,
+): Array<{ id: string; vector: unknown }> {
 	// sqlite-vec's virtual table is expensive for anti-joins: on a 43k-row local
 	// DB, `LEFT JOIN vec_embeddings` costs ~6.5s even when no rows are missing.
 	// The backing rowid table is a normal SQLite table with a UNIQUE id index and
@@ -1198,69 +2119,145 @@ function missingVecEmbeddingsRows(
 		.prepare(
 			`SELECT e.id, e.vector FROM embeddings e
 			 LEFT JOIN ${targetTable} v ON v.id = e.id
-			 WHERE v.id IS NULL AND e.dimensions = ?`,
+			 LEFT JOIN vec_embeddings_quarantine q ON q.rowid = e.id
+			 WHERE v.id IS NULL AND q.rowid IS NULL AND e.dimensions = ? AND e.id > ?
+			 ORDER BY e.id LIMIT ?`,
 		)
-		.all(expectedDimensions) as Array<{ id: string; vector: Buffer }>;
+		.all(expectedDimensions, lastId, limit) as Array<{ id: string; vector: unknown }>;
 }
 
-function countSkippedVecEmbeddingsRows(db: SqliteDatabase, expectedDimensions: number): number {
-	const targetTable = vecRowidsTableAvailable(db) ? "vec_embeddings_rowids" : "vec_embeddings";
-	const skippedRow = db
-		.prepare(
-			`SELECT COUNT(*) AS n FROM embeddings e
-			 LEFT JOIN ${targetTable} v ON v.id = e.id
-			 WHERE v.id IS NULL AND e.dimensions != ?`,
-		)
-		.get(expectedDimensions) as { n: number } | undefined;
-	return skippedRow?.n ?? 0;
+export interface VecBackfillOptions {
+	readonly maxBatches?: number;
+	/** Bound one synchronous writer turn so the daemon can yield between slices. */
+	readonly batchSize?: number;
 }
 
-function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number): void {
+export function backfillVecEmbeddings(
+	db: SqliteWriteSurface,
+	expectedDimensions: number,
+	deadlineAt?: number,
+	options: VecBackfillOptions = {},
+): void {
+	// Keep quarantine state durable across restarts and exclude it from every
+	// subsequent pending probe. The table contains IDs and diagnostics only.
+	ensureVecEmbeddingsQuarantineTable(db);
 	// Directly query for missing rows instead of comparing counts.
 	// Count comparison is racy — a row can exist in embeddings but not
 	// vec_embeddings even when counts match (e.g. after a crash mid-sync).
-	const rows = missingVecEmbeddingsRows(db, expectedDimensions);
-
-	const skippedCount = countSkippedVecEmbeddingsRows(db, expectedDimensions);
-	if (skippedCount > 0) {
-		console.warn(
-			`[db-accessor] Skipped ${skippedCount} embeddings with dimensions that do not match FLOAT[${expectedDimensions}]`,
-		);
-	}
-
-	if (rows.length === 0) return;
-
+	const batchSize = Math.max(
+		1,
+		Math.min(options.batchSize ?? VEC_EMBEDDING_BACKFILL_BATCH_SIZE, VEC_EMBEDDING_BACKFILL_BATCH_SIZE),
+	);
 	const insert = db.prepare("INSERT OR REPLACE INTO vec_embeddings (id, embedding) VALUES (?, ?)");
-
+	const quarantine = db.prepare(
+		"INSERT OR IGNORE INTO vec_embeddings_quarantine (rowid, dimensions, reason, quarantinedAt) VALUES (?, ?, ?, ?)",
+	);
+	let lastId = "";
 	let migrated = 0;
-	try {
-		db.exec("BEGIN");
-		for (const row of rows) {
-			try {
-				const vec = new Float32Array(
-					row.vector.buffer.slice(row.vector.byteOffset, row.vector.byteOffset + row.vector.byteLength),
-				);
-				insert.run(row.id, vec);
-				migrated++;
-			} catch {
-				// Skip malformed rows
-			}
+	let totalRows = 0;
+	let batches = 0;
+	let deferred = false;
+	let lastBatchSize = batchSize;
+	let remainingRowsAtLeast = 0;
+	const stopForBudget = (error: unknown, remainingHint = 1): boolean => {
+		if (!(error instanceof MigrationBackupAdmissionError) || error.reason !== "throughput") throw error;
+		deferred = true;
+		pendingVecBackfillDimensions = expectedDimensions;
+		remainingRowsAtLeast = remainingHint;
+		return true;
+	};
+	for (;;) {
+		// Keep both the anti-join and the transaction inside the startup budget.
+		if (options.maxBatches !== undefined && batches >= options.maxBatches) {
+			if (lastBatchSize < batchSize) break;
+			deferred = true;
+			pendingVecBackfillDimensions = expectedDimensions;
+			remainingRowsAtLeast = 1;
+			break;
 		}
-		db.exec("COMMIT");
-	} catch (e) {
 		try {
-			db.exec("ROLLBACK");
-		} catch {
-			// Rollback failed — transaction already closed or rolled back
+			assertMigrationStartupBudget(deadlineAt, "vector embedding backfill batch");
+		} catch (error) {
+			if (stopForBudget(error)) break;
+			throw error;
 		}
-		throw e;
+		const rows = missingVecEmbeddingsRows(db, expectedDimensions, lastId, batchSize);
+		if (rows.length === 0) break;
+		lastBatchSize = rows.length;
+		batches++;
+		totalRows += rows.length;
+		let batchLastId = lastId;
+		let processedRows = 0;
+		try {
+			db.exec("BEGIN");
+			for (const [index, row] of rows.entries()) {
+				if (index % 100 === 0) assertMigrationStartupBudget(deadlineAt, "vector embedding backfill");
+				const decoded = decodeBackfillVector(row.vector, expectedDimensions);
+				if ("reason" in decoded) {
+					const reason = decoded.reason.slice(0, 1_000);
+					const result = quarantine.run(row.id, expectedDimensions, reason, new Date().toISOString());
+					if (result.changes > 0) {
+						// Log once per validated malformed row; retries do not spam logs.
+						console.warn(`[db-accessor] Quarantined malformed embedding row ${row.id}: ${reason}`);
+					}
+				} else {
+					// Insert failures are operational errors (for example, SQLITE_BUSY).
+					// Let the outer transaction handler roll back and let the caller retry;
+					// only validated data-shape failures enter durable quarantine.
+					insert.run(row.id, decoded.vector);
+					migrated++;
+				}
+				batchLastId = row.id;
+				processedRows++;
+			}
+			db.exec("COMMIT");
+			lastId = batchLastId;
+		} catch (e) {
+			if (e instanceof MigrationBackupAdmissionError && e.reason === "throughput") {
+				// The budget fence can fire inside a large transaction. Commit the
+				// durable prefix instead of rolling it back and retrying the same rows
+				// forever; the keyset cursor resumes after this committed row.
+				try {
+					db.exec("COMMIT");
+				} catch (commitError) {
+					try {
+						db.exec("ROLLBACK");
+					} catch {
+						// Preserve the commit failure.
+					}
+					throw commitError;
+				}
+				lastId = batchLastId;
+				stopForBudget(e, Math.max(1, rows.length - processedRows));
+				break;
+			}
+			try {
+				db.exec("ROLLBACK");
+			} catch {
+				// Rollback failed — transaction already closed or rolled back
+			}
+			throw e;
+		}
+		if (rows.length < batchSize) break;
 	}
 
 	if (migrated > 0) {
 		// eslint-disable-next-line no-console
-		console.log(`[db-accessor] Backfilled ${migrated}/${rows.length} missing embeddings into vec_embeddings`);
+		console.log(`[db-accessor] Backfilled ${migrated}/${totalRows} missing embeddings into vec_embeddings`);
+	}
+	if (deferred) {
+		console.warn(
+			`[db-accessor] Deferred vector embedding backfill after ${migrated} rows; remaining rows at least ${remainingRowsAtLeast} will be completed post-ready`,
+		);
+		return;
 	}
 
+	try {
+		assertMigrationStartupBudget(deadlineAt, "vector embedding cleanup");
+	} catch (error) {
+		if (stopForBudget(error, 0)) return;
+		throw error;
+	}
 	// Clean orphaned vec_embeddings rows (phantom IDs from prior sync bugs)
 	try {
 		const orphanRow = db
@@ -1279,6 +2276,24 @@ function backfillVecEmbeddings(db: SqliteDatabase, expectedDimensions: number): 
 	} catch {
 		// vec_embeddings may not exist — non-fatal
 	}
+	pendingVecBackfillDimensions = null;
+}
+
+export function hasPendingVecBackfill(): boolean {
+	return pendingVecBackfillDimensions !== null;
+}
+
+export function pendingVecBackfillDimensionsValue(): number | null {
+	return pendingVecBackfillDimensions;
+}
+
+export function continuePendingVecBackfill(
+	db: SqliteWriteSurface,
+	deadlineAt = Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS,
+): void {
+	const dimensions = pendingVecBackfillDimensions;
+	if (dimensions === null) return;
+	backfillVecEmbeddings(db, dimensions, deadlineAt);
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,6 +2551,7 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 	type WriteOperationMeta = Parameters<typeof runWriteOperation>[1];
 
 	function runWriteTx<T>(fn: (db: WriteDb) => T, meta: WriteOperationMeta = { operation: "db.write" }): T {
+		assertDatabaseIntegrityWritesAllowed();
 		return runWriteOperation(() => {
 			writeConn.exec("BEGIN IMMEDIATE");
 			try {
@@ -1550,16 +2566,19 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 	}
 
 	function runCheckpointWal(): void {
+		assertDatabaseIntegrityWritesAllowed();
 		writeConn.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 	}
 
 	function runIncrementalVacuum(): number {
+		assertDatabaseIntegrityWritesAllowed();
 		writeConn.exec("PRAGMA incremental_vacuum");
 		const row = writeConn.prepare("PRAGMA freelist_count").get() as { freelist_count?: number } | undefined;
 		return typeof row?.freelist_count === "number" ? row.freelist_count : 0;
 	}
 
 	function runVacuumConversion(): boolean {
+		assertDatabaseIntegrityWritesAllowed();
 		return convertToIncrementalVacuum(toMigrationDb(writeConn), { dbPath: dbPath ?? undefined });
 	}
 
@@ -1742,6 +2761,22 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 					endSyncDbCall(attribution);
 				}
 			}, options);
+		},
+
+		withWriteDbAsync<T>(fn: (db: WriteDb) => T, options?: WriteAdmissionOptions): Promise<T> {
+			return enqueueWrite(
+				() => {
+					const attribution = beginSyncDbCall("withWriteDbAsync", Date.now(), options?.siteToken);
+					try {
+						assertDatabaseIntegrityWritesAllowed();
+						return fn(writeConn);
+					} finally {
+						endSyncDbCall(attribution);
+					}
+				},
+				options,
+				false,
+			);
 		},
 
 		checkpointWalAsync(options?: WriteAdmissionOptions): Promise<void> {
@@ -1985,6 +3020,8 @@ export function registerDbOwnerHealthProvider(provider: (() => DbOwnerHealth) | 
 
 /** Tear down the singleton and its lazy DB-owner clients. Safe to call even if never initialised. */
 export async function closeDbAccessor(): Promise<void> {
+	databaseIntegrityWritesBlocked = false;
+	pendingVecBackfillDimensions = null;
 	dbOwnerHealthProvider = null;
 	if (accessor) {
 		accessor.close();

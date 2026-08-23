@@ -1,9 +1,17 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { repairTelemetryIndexes, runDeferredIntegrityCheck } from "./database-integrity";
+import {
+	getDatabaseIntegrityStatus,
+	publishDatabaseIntegrityStatus,
+	resetGlobalIntegrityLatch,
+	repairTelemetryIndexes,
+	runDeferredIntegrityCheck,
+	type DatabaseIntegrityProgress,
+	updateDatabaseIntegrityStatus,
+} from "./database-integrity";
 import { createDbOwnerClient } from "./db-owner-client";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 
@@ -91,6 +99,25 @@ function fakeAccessor(options: {
 		close(): void {},
 	};
 	return { accessor, reindexed };
+}
+
+function incrementalProgress(overrides: Partial<DatabaseIntegrityProgress> = {}): DatabaseIntegrityProgress {
+	return {
+		checkpointKey: "database.quick-check",
+		phase: "complete",
+		checkedObjects: 3,
+		failedObjects: 0,
+		remainingObjects: 0,
+		lastObject: "table:gamma",
+		databasePagesObserved: 3,
+		databaseBytesObserved: 12_288,
+		elapsedMs: 4,
+		ownerQueueAdmissionMs: 0,
+		ownerExecutionMs: 1,
+		cancellationReason: null,
+		degradationReason: null,
+		...overrides,
+	};
 }
 
 afterEach(async () => {
@@ -534,5 +561,65 @@ describe("deferred database integrity recovery (#1513)", () => {
 		expect(verified.prepare("SELECT COUNT(*) AS n FROM repair_fixture").get()).toEqual({ n: 0 });
 		verified.close();
 		rmSync(dir, { recursive: true, force: true });
+	});
+});
+
+describe("integrity state severity merge", () => {
+	beforeEach(() => {
+		resetGlobalIntegrityLatch();
+		updateDatabaseIntegrityStatus(incrementalProgress());
+	});
+	it("publishes incremental corruption and repair guidance over a degraded latch", () => {
+		publishDatabaseIntegrityStatus("degraded", ["global verification incomplete"]);
+		updateDatabaseIntegrityStatus(incrementalProgress({ failedObjects: 1 }), ["confirmed corruption"]);
+
+		expect(getDatabaseIntegrityStatus()).toMatchObject({
+			state: "corrupt",
+			integrity: "confirmed corruption",
+		});
+		expect(getDatabaseIntegrityStatus().repairGuidance).toContain("back up the database");
+		publishDatabaseIntegrityStatus("healthy");
+		expect(getDatabaseIntegrityStatus()).toMatchObject({
+			state: "corrupt",
+			integrity: "confirmed corruption",
+		});
+	});
+
+	it("retains a corrupt global latch over a healthy incremental result", () => {
+		publishDatabaseIntegrityStatus("corrupt", ["global corruption"]);
+		updateDatabaseIntegrityStatus(incrementalProgress());
+
+		expect(getDatabaseIntegrityStatus()).toMatchObject({
+			state: "corrupt",
+			integrity: "global corruption",
+		});
+		publishDatabaseIntegrityStatus("healthy");
+	});
+
+	it("retains a degraded global latch over a healthy incremental result", () => {
+		resetGlobalIntegrityLatch();
+		publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"]);
+		updateDatabaseIntegrityStatus(incrementalProgress());
+
+		expect(getDatabaseIntegrityStatus()).toMatchObject({
+			state: "degraded",
+			integrity: "degraded:integrity-unverified",
+		});
+		publishDatabaseIntegrityStatus("healthy");
+	});
+
+	it("does not downgrade a latched corrupt verdict during persistence retries", () => {
+		resetGlobalIntegrityLatch();
+		publishDatabaseIntegrityStatus("corrupt", ["confirmed corruption"]);
+		publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"]);
+
+		expect(getDatabaseIntegrityStatus()).toMatchObject({
+			state: "corrupt",
+			integrity: "confirmed corruption",
+		});
+
+		resetGlobalIntegrityLatch();
+		publishDatabaseIntegrityStatus("healthy");
+		expect(getDatabaseIntegrityStatus().state).toBe("healthy");
 	});
 });

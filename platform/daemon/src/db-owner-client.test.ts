@@ -20,6 +20,7 @@ import {
 	DbOwnerCancelledError,
 	DbOwnerDeadlineError,
 	DbOwnerDiedError,
+	DbOwnerWritesBlockedError,
 	MAX_DB_OWNER_PENDING_JOBS,
 	MAX_DB_OWNER_WORK_UNITS,
 } from "./db-owner-client";
@@ -177,6 +178,40 @@ describe("DB owner client", () => {
 			if (previousTimeout === undefined) Reflect.deleteProperty(process.env, "SIGNET_DB_OWNER_START_TIMEOUT_MS");
 			else process.env.SIGNET_DB_OWNER_START_TIMEOUT_MS = previousTimeout;
 		}
+	});
+
+	test("preserves application error codes across the owner boundary", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const workerPath = join(database.directory, "serialized-error-worker.js");
+		await Bun.write(
+			workerPath,
+			[
+				'process.stdout.write(JSON.stringify({ type: "ready", pid: process.pid }) + "\\n");',
+				'let input = "";',
+				'process.stdin.setEncoding("utf8");',
+				'process.stdin.on("data", (chunk) => {',
+				"  input += chunk;",
+				'  const lines = input.split("\\n");',
+				'  input = lines.pop() || "";',
+				"  for (const line of lines) {",
+				"    if (!line) continue;",
+				"    const command = JSON.parse(line);",
+				'    if (command.type === "submit") process.stdout.write(JSON.stringify({ type: "result", jobId: command.job.id, outcome: "failed", error: { name: "MigrationBackupAdmissionError", message: "admission refused", code: "DB_MIGRATION_BACKUP_ADMISSION_FAILED" } }) + "\\n");',
+				'    if (command.type === "shutdown") process.exit(0);',
+				"  }",
+				"});",
+			].join("\n"),
+		);
+		client = createDbOwnerClient({ dbPath: database.path, workerPath });
+		await client.start();
+
+		await expect(
+			client.submit(
+				{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "all" } },
+				{ operation: "serialized-application-error", lane: "read", deadlineMs: 1_000 },
+			).result,
+		).rejects.toMatchObject({ code: "DB_MIGRATION_BACKUP_ADMISSION_FAILED", sqliteCode: undefined });
 	});
 
 	test("keeps transport readiness distinct from database initialization", async () => {
@@ -848,6 +883,61 @@ describe("DB owner client", () => {
 
 		for (const handle of handles) handle.cancel();
 		await Promise.allSettled(handles.map((handle) => handle.result));
+	});
+
+	test("preserves the named admission error through production initialize", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		const owner = client;
+		if (owner === null) throw new Error("owner client not created");
+		const handles: ReturnType<typeof owner.submit>[] = [];
+		for (let index = 0; index < MAX_DB_OWNER_PENDING_JOBS; index += 1) {
+			handles.push(
+				owner.submit(
+					{ kind: "sleep", durationMs: 50 },
+					{ operation: "maintenance.initialize-admission-test", lane: "maintenance", deadlineMs: 2_000 },
+				),
+			);
+		}
+
+		await expect(owner.initialize(database.directory)).rejects.toBeInstanceOf(DbOwnerAdmissionError);
+		for (const handle of handles) handle.cancel();
+		await Promise.allSettled(handles.map((handle) => handle.result));
+	});
+
+	test("keeps verification jobs usable while application writes are blocked", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+		client.setWriteBlocked(true);
+
+		expect(() =>
+			client?.submit(
+				{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "get" } },
+				{ operation: "application.write-block-test", lane: "maintenance", deadlineMs: 1_000 },
+			),
+		).toThrow(DbOwnerWritesBlockedError);
+		await expect(
+			client.submit<{ readonly value: number } | undefined>(
+				{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "get", readonly: true } },
+				{ operation: "integrity.verify-block-test", lane: "verify", deadlineMs: 1_000 },
+			).result,
+		).resolves.toEqual({ value: 1 });
+	});
+
+	test("carries pending vector backfill state through the initialize protocol", async () => {
+		const database = makeMigratedDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+
+		await expect(client.initialize(database.directory)).resolves.toEqual({
+			initialized: true,
+			pendingVecBackfill: true,
+			extensionPath: findSqliteVecExtension(),
+		});
 	});
 
 	test("rejects a result that exceeds the bounded wire payload", async () => {

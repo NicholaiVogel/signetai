@@ -92,6 +92,37 @@ let latestStatus: DatabaseIntegrityStatus = {
 	incrementalProgress: null,
 };
 
+type GlobalIntegrityState = "healthy" | "corrupt" | "unavailable" | "degraded";
+let globalIntegrityState: GlobalIntegrityState | null = null;
+let globalIntegrityMessage: string | null = null;
+let incrementalIntegrityState: DatabaseIntegrityState = "unknown";
+let incrementalIntegrityMessage: string | null = null;
+
+const INTEGRITY_STATE_SEVERITY: Record<DatabaseIntegrityState, number> = {
+	unknown: 0,
+	healthy: 1,
+	repaired: 1,
+	degraded: 2,
+	unavailable: 3,
+	corrupt: 4,
+};
+
+function mergeIntegrityState(
+	globalState: GlobalIntegrityState | null,
+	incrementalState: DatabaseIntegrityState,
+): DatabaseIntegrityState {
+	if (globalState === null) return incrementalState;
+	return INTEGRITY_STATE_SEVERITY[incrementalState] > INTEGRITY_STATE_SEVERITY[globalState]
+		? incrementalState
+		: globalState;
+}
+
+/** Clear the migration-wide latch after a confirmed clean global scan. */
+export function resetGlobalIntegrityLatch(): void {
+	globalIntegrityState = null;
+	globalIntegrityMessage = null;
+}
+
 function check(db: ReadDb, pragma: "quick_check" | "integrity_check", table?: string): IntegrityCheckStatus {
 	const sql = table === undefined ? `PRAGMA ${pragma}` : `PRAGMA ${pragma}(${table})`;
 	const key = pragma === "quick_check" ? "quick_check" : "integrity_check";
@@ -161,29 +192,84 @@ export function updateDatabaseIntegrityStatus(
 					? "healthy"
 					: "unknown";
 	const phase: DatabaseIntegrityStatus["phase"] =
-		progress.phase === "timed_out"
-			? "timed_out"
-			: progress.phase === "running"
-				? "running"
-				: progress.phase === "degraded"
-					? "degraded"
-					: "complete";
+		globalIntegrityState === "degraded"
+			? "degraded"
+			: progress.phase === "timed_out"
+				? "timed_out"
+				: progress.phase === "running"
+					? "running"
+					: progress.phase === "degraded"
+						? "degraded"
+						: "complete";
+	const incrementalIntegrity =
+		errors.length > 0
+			? errors.join("; ")
+			: degraded
+				? progress.degradationReason
+				: failed
+					? "incremental integrity check failed"
+					: operationalFailure
+						? "incremental integrity check unavailable"
+						: null;
+	incrementalIntegrityState = state;
+	incrementalIntegrityMessage = incrementalIntegrity;
+	const publishedState = mergeIntegrityState(globalIntegrityState, incrementalIntegrityState);
+	const globalStateWins =
+		globalIntegrityState !== null &&
+		INTEGRITY_STATE_SEVERITY[globalIntegrityState] >= INTEGRITY_STATE_SEVERITY[incrementalIntegrityState];
 	latestStatus = {
 		...latestStatus,
 		checkedAt: new Date().toISOString(),
-		state,
+		state: publishedState,
 		phase,
-		integrity: degraded ? progress.degradationReason : null,
+		integrity: globalStateWins ? globalIntegrityMessage : incrementalIntegrityMessage,
 		quickCheck: failed
 			? { ok: false, messages: errors.length > 0 ? errors : ["incremental integrity check failed"] }
-			: progress.phase === "complete"
-				? { ok: true, messages: [] }
-				: latestStatus.quickCheck,
+			: globalStateWins
+				? latestStatus.quickCheck
+				: progress.phase === "complete"
+					? { ok: true, messages: [] }
+					: latestStatus.quickCheck,
 		durationMs: progress.elapsedMs,
-		repairGuidance: state === "corrupt" || state === "unavailable" ? REPAIR_GUIDANCE : null,
+		repairGuidance: publishedState === "corrupt" || publishedState === "unavailable" ? REPAIR_GUIDANCE : null,
 		ownerState: health?.state ?? latestStatus.ownerState,
 		ownerGeneration: health?.generation ?? latestStatus.ownerGeneration,
 		incrementalProgress: progress,
+	};
+}
+
+/** Publish migration-wide integrity without replacing quick-check details. */
+export function publishDatabaseIntegrityStatus(
+	state: "healthy" | GlobalIntegrityState,
+	messages: readonly string[] = [],
+	owner?: DbOwnerClient,
+): void {
+	const shouldReplaceLatch =
+		globalIntegrityState === null || INTEGRITY_STATE_SEVERITY[state] >= INTEGRITY_STATE_SEVERITY[globalIntegrityState];
+	if (shouldReplaceLatch) {
+		globalIntegrityState = state;
+		globalIntegrityMessage =
+			messages.length > 0
+				? messages.join("; ")
+				: state === "degraded"
+					? "degraded:integrity-unverified"
+					: state === "healthy"
+						? null
+						: "global integrity check failed";
+	}
+	const latchedState = globalIntegrityState ?? state;
+	const publishedState = mergeIntegrityState(latchedState, incrementalIntegrityState);
+	const globalStateWins = INTEGRITY_STATE_SEVERITY[latchedState] >= INTEGRITY_STATE_SEVERITY[incrementalIntegrityState];
+	const health = owner?.health();
+	latestStatus = {
+		...latestStatus,
+		checkedAt: new Date().toISOString(),
+		state: publishedState,
+		phase: publishedState === "degraded" ? "degraded" : "complete",
+		integrity: globalStateWins ? globalIntegrityMessage : incrementalIntegrityMessage,
+		repairGuidance: publishedState === "corrupt" || publishedState === "unavailable" ? REPAIR_GUIDANCE : null,
+		ownerState: health?.state ?? latestStatus.ownerState,
+		ownerGeneration: health?.generation ?? latestStatus.ownerGeneration,
 	};
 }
 
@@ -462,7 +548,7 @@ async function runKillableTelemetryRepair(
 }
 
 async function writeAsync<Result>(accessor: DbAccessor, processBatch: (db: WriteDb) => Result): Promise<Result> {
-	return accessor.withWriteTxAsync(processBatch, { siteToken: "database-integrity.ts:465" });
+	return accessor.withWriteTxAsync(processBatch, { siteToken: "database-integrity.ts:551" });
 }
 
 /**
@@ -629,7 +715,7 @@ async function readIntegrityChecks(
 				telemetry: check(db, "integrity_check", "telemetry_events"),
 				indexes: listTelemetryIndexes(db),
 			}),
-			{ siteToken: "database-integrity.ts:626" },
+			{ siteToken: "database-integrity.ts:712" },
 		);
 	}
 	const deadlineMs = options.repairTimeoutMs ?? DEFAULT_INTEGRITY_TIMEOUT_MS;
@@ -742,7 +828,7 @@ export async function repairTelemetryIndexes(
 			const verifiedTelemetry =
 				options?.owner === undefined
 					? await accessor.withReadDbAsync(async (db) => check(db, "integrity_check", "telemetry_events"), {
-							siteToken: "database-integrity.ts:744",
+							siteToken: "database-integrity.ts:830",
 						})
 					: ownerCheck(
 							await ownerQueryAll<Record<string, unknown>>(

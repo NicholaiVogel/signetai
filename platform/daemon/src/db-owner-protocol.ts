@@ -7,7 +7,7 @@
  * owner. `lane` selects that scheduling boundary.
  */
 
-export type DbOwnerLane = "read" | "write" | "maintenance";
+export type DbOwnerLane = "read" | "write" | "maintenance" | "verify";
 /** Scheduling class inside an owner process. */
 export type DbOwnerWorkloadClass = "foreground" | "maintenance";
 export const DB_OWNER_MAX_QUEUE_DEPTH = 64;
@@ -28,7 +28,9 @@ export interface DbOwnerStatement {
 	/** Maximum UTF-8 JSON payload for this result. The owner rejects larger results. */
 	readonly maxResultBytes?: number;
 	readonly transactional?: boolean;
-	/** Abort a transaction when this run statement changes zero rows. */
+	/** Execute this statement on a connection opened with readonly mode. */
+	readonly readonly?: boolean;
+	/** Abort a transaction when a run statement changes zero rows. */
 	readonly requireChanges?: boolean;
 }
 
@@ -248,6 +250,8 @@ export interface DbOwnerJob {
 	readonly id: string;
 	readonly operation: string;
 	readonly lane: DbOwnerLane;
+	/** Verification jobs may run while application writes are fail-closed. */
+	readonly allowWriteBlocked?: boolean;
 	readonly workloadClass: DbOwnerWorkloadClass;
 	readonly enqueuedAt: number;
 	readonly deadlineAt: number;
@@ -265,6 +269,7 @@ export interface DbOwnerJobMetrics {
 export type DbOwnerCommand =
 	| { readonly type: "submit"; readonly job: DbOwnerJob }
 	| { readonly type: "cancel"; readonly jobId: string }
+	| { readonly type: "set_write_blocked"; readonly blocked: boolean }
 	| { readonly type: "shutdown" };
 
 export type DbOwnerFailureCause = "provider_unavailable" | "internal_error";
@@ -272,6 +277,8 @@ export type DbOwnerFailureCause = "provider_unavailable" | "internal_error";
 export interface DbOwnerSerializedError {
 	readonly name: string;
 	readonly message: string;
+	readonly code?: string | number;
+	readonly sqliteCode?: string | number;
 	readonly causeFamily?: DbOwnerFailureCause;
 }
 
@@ -295,11 +302,21 @@ function serializedCauseFamily(error: unknown): DbOwnerFailureCause | undefined 
 	return undefined;
 }
 
+function serializedErrorField(error: unknown, key: "code" | "sqliteCode"): string | number | undefined {
+	if (typeof error !== "object" || error === null) return undefined;
+	const value = (error as Record<string, unknown>)[key];
+	return typeof value === "string" || typeof value === "number" ? value : undefined;
+}
+
 export function serializeError(error: unknown): DbOwnerSerializedError {
 	const causeFamily = serializedCauseFamily(error);
+	const code = serializedErrorField(error, "code");
+	const sqliteCode = serializedErrorField(error, "sqliteCode");
 	return {
 		name: error instanceof Error ? error.name : "Error",
 		message: error instanceof Error ? error.message : String(error),
+		...(code === undefined ? {} : { code }),
+		...(sqliteCode === undefined ? {} : { sqliteCode }),
 		...(causeFamily === undefined ? {} : { causeFamily }),
 	};
 }

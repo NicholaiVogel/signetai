@@ -15,6 +15,7 @@ export type SyncDbCallKind =
 	| "withWriteTx"
 	| "withReadDbAsync"
 	| "withWriteTxAsync"
+	| "withWriteDbAsync"
 	| "checkpointWalAsync"
 	| "incrementalVacuumAsync"
 	| "vacuumConversionAsync";

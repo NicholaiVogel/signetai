@@ -3,9 +3,20 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createDbOwnerClient } from "./db-owner-client";
 import { isFtsIndexIncomplete } from "./fts-index-state";
 import {
 	getEventLoopLiveness,
@@ -16,21 +27,31 @@ import {
 import { getSyncDbAccessor } from "../legacy-sync/db-accessor-sync";
 import {
 	DbSpacePreflightError,
+	MigrationBackupAdmissionError,
 	DbReadAdmissionCancelledError,
 	DbReadAdmissionRejectedError,
 	DbWriteQueueFullError,
 	MAX_READ_CONNECTIONS,
 	MAX_WRITE_QUEUE,
+	MIGRATION_BACKUP_CHUNK_BYTES,
 	backupBeforeMigration,
+	backupBeforeMigrationAsync,
+	copyMigrationBackupChunks,
 	closeDbAccessor,
 	getDbAccessor,
+	hasPendingMigrationBackup,
 	initDbAccessor,
+	initDbAccessorAsync,
+	pruneMigrationBackupsAfterIntegrity,
 	readVecEmbeddingDimensions,
 	resolveCustomSqlitePath,
 	resolveSqliteAgentsDir,
 	resolveSqliteRuntimeConfig,
 	runWriteTxAsync,
 	vecEmbeddingsSchemaNeedsRepair,
+	isGeneratedMigrationBackupName,
+	backfillVecEmbeddings,
+	VEC_EMBEDDING_POST_READY_BUDGET_MS,
 } from "./db-accessor";
 
 function tmpDbPath(): string {
@@ -57,7 +78,56 @@ describe("DbAccessor", () => {
 		initDbAccessor(dbPath);
 		const acc = getDbAccessor();
 		expect(acc).toBeTruthy();
-		expect(readdirSync(join(dbPath, "..")).filter((name) => name.includes(".bak-v"))).toEqual([]);
+		expect(
+			readdirSync(join(dbPath, "..")).filter((name) => name.includes(".bak-v") && !name.endsWith(".cursor.json")),
+		).toHaveLength(1);
+	});
+
+	test("initializes a multi-chunk pending-migration database without inline global verification", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+
+		initDbAccessor(dbPath);
+		closeDbAccessor();
+		for (const name of readdirSync(join(dbPath, ".."))) {
+			if (name.startsWith("test.db.bak-v") && !name.endsWith(".cursor.json")) rmSync(join(dbPath, "..", name));
+		}
+		const fixture = new Database(dbPath);
+		fixture.exec("CREATE TABLE migration_large_fixture (payload BLOB NOT NULL)");
+		fixture
+			.prepare("INSERT INTO migration_large_fixture (payload) VALUES (zeroblob(?))")
+			.run(3 * MIGRATION_BACKUP_CHUNK_BYTES + 1);
+		fixture.exec("DELETE FROM schema_migrations WHERE version = 128");
+		fixture.close();
+		const sourceSizeBeforeInit = statSync(dbPath).size;
+
+		const owner = createDbOwnerClient({ dbPath });
+		const started = performance.now();
+		try {
+			await owner.start();
+			await owner.initialize(join(dbPath, ".."));
+		} finally {
+			await owner.close();
+		}
+		expect(performance.now() - started).toBeLessThan(45_000);
+
+		const backupsAfterInit = readdirSync(join(dbPath, ".."))
+			.filter((name) => name.startsWith("test.db.bak-v") && !name.endsWith(".cursor.json"))
+			.sort();
+		expect(backupsAfterInit).toHaveLength(1);
+		const backupPath = join(dbPath, "..", backupsAfterInit[0]);
+		const backupStat = statSync(backupPath);
+		expect(backupStat.size).toBe(sourceSizeBeforeInit);
+		const cursor = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as { offset: number };
+		expect(cursor.offset).toBe(sourceSizeBeforeInit);
+
+		closeDbAccessor();
+		const backupBeforeRestart = statSync(backupPath);
+		await initDbAccessorAsync(dbPath, { deadlineAt: Date.now() + 60_000 });
+		expect(statSync(backupPath)).toMatchObject({
+			size: backupBeforeRestart.size,
+			mtimeMs: backupBeforeRestart.mtimeMs,
+		});
 	});
 
 	test("keeps large deferred FTS backfills off the initialization path", () => {
@@ -116,7 +186,7 @@ describe("DbAccessor", () => {
 		initDbAccessor(dbPath);
 		expect(isFtsIndexIncomplete()).toBe(true);
 	});
-	test("retains the pre-migration backup when migration fails", () => {
+	test("defers migration when a retained rollback backup is unverified", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
 
@@ -135,11 +205,54 @@ describe("DbAccessor", () => {
 			db.close();
 		}
 
-		expect(() => initDbAccessor(dbPath)).toThrow();
+		expect(() => initDbAccessor(dbPath)).not.toThrow();
 
-		const backupNames = readdirSync(join(dbPath, "..")).filter((name) => name.includes(".bak-v"));
+		const backupNames = readdirSync(join(dbPath, "..")).filter(
+			(name) => name.includes(".bak-v") && !name.endsWith(".cursor.json"),
+		);
 		expect(backupNames).toHaveLength(1);
-		expect(statSync(join(dbPath, "..", backupNames[0])).size).toBe(statSync(dbPath).size);
+		expect(existsSync(join(dbPath, "..", backupNames[0]))).toBe(true);
+	});
+
+	test("defers migration when a matching rollback cursor is still at byte zero", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+
+		initDbAccessor(dbPath);
+		closeDbAccessor();
+		const initialBackup = readdirSync(join(dbPath, "..")).find(
+			(name) => name.includes(".bak-v") && !name.endsWith(".cursor.json"),
+		);
+		if (!initialBackup) throw new Error("initial migration backup was not created");
+
+		const db = new Database(dbPath);
+		try {
+			db.exec("DELETE FROM schema_migrations WHERE version = 128");
+			db.exec("DROP INDEX IF EXISTS idx_memory_jobs_diagnostics_status_created_at");
+			db.exec("DROP INDEX IF EXISTS idx_memory_jobs_diagnostics_error_updated_at");
+			db.exec("ALTER TABLE memory_jobs RENAME TO memory_jobs_original");
+			db.exec("CREATE TABLE memory_jobs (id TEXT PRIMARY KEY)");
+			db.exec("DROP TABLE memory_jobs_original");
+		} finally {
+			db.close();
+		}
+
+		const backupPath = join(dbPath, "..", initialBackup);
+		const source = statSync(dbPath);
+		writeFileSync(backupPath, Buffer.alloc(0));
+		writeFileSync(
+			`${backupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.size,
+				sourceMtimeMs: source.mtimeMs,
+				destination: backupPath,
+				offset: 0,
+			}),
+		);
+
+		const result = await initDbAccessorAsync(dbPath);
+		expect(result.deferredMigrationVerification).toBe(true);
 	});
 
 	test("withWriteTx provides working write access", () => {
@@ -158,6 +271,32 @@ describe("DbAccessor", () => {
 		});
 		expect(result).toBeTruthy();
 		expect(result?.val).toBe("hello");
+	});
+
+	test("withWriteDbAsync admits autocommit writes without a nested transaction", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		initDbAccessor(dbPath);
+		const acc = getDbAccessor();
+
+		await acc.withWriteTxAsync((db) => {
+			db.exec("CREATE TABLE autocommit_test (id TEXT PRIMARY KEY)");
+		});
+
+		await acc.withWriteDbAsync(
+			(db) => {
+				db.exec("BEGIN");
+				db.prepare("INSERT INTO autocommit_test (id) VALUES (?)").run("autocommit");
+				db.exec("COMMIT");
+			},
+			{ operation: "test.vec-backfill-autocommit" },
+		);
+
+		const result = await acc.withReadDbAsync(
+			(db) =>
+				db.prepare("SELECT COUNT(*) AS count FROM autocommit_test WHERE id = ?").get("autocommit") as { count: number },
+		);
+		expect(result.count).toBe(1);
 	});
 
 	test("attributes a wedged parent sync call with its file and line", () => {
@@ -303,7 +442,7 @@ describe("DbAccessor", () => {
 
 		if (state.latched === null) throw new Error("in-flight latch did not produce liveness data");
 		expect(state.latched.status).toBe("wedged");
-		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:293");
+		expect(state.latched.syncDbCallSites).toContain("withWriteTxAsync@platform/daemon/src/db-accessor.test.ts:432");
 	});
 
 	test("write statements expose the number of affected rows", () => {
@@ -509,7 +648,7 @@ describe("DbAccessor", () => {
 		closeDbAccessor();
 	});
 
-	test("prunes old migration backups before copying a new one", () => {
+	test("preserves cursorless legacy migration backups during pruning", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
 		const dbDir = join(dbPath, "..");
@@ -527,7 +666,6 @@ describe("DbAccessor", () => {
 		backupBeforeMigration({ exec: () => {} }, dbPath, 62, {
 			copyFileSync: (source, dest) => {
 				operations.push(`copy:${source}->${dest}`);
-				expect(operations).toContain("unlink:test.db.bak-v58-1000");
 				files.set(String(dest).slice(dbDir.length + 1), 6000);
 			},
 			readdirSync: () => Array.from(files.keys()),
@@ -541,9 +679,56 @@ describe("DbAccessor", () => {
 			log: () => {},
 		});
 
-		expect(operations[0]).toBe("unlink:test.db.bak-v61-4000");
-		expect(Array.from(files.keys()).sort()).toEqual(["test.db.bak-v62-6000"]);
-		expect(files.size).toBe(1);
+		// Cursorless generated-name backups are legacy rollback points and remain
+		// protected until their own verification pass classifies them.
+		expect(operations).toEqual([operations[0]]);
+		expect(Array.from(files.keys()).sort()).toEqual([
+			"test.db.bak-v58-1000",
+			"test.db.bak-v59-2000",
+			"test.db.bak-v60-3000",
+			"test.db.bak-v61-4000",
+			"test.db.bak-v62-5000",
+			"test.db.bak-v62-6000",
+		]);
+		expect(files.size).toBe(6);
+	});
+
+	test("excludes non-regular migration backups from integrity pruning", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, "database");
+		const regularBackupPath = `${dbPath}.bak-v90-1000`;
+		const directoryBackupPath = `${dbPath}.bak-v91-2000`;
+		const operatorBackupPath = `${dbPath}.bak-vmanual`;
+		writeFileSync(regularBackupPath, "backup");
+		mkdirSync(directoryBackupPath);
+		writeFileSync(operatorBackupPath, "operator backup");
+
+		pruneMigrationBackupsAfterIntegrity(dbPath);
+
+		expect(existsSync(regularBackupPath)).toBe(true);
+		expect(existsSync(directoryBackupPath)).toBe(true);
+		expect(existsSync(operatorBackupPath)).toBe(true);
+	});
+
+	test("protects a cursorless legacy backup until its verification pass", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, "database");
+		const legacyBackupPath = `${dbPath}.bak-v89-1000`;
+		writeFileSync(legacyBackupPath, "legacy rollback");
+
+		pruneMigrationBackupsAfterIntegrity(dbPath);
+		expect(existsSync(legacyBackupPath)).toBe(true);
+
+		pruneMigrationBackupsAfterIntegrity(dbPath, undefined, legacyBackupPath);
+		expect(existsSync(legacyBackupPath)).toBe(false);
+	});
+
+	test("shares the exact generated backup-name predicate", () => {
+		expect(isGeneratedMigrationBackupName("memories.db", "memories.db.bak-v151-1234")).toBe(true);
+		expect(isGeneratedMigrationBackupName("memories.db", "memories.db.bak-vmanual")).toBe(false);
+		expect(isGeneratedMigrationBackupName("memories.db", "memories.db.bak-v151-1234.cursor.json")).toBe(false);
 	});
 
 	test("blocks a migration backup before deleting retained backups when headroom is insufficient", () => {
@@ -570,33 +755,125 @@ describe("DbAccessor", () => {
 				statfsSync: () => ({ bavail: 4, bsize: 1 }),
 				unlinkSync: (path) => {
 					operations.push(`unlink:${String(path).slice(dbDir.length + 1)}`);
+					const name = String(path).slice(dbDir.length + 1);
+					files.delete(name);
 				},
 				now: () => 6000,
 				log: () => {},
+				readVerificationCheckpoint: () => "complete",
 			}),
 		).toThrow(DbSpacePreflightError);
+		// Admission refusal must preserve the only completed-unverified rollback
+		// point; freeing it before a replacement exists would destroy recovery.
 		expect(operations).toEqual([]);
 		expect(Array.from(files.keys())).toEqual(["test.db.bak-v62-5000"]);
 	});
 
-	test("allows a small writable migration backup when statfs reports zero free bytes", () => {
+	test("reclaims stale-generation backups before admission", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
 		const dbDir = join(dbPath, "..");
 		writeFileSync(dbPath, "database");
 
-		const files = new Map<string, number>();
+		const staleName = "test.db.bak-v61-4000";
+		const stalePath = join(dbDir, staleName);
+		writeFileSync(
+			`${stalePath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: 7,
+				sourceMtimeMs: 100,
+				destination: stalePath,
+				offset: 7,
+			}),
+		);
+		const files = new Map<string, { readonly mtimeMs: number; readonly size: number }>([
+			[staleName, { mtimeMs: 4000, size: 8 }],
+		]);
 		const operations: string[] = [];
+		const requiredBytes = 8 + MIGRATION_BACKUP_CHUNK_BYTES * 2;
 
-		backupBeforeMigration({ exec: () => {} }, dbPath, 64, {
-			copyFileSync: (source, destination) => {
+		backupBeforeMigration({ exec: () => {} }, dbPath, 62, {
+			copyFileSync: (_source, destination) => {
 				const name = String(destination).slice(dbDir.length + 1);
-				operations.push(`copy:${String(source).slice(dbDir.length + 1)}->${name}`);
-				files.set(name, 1);
+				operations.push(`copy:${name}`);
+				files.set(name, { mtimeMs: 6000, size: 8 });
 			},
 			readdirSync: () => Array.from(files.keys()),
-			statSync: (path) => ({ mtimeMs: files.get(String(path).slice(dbDir.length + 1)) ?? 0, size: 8 }),
-			statfsSync: () => ({ bavail: 0, bsize: 0 }),
+			statSync: (path) => {
+				const name = String(path).slice(dbDir.length + 1);
+				return name === "test.db" ? { mtimeMs: 200, size: 8 } : (files.get(name) ?? { mtimeMs: 0, size: 8 });
+			},
+			statfsSync: () => ({ bavail: files.has(staleName) ? requiredBytes - 1 : requiredBytes, bsize: 1 }),
+			unlinkSync: (path) => {
+				const name = String(path).slice(dbDir.length + 1);
+				operations.push(`unlink:${name}`);
+				files.delete(name);
+			},
+			now: () => 6000,
+			log: () => {},
+			readVerificationCheckpoint: () => "complete",
+		});
+
+		expect(operations.slice(0, 3)).toEqual([
+			`unlink:${staleName}`,
+			`unlink:${staleName}.verdict.json`,
+			`unlink:${staleName}.cursor.json`,
+		]);
+		expect(operations[3]).toContain("copy:test.db.bak-v62-6000");
+	});
+
+	test("preserves and refuses a stale rollback point with a failed checkpoint", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const dbDir = join(dbPath, "..");
+		writeFileSync(dbPath, "database");
+		const staleName = "test.db.bak-v61-4000";
+		const stalePath = join(dbDir, staleName);
+		writeFileSync(stalePath, "rollback");
+		writeFileSync(
+			`${stalePath}.cursor.json`,
+			JSON.stringify({ sourcePath: dbPath, sourceSize: 7, sourceMtimeMs: 100, destination: stalePath, offset: 7 }),
+		);
+		const operations: string[] = [];
+
+		expect(() =>
+			backupBeforeMigration({ exec: () => {} }, dbPath, 62, {
+				copyFileSync: () => operations.push("copy"),
+				readdirSync: () => [staleName],
+				statSync: (path) => (String(path).endsWith("test.db") ? { mtimeMs: 200, size: 8 } : { mtimeMs: 4000, size: 8 }),
+				statfsSync: () => ({ bavail: MIGRATION_BACKUP_CHUNK_BYTES * 4, bsize: 1 }),
+				unlinkSync: (path) => operations.push(`unlink:${path}`),
+				now: () => 6000,
+				log: () => {},
+				readVerificationCheckpoint: () => "failed:integrity-unverified",
+			}),
+		).toThrow(MigrationBackupAdmissionError);
+		expect(operations).toEqual([]);
+		expect(existsSync(stalePath)).toBe(true);
+		expect(existsSync(`${stalePath}.cursor.json`)).toBe(true);
+	});
+
+	test("reclaims stale migration probes before the free-space admission check", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const dbDir = join(dbPath, "..");
+		writeFileSync(dbPath, "database");
+		const staleName = "test.db.bak-v62-5000.probe-1";
+		const currentName = `test.db.bak-v62-5000.probe-${process.pid}`;
+		const files = new Set([staleName, currentName]);
+		const operations: string[] = [];
+
+		backupBeforeMigration({ exec: () => {} }, dbPath, 63, {
+			copyFileSync: (_source, destination) => {
+				operations.push(`copy:${String(destination).slice(dbDir.length + 1)}`);
+			},
+			readdirSync: () => [...files],
+			statSync: (path) => ({
+				mtimeMs: 1,
+				size: String(path).endsWith("test.db") ? 8 : 0,
+			}),
+			statfsSync: () => ({ bavail: 200_000_000, bsize: 1 }),
 			unlinkSync: (path) => {
 				const name = String(path).slice(dbDir.length + 1);
 				operations.push(`unlink:${name}`);
@@ -606,37 +883,64 @@ describe("DbAccessor", () => {
 			log: () => {},
 		});
 
-		expect(operations).toEqual([
-			"copy:test.db->test.db.space-probe-6000",
-			"unlink:test.db.space-probe-6000",
-			"copy:test.db->test.db.bak-v64-6000",
-		]);
-		expect(files.has("test.db.bak-v64-6000")).toBe(true);
+		expect(operations).toContain(`unlink:${staleName}`);
+		expect(operations).not.toContain(`unlink:${currentName}`);
+	});
+	test("refuses a migration backup when statfs is degenerate instead of copy-probing", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const dbDir = join(dbPath, "..");
+		writeFileSync(dbPath, "database");
+
+		const files = new Map<string, number>();
+		const operations: string[] = [];
+
+		expect(() =>
+			backupBeforeMigration({ exec: () => {} }, dbPath, 64, {
+				copyFileSync: () => {
+					operations.push("copy");
+				},
+				readdirSync: () => Array.from(files.keys()),
+				statSync: (path) => ({ mtimeMs: files.get(String(path).slice(dbDir.length + 1)) ?? 0, size: 8 }),
+				statfsSync: () => ({ bavail: 0, bsize: 0 }),
+				unlinkSync: () => {
+					operations.push("unlink");
+				},
+				now: () => 6000,
+				log: () => {},
+			}),
+		).toThrow(DbSpacePreflightError);
+		// Admission never falls back to an unbounded copy probe: it refuses
+		// with the metrics it has and writes nothing.
+		expect(operations).toEqual([]);
+		expect(files.has("test.db.bak-v64-6000")).toBe(false);
 	});
 
-	test("uses the write probe when statfs returns a degenerate block size", () => {
+	test("refuses when statfs returns a degenerate block size instead of write-probing", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
 		writeFileSync(dbPath, "database");
 		const operations: string[] = [];
 
-		backupBeforeMigration({ exec: () => {} }, dbPath, 65, {
-			copyFileSync: (_source, destination) => {
-				operations.push(String(destination).includes("space-probe") ? "probe" : "backup");
-			},
-			readdirSync: () => [],
-			statSync: () => ({ mtimeMs: 0, size: 1024 * 1024 + 1 }),
-			statfsSync: () => ({ bavail: 244199454, bsize: 0 }),
-			unlinkSync: () => {
-				operations.push("unlink");
-			},
-			now: () => 7000,
-			log: () => {},
-		});
-		expect(operations).toEqual(["probe", "unlink", "backup"]);
+		expect(() =>
+			backupBeforeMigration({ exec: () => {} }, dbPath, 65, {
+				copyFileSync: () => {
+					operations.push("copy");
+				},
+				readdirSync: () => [],
+				statSync: () => ({ mtimeMs: 0, size: 1024 * 1024 + 1 }),
+				statfsSync: () => ({ bavail: 244199454, bsize: 0 }),
+				unlinkSync: () => {
+					operations.push("unlink");
+				},
+				now: () => 7000,
+				log: () => {},
+			}),
+		).toThrow(DbSpacePreflightError);
+		expect(operations).toEqual([]);
 	});
 
-	test("does not fabricate free space when the degenerate write probe fails", () => {
+	test("does not fabricate free space when statfs is degenerate", () => {
 		const dbPath = tmpDbPath();
 		cleanupDirs.push(join(dbPath, ".."));
 		writeFileSync(dbPath, "database");
@@ -644,12 +948,10 @@ describe("DbAccessor", () => {
 		let error: DbSpacePreflightError | undefined;
 		try {
 			backupBeforeMigration({ exec: () => {} }, dbPath, 65, {
-				copyFileSync: () => {
-					throw new Error("probe failed");
-				},
+				copyFileSync: () => {},
 				readdirSync: () => [],
-				statSync: () => ({ mtimeMs: 0, size: 1024 }),
-				statfsSync: () => ({ bavail: 1, bsize: 0 }),
+				statSync: () => ({ mtimeMs: 0, size: 8 }),
+				statfsSync: () => ({ bavail: 0, bsize: 0 }),
 				unlinkSync: () => {},
 				now: () => 7000,
 				log: () => {},
@@ -744,6 +1046,384 @@ describe("DbAccessor", () => {
 
 		expect(operations).toContain("unlink:test.db.bak-v65-7000");
 		expect(files.has("test.db.bak-v65-7000")).toBe(false);
+	});
+	test("creates streamed migration backups with the source file mode", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, "secured database contents");
+		chmodSync(dbPath, 0o600);
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 72);
+
+		expect(statSync(backupPath).mode & 0o7777).toBe(0o600);
+	});
+	test("uses the absolute admission window when copy outlasts the remaining budget", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, Buffer.alloc(MIGRATION_BACKUP_CHUNK_BYTES + 1));
+		const realNow = Date.now;
+		const baseNow = realNow();
+		let fakeNow = baseNow;
+		let nowCalls = 0;
+		Date.now = () => {
+			nowCalls += 1;
+			return nowCalls >= 4 ? baseNow + 60_000 : fakeNow;
+		};
+		try {
+			await expect(
+				backupBeforeMigrationAsync(
+					{
+						exec: () => {
+							fakeNow = baseNow + 54_000;
+						},
+					},
+					dbPath,
+					73,
+					undefined,
+					baseNow + 60_000,
+				),
+			).rejects.toMatchObject({
+				name: "MigrationBackupAdmissionError",
+				reason: "throughput",
+			});
+		} finally {
+			Date.now = realNow;
+		}
+	});
+	test("retains the cursor when the final chunk crosses the absolute deadline", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("slow final chunk fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const backupPath = `${dbPath}.bak-v74-9000`;
+		const realNow = Date.now;
+		const baseNow = realNow();
+		let fakeNow = baseNow;
+		Date.now = () => fakeNow;
+		try {
+			await expect(
+				copyMigrationBackupChunks(
+					dbPath,
+					backupPath,
+					source.length,
+					sourceStat.mtimeMs,
+					sourceStat.mode & 0o7777,
+					0,
+					baseNow + 6_000,
+					async (buffer, length) => {
+						buffer.fill(1, 0, length);
+						fakeNow = baseNow + 6_001;
+						return { bytesRead: length };
+					},
+				),
+			).rejects.toMatchObject({
+				name: "MigrationBackupAdmissionError",
+				reason: "throughput",
+			});
+			const cursor = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as { offset: number };
+			expect(cursor.offset).toBe(source.length);
+			expect(existsSync(`${backupPath}.cursor.json`)).toBe(true);
+		} finally {
+			Date.now = realNow;
+		}
+	});
+	test("rejects a final chunk that consumes the migration startup reserve", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("final chunk reserve fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const backupPath = `${dbPath}.bak-v75-9000`;
+		const realNow = Date.now;
+		const baseNow = realNow();
+		let fakeNow = baseNow;
+		Date.now = () => fakeNow;
+		try {
+			await expect(
+				copyMigrationBackupChunks(
+					dbPath,
+					backupPath,
+					source.length,
+					sourceStat.mtimeMs,
+					sourceStat.mode & 0o7777,
+					0,
+					baseNow + 60_000,
+					async (buffer, length) => {
+						buffer.fill(2, 0, length);
+						fakeNow = baseNow + 57_000;
+						return { bytesRead: length };
+					},
+				),
+			).rejects.toMatchObject({
+				name: "MigrationBackupAdmissionError",
+				reason: "throughput",
+			});
+			const cursor = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as { offset: number };
+			expect(cursor.offset).toBe(source.length);
+			expect(statSync(backupPath).size).toBe(source.length);
+		} finally {
+			Date.now = realNow;
+		}
+	});
+
+	test("persists a zero-offset cursor before the first migration backup chunk", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, "first chunk fixture");
+		const sourceStat = statSync(dbPath);
+		const backupPath = `${dbPath}.bak-v73-9000`;
+
+		await expect(
+			copyMigrationBackupChunks(
+				dbPath,
+				backupPath,
+				sourceStat.size,
+				sourceStat.mtimeMs,
+				sourceStat.mode & 0o7777,
+				0,
+				Date.now() + 60_000,
+				async () => {
+					throw new Error("simulated first-chunk interruption");
+				},
+			),
+		).rejects.toThrow("simulated first-chunk interruption");
+
+		const cursor = JSON.parse(readFileSync(`${backupPath}.cursor.json`, "utf8")) as {
+			destination: string;
+			offset: number;
+		};
+		expect(cursor.offset).toBe(0);
+		expect(statSync(cursor.destination).size).toBe(0);
+	});
+
+	test("rejects a cursor whose destination is shorter than its claimed offset", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("truncated migration backup resume fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const staleBackupPath = `${dbPath}.bak-v75-9000`;
+		const offset = 20;
+		writeFileSync(staleBackupPath, source.subarray(0, offset - 3));
+		writeFileSync(
+			`${staleBackupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: staleBackupPath,
+				offset,
+			}),
+		);
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 76);
+
+		expect(backupPath).not.toBe(staleBackupPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(existsSync(staleBackupPath)).toBe(false);
+		expect(existsSync(`${staleBackupPath}.cursor.json`)).toBe(false);
+	});
+
+	test("rejects a cursor whose offset exceeds the source size", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("migration backup cursor bounds fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const staleBackupPath = `${dbPath}.bak-v74-9000`;
+		writeFileSync(staleBackupPath, source);
+		writeFileSync(
+			`${staleBackupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: staleBackupPath,
+				offset: source.length + 1,
+			}),
+		);
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 75);
+
+		expect(backupPath).not.toBe(staleBackupPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(existsSync(staleBackupPath)).toBe(false);
+		expect(existsSync(`${staleBackupPath}.cursor.json`)).toBe(false);
+	});
+
+	test("rejects a cursor whose destination is a symlink without truncating its target", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("symlink migration backup resume fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const targetPath = `${dbPath}.target`;
+		const symlinkPath = `${dbPath}.bak-v76-9000`;
+		writeFileSync(targetPath, Buffer.from("target must remain intact"));
+		symlinkSync(targetPath, symlinkPath);
+		writeFileSync(
+			`${symlinkPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: symlinkPath,
+				offset: 8,
+			}),
+		);
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 77);
+
+		expect(backupPath).not.toBe(symlinkPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(readFileSync(targetPath)).toEqual(Buffer.from("target must remain intact"));
+		expect(existsSync(symlinkPath)).toBe(false);
+	});
+
+	test("rejects a cursor whose destination is a directory without deleting it", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("directory migration backup resume fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const directoryPath = `${dbPath}.bak-v78-9000`;
+		mkdirSync(directoryPath);
+		writeFileSync(
+			`${directoryPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: directoryPath,
+				offset: 8,
+			}),
+		);
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 79);
+
+		expect(backupPath).not.toBe(directoryPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(statSync(directoryPath).isDirectory()).toBe(true);
+	});
+
+	test("truncates an oversized destination to the durable cursor before resuming", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("oversized migration backup resume fixture with a valid prefix");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const backupPath = `${dbPath}.bak-v77-9000`;
+		const offset = 20;
+		writeFileSync(backupPath, Buffer.concat([source.subarray(0, offset), Buffer.from("torn suffix")]));
+		writeFileSync(
+			`${backupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: backupPath,
+				offset,
+			}),
+		);
+
+		await expect(backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 77)).resolves.toBe(backupPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+	});
+
+	test("resumes a chunked migration backup from its durable cursor", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("chunked migration backup resume fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const backupPath = `${dbPath}.bak-v71-8000`;
+		const offset = 12;
+		writeFileSync(backupPath, source.subarray(0, offset));
+		writeFileSync(
+			`${backupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: backupPath,
+				offset,
+			}),
+		);
+
+		await expect(backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 71)).resolves.toBe(backupPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(existsSync(`${backupPath}.cursor.json`)).toBe(true);
+	});
+	test("resume admission does not prune the only completed-unverified backup", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("resume admission fixture");
+		writeFileSync(dbPath, source);
+		const oldBackupPath = `${dbPath}.bak-v70-7000`;
+		writeFileSync(oldBackupPath, source);
+		const sourceStat = statSync(dbPath);
+		writeFileSync(
+			`${oldBackupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length - 1,
+				sourceMtimeMs: sourceStat.mtimeMs - 1,
+				destination: oldBackupPath,
+				offset: source.length,
+			}),
+		);
+		writeFileSync(`${oldBackupPath}.verdict.json`, JSON.stringify({ status: "complete" }));
+		const resumablePath = `${dbPath}.bak-v71-8000`;
+		mkdirSync(resumablePath);
+		const offset = 4;
+		writeFileSync(
+			`${resumablePath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: resumablePath,
+				offset,
+			}),
+		);
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 71);
+		expect(backupPath).not.toBe(resumablePath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(existsSync(oldBackupPath)).toBe(false);
+	});
+	test("prunes the retained migration backup only after integrity passes", () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		writeFileSync(dbPath, "database");
+		const backupPath = `${dbPath}.bak-v72-9000`;
+		writeFileSync(backupPath, "database");
+		writeFileSync(`${backupPath}.cursor.json`, "stale cursor");
+
+		expect(hasPendingMigrationBackup(dbPath)).toBe(true);
+		pruneMigrationBackupsAfterIntegrity(dbPath);
+		expect(hasPendingMigrationBackup(dbPath)).toBe(false);
+		expect(existsSync(backupPath)).toBe(false);
+		expect(existsSync(`${backupPath}.cursor.json`)).toBe(false);
+	});
+
+	test("propagates a failed rollback backup deletion after integrity passes", () => {
+		const dbPath = "/tmp/migration-prune-failure/test.db";
+		const deps = {
+			copyFileSync: () => {},
+			readdirSync: () => ["test.db.bak-v72-9000"],
+			statSync: () => ({ mtimeMs: 1, size: 10 }),
+			statfsSync: () => ({ bavail: 1, bsize: 1 }),
+			unlinkSync: () => {
+				throw new Error("unlink denied");
+			},
+			now: () => 0,
+			log: () => {},
+			readVerificationCheckpoint: () => "complete",
+		};
+
+		expect(() => pruneMigrationBackupsAfterIntegrity(dbPath, deps)).toThrow("unlink denied");
 	});
 });
 
@@ -942,5 +1622,162 @@ describe("vec_embeddings schema repair", () => {
 		expect(vecEmbeddingsSchemaNeedsRepair(currentSql, 1536)).toBe(false);
 		expect(vecEmbeddingsSchemaNeedsRepair(currentSql.replace("FLOAT[1536]", "FLOAT[768]"), 1536)).toBe(true);
 		expect(vecEmbeddingsSchemaNeedsRepair(currentSql.replace("id TEXT PRIMARY KEY,", ""), 1536)).toBe(true);
+	});
+
+	test("does not run vector backfill during accessor initialization", () => {
+		const source = readFileSync(join(import.meta.dir, "db-accessor.ts"), "utf8");
+		const initStart = source.indexOf("function finishDbAccessorInit(");
+		const initEnd = source.indexOf("export function initDbAccessorLite", initStart);
+		const initSource = source.slice(initStart, initEnd);
+
+		expect(initSource).not.toContain("backfillVecEmbeddings(");
+		expect(initSource).toContain("pendingVecBackfill");
+		expect(initSource).toContain("hasMissingVecEmbeddings");
+	});
+
+	test("post-ready backfill budget leaves room for a real batch", () => {
+		const db = new Database(":memory:");
+		db.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB NOT NULL); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)").run("post-ready", 2, vector);
+
+		backfillVecEmbeddings(
+			{
+				exec: (sql: string) => db.exec(sql),
+				prepare: (sql: string) => db.prepare(sql),
+			} as never,
+			2,
+			Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS,
+			{ maxBatches: 1 },
+		);
+
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(1);
+		db.close();
+	});
+
+	test("backfills missing embeddings in bounded keyset batches", () => {
+		const db = new Database(":memory:");
+		db.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB NOT NULL); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		const insert = db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)");
+		db.exec("BEGIN");
+		for (let index = 0; index < 10_001; index++) {
+			insert.run(`embedding-${String(index).padStart(5, "0")}`, 2, vector);
+		}
+		db.exec("COMMIT");
+		let batchQueries = 0;
+		const trackedDb = {
+			exec: (sql: string) => db.exec(sql),
+			prepare: (sql: string) => {
+				if (sql.includes("ORDER BY e.id LIMIT")) batchQueries++;
+				return db.prepare(sql);
+			},
+		};
+
+		backfillVecEmbeddings(trackedDb as never, 2);
+
+		expect(batchQueries).toBeGreaterThan(1);
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(10_001);
+		db.close();
+	});
+
+	test("quarantines malformed rows and continues backfill around them", () => {
+		const db = new Database(":memory:");
+		db.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB NOT NULL); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		const insert = db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)");
+		insert.run("good-1", 2, vector);
+		insert.run("bad-row", 2, Buffer.from([1, 2, 3]));
+		insert.run("good-2", 2, vector);
+
+		backfillVecEmbeddings(
+			{
+				exec: (sql: string) => db.exec(sql),
+				prepare: (sql: string) => db.prepare(sql),
+			} as never,
+			2,
+		);
+
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(2);
+		expect(
+			db.prepare("SELECT rowid, dimensions, reason, quarantinedAt FROM vec_embeddings_quarantine").all(),
+		).toMatchObject([
+			{
+				rowid: "bad-row",
+				dimensions: 2,
+				reason: "embedding blob has 3 bytes; expected 8 for 2 dimensions",
+			},
+		]);
+		// A follow-up probe sees no eligible pending row for the quarantined ID.
+		backfillVecEmbeddings(
+			{
+				exec: (sql: string) => db.exec(sql),
+				prepare: (sql: string) => db.prepare(sql),
+			} as never,
+			2,
+		);
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(2);
+		db.close();
+	});
+
+	test("quarantines NULL and non-blob legacy vectors and continues backfill", () => {
+		const db = new Database(":memory:");
+		db.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		const insert = db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)");
+		insert.run("good-row", 2, vector);
+		insert.run("null-row", 2, null);
+		insert.run("text-row", 2, "not-a-vector");
+
+		backfillVecEmbeddings(
+			{
+				exec: (sql: string) => db.exec(sql),
+				prepare: (sql: string) => db.prepare(sql),
+			} as never,
+			2,
+		);
+
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(1);
+		expect(db.prepare("SELECT rowid, dimensions, reason FROM vec_embeddings_quarantine ORDER BY rowid").all()).toEqual([
+			{ rowid: "null-row", dimensions: 2, reason: "embedding blob is NULL" },
+			{ rowid: "text-row", dimensions: 2, reason: "embedding blob is not a binary buffer" },
+		]);
+		db.close();
+	});
+
+	test("rethrows operational vector insert failures instead of quarantining rows", () => {
+		const db = new Database(":memory:");
+		db.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB NOT NULL); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
+		);
+		db.exec(
+			"CREATE TRIGGER reject_locked_vec BEFORE INSERT ON vec_embeddings WHEN NEW.id = 'locked-row' BEGIN SELECT RAISE(ABORT, 'database is locked'); END",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		const insert = db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)");
+		insert.run("good-row", 2, vector);
+		insert.run("locked-row", 2, vector);
+
+		expect(() =>
+			backfillVecEmbeddings(
+				{
+					exec: (sql: string) => db.exec(sql),
+					prepare: (sql: string) => db.prepare(sql),
+				} as never,
+				2,
+			),
+		).toThrow("database is locked");
+
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(0);
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings_quarantine").get() as { n: number }).n).toBe(0);
+		db.close();
 	});
 });

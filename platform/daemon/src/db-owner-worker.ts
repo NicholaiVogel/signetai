@@ -60,6 +60,7 @@ interface SqliteDatabaseConstructor {
 
 interface JobExecutionContext {
 	readonly jobId: string;
+	readonly deadlineAt: number;
 	committed: boolean;
 }
 
@@ -206,6 +207,7 @@ export function runDbOwnerWorker(): void {
 	let foregroundStreak = 0;
 	const MAX_FOREGROUND_BURST = 8;
 	let activeJobId: string | null = null;
+	let writeBlocked = false;
 	let draining = false;
 
 	function nextJob(): DbOwnerJob | undefined {
@@ -268,6 +270,20 @@ export function runDbOwnerWorker(): void {
 		}
 
 		return withBusyRetry(() => enforceResultLimit(statement, prepared.run(...params)), context);
+	}
+
+	function executeReadOnlyStatement(statement: DbOwnerStatement): unknown {
+		if (statement.result === "run") throw new Error("DB owner readonly statements must return rows");
+		const readonlyDb = new Database(ownerDbPath, { readonly: true });
+		try {
+			const params = (statement.params ?? []).map(bindParameter);
+			const prepared = readonlyDb.prepare(statement.sql);
+			return statement.result === "all"
+				? enforceResultLimit(statement, prepared.all(...params))
+				: enforceResultLimit(statement, prepared.get(...params));
+		} finally {
+			readonlyDb.close();
+		}
 	}
 
 	function executeTransaction(
@@ -655,6 +671,11 @@ export function runDbOwnerWorker(): void {
 	let recallAccessorReady = false;
 
 	async function executeRecall(payload: DbOwnerRecallPayload): Promise<unknown> {
+		if (writeBlocked) {
+			const error = new Error("DB owner writes are blocked while database integrity is unresolved");
+			error.name = "DB_OWNER_WRITES_BLOCKED";
+			throw error;
+		}
 		if (process.env.SIGNET_DB_OWNER_RECALL_WORKER !== "1") {
 			throw new Error("DB owner recall jobs require a recall worker");
 		}
@@ -694,7 +715,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:695" },
+			{ siteToken: "db-owner-worker.ts:716" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
@@ -723,14 +744,23 @@ export function runDbOwnerWorker(): void {
 			while (!existsSync(releaseMarker)) await new Promise((resolve) => setTimeout(resolve, 5));
 		}
 		const { initDbAccessorAsync } = await import("./db-accessor");
-		await initDbAccessorAsync(ownerDbPath, { agentsDir });
+		const initialization = await initDbAccessorAsync(ownerDbPath, { agentsDir, deadlineAt: context?.deadlineAt });
 		if (context !== undefined) context.committed = true;
-		return { initialized: true };
+		return {
+			initialized: true,
+			pendingVecBackfill: initialization.pendingVecBackfill,
+			...(initialization.extensionPath !== undefined ? { extensionPath: initialization.extensionPath } : {}),
+			...(initialization.deferredMigrationVerification ? { deferredMigrationVerification: true } : {}),
+		};
 	}
 
 	async function execute(job: DbOwnerJob, context: JobExecutionContext): Promise<unknown> {
 		if (job.request.kind === "initialize") return await executeInitialization(job.request.agentsDir, context);
-		if (job.request.kind === "query") return executeStatement(job.request.statement, context);
+		if (job.request.kind === "query") {
+			return job.request.statement.readonly
+				? executeReadOnlyStatement(job.request.statement)
+				: executeStatement(job.request.statement, context);
+		}
 		if (job.request.kind === "transaction") return executeTransaction(job.request.transaction.statements, context);
 		if (job.request.kind === "batch")
 			return executeBatch(job.request.statements, job.request.requireChanges === true, context);
@@ -815,7 +845,7 @@ export function runDbOwnerWorker(): void {
 			activeJobId = job.id;
 			send({ type: "started", jobId: job.id, workloadClass: job.workloadClass });
 			const startedAt = Date.now();
-			const context: JobExecutionContext = { jobId: job.id, committed: false };
+			const context: JobExecutionContext = { jobId: job.id, deadlineAt: job.deadlineAt, committed: false };
 			try {
 				if (cancelled.delete(job.id) || cancellationRequested(job.id)) {
 					result(job.id, "cancelled");
@@ -861,8 +891,22 @@ export function runDbOwnerWorker(): void {
 			cancelled.add(command.jobId);
 			return;
 		}
+		if (command.type === "set_write_blocked") {
+			writeBlocked = command.blocked;
+			return;
+		}
+		if (writeBlocked && command.job.lane !== "read" && command.job.allowWriteBlocked !== true) {
+			failed(
+				command.job.id,
+				"DB_OWNER_WRITES_BLOCKED",
+				"DB owner writes are blocked while database integrity is unresolved",
+			);
+			return;
+		}
 		const maxDeadlineMs =
-			command.job.lane === "maintenance" ? DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS : DB_OWNER_MAX_DEADLINE_MS;
+			command.job.lane === "maintenance" || command.job.lane === "verify"
+				? DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS
+				: DB_OWNER_MAX_DEADLINE_MS;
 		if (command.job.deadlineAt - command.job.enqueuedAt > maxDeadlineMs) {
 			failed(command.job.id, "DB_OWNER_WORK_BUDGET", `DB owner deadline exceeds ${maxDeadlineMs}ms`);
 			return;
@@ -876,7 +920,8 @@ export function runDbOwnerWorker(): void {
 			return;
 		}
 		const workloadClass =
-			command.job.workloadClass ?? (command.job.lane === "maintenance" ? "maintenance" : "foreground");
+			command.job.workloadClass ??
+			(command.job.lane === "maintenance" || command.job.lane === "verify" ? "maintenance" : "foreground");
 		const queue = workloadClass === "foreground" ? foregroundQueue : maintenanceQueue;
 		if (queue.length >= DB_OWNER_MAX_QUEUE_DEPTH) {
 			failed(

@@ -93,10 +93,20 @@ export interface DbOwnerJobHandle<Result> {
 	readonly cancel: () => void;
 }
 
+export interface DbOwnerInitializationResult {
+	readonly initialized: true;
+	readonly pendingVecBackfill: boolean;
+	/** sqlite-vec path resolved in the owner process, if available. */
+	readonly extensionPath?: string | null;
+	readonly deferredMigrationVerification?: boolean;
+}
+
 export interface DbOwnerClient {
 	start(): Promise<void>;
-	initialize(agentsDir?: string): Promise<void>;
+	initialize(agentsDir?: string): Promise<DbOwnerInitializationResult>;
 	submit<Result>(request: DbOwnerRequest, options: DbOwnerSubmitOptions): DbOwnerJobHandle<Result>;
+	/** Fail closed on every non-read lane, including owners spawned later. */
+	setWriteBlocked(blocked: boolean): void;
 	awaitResult<Result>(handle: DbOwnerJobHandle<Result>, timeoutMs?: number): Promise<Result>;
 	cancel(jobId: string): void;
 	health(): DbOwnerHealth;
@@ -104,13 +114,15 @@ export interface DbOwnerClient {
 }
 
 export class DbOwnerError extends Error {
-	readonly code: string;
+	readonly code: string | number;
+	readonly sqliteCode?: string | number;
 	readonly causeFamily?: DbOwnerFailureCause;
 
-	constructor(code: string, message: string, causeFamily?: DbOwnerFailureCause) {
+	constructor(code: string | number, message: string, causeFamily?: DbOwnerFailureCause, sqliteCode?: string | number) {
 		super(message);
 		this.name = "DbOwnerError";
 		this.code = code;
+		this.sqliteCode = sqliteCode;
 		this.causeFamily = causeFamily;
 	}
 }
@@ -140,6 +152,13 @@ export class DbOwnerAdmissionError extends DbOwnerError {
 	constructor(code: "DB_OWNER_QUEUE_FULL" | "DB_OWNER_WORK_BUDGET", message: string) {
 		super(code, message);
 		this.name = "DbOwnerAdmissionError";
+	}
+}
+
+export class DbOwnerWritesBlockedError extends DbOwnerError {
+	constructor() {
+		super("DB_OWNER_WRITES_BLOCKED", "DB owner writes are blocked while database integrity is unresolved");
+		this.name = "DbOwnerWritesBlockedError";
 	}
 }
 
@@ -224,7 +243,7 @@ function ownerIsDead(owner: ChildProcess): boolean {
 }
 
 function messageFromError(error: DbOwnerSerializedError): Error {
-	return new DbOwnerError(error.name, error.message, error.causeFamily);
+	return new DbOwnerError(error.code ?? error.name, error.message, error.causeFamily, error.sqliteCode);
 }
 
 function oldestAge(first: number | null, second: number | null): number | null {
@@ -248,12 +267,14 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	let sequence = 0;
 	let input = "";
 	let stderr = "";
+	let writeBlocked = false;
 	sweepStaleCancellationRegistries(dirname(options.dbPath));
 	const cancellationRegistryPath = join(
 		dirname(options.dbPath),
 		`${CANCEL_REGISTRY_PREFIX}${process.pid}-${randomUUID()}`,
 	);
 	const pending = new Map<string, PendingJob<unknown>>();
+	const abandonedMetrics = new Map<string, (value: DbOwnerJobMetrics | undefined) => void>();
 
 	function unlinkCancellationRegistry(): void {
 		try {
@@ -372,6 +393,8 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		startupReject = null;
 		rejectStartup?.(error);
 		if (!closed) rejectAll(error, dispatchedOnly);
+		for (const resolveMetrics of abandonedMetrics.values()) resolveMetrics(undefined);
+		abandonedMetrics.clear();
 		unlinkCancellationRegistry();
 		if (retired !== null) {
 			try {
@@ -387,6 +410,10 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		if (event.type === "ready") {
 			state = "ready";
 			pid = event.pid;
+			void write(owner, { type: "set_write_blocked", blocked: writeBlocked }).catch((error: unknown) => {
+				if (child !== owner || closed) return;
+				retireOwner(error instanceof Error ? error : new Error(String(error)), owner, "dead", true);
+			});
 			startupResolve?.();
 			startupResolve = null;
 			startupReject = null;
@@ -407,6 +434,11 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		}
 		const pendingJob = pending.get(event.jobId);
 		pendingJob?.resolveMetrics(event.metrics);
+		const abandonedResolveMetrics = abandonedMetrics.get(event.jobId);
+		if (abandonedResolveMetrics !== undefined) {
+			abandonedMetrics.delete(event.jobId);
+			abandonedResolveMetrics(event.metrics);
+		}
 		if (pendingJob?.job.request.kind === "initialize") {
 			initialization = event.outcome === "completed" ? "ready" : "failed";
 		}
@@ -604,11 +636,15 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 	}
 
 	function submit<Result>(request: DbOwnerRequest, submitOptions: DbOwnerSubmitOptions): DbOwnerJobHandle<Result> {
+		if (writeBlocked && submitOptions.lane !== "read" && submitOptions.lane !== "verify")
+			throw new DbOwnerWritesBlockedError();
 		if (!Number.isFinite(submitOptions.deadlineMs) || submitOptions.deadlineMs <= 0) {
 			throw new RangeError("DB owner deadlineMs must be a positive finite number");
 		}
 		const maxDeadlineMs =
-			submitOptions.lane === "maintenance" ? DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS : MAX_DB_OWNER_DEADLINE_MS;
+			submitOptions.lane === "maintenance" || submitOptions.lane === "verify"
+				? DB_OWNER_MAX_MAINTENANCE_DEADLINE_MS
+				: MAX_DB_OWNER_DEADLINE_MS;
 		if (submitOptions.deadlineMs > maxDeadlineMs) {
 			throw new DbOwnerAdmissionError(
 				"DB_OWNER_WORK_BUDGET",
@@ -626,7 +662,8 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			);
 		}
 		const workloadClass =
-			submitOptions.workloadClass ?? (submitOptions.lane === "maintenance" ? "maintenance" : "foreground");
+			submitOptions.workloadClass ??
+			(submitOptions.lane === "maintenance" || submitOptions.lane === "verify" ? "maintenance" : "foreground");
 		const classJobs = [...pending.values()].filter((entry) => entry.job.workloadClass === workloadClass).length;
 		const maxClassJobs = workloadClass === "foreground" ? MAX_DB_OWNER_FOREGROUND_JOBS : MAX_DB_OWNER_MAINTENANCE_JOBS;
 		if (classJobs >= maxClassJobs) {
@@ -640,6 +677,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			id: `db-owner-${process.pid}-${++sequence}`,
 			operation: submitOptions.operation,
 			lane: submitOptions.lane,
+			...(submitOptions.lane === "verify" ? { allowWriteBlocked: true } : {}),
 			workloadClass,
 			enqueuedAt: now,
 			deadlineAt: now + submitOptions.deadlineMs,
@@ -660,6 +698,7 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 				const owner = child;
 				const dispatched = entry.dispatched;
 				settle(job.id, (settledJob) => {
+					if (dispatched) abandonedMetrics.set(job.id, settledJob.resolveMetrics);
 					if (!settledJob.settled) {
 						settledJob.settled = true;
 						settledJob.reject(new DbOwnerDeadlineError(job.id));
@@ -706,6 +745,24 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 			void write(child, { type: "cancel", jobId }).catch(() => {
 				// The exit handler reports a dead owner to other pending jobs.
 			});
+	}
+
+	function setWriteBlocked(blocked: boolean): void {
+		writeBlocked = blocked;
+		if (blocked) {
+			// Do not leave already-admitted application writes queued behind the
+			// control message. Read and verification jobs remain available for
+			// recovery/status surfaces.
+			for (const entry of [...pending.values()]) {
+				if (entry.job.lane !== "read" && entry.job.lane !== "verify") cancel(entry.job.id);
+			}
+		}
+		if (state !== "ready" || child === null) return;
+		const owner = child;
+		void write(owner, { type: "set_write_blocked", blocked }).catch((error: unknown) => {
+			if (child !== owner || closed) return;
+			retireOwner(error instanceof Error ? error : new Error(String(error)), owner, "dead", true);
+		});
 	}
 
 	async function awaitResult<Result>(handle: DbOwnerJobHandle<Result>, timeoutMs?: number): Promise<Result> {
@@ -755,15 +812,15 @@ function createSingleDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClient
 		}
 	}
 
-	async function initialize(agentsDir?: string): Promise<void> {
-		const handle = submit(
+	async function initialize(agentsDir?: string): Promise<DbOwnerInitializationResult> {
+		const handle = submit<DbOwnerInitializationResult>(
 			{ kind: "initialize", agentsDir },
 			{ operation: "db.initialize", lane: "maintenance", deadlineMs: 60_000, estimatedWorkUnits: 10_000 },
 		);
-		await awaitResult(handle, 60_000);
+		return await awaitResult<DbOwnerInitializationResult>(handle, 60_000);
 	}
 
-	return { start, initialize, submit, awaitResult, cancel, health: currentHealth, close };
+	return { start, initialize, submit, setWriteBlocked, awaitResult, cancel, health: currentHealth, close };
 }
 
 /**
@@ -782,7 +839,8 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 	let closed = false;
 
 	function laneFor(requestLane: DbOwnerLane, workloadClass?: DbOwnerWorkloadClass): DbOwnerClient {
-		if (workloadClass === "maintenance" || requestLane === "maintenance") return maintenanceLane;
+		if (workloadClass === "maintenance" || requestLane === "maintenance" || requestLane === "verify")
+			return maintenanceLane;
 		return requestLane === "read" ? readLane : writeLane;
 	}
 
@@ -851,11 +909,16 @@ export function createDbOwnerClient(options: DbOwnerClientOptions): DbOwnerClien
 			if (closed) throw new DbOwnerError("DB_OWNER_CLOSED", "DB owner client is closed");
 			await Promise.all([readLane.start(), writeLane.start(), maintenanceLane.start()]);
 		},
-		async initialize(agentsDir?: string): Promise<void> {
-			await maintenanceLane.initialize(agentsDir);
+		async initialize(agentsDir?: string): Promise<DbOwnerInitializationResult> {
+			return await maintenanceLane.initialize(agentsDir);
 		},
 		submit<Result>(request: DbOwnerRequest, submitOptions: DbOwnerSubmitOptions): DbOwnerJobHandle<Result> {
 			return laneFor(submitOptions.lane, submitOptions.workloadClass).submit<Result>(request, submitOptions);
+		},
+		setWriteBlocked(blocked: boolean): void {
+			readLane.setWriteBlocked(blocked);
+			if (writeLane !== readLane) writeLane.setWriteBlocked(blocked);
+			if (maintenanceLane !== readLane && maintenanceLane !== writeLane) maintenanceLane.setWriteBlocked(blocked);
 		},
 		awaitResult<Result>(handle: DbOwnerJobHandle<Result>, timeoutMs?: number): Promise<Result> {
 			return laneFor(handle.job.lane, handle.job.workloadClass).awaitResult(handle, timeoutMs);

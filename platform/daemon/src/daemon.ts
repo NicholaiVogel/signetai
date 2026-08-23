@@ -47,15 +47,40 @@ import {
 	migrateSessionSynthesisRoute,
 } from "./config-migration";
 import { listConnectorsAsync } from "./connectors/registry";
+import { findSqliteVecExtension } from "@signet/core";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
-import { runIncrementalDatabaseIntegrityCheck } from "./incremental-database-integrity";
+import {
+	MIGRATION_VERIFY_FAILED_STATUS,
+	MIGRATION_VERIFY_PARKED_STATUS,
+	readMigrationVerifyCheckpoint,
+	runIncrementalDatabaseIntegrityCheck,
+} from "./incremental-database-integrity";
+import {
+	createMigrationVerifySetupRetry,
+	migrationVerifyCheckpointKey,
+	runMigrationIntegrityVerifyGate,
+} from "./migration-integrity-verify";
+import { readRetainedMigrationVerifyStatus } from "./daemon-migration-startup";
+import {
+	getDatabaseIntegrityStatus,
+	publishDatabaseIntegrityStatus,
+	resetGlobalIntegrityLatch,
+} from "./database-integrity";
 import {
 	closeDbAccessor,
+	backfillVecEmbeddings,
+	DatabaseIntegrityCorruptError,
 	getDbAccessor,
 	getVectorRuntimeStatus,
+	VEC_EMBEDDING_POST_READY_BUDGET_MS,
+	pendingMigrationBackupPath,
 	initDbAccessorLite,
+	initDbAccessorReadOnly,
+	isVectorRuntimeUsable,
+	pruneMigrationBackupsAfterIntegrity,
 	resolveSqliteRuntimeConfig,
 	registerDbOwnerHealthProvider,
+	setDatabaseIntegrityWritesBlocked,
 	type WriteDb,
 } from "./db-accessor";
 import { type VacuumConversionHandle, startVacuumConversionWorker } from "./db-vacuum";
@@ -269,6 +294,10 @@ const __dirname = dirname(__filename);
 let httpServer: import("node:net").Server | null = null;
 let dbOwnerClient: DbOwnerClient | null = null;
 let dbOwnerMaintenanceHandle: DbOwnerMaintenance | null = null;
+let globalVerifyInFlight = false;
+let migrationIntegrityWritesBlocked = false;
+let migrationWritesDeferred = false;
+let recallDbOwner: DbOwnerClient | null = null;
 let dreamingWorkerHandle: DreamingWorkerHandle | null = null;
 let reflectionWorkerHandle: ReflectionWorkerHandle | null = null;
 let embeddingTrackerHandle: EmbeddingTrackerHandle | null = null;
@@ -285,6 +314,74 @@ let telemetryRef: TelemetryCollector | undefined;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let checkpointPruneTimer: ReturnType<typeof setInterval> | undefined;
 
+function armMigrationIntegrityWriteBlock(): void {
+	migrationIntegrityWritesBlocked = true;
+	migrationWritesDeferred = false;
+	process.env.SIGNET_DB_WRITES_BLOCKED = "1";
+	setDatabaseIntegrityWritesBlocked(true);
+	dbOwnerClient?.setWriteBlocked(true);
+	recallDbOwner?.setWriteBlocked(true);
+	void transcriptRecoveryWorkerHandle?.stop().catch((error: unknown) => {
+		logger.error("startup-recovery", "Failed to stop transcript recovery after integrity failure", undefined, {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	});
+}
+
+function releaseMigrationIntegrityWriteBlock(): void {
+	migrationIntegrityWritesBlocked = false;
+	migrationWritesDeferred = false;
+	delete process.env.SIGNET_DB_WRITES_BLOCKED;
+	setDatabaseIntegrityWritesBlocked(false);
+	dbOwnerClient?.setWriteBlocked(false);
+	recallDbOwner?.setWriteBlocked(false);
+}
+
+function deferMigrationWriters(): void {
+	migrationIntegrityWritesBlocked = true;
+	migrationWritesDeferred = true;
+	process.env.SIGNET_DB_WRITES_BLOCKED = "1";
+	setDatabaseIntegrityWritesBlocked(true);
+	dbOwnerClient?.setWriteBlocked(true);
+	recallDbOwner?.setWriteBlocked(true);
+}
+
+async function ownerHasPendingVecBackfill(owner: DbOwnerClient, expectedDimensions: number): Promise<boolean> {
+	const rowidsHandle = owner.submit<{ readonly present?: number } | undefined>(
+		{
+			kind: "query",
+			statement: {
+				sql: "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'vec_embeddings_rowids' LIMIT 1",
+				result: "get",
+				transactional: false,
+				readonly: true,
+			},
+		},
+		{ operation: "maintenance.vec-backfill-probe-schema", lane: "read", deadlineMs: 5_000 },
+	);
+	const rowids = await owner.awaitResult(rowidsHandle, 5_000);
+	const targetTable = rowids === undefined ? "vec_embeddings" : "vec_embeddings_rowids";
+	const pendingHandle = owner.submit<{ readonly present?: number } | undefined>(
+		{
+			kind: "query",
+			statement: {
+				sql: `SELECT 1 AS present FROM embeddings e
+				LEFT JOIN ${targetTable} v ON v.id = e.id
+				LEFT JOIN vec_embeddings_quarantine q ON q.rowid = e.id
+				WHERE v.id IS NULL AND q.rowid IS NULL AND e.dimensions = ? LIMIT 1`,
+				params: [expectedDimensions],
+				result: "get",
+				transactional: false,
+				readonly: true,
+			},
+		},
+		{ operation: "maintenance.vec-backfill-probe", lane: "read", deadlineMs: 5_000 },
+	);
+	// `undefined` is a successful empty result. Errors must escape so the
+	// bounded retry path can distinguish an operational failure from "no work".
+	return (await owner.awaitResult(pendingHandle, 5_000)) !== undefined;
+}
+
 export function countConnectorsActive(connectors: readonly { readonly status: string }[]): number {
 	// ConnectorStatus is "idle" | "syncing" | "error"; there is no "active"
 	// state. The heartbeat field keeps its historical name, but means
@@ -298,6 +395,25 @@ export function countConnectorsActive(connectors: readonly { readonly status: st
 
 export const app = new Hono();
 
+// Once migration verification has confirmed corruption, keep every mutating
+// HTTP surface fail-closed while continuing to serve readonly routes and the
+// existing repair guidance used by /health/ready.
+app.use("*", async (c, next) => {
+	if (["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return await next();
+	if (!migrationIntegrityWritesBlocked) return await next();
+	const databaseIntegrity = getDatabaseIntegrityStatus();
+	const error = migrationWritesDeferred
+		? "Writes are blocked: upgrade deferred pending prior-generation verification; restart completes it"
+		: new DatabaseIntegrityCorruptError().message;
+	return c.json(
+		{
+			error,
+			repairGuidance: databaseIntegrity.repairGuidance,
+		},
+		503,
+	);
+});
+
 // Resolve the custom SQLite runtime once so both owner lanes use the same
 // runtime selected for this daemon instance.
 const sqliteRuntime = resolveSqliteRuntimeConfig({ agentsDir: AGENTS_DIR });
@@ -308,7 +424,8 @@ export function createRecallDbOwnerOptions(sqlitePath: string | undefined): DbOw
 
 // Recall uses its own child-process lane so request reads never wait behind
 // maintenance or write work in the generic owner.
-const recallDbOwner = createDbOwnerClient(createRecallDbOwnerOptions(sqliteRuntime.choice?.path));
+const recallOwner = createDbOwnerClient(createRecallDbOwnerOptions(sqliteRuntime.choice?.path));
+recallDbOwner = recallOwner;
 
 registerGlobalMiddleware(app);
 getOrCreateInferenceRouter(resolveDefaultBasePath());
@@ -317,7 +434,7 @@ mountHealthRoutes(app);
 mountMcpRoute(app);
 registerAuthRoutes(app);
 
-registerMemoryRoutes(app, { recallOwner: recallDbOwner });
+registerMemoryRoutes(app, { recallOwner });
 registerHooksRoutes(app);
 registerKnowledgeRoutes(app);
 registerOntologyRoutes(app);
@@ -732,7 +849,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:735" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:852" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -775,7 +892,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:757" },
+			{ siteToken: "daemon.ts:874" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -852,7 +969,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:848" },
+			{ siteToken: "daemon.ts:965" },
 		);
 	} catch {
 		return false;
@@ -1476,7 +1593,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1462", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1579", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1544,7 +1661,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1545", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1662", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -1866,7 +1983,8 @@ async function cleanup() {
 		await dbOwnerClient.close();
 		dbOwnerClient = null;
 	}
-	await recallDbOwner.close();
+	await recallDbOwner?.close();
+	recallDbOwner = null;
 	closeDbAccessor();
 
 	if (watcher) {
@@ -2058,28 +2176,108 @@ async function main() {
 		});
 	}
 
-	// Expensive schema/FTS/vector initialization must execute in the killable
-	// owner process, not merely behind an async function on this isolate.
+	// Expensive schema/FTS initialization must execute in the killable owner
+	// process, not merely behind an async function on this isolate.
 	dbOwnerClient = createDbOwnerClient({ dbPath: MEMORY_DB, sqlitePath: sqliteRuntime.choice?.path });
 	await dbOwnerClient.start();
-	await dbOwnerClient.initialize(AGENTS_DIR);
-	const { extensionPath: initExtensionPath } = getVectorRuntimeStatus();
-	initDbAccessorLite(MEMORY_DB, initExtensionPath ?? "");
+	const owner = dbOwnerClient;
+
+	// Read the retained migration verdict through a strictly read-only owner
+	// query before any mutating database initialization can run. A confirmed
+	// corrupt restart skips initialize() entirely and opens only a readonly
+	// accessor for status and recovery guidance.
+	const retainedMigrationBackupPath = pendingMigrationBackupPath(MEMORY_DB);
+	let retainedMigrationCorrupt = false;
+	let retainedMigrationStatus: string | null = null;
+	let retainedMigrationReadFailed = false;
+	if (retainedMigrationBackupPath !== null) {
+		try {
+			retainedMigrationStatus = await readRetainedMigrationVerifyStatus(
+				owner,
+				migrationVerifyCheckpointKey(retainedMigrationBackupPath),
+				retainedMigrationBackupPath,
+			);
+			retainedMigrationCorrupt = retainedMigrationStatus === MIGRATION_VERIFY_FAILED_STATUS;
+		} catch (error) {
+			retainedMigrationReadFailed = true;
+			logger.warn(
+				"startup-recovery",
+				"Could not read retained migration verification checkpoint before initialization; deferring mutating startup",
+				{ error: error instanceof Error ? error.message : String(error) },
+			);
+		}
+	}
+
+	const initResult =
+		retainedMigrationCorrupt || retainedMigrationReadFailed ? null : await owner.initialize(AGENTS_DIR);
+	// The owner resolves sqlite-vec in its own process. Carry that path across
+	// the protocol so the parent accessor loads the same extension; retained
+	// paths still fall back to local discovery for older owner protocols.
+	const initExtensionPath =
+		initResult?.extensionPath ?? getVectorRuntimeStatus().extensionPath ?? findSqliteVecExtension() ?? "";
+	const deferredMigrationVerification = initResult?.deferredMigrationVerification === true;
+	if (retainedMigrationCorrupt) {
+		armMigrationIntegrityWriteBlock();
+		publishDatabaseIntegrityStatus("corrupt", ["global integrity verification previously failed"], owner);
+		initDbAccessorReadOnly(MEMORY_DB, initExtensionPath ?? "", { agentsDir: AGENTS_DIR });
+		logger.error(
+			"startup-recovery",
+			"Retained migration verification confirmed database corruption; startup writes disabled before initialization",
+		);
+	} else if (retainedMigrationReadFailed) {
+		deferMigrationWriters();
+		publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-unverified"], owner);
+		initDbAccessorReadOnly(MEMORY_DB, initExtensionPath ?? "", { agentsDir: AGENTS_DIR });
+		logger.warn(
+			"startup-recovery",
+			"Retained migration verification could not be read; serving reads with writes blocked until verification recovers",
+		);
+	} else if (deferredMigrationVerification) {
+		deferMigrationWriters();
+		publishDatabaseIntegrityStatus(
+			"degraded",
+			["upgrade deferred pending prior-generation verification; restart completes it"],
+			owner,
+		);
+		initDbAccessorReadOnly(MEMORY_DB, initExtensionPath ?? "", { agentsDir: AGENTS_DIR });
+		logger.warn(
+			"startup-recovery",
+			"Prior-generation migration verification is still running; serving reads with writes blocked until restart",
+		);
+	} else {
+		initDbAccessorLite(MEMORY_DB, initExtensionPath ?? "");
+		releaseMigrationIntegrityWriteBlock();
+		if (retainedMigrationStatus === MIGRATION_VERIFY_PARKED_STATUS || retainedMigrationReadFailed) {
+			publishDatabaseIntegrityStatus(
+				"degraded",
+				retainedMigrationStatus === MIGRATION_VERIFY_PARKED_STATUS
+					? ["degraded:integrity-unverified", "manual integrity verification is available"]
+					: ["degraded:integrity-unverified"],
+				owner,
+			);
+		}
+	}
+	const pendingVecBackfillFromInitialization = initResult?.pendingVecBackfill === true;
+
 	setSessionClaimStore(createSessionClaimStore(getDbAccessor()));
-	startSessionCleanup();
-	// Formal TTL lifecycle (#902): when stale-session cleanup evicts a claim
-	// whose harness never sent session-end, checkpoint the residual continuity
-	// state and mark the retained transcript complete instead of silently
-	// dropping the in-memory lifecycle state.
-	setSessionEvictionHandler(
-		createTtlEvictionHandler({
-			accessor: getDbAccessor(),
-			maxCheckpointsPerSession: loadMemoryConfig(AGENTS_DIR).pipelineV2.continuity.maxCheckpointsPerSession,
-		}),
-	);
-	const restoredSessions = await restorePersistedSessionsAsync();
-	if (restoredSessions.active > 0 || restoredSessions.expired > 0 || restoredSessions.ended > 0) {
-		logger.info("session-tracker", "Restored durable session lifecycle state", restoredSessions);
+	if (!migrationIntegrityWritesBlocked) {
+		startSessionCleanup();
+		// Formal TTL lifecycle (#902): when stale-session cleanup evicts a claim
+		// whose harness never sent session-end, checkpoint the residual continuity
+		// state and mark the retained transcript complete instead of silently
+		// dropping the in-memory lifecycle state.
+		setSessionEvictionHandler(
+			createTtlEvictionHandler({
+				accessor: getDbAccessor(),
+				maxCheckpointsPerSession: loadMemoryConfig(AGENTS_DIR).pipelineV2.continuity.maxCheckpointsPerSession,
+			}),
+		);
+		const restoredSessions = await restorePersistedSessionsAsync();
+		if (restoredSessions.active > 0 || restoredSessions.expired > 0 || restoredSessions.ended > 0) {
+			logger.info("session-tracker", "Restored durable session lifecycle state", restoredSessions);
+		}
+	} else {
+		logger.warn("startup-recovery", "Skipping session restoration and cleanup because database writes are fail-closed");
 	}
 	logFdSnapshot("post-db-init");
 	startEventLoopMonitor();
@@ -2089,7 +2287,7 @@ async function main() {
 	registerDbOwnerMaintenance(dbOwnerMaintenanceHandle);
 	// Clean accumulated crash-loop damage through the owner. This remains a
 	// deferred call, so owner startup and the bounded drain never delay readiness.
-	runStartupRecovery(getDbAccessor(), { owner: dbOwnerClient });
+	if (!migrationIntegrityWritesBlocked) runStartupRecovery(getDbAccessor(), { owner: dbOwnerClient });
 
 	// Source-deletion cleanup runs in the post-ready deferred lane below. Do not
 	// put it before binding the HTTP server: its lifecycle-state delete uses the
@@ -2101,14 +2299,18 @@ async function main() {
 		? bundled
 		: (resolveEmbeddedWorkerPath("synthesis-render-worker") ?? join(__dirname, "synthesis-render-worker.ts"));
 	let synthWorker: Worker | null = null;
-	try {
-		synthWorker = new Worker(workerPath);
-	} catch (err) {
-		logger.warn(
-			"daemon",
-			"synthesis worker creation failed — using sync rendering",
-			err instanceof Error ? err : undefined,
-		);
+	if (!migrationIntegrityWritesBlocked) {
+		try {
+			synthWorker = new Worker(workerPath);
+		} catch (err) {
+			logger.warn(
+				"daemon",
+				"synthesis worker creation failed — using sync rendering",
+				err instanceof Error ? err : undefined,
+			);
+		}
+	} else {
+		logger.warn("startup-recovery", "Skipping synthesis worker initialization because database writes are fail-closed");
 	}
 	let synthWorkerReady = false;
 	if (synthWorker) {
@@ -2163,7 +2365,8 @@ async function main() {
 		});
 	}
 
-	await syncAgentRoster(AGENTS_DIR);
+	if (!migrationIntegrityWritesBlocked) await syncAgentRoster(AGENTS_DIR);
+	else logger.warn("startup-recovery", "Skipping agent roster sync because database writes are fail-closed");
 
 	invalidateTraversalCache();
 
@@ -2182,7 +2385,7 @@ async function main() {
 
 	const memoryCfg = loadMemoryConfig(AGENTS_DIR);
 	let telemetryCollector: TelemetryCollector | undefined;
-	if (memoryCfg.pipelineV2.telemetryEnabled && !telemetryDisabledByEnv()) {
+	if (!migrationIntegrityWritesBlocked && memoryCfg.pipelineV2.telemetryEnabled && !telemetryDisabledByEnv()) {
 		const posthogApiKey = memoryCfg.pipelineV2.telemetry.posthogApiKey;
 		const resolvedTelemetryCfg = {
 			...memoryCfg.pipelineV2.telemetry,
@@ -2257,11 +2460,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2253", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2456", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2263",
+								siteToken: "daemon.ts:2466",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2341,13 +2544,122 @@ async function main() {
 				cause: "fts_index_incomplete",
 			});
 		},
+		onIntegrityFailure: (error): void => {
+			logger.error("startup-recovery", "Deferred integrity maintenance rejected", undefined, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			publishDatabaseIntegrityStatus("degraded", ["degraded:integrity-callback-rejected"], dbOwnerClient ?? undefined);
+		},
+		completeIntegrityOnCallback: false,
 	});
+
+	let daemonPendingVecBackfill = pendingVecBackfillFromInitialization;
+	let vecBackfillScheduled = false;
+	const probePendingVecBackfill = async (): Promise<boolean> => {
+		if (migrationIntegrityWritesBlocked) return false;
+		const activeEmbedding = await getDbAccessor().withReadDbAsync(
+			(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
+			{ siteToken: "daemon.ts:2560", operation: "maintenance.vec-backfill-config" },
+		);
+		return await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions);
+	};
+	const probePendingVecBackfillWithRetry = async (): Promise<boolean> => {
+		for (let attempt = 0; attempt < 2; attempt++) {
+			if (migrationIntegrityWritesBlocked) return false;
+			try {
+				return await probePendingVecBackfill();
+			} catch (error) {
+				logger.warn("startup-recovery", "Vector backfill probe failed", {
+					attempt: attempt + 1,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				if (attempt === 0) await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+			}
+		}
+		logger.error("startup-recovery", "Vector backfill probe gave up after one retry");
+		return false;
+	};
+	const schedulePendingVecBackfill = (): void => {
+		if (migrationIntegrityWritesBlocked || vecBackfillScheduled) return;
+		void probePendingVecBackfillWithRetry()
+			.then((pending) => {
+				daemonPendingVecBackfill = pending;
+				if (!pending || migrationIntegrityWritesBlocked) return;
+				vecBackfillScheduled = true;
+				deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
+					let budgetExpired = false;
+					try {
+						const activeEmbedding = await getDbAccessor().withReadDbAsync(
+							(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
+							{ siteToken: "daemon.ts:2592", operation: "maintenance.vec-backfill-config" },
+						);
+						if (migrationIntegrityWritesBlocked) return;
+						if (!isVectorRuntimeUsable()) {
+							logger.warn("startup-recovery", "Skipping vector backfill slice because sqlite-vec is unavailable");
+							return;
+						}
+						const deadlineAt = Date.now() + VEC_EMBEDDING_POST_READY_BUDGET_MS;
+						for (;;) {
+							if (migrationIntegrityWritesBlocked) return;
+							if (Date.now() >= deadlineAt) {
+								budgetExpired = true;
+								return;
+							}
+							await getDbAccessor().withWriteDbAsync(
+								(db) =>
+									backfillVecEmbeddings(db, activeEmbedding.dimensions, deadlineAt, {
+										maxBatches: 1,
+										batchSize: 500,
+									}),
+								{ siteToken: "daemon.ts:2608", operation: "maintenance.vec-backfill" },
+							);
+							// The writer callback is synchronous on this isolate. Yield after
+							// every bounded batch so health and ready can run between slices.
+							await new Promise<void>((resolve) => setImmediate(resolve));
+							if (!(await probePendingVecBackfillWithRetry())) return;
+						}
+					} finally {
+						vecBackfillScheduled = false;
+						if (budgetExpired && !migrationIntegrityWritesBlocked) {
+							// Probe after the bounded slice and give the serialized
+							// maintenance scheduler a short breather before arming the
+							// next slice. Errors are handled by the bounded probe retry.
+							const timer = setTimeout(() => schedulePendingVecBackfill(), 100);
+							timer.unref?.();
+						}
+					}
+				});
+			})
+			.catch((error: unknown) => {
+				logger.error("startup-recovery", "Vector backfill probe unexpectedly rejected", undefined, {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+	};
+	// The owner initialization result seeds daemon knowledge, while this probe
+	// remains authoritative so restarts and cross-process drift cannot strand a
+	// pending backfill behind the owner boundary.
+	if (daemonPendingVecBackfill) schedulePendingVecBackfill();
+	else
+		void probePendingVecBackfillWithRetry()
+			.then((pending) => {
+				if (pending) schedulePendingVecBackfill();
+			})
+			.catch((error: unknown) => {
+				logger.error("startup-recovery", "Vector backfill probe unexpectedly rejected", undefined, {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 
 	// Grace period: defer all background workers for 10s after startup so the
 	// event-loop monitor can calibrate and migrations can settle before any
 	// background write work piles on (#1059 thundering-herd prevention).
 	const startPostReadyRuntime = async (): Promise<void> => {
 		await deferredRuntimeGate.waitForIntegrity();
+		if (migrationIntegrityWritesBlocked) {
+			logger.warn("startup-recovery", "Skipping post-ready runtime startup because database writes are fail-closed");
+			return;
+		}
 		reportStartupGrace();
 		await startPipelineRuntime(memoryCfg, telemetryCollector);
 		logFdSnapshot("post-pipeline");
@@ -2442,15 +2754,22 @@ async function main() {
 	deferredRuntimeScheduler.schedulePipeline(startPostReadyRuntime);
 	// Cleanup is retryable maintenance. It must not hold up pipeline startup if
 	// the async writer is blocked or unavailable.
-	deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
-		try {
-			await cleanupSourceDeletionTombstones(AGENTS_DIR);
-		} catch (error) {
-			logger.error("daemon", "Deferred source-deletion tombstone cleanup failed; retry remains available", undefined, {
-				error: error instanceof Error ? error.message : String(error),
-			});
-		}
-	});
+	if (!migrationIntegrityWritesBlocked) {
+		deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
+			try {
+				await cleanupSourceDeletionTombstones(AGENTS_DIR);
+			} catch (error) {
+				logger.error(
+					"daemon",
+					"Deferred source-deletion tombstone cleanup failed; retry remains available",
+					undefined,
+					{
+						error: error instanceof Error ? error.message : String(error),
+					},
+				);
+			}
+		});
+	}
 
 	const REQUEST_BODY_LIMIT = 10 * 1_048_576;
 	const { createServer: nodeCreateServer } = await import("node:http");
@@ -2492,26 +2811,246 @@ async function main() {
 			port: info.port,
 		});
 		logger.info("daemon", "Daemon ready");
-		deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
-			const maintenance = dbOwnerMaintenanceHandle;
-			if (maintenance === null) throw new Error("DB owner maintenance is unavailable for FTS startup recovery");
-			const result = await completeFtsStartupRecovery({
-				backfill: maintenance.backfillFts,
-				backfillOptions: { checkpointKey: "fts.memories.startup" },
-				scheduleContinuation: (callback): void => {
-					const timer = setTimeout(callback, 0);
-					timer.unref?.();
-				},
+		if (!migrationIntegrityWritesBlocked) {
+			deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
+				const maintenance = dbOwnerMaintenanceHandle;
+				if (maintenance === null) throw new Error("DB owner maintenance is unavailable for FTS startup recovery");
+				const result = await completeFtsStartupRecovery({
+					backfill: maintenance.backfillFts,
+					backfillOptions: { checkpointKey: "fts.memories.startup" },
+					scheduleContinuation: (callback): void => {
+						const timer = setTimeout(callback, 0);
+						timer.unref?.();
+					},
+				});
+				logger.info("daemon", "FTS startup maintenance finished", { ...result });
 			});
-			logger.info("daemon", "FTS startup maintenance finished", { ...result });
-		});
+		}
+		let retainedCorruptMaintenanceLogged = false;
 		deferredRuntimeScheduler.scheduleIntegrity(async (): Promise<void> => {
+			if (retainedMigrationCorrupt) {
+				if (!retainedCorruptMaintenanceLogged) {
+					retainedCorruptMaintenanceLogged = true;
+					logger.warn(
+						"startup-recovery",
+						"Skipping all mutating post-ready maintenance because database corruption is retained",
+					);
+				}
+				deferredRuntimeGate.completeIntegrity();
+				return;
+			}
 			logFdSnapshot("server-ready");
 			writeDaemonLifecycle(AGENTS_DIR, buildLifecycleRecord("running"));
-			vacuumConversionHandle = startVacuumConversionWorker(getDbAccessor(), { owner: dbOwnerClient ?? undefined });
 			const owner = dbOwnerClient;
+			const migrationBackupPath = pendingMigrationBackupPath(MEMORY_DB);
+			let currentDatabaseSizeBytes = 0;
+			try {
+				currentDatabaseSizeBytes = (await statAsync(MEMORY_DB)).size;
+			} catch (error) {
+				logger.warn("startup-recovery", "Could not stat current database for integrity budget", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			const migrationBackupPending = migrationBackupPath !== null;
 			if (owner === null) throw new Error("DB owner is unavailable for incremental integrity maintenance");
-			const runIntegritySlice = async (): Promise<void> => {
+			const startVacuumConversion = (): void => {
+				if (vacuumConversionHandle !== null) return;
+				vacuumConversionHandle = startVacuumConversionWorker(getDbAccessor(), { owner });
+			};
+			if (!migrationBackupPending) startVacuumConversion();
+
+			// ── Migration backup prune gate ──────────────────────────────────
+			// Global `PRAGMA integrity_check` is the ONLY result that may delete
+			// the rollback backup. Each completed backup generation gets its own
+			// checkpoint key, so a parked or failed prior generation cannot suppress
+			// verification of this generation.
+			let integritySliceTimer: ReturnType<typeof setTimeout> | null = null;
+			let integritySlicePending = false;
+			let migrationIntegrityGateActive = false;
+			let integrityGateCompleted = false;
+			let migrationWritersAllowed = Promise.resolve(true);
+			let runIntegritySlice: () => Promise<void>;
+			const scheduleIntegritySlice = (delayMs: number): void => {
+				if (retainedMigrationCorrupt) {
+					if (!retainedCorruptMaintenanceLogged) {
+						retainedCorruptMaintenanceLogged = true;
+						logger.warn(
+							"startup-recovery",
+							"Skipping incremental integrity maintenance because database corruption is retained",
+						);
+					}
+					return;
+				}
+				integritySlicePending = true;
+				if (globalVerifyInFlight || integritySliceTimer !== null) return;
+				integritySliceTimer = setTimeout(() => {
+					integritySliceTimer = null;
+					if (globalVerifyInFlight) return;
+					integritySlicePending = false;
+					void runIntegritySlice().catch((error) => {
+						logger.error("startup-recovery", "Incremental database integrity continuation rejected", error);
+					});
+				}, delayMs);
+				integritySliceTimer.unref?.();
+			};
+			let scheduledVerifyRuntimeGateReleased = false;
+			const publishMigrationVerifyStatus = (
+				state: "healthy" | "corrupt" | "degraded",
+				messages?: readonly string[],
+			): void => {
+				// The terminal callback is intentionally injected into the gate so
+				// `if (state === "corrupt") armMigrationIntegrityWriteBlock();` runs
+				// only after the checkpoint and sidecar have been attempted.
+				publishDatabaseIntegrityStatus(state, messages, owner);
+				if (state === "degraded" && !scheduledVerifyRuntimeGateReleased) {
+					scheduledVerifyRuntimeGateReleased = true;
+					deferredRuntimeGate.completeIntegrity();
+				}
+			};
+			if (migrationBackupPending && migrationBackupPath !== null) {
+				migrationIntegrityGateActive = true;
+				let migrationCheckpoint: Awaited<ReturnType<typeof readMigrationVerifyCheckpoint>> = {
+					attemptCount: 0,
+					status: "running",
+				};
+				try {
+					migrationCheckpoint = await readMigrationVerifyCheckpoint(
+						owner,
+						migrationVerifyCheckpointKey(migrationBackupPath),
+						5_000,
+					);
+				} catch (error) {
+					logger.error(
+						"startup-recovery",
+						"Migration verification checkpoint read failed; retrying verification",
+						error instanceof Error ? error : undefined,
+					);
+					publishMigrationVerifyStatus("degraded", ["degraded:integrity-unverified"]);
+				}
+				const retainedTerminalCheckpoint =
+					migrationCheckpoint.status === MIGRATION_VERIFY_FAILED_STATUS ||
+					migrationCheckpoint.status === MIGRATION_VERIFY_PARKED_STATUS;
+				let resolveMigrationWriters: ((allowed: boolean) => void) | undefined;
+				if (retainedTerminalCheckpoint) {
+					migrationWritersAllowed = new Promise<boolean>((resolve) => {
+						resolveMigrationWriters = resolve;
+					});
+				}
+				let runMigrationVerifyGate: () => Promise<Awaited<ReturnType<typeof runMigrationIntegrityVerifyGate>>>;
+				const releaseVerifyLatch = (): void => {
+					if (!globalVerifyInFlight) return;
+					globalVerifyInFlight = false;
+					if (integritySlicePending) scheduleIntegritySlice(0);
+				};
+				const migrationVerifyGateOptions: Parameters<typeof runMigrationIntegrityVerifyGate>[0] = {
+					owner,
+					backupPath: migrationBackupPath,
+					databaseSizeBytes: currentDatabaseSizeBytes,
+					pruneBackup: () => pruneMigrationBackupsAfterIntegrity(MEMORY_DB, undefined, migrationBackupPath),
+					publishStatus: publishMigrationVerifyStatus,
+					armWriteBlock: armMigrationIntegrityWriteBlock,
+					resetGlobalLatch: resetGlobalIntegrityLatch,
+					onProgress: (progress): void => {
+						logger.info("startup-recovery", "Migration integrity verify attempt", { ...progress });
+					},
+					continuation: () => runMigrationVerifyGate(),
+					log: (message, details): void => {
+						logger.info("startup-recovery", message, details);
+					},
+					onContinuationRejection: (callback, error): void => setupRetry.handleRejection(callback, error),
+				};
+				runMigrationVerifyGate = async (): Promise<Awaited<ReturnType<typeof runMigrationIntegrityVerifyGate>>> => {
+					globalVerifyInFlight = true;
+					let resolveWorker: () => void = () => {};
+					let workerSettledResolved = false;
+					const settleWorker = (): void => {
+						if (workerSettledResolved) return;
+						workerSettledResolved = true;
+						resolveWorker();
+					};
+					const workerSettled = new Promise<void>((resolve) => {
+						resolveWorker = resolve;
+					});
+					try {
+						const result = await runMigrationIntegrityVerifyGate({
+							...migrationVerifyGateOptions,
+							// Do not let the 30-minute continuation race a deadline-abandoned
+							// worker. Scheduling after settlement makes the global latch a true
+							// single-flight guard even when an old worker settles late.
+							scheduleNextAttempt: (callback, delayMs): void => {
+								void workerSettled.then(() => {
+									const timer = setTimeout(callback, delayMs);
+									timer.unref?.();
+								});
+							},
+							onWorkerSettled: settleWorker,
+							onAdmissionFailure: () => {
+								settleWorker();
+								// No owner job exists to settle after a synchronous admission
+								// rejection, so the integrity lane can be released now.
+								releaseVerifyLatch();
+							},
+						});
+						if (result.phase === "pass") {
+							/* if (result.phase === "pass") {
+							startVacuumConversion(); */
+							if (deferredMigrationVerification) {
+								logger.info(
+									"startup-recovery",
+									"Prior-generation verification passed; scheduling graceful restart before admitting migration",
+								);
+								setTimeout(() => {
+									requestShutdown("migration-verify-complete-restart", 0, undefined, false);
+								}, 0);
+							} else {
+								startVacuumConversion();
+							}
+						} else if (result.phase === "parked" || result.phase === "failed" || result.phase === "terminal") {
+							logger.warn("startup-recovery", "Migration verification retained the rollback backup; VACUUM deferred", {
+								phase: result.phase,
+							});
+						}
+						if (resolveMigrationWriters !== undefined) {
+							const allowed =
+								result.phase !== "failed" &&
+								!(result.phase === "terminal" && migrationCheckpoint.status === MIGRATION_VERIFY_FAILED_STATUS);
+							resolveMigrationWriters(allowed);
+							resolveMigrationWriters = undefined;
+						}
+						if (result.phase === "incomplete" && result.admitted) void workerSettled.then(releaseVerifyLatch);
+						else releaseVerifyLatch();
+						return result;
+					} catch (error) {
+						releaseVerifyLatch();
+						throw error;
+					}
+				};
+				let setupRetry: ReturnType<typeof createMigrationVerifySetupRetry>;
+				setupRetry = createMigrationVerifySetupRetry({
+					run: runMigrationVerifyGate,
+					publishStatus: publishMigrationVerifyStatus,
+					logWarn: (message, details): void => logger.warn("startup-recovery", message, details),
+					logError: (message, error, details): void => logger.error("startup-recovery", message, error, details),
+				});
+				setupRetry.run();
+			}
+
+			runIntegritySlice = async (): Promise<void> => {
+				if (retainedMigrationCorrupt) {
+					if (!retainedCorruptMaintenanceLogged) {
+						retainedCorruptMaintenanceLogged = true;
+						logger.warn(
+							"startup-recovery",
+							"Skipping incremental integrity maintenance because database corruption is retained",
+						);
+					}
+					integritySlicePending = false;
+					return;
+				}
+				if (globalVerifyInFlight) {
+					integritySlicePending = true;
+					return;
+				}
 				const result = await runIncrementalDatabaseIntegrityCheck({
 					owner,
 					checkpointKey: "database.quick-check",
@@ -2531,18 +3070,14 @@ async function main() {
 					});
 				}
 				if (result.phase === "running" || result.phase === "timed_out" || result.phase === "unavailable") {
-					const timer = setTimeout(
-						() => {
-							void runIntegritySlice().catch((error) => {
-								logger.error("startup-recovery", "Incremental database integrity continuation rejected", error);
-							});
-						},
-						result.phase === "running" ? 0 : 1000,
-					);
-					timer.unref?.();
+					scheduleIntegritySlice(result.phase === "running" ? 0 : 1000);
+				}
+				if (!migrationIntegrityGateActive && !integrityGateCompleted) {
+					integrityGateCompleted = true;
+					deferredRuntimeGate.completeIntegrity();
 				}
 			};
-			await runIntegritySlice();
+			scheduleIntegritySlice(0);
 			if (owner.health().state === "failed") {
 				logger.error("startup-recovery", "DB owner failed during incremental integrity maintenance", undefined, {
 					ownerState: owner.health().state,
@@ -2576,6 +3111,18 @@ async function main() {
 				}
 			} catch {}
 
+			const writersAllowed = await migrationWritersAllowed;
+			if (!writersAllowed) {
+				logger.error(
+					"startup-recovery",
+					"Skipping startup DB writers because migration verification confirmed corruption",
+					undefined,
+					{
+						checkpointStatus: MIGRATION_VERIFY_FAILED_STATUS,
+					},
+				);
+				return;
+			}
 			importExistingMemoryFiles().catch((e) => {
 				const errDetails = e instanceof Error ? { message: e.message, stack: e.stack } : { error: String(e) };
 				logger.error("daemon", "Failed to import existing memory files", undefined, errDetails);

@@ -23,7 +23,13 @@ import { setFtsIndexIncomplete } from "./fts-index-state";
 export interface DbOwnerMaintenanceOptions {
 	readonly deadlineMs?: number;
 	readonly estimatedWorkUnits?: number;
+	/** Verification maintenance is admitted while application writes are blocked. */
+	readonly lane?: "maintenance" | "verify";
 	readonly onOwnerMetrics?: (metrics: DbOwnerMaintenanceMetrics) => void | Promise<void>;
+	/** Called when the owner worker has emitted its terminal result. */
+	readonly onOwnerJobSettled?: () => void | Promise<void>;
+	/** Called when admission rejects before an owner job is created. */
+	readonly onOwnerJobAdmissionFailure?: (error: unknown) => void;
 }
 
 export interface DbOwnerMaintenanceMetrics {
@@ -37,11 +43,11 @@ const DEFAULT_OWNER_DEADLINE_MS = 5_000;
 
 function submitOptions(
 	operation: string,
-	lane: "read" | "write" | "maintenance",
+	lane: "read" | "write" | "maintenance" | "verify",
 	options: DbOwnerMaintenanceOptions,
 ): {
 	readonly operation: string;
-	readonly lane: "read" | "write" | "maintenance";
+	readonly lane: "read" | "write" | "maintenance" | "verify";
 	readonly deadlineMs: number;
 	readonly estimatedWorkUnits?: number;
 } {
@@ -60,7 +66,33 @@ async function runOwnerJob<Result>(
 	lane: "read" | "write" | "maintenance",
 	options: DbOwnerMaintenanceOptions = {},
 ): Promise<Result> {
-	const handle: DbOwnerJobHandle<Result> = owner.submit<Result>(request, submitOptions(operation, lane, options));
+	let handle: DbOwnerJobHandle<Result>;
+	try {
+		// Integrity checks and their durable checkpoints are the recovery path
+		// that must remain usable while application writes are fail-closed.
+		const effectiveLane = options.lane ?? (operation.startsWith("integrity.") ? "verify" : lane);
+		handle = owner.submit<Result>(request, submitOptions(operation, effectiveLane, options));
+	} catch (error) {
+		options.onOwnerJobAdmissionFailure?.(error);
+		throw error;
+	}
+	let notified = false;
+	const notifySettled = (): void => {
+		if (notified) return;
+		notified = true;
+		void Promise.resolve(options.onOwnerJobSettled?.()).catch(() => {
+			// Completion notification is advisory and must not alter the owner result.
+		});
+	};
+	void handle.metrics?.then(notifySettled, () => {
+		// A dead owner has no worker left to wait for.
+		notifySettled();
+	});
+	void handle.result.catch((error: unknown) => {
+		// Deadline rejection abandons the client promise but not a dispatched
+		// synchronous worker; its metrics promise remains the completion fence.
+		if (!(error instanceof DbOwnerDeadlineError)) notifySettled();
+	});
 	const result = await handle.result;
 	const metrics = await handle.metrics;
 	if (metrics !== undefined) {
