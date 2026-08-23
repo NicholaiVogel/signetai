@@ -26,7 +26,7 @@ export type DbSpaceOperation = "migration_backup" | "vacuum";
 
 export interface DbSpaceMetrics {
 	readonly dbBytes: number;
-	readonly freeBytes: number;
+	readonly freeBytes: number | null;
 	readonly requiredBytes: number;
 }
 
@@ -91,7 +91,9 @@ function measureDbSpace(dbPath: string, deps: DbSpaceDeps): DbSpaceMetrics | nul
 
 function assertDbSpace(operation: DbSpaceOperation, dbPath: string, deps: DbSpaceDeps): DbSpaceMetrics | null {
 	const metrics = measureDbSpace(dbPath, deps);
-	if (metrics && metrics.freeBytes < metrics.requiredBytes) throw new DbSpacePreflightError(operation, metrics);
+	if (metrics && metrics.freeBytes !== null && metrics.freeBytes < metrics.requiredBytes) {
+		throw new DbSpacePreflightError(operation, metrics);
+	}
 	return metrics;
 }
 

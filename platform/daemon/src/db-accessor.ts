@@ -783,6 +783,7 @@ export interface MigrationBackupDeps {
 	readonly unlinkSync: (path: string) => void;
 	readonly now: () => number;
 	readonly log: (message: string) => void;
+	readonly warn?: (message: string) => void;
 	/** Test seam and optional alternate checkpoint source for backup admission. */
 	readonly readVerificationCheckpoint?: (backupPath: string) => string | undefined;
 }
@@ -796,6 +797,7 @@ const migrationBackupDeps: MigrationBackupDeps = {
 	unlinkSync,
 	now: Date.now,
 	log: console.log,
+	warn: console.warn,
 };
 
 function readErrorMessage(err: unknown): string {
@@ -1137,13 +1139,15 @@ function preflightMigrationBackupSpace(dbPath: string, deps: MigrationBackupDeps
 		dbBytes,
 		freeBytes,
 		requiredBytes: dbBytes + MIGRATION_BACKUP_SPACE_MARGIN_BYTES,
-	} as DbSpaceMetrics;
+	} satisfies DbSpaceMetrics;
 	if (freeBytes === null) {
-		// A degenerate statfs reading is not a license to proceed. Unbounded
-		// copy-probing inside admission would violate the startup deadline, and
-		// an unknown free-space figure cannot satisfy the space margin, so the
-		// honest outcome is refusal with the metrics we do have.
-		throw new DbSpacePreflightError("migration_backup", metrics);
+		// statfs is unavailable or returned an unusable value on some filesystems.
+		// Do not turn an unknown measurement into a false zero and brick startup;
+		// the copy itself remains the authoritative write check.
+		(deps.warn ?? deps.log)(
+			"[db-accessor] Migration backup free space is unknown; proceeding without the space preflight.",
+		);
+		return metrics;
 	}
 	if (freeBytes < metrics.requiredBytes) throw new DbSpacePreflightError("migration_backup", metrics);
 	return metrics;
@@ -1576,8 +1580,8 @@ function prepareMigrationBackup(
  * Resume admission: the remaining bytes still need headroom on this disk,
  * now, after the partial copy already consumed `offset` bytes. The
  * in-progress backup itself is the current attempt's rollback point, so it
- * is not pruned; only its remaining growth must fit. Degenerate statfs
- * readings refuse, exactly like the fresh-copy preflight.
+ * is not pruned; only its remaining growth must fit. Unknown statfs readings
+ * warn and proceed, exactly like the fresh-copy preflight.
  */
 function preflightResumedMigrationBackupSpace(
 	dbPath: string,
@@ -1592,8 +1596,13 @@ function preflightResumedMigrationBackupSpace(
 		dbBytes: sourceSize,
 		freeBytes,
 		requiredBytes: remaining + MIGRATION_BACKUP_SPACE_MARGIN_BYTES,
-	} as DbSpaceMetrics;
-	if (freeBytes === null) throw new DbSpacePreflightError("migration_backup", metrics);
+	} satisfies DbSpaceMetrics;
+	if (freeBytes === null) {
+		(deps.warn ?? deps.log)(
+			"[db-accessor] Migration backup resume free space is unknown; proceeding without the space preflight.",
+		);
+		return;
+	}
 	if (freeBytes < metrics.requiredBytes) throw new DbSpacePreflightError("migration_backup", metrics);
 }
 
