@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-22
+- Bug fixes: let commands exit cleanly.
+
 ### 2026-08-21
 - Bug fixes: trim async DB attribution overhead; endpoint-neutral fingerprint + reachable building-state recovery + owner-bound resumable embedding migration; recover endpoint-only embedding builds; make embedding migration owner-bound and resumable; amputate parent-side native-memory indexing behind killable boundary with transactional resumable frontier; preserve provider retry frontiers; close native source frontier crash windows; type native embedding protocol; isolate native source embeddings; persist native source traversal frontier; move native memory indexing behind owner boundary; remove secondary parent sync paths + recovery child exit-0 protocol; remove secondary sync paths; parent sync attribution with in-flight latch naming + telemetry conversion; preserve in-flight sync DB attribution; lazily capture sync DB attribution; refresh event-loop source ledger; refresh sync access ledger for telemetry fallback; satisfy attribution boundary checks; move startup telemetry write behind owner; attribute transitional sync db stalls.
 
@@ -33,13 +36,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: route recall through owner; add process DB owner.
 - Docs: fix profiling cold start; make profiling launch linear; wait for inspector readiness.
 
-### 2026-08-15
-- Features: add dreaming parity profile; use native keyring master keys; observer-scoped assertions; add phase one connector setup.
-- Bug fixes: retry telemetry repair locks; support Node sqlite repair; refresh recovery ledger; preserve recovery pass precision; close recovery race; sequence orphan recovery; close recovery audit gaps; make recovery async; resolve active embedding profile before backfill writes; make stale cleanup atomic; await route deletions; harden daemonless locking; support daemonless CLI; bound Discord heartbeat timer; close recall async gaps; await async recall slice work; refresh recall migration ledger; await async db call chains; make vector reads atomic; preserve recall during cutover; keep vector recall generation aligned; prevent embedding resurrection; close embedding swap write race; resume vector projection rebuild; harden vector rebuild; chunk embedding promotion; restore main quality gates; refresh rebased migration ledger; close source lifecycle races; deduplicate migration notes; drain async source telemetry; refresh async migration ledger; narrow async slice scope; async pipeline maintenance; refresh rebased telemetry ledger; close opt-out write race; refresh telemetry ledger; gate telemetry startup backoff; async telemetry writes; refresh source event-loop ledger; guard truncated source cleanup; stream native source imports; close interpolated import gap; close extension import audit gap; isolate sync accessor module; close event-loop scanner bypasses; close sync accessor escape hatch; refresh inventory after rebase; track sync API aliases; close static scan bypasses; close event-loop bypasses; close event-loop audit gaps; classify bootstrap calls by reachability; enforce exact baseline inventory and pin deterministic count; reconcile baseline to truthful 1056 inventory; count every same-line call site; validate allowlist semantics; parse event-loop call sites; bound Darwin ps cleanup; use ps for darwin ACPX ownership; reap escaped ACPX children on darwin; harden launchd migration; isolate launchd workspaces; bound deferred session switches; reset scheduled run outcomes; preserve forced run outcomes; resolve deferred shutdown work; preserve deferred session ordering; bound provider and drain work; align proof package with main; fence abandoned synthesis writes; emit owner proof observations; align proof package version; align browser opener types; bound browser opener cleanup; observe browser open failures; surface browser open failures; validate native keyring encoding; degrade malformed keyring health; degrade health for missing keyring; report keyring health and fallback; stage Kimi connector for npm; clear recovered source status; back off source embeddings; await rebased backlog regression; count full evidence backlog; derive observer assertions; prove observer-scoped divergence; hand off native inspector; proxy Bun inspector discovery; prevent inspector port collision; retire legacy Python embeddings; align rebased connector version; align connector release version; align connector package version; route setup through Kimi ACPX agent; authenticate desktop asset poll; gate undraft on desktop assets; let desktop own release undraft; finalize desktop release after matrix; preserve package manifest formatting.
-- Refactoring: make recall routes async; enforce async db accessor types; add async db contract audit; remove dead Python vector path.
-- Docs: document deferred accessor cleanup; align Kimi Code nav; add Kimi Code support.
-
 ## Release Ledger
+
+## [0.214.8] - 2026-08-22
+
+Release summary: 1 bug fix.
+Tag range: `v0.214.7..v0.214.8`.
+
+### Bug Fixes
+
+- **cli**: let commands exit cleanly
 
 ## [0.214.7] - 2026-08-21
 
