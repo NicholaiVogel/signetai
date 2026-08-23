@@ -784,7 +784,7 @@ describe("DbAccessor", () => {
 				sourceSize: 7,
 				sourceMtimeMs: 100,
 				destination: stalePath,
-				offset: 8,
+				offset: 7,
 			}),
 		);
 		const files = new Map<string, { readonly mtimeMs: number; readonly size: number }>([
@@ -833,7 +833,7 @@ describe("DbAccessor", () => {
 		writeFileSync(stalePath, "rollback");
 		writeFileSync(
 			`${stalePath}.cursor.json`,
-			JSON.stringify({ sourcePath: dbPath, sourceSize: 7, sourceMtimeMs: 100, destination: stalePath, offset: 8 }),
+			JSON.stringify({ sourcePath: dbPath, sourceSize: 7, sourceMtimeMs: 100, destination: stalePath, offset: 7 }),
 		);
 		const operations: string[] = [];
 
@@ -1218,6 +1218,33 @@ describe("DbAccessor", () => {
 		);
 
 		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 76);
+
+		expect(backupPath).not.toBe(staleBackupPath);
+		expect(readFileSync(backupPath)).toEqual(source);
+		expect(existsSync(staleBackupPath)).toBe(false);
+		expect(existsSync(`${staleBackupPath}.cursor.json`)).toBe(false);
+	});
+
+	test("rejects a cursor whose offset exceeds the source size", async () => {
+		const dbPath = tmpDbPath();
+		cleanupDirs.push(join(dbPath, ".."));
+		const source = Buffer.from("migration backup cursor bounds fixture");
+		writeFileSync(dbPath, source);
+		const sourceStat = statSync(dbPath);
+		const staleBackupPath = `${dbPath}.bak-v74-9000`;
+		writeFileSync(staleBackupPath, source);
+		writeFileSync(
+			`${staleBackupPath}.cursor.json`,
+			JSON.stringify({
+				sourcePath: dbPath,
+				sourceSize: source.length,
+				sourceMtimeMs: sourceStat.mtimeMs,
+				destination: staleBackupPath,
+				offset: source.length + 1,
+			}),
+		);
+
+		const backupPath = await backupBeforeMigrationAsync({ exec: () => {} }, dbPath, 75);
 
 		expect(backupPath).not.toBe(staleBackupPath);
 		expect(readFileSync(backupPath)).toEqual(source);
@@ -1696,6 +1723,33 @@ describe("vec_embeddings schema repair", () => {
 			2,
 		);
 		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(2);
+		db.close();
+	});
+
+	test("quarantines NULL and non-blob legacy vectors and continues backfill", () => {
+		const db = new Database(":memory:");
+		db.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY);",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		const insert = db.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, ?, ?)");
+		insert.run("good-row", 2, vector);
+		insert.run("null-row", 2, null);
+		insert.run("text-row", 2, "not-a-vector");
+
+		backfillVecEmbeddings(
+			{
+				exec: (sql: string) => db.exec(sql),
+				prepare: (sql: string) => db.prepare(sql),
+			} as never,
+			2,
+		);
+
+		expect((db.prepare("SELECT COUNT(*) AS n FROM vec_embeddings").get() as { n: number }).n).toBe(1);
+		expect(db.prepare("SELECT rowid, dimensions, reason FROM vec_embeddings_quarantine ORDER BY rowid").all()).toEqual([
+			{ rowid: "null-row", dimensions: 2, reason: "embedding blob is NULL" },
+			{ rowid: "text-row", dimensions: 2, reason: "embedding blob is not a binary buffer" },
+		]);
 		db.close();
 	});
 

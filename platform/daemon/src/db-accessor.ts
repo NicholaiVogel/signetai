@@ -897,7 +897,8 @@ function migrationBackupCursor(
 			!Number.isFinite(parsed.sourceMtimeMs) ||
 			typeof parsed.offset !== "number" ||
 			!Number.isInteger(parsed.offset) ||
-			parsed.offset < 0
+			parsed.offset < 0 ||
+			parsed.offset > parsed.sourceSize
 		)
 			return undefined;
 		return { sourceSize: parsed.sourceSize, sourceMtimeMs: parsed.sourceMtimeMs, offset: parsed.offset };
@@ -1012,7 +1013,7 @@ function shouldDeferPendingMigration(dbPath: string, db: MigrationBackupDb, deps
 			deferred = true;
 			continue;
 		}
-		if (cursor?.offset === 0) {
+		if (cursor?.offset === 0 && (source.size ?? 0) > 0) {
 			const status = readMigrationBackupCheckpointStatus(backupPath, db, deps);
 			if (isTerminalMigrationBackupStatus(status)) {
 				throw new MigrationBackupAdmissionError(
@@ -1020,7 +1021,7 @@ function shouldDeferPendingMigration(dbPath: string, db: MigrationBackupDb, deps
 					`retained rollback file ${backup.name} has terminal verification status ${status}; operator repair is required`,
 				);
 			}
-			deferred = true;
+			if (status !== MIGRATION_CHECKPOINT_COMPLETE_STATUS) deferred = true;
 			continue;
 		}
 		if (cursor === undefined || (cursor.sourceSize === source.size && cursor.sourceMtimeMs === source.mtimeMs))
@@ -2019,9 +2020,13 @@ function ensureVecEmbeddingsQuarantineTable(db: SqliteWriteSurface): void {
 }
 
 function decodeBackfillVector(
-	vector: Buffer,
+	vector: unknown,
 	expectedDimensions: number,
 ): { readonly vector: Float32Array } | { readonly reason: string } {
+	if (vector === null || vector === undefined) return { reason: "embedding blob is NULL" };
+	// bun:sqlite exposes BLOB columns as Uint8Array (and Buffer is a subtype),
+	// while text/number values from a legacy nullable table are not decodable.
+	if (!(vector instanceof Uint8Array)) return { reason: "embedding blob is not a binary buffer" };
 	const expectedBytes = expectedDimensions * Float32Array.BYTES_PER_ELEMENT;
 	if (vector.byteLength !== expectedBytes) {
 		return {
@@ -2102,7 +2107,7 @@ function missingVecEmbeddingsRows(
 	expectedDimensions: number,
 	lastId: string,
 	limit: number,
-): Array<{ id: string; vector: Buffer }> {
+): Array<{ id: string; vector: unknown }> {
 	// sqlite-vec's virtual table is expensive for anti-joins: on a 43k-row local
 	// DB, `LEFT JOIN vec_embeddings` costs ~6.5s even when no rows are missing.
 	// The backing rowid table is a normal SQLite table with a UNIQUE id index and
@@ -2118,7 +2123,7 @@ function missingVecEmbeddingsRows(
 			 WHERE v.id IS NULL AND q.rowid IS NULL AND e.dimensions = ? AND e.id > ?
 			 ORDER BY e.id LIMIT ?`,
 		)
-		.all(expectedDimensions, lastId, limit) as Array<{ id: string; vector: Buffer }>;
+		.all(expectedDimensions, lastId, limit) as Array<{ id: string; vector: unknown }>;
 }
 
 export interface VecBackfillOptions {
