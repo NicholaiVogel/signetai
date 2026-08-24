@@ -832,6 +832,9 @@ export function searchEpisodicSources(
 		params.excludeDelivered === true &&
 		db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dreaming_evidence_consumption'").get() !=
 			null;
+	const reviewedFilterEnabled =
+		params.excludeDelivered === true &&
+		db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dreaming_evidence_reviews'").get() != null;
 	const deliveredPredicate = (
 		kind: EpisodicSourceKind,
 		id: string,
@@ -849,12 +852,32 @@ export function searchEpisodicSources(
 			)`
 			: "";
 	const deliveredArgs = deliveredFilterEnabled ? [params.agentId] : [];
-	const transcriptSearchTime = tableHasColumn(db, "session_transcripts", "updated_at")
-		? "COALESCE(updated_at, created_at)"
-		: "created_at";
-	const transcriptCompleted = tableHasColumn(db, "session_transcripts", "completed_at")
-		? "completed_at IS NOT NULL"
-		: "0";
+	const reviewedPredicate = (
+		kind: EpisodicSourceKind,
+		id: string,
+		capturedAt: string,
+		sourceEntryId: string,
+		sourceRevision: string,
+	): string =>
+		reviewedFilterEnabled
+			? `AND NOT EXISTS (
+				SELECT 1 FROM dreaming_evidence_reviews der
+				 WHERE der.agent_id = ? AND der.source_kind = '${kind}' AND der.source_id = ${id}
+				   AND der.source_captured_at = ${capturedAt} AND der.source_entry_id = ${sourceEntryId}
+				   AND der.source_revision = ${sourceRevision}
+			)`
+			: "";
+	const reviewedArgs = reviewedFilterEnabled ? [params.agentId] : [];
+	const transcriptHasUpdatedAt = tableHasColumn(db, "session_transcripts", "updated_at");
+	const transcriptHasCompletedAt = tableHasColumn(db, "session_transcripts", "completed_at");
+	const transcriptSearchTime = transcriptHasCompletedAt
+		? transcriptHasUpdatedAt
+			? "COALESCE(session_transcripts.completed_at, session_transcripts.updated_at, session_transcripts.created_at)"
+			: "COALESCE(session_transcripts.completed_at, session_transcripts.created_at)"
+		: transcriptHasUpdatedAt
+			? "COALESCE(session_transcripts.updated_at, session_transcripts.created_at)"
+			: "session_transcripts.created_at";
+	const transcriptCompleted = transcriptHasCompletedAt ? "session_transcripts.completed_at IS NOT NULL" : "0";
 
 	const branches: Array<{ sql: string; args: unknown[] }> = [];
 	if (params.kind === undefined || params.kind === "memory") {
@@ -866,8 +889,9 @@ export function searchEpisodicSources(
 			        AND COALESCE(type, '') != 'session_summary' AND content LIKE ?
 			        ${params.since ? "AND (julianday(created_at) >= julianday(?) OR julianday(created_at) < julianday(?))" : ""}
 			        ${params.before ? "AND julianday(created_at) <= julianday(?)" : ""}
-			        ${deliveredPredicate("memory", "id", "created_at", "''", "created_at")}`,
-			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs],
+			        ${deliveredPredicate("memory", "id", "created_at", "''", "created_at")}
+			        ${reviewedPredicate("memory", "id", "created_at", "''", "created_at")}`,
+			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs, ...reviewedArgs],
 		});
 	}
 	if (params.kind === undefined || params.kind === "artifact") {
@@ -883,6 +907,7 @@ export function searchEpisodicSources(
 			        ${params.since ? "AND (julianday(ma.captured_at) >= julianday(?) OR julianday(ma.captured_at) < julianday(?))" : ""}
 			        ${params.before ? "AND julianday(ma.captured_at) <= julianday(?)" : ""}
 			        ${deliveredPredicate("artifact", "ma.source_path", "ma.captured_at", "COALESCE(ma.source_id, '')", "CASE WHEN ma.source_sha256 IS NULL OR ma.source_sha256 = '' THEN ma.captured_at ELSE ma.source_sha256 END")}
+			        ${reviewedPredicate("artifact", "ma.source_path", "ma.captured_at", "COALESCE(ma.source_id, '')", "CASE WHEN ma.source_sha256 IS NULL OR ma.source_sha256 = '' THEN ma.captured_at ELSE ma.source_sha256 END")}
 			        AND (ma.source_sha256 IS NULL OR ma.source_sha256 = ''
 			             OR (ma.agent_id, ma.source_path) = (
 			               SELECT ma2.agent_id, ma2.source_path FROM memory_artifacts ma2
@@ -892,7 +917,7 @@ export function searchEpisodicSources(
 			               ORDER BY ma2.captured_at DESC, ma2.source_path ASC
 			               LIMIT 1
 			             ))`,
-			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs],
+			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs, ...reviewedArgs],
 		});
 	}
 	if (params.kind === undefined || params.kind === "transcript") {
@@ -902,8 +927,9 @@ export function searchEpisodicSources(
 			      WHERE agent_id = ? AND ${transcriptCompleted} AND content LIKE ?
 			        ${params.since ? `AND (julianday(${transcriptSearchTime}) >= julianday(?) OR julianday(${transcriptSearchTime}) < julianday(?))` : ""}
 			        ${params.before ? `AND julianday(${transcriptSearchTime}) <= julianday(?)` : ""}
-			        ${deliveredPredicate("transcript", "session_key", transcriptSearchTime, "''", transcriptSearchTime)}`,
-			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs],
+			        ${deliveredPredicate("transcript", "session_key", transcriptSearchTime, "''", transcriptSearchTime)}
+			        ${reviewedPredicate("transcript", "session_key", transcriptSearchTime, "''", transcriptSearchTime)}`,
+			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs, ...reviewedArgs],
 		});
 	}
 	if (params.kind === "summary") {
@@ -915,8 +941,9 @@ export function searchEpisodicSources(
 			        AND content LIKE ?
 			        ${params.since ? "AND (julianday(latest_at) >= julianday(?) OR julianday(latest_at) < julianday(?))" : ""}
 			        ${params.before ? "AND julianday(latest_at) <= julianday(?)" : ""}
-			        ${deliveredPredicate("summary", "id", "latest_at", "''", "latest_at")}`,
-			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs],
+			        ${deliveredPredicate("summary", "id", "latest_at", "''", "latest_at")}
+			        ${reviewedPredicate("summary", "id", "latest_at", "''", "latest_at")}`,
+			args: [params.agentId, like, ...sinceArgs, ...beforeArgs, ...deliveredArgs, ...reviewedArgs],
 		});
 	}
 

@@ -513,6 +513,14 @@ episodic evidence. Requires `admin` permission.
 }
 ```
 
+The status response also includes `reviewedEvidence`, containing immutable
+source revisions that a completed pass fully inspected and intentionally found
+to contain no durable fact. These rows are excluded from scan-first backlog
+accounting but remain available to direct evidence lookup and recall. The
+`reviewedEvidence` rows include `sourceCapturedAt`, `sourceEntryId`,
+`sourceRevision`, `reason`, `passId`, and `reviewedAt`, so the terminal decision
+is tied to one exact source revision rather than to a mutable source ID.
+
 An exclusion preserves only the source identity and processing status; it does
 not modify or discard the underlying episodic evidence. Current Dreaming passes
 record `semantic_operation_rejected` when the daemon rejects an agent's cited
@@ -603,8 +611,9 @@ or prompt-submission action.
 
 ### POST /api/dream/exclusions/requeue
 
-Request one quarantined evidence source be considered again after correcting
-the model or configuration issue that caused a rejected semantic operation.
+Request one quarantined or reviewed evidence source be considered again after
+correcting the model or configuration issue that caused it to be rejected, or
+after deciding that a previously reviewed source deserves another look.
 Requires `admin` permission.
 
 **Request body**
@@ -621,9 +630,15 @@ Requires `admin` permission.
 `sourceId` is the identifier returned by `GET /api/dream/status`. `agentId`
 uses the same scoped-agent resolution as Dreaming trigger requests.
 
-Returns `404` when the scoped exclusion is no longer active.
+For `memory`, `artifact`, and `transcript`, returns `404` when neither the
+scoped transient exclusion nor a reviewed revision is active. When both states
+exist for those kinds, both are cleared. Summary sources retain their retired
+requeue behavior: a transient summary exclusion returns `410`, and a reviewed
+summary can be reopened only when no transient summary exclusion is active.
 Requeueing also records an `evidence_requeue` attention item, so it can wake a
-scoped Dreaming pass without waiting for unrelated new evidence.
+scoped Dreaming pass without waiting for unrelated new evidence. The same
+endpoint reopens a `reviewedEvidence` disposition for the requested source;
+the response includes `reviewedExcluded: true` when that state was cleared.
 
 ### POST /api/dream/operations
 

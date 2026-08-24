@@ -90,6 +90,11 @@ The same scope-bound registry is used across the in-process agent path and the
 MCP, HTTP, and CLI surfaces. Capability input is validated before execution,
 and graph reads and writes remain bound to the requested agent scope.
 
+`runbook_write` accepts `reviewedExcludedEvidence` for source revisions that the
+pass inspected completely and intentionally found to contain no durable fact.
+This terminal disposition is revision-scoped. A newer source revision becomes
+eligible again, while a temporary blocker must remain in `deferredEvidence`.
+
 ### 3. Propose and validate ontology operations
 
 Dreaming expresses semantic changes as structured ontology operations rather

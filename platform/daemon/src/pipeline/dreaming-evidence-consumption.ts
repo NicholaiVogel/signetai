@@ -7,6 +7,7 @@ export interface DreamingEvidenceDelivery {
 	readonly kind: EpisodicSourceKind;
 	readonly id: string;
 	readonly capturedAt: string;
+	readonly sourceEntryId: string;
 	readonly sourceRevision: string;
 	readonly start: number;
 	readonly end: number;
@@ -82,6 +83,7 @@ export function persistedEvidenceDeliveries(db: ReadDb, passId: string): readonl
 			const parsed = ref ? sourceRef(ref) : null;
 			const capturedAt = text(row?.capturedAt);
 			const sourceRevision = text(row?.sourceRevision);
+			const sourceEntryId = typeof row?.sourceEntryId === "string" ? row.sourceEntryId : "";
 			const start =
 				typeof row?.contentOffset === "number" && Number.isSafeInteger(row.contentOffset) ? row.contentOffset : null;
 			const content = text(row?.content);
@@ -100,15 +102,34 @@ export function persistedEvidenceDeliveries(db: ReadDb, passId: string): readonl
 				return [];
 			const end = start + content.length;
 			if (end > length) return [];
-			return [{ agentId, kind: parsed.kind, id: parsed.id, capturedAt, sourceRevision, start, end, length, content }];
+			return [
+				{
+					agentId,
+					kind: parsed.kind,
+					id: parsed.id,
+					capturedAt,
+					sourceEntryId,
+					sourceRevision,
+					start,
+					end,
+					length,
+					content,
+				},
+			];
 		});
 	});
 }
 
-function verifiedDelivery(db: ReadDb, delivery: DreamingEvidenceDelivery): EpisodicSourceRecord | null {
+export function verifiedDreamingEvidenceDelivery(
+	db: ReadDb,
+	delivery: DreamingEvidenceDelivery,
+): EpisodicSourceRecord | null {
 	const source = readEpisodicSource(db, { agentId: delivery.agentId, from: `${delivery.kind}:${delivery.id}` });
 	if (
 		source === null ||
+		source.kind !== delivery.kind ||
+		source.id !== delivery.id ||
+		(source.sourceEntryId !== null && source.sourceEntryId !== delivery.sourceEntryId) ||
 		source.capturedAt !== delivery.capturedAt ||
 		sourceRevision(source) !== delivery.sourceRevision
 	)
@@ -156,7 +177,7 @@ export function recordDreamingEvidenceConsumptionInTx(
 		   updated_at = excluded.updated_at`,
 	);
 	for (const delivery of deliveries) {
-		const source = verifiedDelivery(db, delivery);
+		const source = verifiedDreamingEvidenceDelivery(db, delivery);
 		if (source === null) continue;
 		const identity = sourceIdentity(source);
 		const revision = sourceRevision(source);
@@ -202,12 +223,24 @@ export function deliveredOffsetForSource(db: ReadDb, agentId: string, source: Ep
  */
 export function hasDreamingEvidenceContinuation(db: ReadDb, agentId: string, passId: string | null): boolean {
 	if (!passId || !tableExists(db, "dreaming_evidence_consumption")) return false;
+	const reviewedPredicate = tableExists(db, "dreaming_evidence_reviews")
+		? `AND NOT EXISTS (
+		       SELECT 1 FROM dreaming_evidence_reviews der
+		       WHERE der.agent_id = dreaming_evidence_consumption.agent_id
+		         AND der.source_kind = dreaming_evidence_consumption.source_kind
+		         AND der.source_id = dreaming_evidence_consumption.source_id
+		         AND der.source_captured_at = dreaming_evidence_consumption.source_captured_at
+		         AND der.source_entry_id = dreaming_evidence_consumption.source_entry_id
+		         AND der.source_revision = dreaming_evidence_consumption.source_revision
+		   )`
+		: "";
 	return (
 		db
 			.prepare(
 				`SELECT 1 FROM dreaming_evidence_consumption
 				 WHERE agent_id = ? AND pass_id = ?
 				   AND delivered_offset > 0 AND delivered_offset < source_length
+				   ${reviewedPredicate}
 				 LIMIT 1`,
 			)
 			.get(agentId, passId) != null
@@ -232,6 +265,17 @@ export function pendingDreamingEvidenceContinuations(
 	const transcriptUpdatedAt = tableHasColumn(db, "session_transcripts", "updated_at") ? "st.updated_at" : "NULL";
 	const transcriptCompletedAt = tableHasColumn(db, "session_transcripts", "completed_at") ? "st.completed_at" : "NULL";
 	const transcriptRevision = `COALESCE(${transcriptCompletedAt}, ${transcriptUpdatedAt}, st.created_at)`;
+	const reviewedPredicate = tableExists(db, "dreaming_evidence_reviews")
+		? `AND NOT EXISTS (
+		       SELECT 1 FROM dreaming_evidence_reviews der
+		       WHERE der.agent_id = dec.agent_id
+		         AND der.source_kind = dec.source_kind
+		         AND der.source_id = dec.source_id
+		         AND der.source_captured_at = dec.source_captured_at
+		         AND der.source_entry_id = dec.source_entry_id
+		         AND der.source_revision = dec.source_revision
+		   )`
+		: "";
 	const rows = db
 		.prepare(
 			`SELECT dec.source_kind AS kind, dec.source_id AS id, dec.source_captured_at AS capturedAt,
@@ -240,6 +284,7 @@ export function pendingDreamingEvidenceContinuations(
 			 INNER JOIN dreaming_passes pass ON pass.id = dec.pass_id AND pass.agent_id = dec.agent_id
 			 WHERE dec.agent_id = ?
 			   AND dec.delivered_offset > 0 AND dec.delivered_offset < dec.source_length
+			   ${reviewedPredicate}
 			   AND (? IS NULL OR dec.source_kind = ?)
 			   AND (
 			     (dec.source_kind = 'memory' AND EXISTS (
@@ -341,6 +386,16 @@ export function sourceHasEligibleUnconsumedEvidence(
 		) as Array<{ source_path: string }>;
 	return rows.some((row) => {
 		const source = readEpisodicSource(db, { agentId, from: `artifact:${row.source_path}` });
-		return source !== null && deliveredOffsetForSource(db, agentId, source) < renderDreamingEvidence(source).length;
+		if (source === null) return false;
+		const reviewed =
+			tableExists(db, "dreaming_evidence_reviews") &&
+			db
+				.prepare(
+					`SELECT 1 FROM dreaming_evidence_reviews
+					 WHERE agent_id = ? AND source_kind = 'artifact' AND source_id = ?
+					   AND source_captured_at = ? AND source_entry_id = ? AND source_revision = ?`,
+				)
+				.get(agentId, source.id, source.capturedAt, sourceIdentity(source), sourceRevision(source)) != null;
+		return !reviewed && deliveredOffsetForSource(db, agentId, source) < renderDreamingEvidence(source).length;
 	});
 }

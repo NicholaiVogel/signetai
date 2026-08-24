@@ -28,7 +28,6 @@ import { up as telemetryVersionObservation } from "./119-telemetry-version-obser
 import { up as dreamingEvidenceRetry } from "./122-dreaming-evidence-retry";
 import { up as memoryContentSafety } from "./125-memory-content-safety";
 import { up as dreamingSurprisalAttention } from "./126-dreaming-surprisal-attention";
-import { up as ontologyContradictions } from "./127-ontology-contradictions";
 import { MIGRATIONS, hasPendingMigrations, runMigrations } from "./index";
 
 function createFreshDb(): Database {
@@ -140,7 +139,7 @@ describe("migration framework", () => {
 			runMigrations(db);
 
 			const applied = db.query("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
-			expect(applied.version).toBe(143);
+			expect(applied.version).toBe(144);
 			expect(
 				db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_source_sync_state'").get(),
 			).toBeTruthy();
@@ -366,6 +365,9 @@ describe("migration framework", () => {
 
 		// v131 records successful source-fragment delivery independently of the time watermark.
 		expect(tableNames).toContain("dreaming_evidence_consumption");
+
+		// v144 records terminal reviewed dispositions for immutable evidence revisions.
+		expect(tableNames).toContain("dreaming_evidence_reviews");
 
 		// v14 tables
 		expect(tableNames).toContain("telemetry_events");

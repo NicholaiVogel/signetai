@@ -54,6 +54,10 @@ import {
 	recordDreamingEvidenceConsumptionInTx,
 } from "./dreaming-evidence-consumption";
 import {
+	parseDreamingReviewedExcludedEvidence,
+	recordDreamingReviewedExcludedEvidenceInTx,
+} from "./dreaming-evidence-reviews";
+import {
 	type RejectedDreamingEvidence,
 	collectRejectedDreamingEvidence,
 	recordRejectedDreamingEvidenceInTx,
@@ -851,6 +855,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
 5. Only when the hygiene queue is clear: find new evidence since the cutoff. First LIST unprocessed sources with search_evidence — omit the query and omit since so it lists from the scope's evidence watermark (the frontier the last pass actually surfaced), newest first; only after seeing what is there, narrow with a query if the list is large. Prefer evidence from completed transcript sessions; historical summary rows are not part of the default delivery path. A transcript with completed: false is mid-stream — defer filing from it with the named blocker "transcript still mid-stream" (re-check completed each pass: a session still active when re-checked is a re-verified blocker, not a repeated one), and note the deferral in the pass log, because its states may be contradicted by the session's end. For each new source:
    - search_entities for subjects it establishes.
    - File claims only for what the source establishes as settled fact: outcomes, decisions, shipped changes, stable behavior. Do not file instructions that were merely suggested, hypotheses or diagnoses, open questions, or intermediate states of an ongoing investigation. When a source shows an attempt and its outcome, file the outcome.
+   - If you inspect an entire source revision and it contains no durable fact, add it to reviewedExcludedEvidence with a specific reason. This is terminal for that immutable revision; do not use it for a temporary blocker, which belongs in deferredEvidence.
    - A claim must be a complete statement: it names the subject and the fact about it. A bare label ("SHIP-WITH-FIXES"), a fragment ("Root cause confirmed."), or an implementation detail without its subject is not a claim — do not file it.
    - Before adding a claim, check the target aspect's existing claims; if one covers the same key or is contradicted by the new evidence, supersede it (supersede_claim_value) instead of adding alongside.
    - The evidence source and the graph target must use the same agent scope: search evidence with the agentId of the entity you will update, then pass that same agentId to apply_ontology_ops. A source found in another scope cannot support a write here.
@@ -971,6 +976,7 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
 4. Find new evidence since the cutoff. First LIST unprocessed sources with search_evidence — omit the query and omit since so it lists from the scope's evidence watermark (the frontier the last pass actually surfaced), newest first; only after seeing what is there, narrow with a query if the list is large. Prefer evidence from completed transcript sessions; historical summary rows are not part of the default delivery path. A transcript with completed: false is mid-stream — defer filing from it with the named blocker "transcript still mid-stream" (re-check completed each pass: a session still active when re-checked is a re-verified blocker, not a repeated one), and note the deferral in the pass log, because its states may be contradicted by the session's end. For each new source:
    - search_entities for subjects it establishes.
    - File claims only for what the source establishes as settled fact: outcomes, decisions, shipped changes, stable behavior. Do not file instructions that were merely suggested, hypotheses or diagnoses, open questions, or intermediate states of an ongoing investigation. When a source shows an attempt and its outcome, file the outcome.
+   - If you inspect an entire source revision and it contains no durable fact, add it to reviewedExcludedEvidence with a specific reason. This is terminal for that immutable revision; do not use it for a temporary blocker, which belongs in deferredEvidence.
    - A claim must be a complete statement: it names the subject and the fact about it. A bare label ("SHIP-WITH-FIXES"), a fragment ("Root cause confirmed."), or an implementation detail without its subject is not a claim — do not file it.
    - Before adding a claim, check the target aspect's existing claims; if one covers the same key or is contradicted by the new evidence, supersede it (supersede_claim_value) instead of adding alongside.
    - The evidence source and the graph target must use the same agent scope: search evidence with the agentId of the entity you will update, then pass that same agentId to apply_ontology_ops. A source found in another scope cannot support a write here.
@@ -1743,14 +1749,26 @@ export async function runDreamingAgentPass(
 					.get(passId) as {
 					runbookJson: string | null;
 				} | null;
-				let deferredEvidence: ReadonlySet<string> | null = new Set();
+				let parsedRunbook: Record<string, unknown> | null = {};
 				try {
-					deferredEvidence = deferredEvidenceKeys(JSON.parse(runbook?.runbookJson ?? "{}"), agentId);
+					const parsed: unknown = JSON.parse(runbook?.runbookJson ?? "{}");
+					parsedRunbook = isRecord(parsed) ? parsed : null;
 				} catch {
-					deferredEvidence = null;
+					parsedRunbook = null;
 				}
 				// A malformed runbook is never permission to acknowledge evidence.
-				if (deferredEvidence !== null) recordDreamingEvidenceConsumptionInTx(db, { passId, deferredEvidence });
+				const deferredEvidence = parsedRunbook === null ? null : deferredEvidenceKeys(parsedRunbook, agentId);
+				const reviewedExcludedEvidence =
+					parsedRunbook === null ? null : parseDreamingReviewedExcludedEvidence(parsedRunbook);
+				if (deferredEvidence !== null && reviewedExcludedEvidence !== null) {
+					recordDreamingEvidenceConsumptionInTx(db, { passId, deferredEvidence });
+					recordDreamingReviewedExcludedEvidenceInTx(db, {
+						passId,
+						primaryAgentId: agentId,
+						entries: reviewedExcludedEvidence,
+						deferredEvidence,
+					});
+				}
 			}
 			// The time watermark preserves chronological discovery and mid-pass
 			// catch-up. Durable delivery offsets independently decide whether an
