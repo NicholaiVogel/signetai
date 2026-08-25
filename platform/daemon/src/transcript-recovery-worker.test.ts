@@ -389,6 +389,33 @@ describe("transcript recovery worker", () => {
 		expect(second.examined).toBe(0);
 	});
 
+	it("bounds fingerprint preload to discovered files despite large history", async () => {
+		const path = join(claudeRoot, "-repo", "bounded-history.jsonl");
+		writeSettled(path, JSON.stringify({ sessionId: "bounded-history", message: { role: "user", content: "bounded" } }));
+		expect((await scan()).enqueued).toBe(1);
+		getDbAccessor().withWriteTx((db) => {
+			const insert = db.prepare(
+				`INSERT INTO transcript_recovery_files (
+					agent_id, source_path, harness, size_bytes, mtime_ms, content_sha256, session_id, last_scanned_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			);
+			for (let index = 0; index < 5_000; index++) {
+				insert.run(
+					"agent-a",
+					`/historical/${index}.jsonl`,
+					"claude-code",
+					1,
+					1,
+					`sha-${index}`,
+					`session-${index}`,
+					"2026-01-01",
+				);
+			}
+		});
+		const result = await scan();
+		expect(result.skippedUnchanged).toBe(1);
+		expect(result.examined).toBe(0);
+	});
 	it("resumes a bounded scan from its durable frontier", async () => {
 		const firstPath = join(claudeRoot, "-repo", "a-frontier.jsonl");
 		const secondPath = join(claudeRoot, "-repo", "b-frontier.jsonl");
@@ -548,6 +575,53 @@ describe("transcript recovery worker", () => {
 		}
 	});
 
+	it("does not reschedule after a successful child scan", async () => {
+		const childPath = join(dir, "counted-child.js");
+		const counterPath = join(dir, "child-runs.txt");
+		const result = {
+			discovered: 0,
+			examined: 0,
+			enqueued: 0,
+			deduplicated: 0,
+			skippedRecent: 0,
+			skippedOversized: 0,
+			skippedUnchanged: 0,
+			skippedInvalid: 0,
+		};
+		writeFileSync(
+			childPath,
+			`require("node:fs").appendFileSync(${JSON.stringify(counterPath)}, "x"); process.stdout.write(${JSON.stringify(`${JSON.stringify({ type: "result", result })}\\n`)}); process.exit(0);`,
+		);
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 10,
+			childPath,
+		});
+		await Bun.sleep(100);
+		await handle.stop();
+		expect(readFileSync(counterPath, "utf8")).toBe("x");
+	});
+	it("treats a clean exit without a protocol payload as a terminal success", async () => {
+		const childPath = join(dir, "empty-success-child.js");
+		writeFileSync(childPath, "process.exit(0);");
+		const warnings: string[] = [];
+		const originalWarn = logger.warn;
+		logger.warn = ((category, message) => {
+			warnings.push(`${category}:${message}`);
+		}) as typeof logger.warn;
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 10,
+			childPath,
+		});
+		try {
+			await Bun.sleep(100);
+			expect(warnings).toEqual([]);
+		} finally {
+			await handle.stop();
+			logger.warn = originalWarn;
+		}
+	});
 	it("cancels a scan waiting for DB admission", async () => {
 		let admittedResolve!: () => void;
 		const admitted = new Promise<void>((resolve) => {

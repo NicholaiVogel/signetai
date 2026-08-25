@@ -73,6 +73,18 @@ export function parseTranscriptRecoveryResult(output: string): TranscriptRecover
 	return null;
 }
 
+function parseTranscriptRecoveryChildPid(output: string): number | null {
+	for (const line of output.split("\n")) {
+		try {
+			const event = JSON.parse(line) as { type?: string; pid?: unknown };
+			if (event.type === "started" && typeof event.pid === "number" && Number.isInteger(event.pid)) return event.pid;
+		} catch {
+			// Logger output is not part of the child protocol.
+		}
+	}
+	return null;
+}
+
 export interface TranscriptRecoveryWorkerHandle {
 	stop(): Promise<void>;
 	nudge(): void;
@@ -85,6 +97,8 @@ type TranscriptRecoveryWorkerOptions = TranscriptRecoveryScanOptions & {
 	readonly intervalMs?: number;
 	/** Test-only child entrypoint used to exercise the stdio/close protocol deterministically. */
 	readonly childPath?: string;
+	/** Test-only supervisor entrypoint; production uses the bundled supervisor. */
+	readonly supervisorPath?: string;
 };
 
 function defaultRoots(): TranscriptRecoveryRoots {
@@ -183,15 +197,60 @@ function readMetadata(candidate: RecoveryCandidate, raw: string): TranscriptMeta
 	};
 }
 
-function unchanged(db: ReadDb, agentId: string, candidate: RecoveryCandidate): boolean {
-	const row = db
-		.prepare(
-			`SELECT size_bytes, mtime_ms
-			 FROM transcript_recovery_files
-			 WHERE agent_id = ? AND source_path = ?`,
-		)
-		.get(agentId, candidate.path) as { size_bytes?: unknown; mtime_ms?: unknown } | undefined;
-	return row?.size_bytes === candidate.size && row.mtime_ms === Math.trunc(candidate.mtimeMs);
+const RECOVERY_FINGERPRINT_BATCH_SIZE = 400;
+
+interface RecoveryFingerprint {
+	readonly sizeBytes: number;
+	readonly mtimeMs: number;
+	readonly hasDeadCaptureJob: boolean;
+}
+
+async function loadRecoveryFingerprints(
+	dbAccessor: DbAccessor,
+	agentId: string,
+	candidates: readonly RecoveryCandidate[],
+	signal?: AbortSignal,
+): Promise<Map<string, RecoveryFingerprint>> {
+	const fingerprints = new Map<string, RecoveryFingerprint>();
+	for (let offset = 0; offset < candidates.length; offset += RECOVERY_FINGERPRINT_BATCH_SIZE) {
+		throwIfAborted(signal);
+		const paths = candidates.slice(offset, offset + RECOVERY_FINGERPRINT_BATCH_SIZE).map((candidate) => candidate.path);
+		const placeholders = paths.map(() => "?").join(", ");
+		const rows = await dbAccessor.withReadDbAsync(
+			(db) =>
+				db
+					.prepare(
+						`SELECT f.source_path, f.size_bytes, f.mtime_ms,
+								EXISTS(
+									SELECT 1 FROM transcript_capture_jobs AS j
+									 WHERE j.agent_id = f.agent_id AND j.session_id = f.session_id AND j.status = 'dead'
+								) AS has_dead_capture_job
+						 FROM transcript_recovery_files AS f
+						 WHERE f.agent_id = ? AND f.source_path IN (${placeholders})`,
+					)
+					.all(agentId, ...paths) as Array<{
+					source_path?: unknown;
+					size_bytes?: unknown;
+					mtime_ms?: unknown;
+					has_dead_capture_job?: unknown;
+				}>,
+			{
+				siteToken: "transcript-recovery-worker.ts:193",
+				operation: "transcript-recovery.load-fingerprints",
+				signal,
+			},
+		);
+		for (const row of rows) {
+			if (typeof row.source_path !== "string" || typeof row.size_bytes !== "number" || typeof row.mtime_ms !== "number")
+				continue;
+			fingerprints.set(row.source_path, {
+				sizeBytes: row.size_bytes,
+				mtimeMs: row.mtime_ms,
+				hasDeadCaptureJob: row.has_dead_capture_job === 1 || row.has_dead_capture_job === true,
+			});
+		}
+	}
+	return fingerprints;
 }
 
 function snapshotAlreadyCaptured(
@@ -357,9 +416,17 @@ export async function runTranscriptRecoveryScan(
 	const discoveryComplete = claudeDiscoveryComplete && codexDiscoveryComplete;
 	candidates.sort((a, b) => a.path.localeCompare(b.path));
 	const frontiers = await loadFrontiers(dbAccessor, agentId, options.signal);
+	const fingerprints = await loadRecoveryFingerprints(dbAccessor, agentId, candidates, options.signal);
 	const resumableCandidates = candidates.filter((candidate) => {
 		const cursor = frontiers.get(frontierKey(candidate));
-		return cursor === undefined || cursor === null || candidate.path > cursor;
+		if (cursor === undefined || cursor === null || candidate.path > cursor) return true;
+		const fingerprint = fingerprints.get(candidate.path);
+		return (
+			fingerprint === undefined ||
+			fingerprint.hasDeadCaptureJob ||
+			fingerprint.sizeBytes !== candidate.size ||
+			fingerprint.mtimeMs !== Math.trunc(candidate.mtimeMs)
+		);
 	});
 
 	let examined = 0;
@@ -382,12 +449,12 @@ export async function runTranscriptRecoveryScan(
 			await saveFrontier(dbAccessor, agentId, candidate, candidate.path, options.signal);
 			continue;
 		}
+		const fingerprint = fingerprints.get(candidate.path);
 		if (
-			await dbAccessor.withReadDbAsync((db) => unchanged(db, agentId, candidate), {
-				siteToken: "transcript-recovery-worker.ts:386",
-				operation: "transcript-recovery.unchanged",
-				signal: options.signal,
-			})
+			fingerprint !== undefined &&
+			!fingerprint.hasDeadCaptureJob &&
+			fingerprint.sizeBytes === candidate.size &&
+			fingerprint.mtimeMs === Math.trunc(candidate.mtimeMs)
 		) {
 			skippedUnchanged++;
 			await saveFrontier(dbAccessor, agentId, candidate, candidate.path, options.signal);
@@ -471,7 +538,7 @@ export async function runTranscriptRecoveryScan(
 			existingTranscript?.completedAt !== undefined &&
 			transcript.length > existingTranscript.content.length &&
 			transcript.includes(existingTranscript.content);
-		if (existingTranscript?.completedAt && !completedSnapshotExtendsCanonical) {
+		if (existingTranscript?.completedAt && !completedSnapshotExtendsCanonical && !fingerprint?.hasDeadCaptureJob) {
 			await dbAccessor.withWriteTxAsync(
 				(db) => markScanned(db, agentId, candidate, contentSha256, sessionId, new Date(nowMs).toISOString()),
 				{
@@ -565,35 +632,45 @@ export function startTranscriptRecoveryWorker(
 ): TranscriptRecoveryWorkerHandle {
 	let stopped = false;
 	let running = false;
+	let completed = false;
 	let timer: ReturnType<typeof setTimeout> | null = null;
 	let activeScan: Promise<void> | null = null;
 	let activeChild: ChildProcess | null = null;
+	let activeTargetPid: number | null = null;
 	const cancellation = new AbortController();
 	const execution = options.execution ?? "child";
+	let retryDelayMs = options.intervalMs ?? TRANSCRIPT_RECOVERY_INTERVAL_MS;
 
-	const schedule = (delayMs: number): void => {
-		if (stopped || timer) return;
+	const scheduleRetry = (): void => {
+		if (stopped || completed || timer) return;
 		timer = setTimeout(() => {
 			timer = null;
 			void scan();
-		}, delayMs);
+		}, retryDelayMs);
+		retryDelayMs = Math.min(retryDelayMs * 2, TRANSCRIPT_RECOVERY_INTERVAL_MS);
 	};
 
 	const runChild = async (): Promise<TranscriptRecoveryScanResult> => {
 		const childName = fileURLToPath(import.meta.url).endsWith(".ts")
 			? "transcript-recovery-child.ts"
 			: "transcript-recovery-child.js";
+		const supervisorName = fileURLToPath(import.meta.url).endsWith(".ts")
+			? "transcript-recovery-supervisor.ts"
+			: "transcript-recovery-supervisor.js";
 		const childPath = options.childPath ?? join(dirname(fileURLToPath(import.meta.url)), childName);
+		const supervisorPath = options.supervisorPath ?? join(dirname(fileURLToPath(import.meta.url)), supervisorName);
 		const {
 			intervalMs: _intervalMs,
 			signal: _signal,
 			execution: _execution,
 			childPath: _childPath,
+			supervisorPath: _supervisorPath,
 			...scanOptions
 		} = options;
-		const child = spawn(process.execPath, [childPath], {
+		const child = spawn(process.execPath, [supervisorPath], {
 			env: {
 				...process.env,
+				SIGNET_TRANSCRIPT_RECOVERY_CHILD_PATH: childPath,
 				SIGNET_TRANSCRIPT_RECOVERY_INPUT: JSON.stringify({ basePath, agentId, options: scanOptions }),
 			},
 			stdio: ["ignore", "pipe", "pipe"],
@@ -613,12 +690,26 @@ export function startTranscriptRecoveryWorker(
 				// child may write its result and exit in the same turn; resolving from
 				// `data` or rejecting from `exit` races the final stdout delivery.
 				output += chunk;
+				activeTargetPid = parseTranscriptRecoveryChildPid(output) ?? activeTargetPid;
 			});
 			child.on("error", (error) => settle(() => reject(error)));
 			child.on("close", (code, signal) => {
 				const result = parseTranscriptRecoveryResult(output);
-				if (result !== null) {
-					settle(() => resolve(result));
+				if (code === 0 && signal === null) {
+					settle(() =>
+						resolve(
+							result ?? {
+								discovered: 0,
+								examined: 0,
+								enqueued: 0,
+								deduplicated: 0,
+								skippedRecent: 0,
+								skippedOversized: 0,
+								skippedUnchanged: 0,
+								skippedInvalid: 0,
+							},
+						),
+					);
 					return;
 				}
 				const detail = signal === null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`;
@@ -642,6 +733,7 @@ export function startTranscriptRecoveryWorker(
 				if (result.enqueued > 0 || result.deduplicated > 0) {
 					logger.info("transcripts", "Transcript recovery scan complete", { ...result });
 				}
+				completed = true;
 			} catch (error) {
 				if (cancellation.signal.aborted || stopped) return;
 				logger.warn("transcripts", "Transcript recovery scan failed", {
@@ -654,8 +746,9 @@ export function startTranscriptRecoveryWorker(
 		} finally {
 			activeScan = null;
 			activeChild = null;
+			activeTargetPid = null;
 			running = false;
-			schedule(options.intervalMs ?? TRANSCRIPT_RECOVERY_INTERVAL_MS);
+			if (!completed) scheduleRetry();
 		}
 	};
 
@@ -666,16 +759,27 @@ export function startTranscriptRecoveryWorker(
 			cancellation.abort();
 			if (timer) clearTimeout(timer);
 			timer = null;
+			if (activeTargetPid !== null && process.platform !== "win32") {
+				try {
+					process.kill(-activeTargetPid, "SIGTERM");
+				} catch {
+					// The target may have exited between the check and kill.
+				}
+			}
 			if (activeChild !== null) {
 				try {
-					activeChild.kill("SIGKILL");
+					activeChild.kill("SIGTERM");
 				} catch {
 					// The child may have exited between the check and kill.
 				}
 			}
-			await activeScan;
+			if (activeScan !== null) {
+				await Promise.race([activeScan, new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
+			}
 		},
 		nudge(): void {
+			completed = false;
+			retryDelayMs = options.intervalMs ?? TRANSCRIPT_RECOVERY_INTERVAL_MS;
 			if (timer) clearTimeout(timer);
 			timer = null;
 			queueMicrotask(() => void scan());
@@ -684,7 +788,7 @@ export function startTranscriptRecoveryWorker(
 			return !stopped;
 		},
 		get childPid(): number | null {
-			return activeChild?.pid ?? null;
+			return activeTargetPid ?? activeChild?.pid ?? null;
 		},
 	};
 }
