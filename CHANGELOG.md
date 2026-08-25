@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-25
+- Bug fixes: kill delayed recovery targets; harden transcript recovery shutdown; rebase recovery site tokens after retry-bounding edit; bound transcript recovery retries.
+
 ### 2026-08-23
 - Bug fixes: rebase site tokens after vacuum space-guard edit; allow unknown migration backup space; harden vector backfill and migration cursors; validate backup cursors and quarantine only malformed vectors; legacy backup classification and quarantined backfill; verifiable bridge state and equipped backfill; ordered verdicts, blocked children, yielding backfill; process-wide corruption block and recoverable verification; progress-capable backfill and corruption-safe maintenance; pre-init corruption gate and owner-spanning backfill; fail-close corrupt writes and defer heavy backfill; gate runtime writers and vacuum on verification outcome; preserve unverified rollback points and bound backfill; admissible scan budgets and regular-file backup inventory; uncapped size budgets, staged startup fencing, safe destinations; unblock runtime on scheduled verify and test production deadline; honest scan exclusion and crash-safe backup resume; monotonic corruption latch and verified backup resume; serialize verify maintenance and keep backup lifecycle honest; keep corruption verdicts and startup budgets honest; scope verify outcomes honestly and confirm prune results; severity-merge integrity states and retry verify gate setup; bind migration budgets to owner deadline and surface verify failures; harden migration backup recovery status; close migration startup races; upgrade checkpoint attempt_count column before first reference; preserve unverified rollback point and scope verify checkpoint per generation; lint-clean probe handles; no non-null assertions; complete r6 bounded-verify and absolute-deadline fixes; make post-migration verification full-equivalent and resume admission-closed; scope artifact verification and close probe write gap; close admission gaps flagged in review of #1709; bound startup migration work behind admission guarantees.
 
@@ -30,6 +33,18 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: degrade instead of die when sqlite-vec fails to load; degrade when sqlite-vec load fails; bound /health DB read admission to 500ms; retire db owner synchronously on write rejection; requeue undispatched job; stop DB owner transport retry loop; preserve db owner transport stderr; create db owner parent directory; preserve async embedding usage read; wire chunked vacuum reclaim into maintenance; chunk incremental vacuum reclaim; move vacuum conversion to owner; isolate dashboard status reads; support daemonless update recovery; isolate database initialization from event loop; publish head and manifest atomically; preserve unknown backup space metrics; handle degenerate statfs block sizes; resolve macOS Homebrew outside PATH; gate reindex before scanning; honor open circuit in reindex; wire provider breaker notices and probes; wire embedding breaker failure paths; share embedding provider circuit breaker; isolate embedding usage database work; persist embedding provider failure retry; retire remaining completion callers; align patch policy group validation; accept null policy group on agent creation; honor Hermes profile targets; restore Biome and daemon typecheck gates; clear group when changing memory scope; confirm agent scope edits.
 
 ## Release Ledger
+
+## [0.214.12] - 2026-08-25
+
+Release summary: 4 bug fixes.
+Tag range: `v0.214.11..v0.214.12`.
+
+### Bug Fixes
+
+- **daemon**: kill delayed recovery targets
+- **daemon**: harden transcript recovery shutdown
+- **daemon**: rebase recovery site tokens after retry-bounding edit
+- **daemon**: bound transcript recovery retries
 
 ## [0.214.11] - 2026-08-25
 
