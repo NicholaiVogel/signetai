@@ -18,6 +18,8 @@ export const TRANSCRIPT_RECOVERY_SETTLE_MS = 60_000;
 export const TRANSCRIPT_RECOVERY_MAX_BYTES = 50 * 1024 * 1024;
 export const TRANSCRIPT_RECOVERY_MAX_FILES_PER_SCAN = 50;
 export const TRANSCRIPT_RECOVERY_MAX_DISCOVERED_FILES = 50_000;
+export const TRANSCRIPT_RECOVERY_MAX_RETRY_DELAY_MS = 30 * 60_000;
+export const TRANSCRIPT_RECOVERY_STOP_GRACE_MS = 5_000;
 
 interface RecoveryCandidate {
 	readonly harness: "claude-code" | "codex";
@@ -235,7 +237,7 @@ async function loadRecoveryFingerprints(
 					has_dead_capture_job?: unknown;
 				}>,
 			{
-				siteToken: "transcript-recovery-worker.ts:219",
+				siteToken: "transcript-recovery-worker.ts:221",
 				operation: "transcript-recovery.load-fingerprints",
 				signal,
 			},
@@ -332,7 +334,7 @@ async function loadFrontiers(
 				.all(agentId) as Array<{ harness: string; root_path: string; cursor_path?: string | null }>;
 			return new Map(rows.map((row) => [`${row.harness}\\0${row.root_path}`, row.cursor_path ?? null]));
 		},
-		{ siteToken: "transcript-recovery-worker.ts:328", operation: "transcript-recovery.load-frontiers", signal },
+		{ siteToken: "transcript-recovery-worker.ts:330", operation: "transcript-recovery.load-frontiers", signal },
 	);
 }
 
@@ -353,7 +355,7 @@ async function saveFrontier(
 					updated_at = excluded.updated_at`,
 			).run(agentId, candidate.harness, candidate.rootPath, cursorPath, new Date().toISOString());
 		},
-		{ siteToken: "transcript-recovery-worker.ts:346", operation: "transcript-recovery.save-frontier", signal },
+		{ siteToken: "transcript-recovery-worker.ts:348", operation: "transcript-recovery.save-frontier", signal },
 	);
 }
 
@@ -371,7 +373,7 @@ async function clearFrontiers(
 				roots.codex,
 			);
 		},
-		{ siteToken: "transcript-recovery-worker.ts:366", operation: "transcript-recovery.clear-frontiers", signal },
+		{ siteToken: "transcript-recovery-worker.ts:368", operation: "transcript-recovery.clear-frontiers", signal },
 	);
 }
 
@@ -489,7 +491,7 @@ export async function runTranscriptRecoveryScan(
 			await dbAccessor.withWriteTxAsync(
 				(db) => markScanned(db, agentId, candidate, contentSha256, skippedSessionId, new Date(nowMs).toISOString()),
 				{
-					siteToken: "transcript-recovery-worker.ts:489",
+					siteToken: "transcript-recovery-worker.ts:491",
 					operation: "transcript-recovery.mark-scanned",
 					signal: options.signal,
 				},
@@ -503,7 +505,7 @@ export async function runTranscriptRecoveryScan(
 		const alreadyCaptured = await dbAccessor.withReadDbAsync(
 			(db) => snapshotAlreadyCaptured(db, agentId, candidate, sessionId, transcript),
 			{
-				siteToken: "transcript-recovery-worker.ts:503",
+				siteToken: "transcript-recovery-worker.ts:505",
 				operation: "transcript-recovery.snapshot-check",
 				signal: options.signal,
 			},
@@ -512,7 +514,7 @@ export async function runTranscriptRecoveryScan(
 			await dbAccessor.withWriteTxAsync(
 				(db) => markScanned(db, agentId, candidate, contentSha256, sessionId, new Date(nowMs).toISOString()),
 				{
-					siteToken: "transcript-recovery-worker.ts:512",
+					siteToken: "transcript-recovery-worker.ts:514",
 					operation: "transcript-recovery.mark-scanned",
 					signal: options.signal,
 				},
@@ -542,7 +544,7 @@ export async function runTranscriptRecoveryScan(
 			await dbAccessor.withWriteTxAsync(
 				(db) => markScanned(db, agentId, candidate, contentSha256, sessionId, new Date(nowMs).toISOString()),
 				{
-					siteToken: "transcript-recovery-worker.ts:542",
+					siteToken: "transcript-recovery-worker.ts:544",
 					operation: "transcript-recovery.mark-scanned",
 					signal: options.signal,
 				},
@@ -600,7 +602,7 @@ export async function runTranscriptRecoveryScan(
 		await dbAccessor.withWriteTxAsync(
 			(db) => markScanned(db, agentId, candidate, contentSha256, sessionId, new Date(nowMs).toISOString()),
 			{
-				siteToken: "transcript-recovery-worker.ts:600",
+				siteToken: "transcript-recovery-worker.ts:602",
 				operation: "transcript-recovery.mark-scanned",
 				signal: options.signal,
 			},
@@ -647,7 +649,29 @@ export function startTranscriptRecoveryWorker(
 			timer = null;
 			void scan();
 		}, retryDelayMs);
-		retryDelayMs = Math.min(retryDelayMs * 2, TRANSCRIPT_RECOVERY_INTERVAL_MS);
+		retryDelayMs = Math.min(retryDelayMs * 2, TRANSCRIPT_RECOVERY_MAX_RETRY_DELAY_MS);
+	};
+
+	const signalActiveProcesses = (signal: NodeJS.Signals): void => {
+		if (activeTargetPid !== null) {
+			try {
+				if (process.platform !== "win32") process.kill(-activeTargetPid, signal);
+			} catch {
+				// The target may have exited between the check and kill.
+			}
+			try {
+				process.kill(activeTargetPid, signal);
+			} catch {
+				// The target may have exited between the group and direct kills.
+			}
+		}
+		if (activeChild !== null) {
+			try {
+				activeChild.kill(signal);
+			} catch {
+				// The supervisor may have exited between the check and kill.
+			}
+		}
 	};
 
 	const runChild = async (): Promise<TranscriptRecoveryScanResult> => {
@@ -759,22 +783,23 @@ export function startTranscriptRecoveryWorker(
 			cancellation.abort();
 			if (timer) clearTimeout(timer);
 			timer = null;
-			if (activeTargetPid !== null && process.platform !== "win32") {
-				try {
-					process.kill(-activeTargetPid, "SIGTERM");
-				} catch {
-					// The target may have exited between the check and kill.
-				}
-			}
-			if (activeChild !== null) {
-				try {
-					activeChild.kill("SIGTERM");
-				} catch {
-					// The child may have exited between the check and kill.
-				}
-			}
-			if (activeScan !== null) {
-				await Promise.race([activeScan, new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
+			const scanToStop = activeScan;
+			if (scanToStop === null) return;
+			signalActiveProcesses("SIGTERM");
+			let graceTimer: ReturnType<typeof setTimeout> | undefined;
+			const stoppedGracefully = await Promise.race([
+				scanToStop.then(
+					() => true,
+					() => true,
+				),
+				new Promise<boolean>((resolve) => {
+					graceTimer = setTimeout(() => resolve(false), TRANSCRIPT_RECOVERY_STOP_GRACE_MS);
+				}),
+			]);
+			if (graceTimer !== undefined) clearTimeout(graceTimer);
+			if (!stoppedGracefully) {
+				signalActiveProcesses("SIGKILL");
+				await scanToStop;
 			}
 		},
 		nudge(): void {

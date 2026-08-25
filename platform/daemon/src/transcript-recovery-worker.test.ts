@@ -13,6 +13,7 @@ import {
 	runTranscriptRecoveryScan,
 	parseTranscriptRecoveryResult,
 	startTranscriptRecoveryWorker,
+	TRANSCRIPT_RECOVERY_STOP_GRACE_MS,
 } from "./transcript-recovery-worker";
 
 let dir = "";
@@ -528,6 +529,38 @@ describe("transcript recovery worker", () => {
 		await handle.stop();
 		expect(handle.running).toBe(false);
 	});
+
+	it("escalates to SIGKILL for a SIGTERM-resistant recovery target", async () => {
+		const childPath = join(dir, "sigterm-resistant-child.js");
+		const pidPath = join(dir, "sigterm-resistant-child.pid");
+		writeFileSync(
+			childPath,
+			`require("node:fs").writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000);`,
+		);
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 60_000,
+			childPath,
+		});
+		for (let attempt = 0; attempt < 100 && !existsSync(pidPath); attempt++) await Bun.sleep(5);
+		expect(existsSync(pidPath)).toBe(true);
+		const targetPid = Number(readFileSync(pidPath, "utf8"));
+		expect(Number.isInteger(targetPid)).toBe(true);
+		const startedAt = Date.now();
+		await handle.stop();
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(TRANSCRIPT_RECOVERY_STOP_GRACE_MS);
+		expect(handle.running).toBe(false);
+		let targetAlive = true;
+		for (let attempt = 0; attempt < 100 && targetAlive; attempt++) {
+			try {
+				process.kill(targetPid, 0);
+			} catch {
+				targetAlive = false;
+			}
+			if (targetAlive) await Bun.sleep(5);
+		}
+		expect(targetAlive).toBe(false);
+	}, 10_000);
 
 	it("accepts a result written immediately before the recovery child exits", async () => {
 		const childPath = join(dir, "immediate-exit-child.js");
