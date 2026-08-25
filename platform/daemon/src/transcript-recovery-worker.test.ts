@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { DbOwnerDiedError } from "./db-owner-client";
 import { deriveSessionEndFallbackId } from "./session-end-recovery";
@@ -389,6 +390,33 @@ describe("transcript recovery worker", () => {
 		expect(second.examined).toBe(0);
 	});
 
+	it("bounds fingerprint preload to discovered files despite large history", async () => {
+		const path = join(claudeRoot, "-repo", "bounded-history.jsonl");
+		writeSettled(path, JSON.stringify({ sessionId: "bounded-history", message: { role: "user", content: "bounded" } }));
+		expect((await scan()).enqueued).toBe(1);
+		getDbAccessor().withWriteTx((db) => {
+			const insert = db.prepare(
+				`INSERT INTO transcript_recovery_files (
+					agent_id, source_path, harness, size_bytes, mtime_ms, content_sha256, session_id, last_scanned_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			);
+			for (let index = 0; index < 5_000; index++) {
+				insert.run(
+					"agent-a",
+					`/historical/${index}.jsonl`,
+					"claude-code",
+					1,
+					1,
+					`sha-${index}`,
+					`session-${index}`,
+					"2026-01-01",
+				);
+			}
+		});
+		const result = await scan();
+		expect(result.skippedUnchanged).toBe(1);
+		expect(result.examined).toBe(0);
+	});
 	it("resumes a bounded scan from its durable frontier", async () => {
 		const firstPath = join(claudeRoot, "-repo", "a-frontier.jsonl");
 		const secondPath = join(claudeRoot, "-repo", "b-frontier.jsonl");
@@ -502,6 +530,85 @@ describe("transcript recovery worker", () => {
 		expect(handle.running).toBe(false);
 	});
 
+	it("escalates to SIGKILL for a SIGTERM-resistant recovery target", async () => {
+		const childPath = join(dir, "sigterm-resistant-child.js");
+		const pidPath = join(dir, "sigterm-resistant-child.pid");
+		writeFileSync(
+			childPath,
+			`require("node:fs").writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000);`,
+		);
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 60_000,
+			childPath,
+		});
+		for (let attempt = 0; attempt < 100 && !existsSync(pidPath); attempt++) await Bun.sleep(5);
+		expect(existsSync(pidPath)).toBe(true);
+		const targetPid = Number(readFileSync(pidPath, "utf8"));
+		expect(Number.isInteger(targetPid)).toBe(true);
+		await handle.stop();
+		expect(handle.running).toBe(false);
+		let targetAlive = true;
+		for (let attempt = 0; attempt < 100 && targetAlive; attempt++) {
+			try {
+				process.kill(targetPid, 0);
+			} catch {
+				targetAlive = false;
+			}
+			if (targetAlive) await Bun.sleep(5);
+		}
+		expect(targetAlive).toBe(false);
+	}, 10_000);
+
+	it("kills the recovery target when its PID handshake is delayed", async () => {
+		const childPath = join(dir, "delayed-pid-child.js");
+		const supervisorPath = join(dir, "delayed-pid-supervisor.js");
+		const pidPath = join(dir, "delayed-pid-child.pid");
+		const productionSupervisorPath = join(dirname(fileURLToPath(import.meta.url)), "transcript-recovery-supervisor.ts");
+		writeFileSync(
+			childPath,
+			`require("node:fs").writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000);`,
+		);
+		writeFileSync(
+			supervisorPath,
+			`const realSupervisorPath = ${JSON.stringify(productionSupervisorPath)}; const originalWrite = process.stdout.write.bind(process.stdout); let delayedStarted = true; process.stdout.write = (chunk) => { if (delayedStarted && String(chunk).includes('"type":"started"')) { delayedStarted = false; setTimeout(() => originalWrite(chunk), 10_000); return true; } return originalWrite(chunk); }; require(realSupervisorPath);`,
+		);
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 60_000,
+			childPath,
+			supervisorPath,
+		});
+		let targetPid = 0;
+		for (let attempt = 0; attempt < 100 && targetPid === 0; attempt++) {
+			if (existsSync(pidPath)) targetPid = Number(readFileSync(pidPath, "utf8"));
+			if (targetPid === 0) await Bun.sleep(5);
+		}
+		expect(Number.isInteger(targetPid)).toBe(true);
+		expect(targetPid).toBeGreaterThan(0);
+		try {
+			await handle.stop();
+			let targetAlive = false;
+			for (let attempt = 0; attempt < 100; attempt++) {
+				targetAlive = true;
+				try {
+					process.kill(targetPid, 0);
+				} catch {
+					targetAlive = false;
+					break;
+				}
+				await Bun.sleep(5);
+			}
+			expect(targetAlive).toBe(false);
+		} finally {
+			try {
+				process.kill(targetPid, "SIGKILL");
+			} catch {
+				// The target should already be gone; keep cleanup idempotent.
+			}
+		}
+	}, 20_000);
+
 	it("accepts a result written immediately before the recovery child exits", async () => {
 		const childPath = join(dir, "immediate-exit-child.js");
 		const result = {
@@ -548,6 +655,53 @@ describe("transcript recovery worker", () => {
 		}
 	});
 
+	it("does not reschedule after a successful child scan", async () => {
+		const childPath = join(dir, "counted-child.js");
+		const counterPath = join(dir, "child-runs.txt");
+		const result = {
+			discovered: 0,
+			examined: 0,
+			enqueued: 0,
+			deduplicated: 0,
+			skippedRecent: 0,
+			skippedOversized: 0,
+			skippedUnchanged: 0,
+			skippedInvalid: 0,
+		};
+		writeFileSync(
+			childPath,
+			`require("node:fs").appendFileSync(${JSON.stringify(counterPath)}, "x"); process.stdout.write(${JSON.stringify(`${JSON.stringify({ type: "result", result })}\\n`)}); process.exit(0);`,
+		);
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 10,
+			childPath,
+		});
+		await Bun.sleep(100);
+		await handle.stop();
+		expect(readFileSync(counterPath, "utf8")).toBe("x");
+	});
+	it("treats a clean exit without a protocol payload as a terminal success", async () => {
+		const childPath = join(dir, "empty-success-child.js");
+		writeFileSync(childPath, "process.exit(0);");
+		const warnings: string[] = [];
+		const originalWarn = logger.warn;
+		logger.warn = ((category, message) => {
+			warnings.push(`${category}:${message}`);
+		}) as typeof logger.warn;
+		const handle = startTranscriptRecoveryWorker(getDbAccessor(), dir, "agent-a", {
+			roots: { claudeCode: claudeRoot, codex: codexRoot },
+			intervalMs: 10,
+			childPath,
+		});
+		try {
+			await Bun.sleep(100);
+			expect(warnings).toEqual([]);
+		} finally {
+			await handle.stop();
+			logger.warn = originalWarn;
+		}
+	});
 	it("cancels a scan waiting for DB admission", async () => {
 		let admittedResolve!: () => void;
 		const admitted = new Promise<void>((resolve) => {
