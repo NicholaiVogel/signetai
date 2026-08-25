@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+const TRANSCRIPT_RECOVERY_CHILD_GRACE_MS = 4_000;
+
 async function main(): Promise<void> {
 	const childPath = process.env.SIGNET_TRANSCRIPT_RECOVERY_CHILD_PATH;
 	if (childPath === undefined) throw new Error("Transcript recovery supervisor child path is missing");
@@ -12,16 +14,37 @@ async function main(): Promise<void> {
 	child.stdout?.pipe(process.stdout);
 	child.stderr?.pipe(process.stderr);
 	if (child.pid !== undefined) process.stdout.write(`${JSON.stringify({ type: "started", pid: child.pid })}\n`);
+
+	let killTimer: ReturnType<typeof setTimeout> | undefined;
+	const killTarget = (): void => {
+		if (child.pid === undefined) return;
+		try {
+			if (process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+			else child.kill("SIGKILL");
+		} catch {
+			try {
+				child.kill("SIGKILL");
+			} catch {
+				// The target may have exited between the check and escalation.
+			}
+		}
+	};
 	const forward = (signal: NodeJS.Signals): void => {
 		if (process.platform !== "win32" && child.pid !== undefined) {
 			try {
 				process.kill(-child.pid, signal);
-				return;
 			} catch {
-				// The child may have exited between the check and the signal.
+				// The target may have exited between the check and signal.
 			}
 		}
-		child.kill(signal);
+		try {
+			child.kill(signal);
+		} catch {
+			// The target may have exited between the check and signal.
+		}
+		if (killTimer === undefined && (signal === "SIGTERM" || signal === "SIGINT")) {
+			killTimer = setTimeout(killTarget, TRANSCRIPT_RECOVERY_CHILD_GRACE_MS);
+		}
 	};
 	process.once("SIGTERM", () => forward("SIGTERM"));
 	process.once("SIGINT", () => forward("SIGINT"));
@@ -30,6 +53,7 @@ async function main(): Promise<void> {
 		child.once("error", reject);
 		child.once("close", (exitCode, exitSignal) => resolve([exitCode, exitSignal]));
 	});
+	if (killTimer !== undefined) clearTimeout(killTimer);
 	if (signal !== null || code !== 0) process.exitCode = code ?? 1;
 }
 
