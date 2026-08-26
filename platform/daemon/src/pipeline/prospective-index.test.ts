@@ -32,6 +32,19 @@ function makeAccessor(db: Database): DbAccessor {
 				throw err;
 			}
 		},
+		withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+			return Promise.resolve().then(() => {
+				db.exec("BEGIN IMMEDIATE");
+				try {
+					const result = fn(db as unknown as WriteDb);
+					db.exec("COMMIT");
+					return result;
+				} catch (err) {
+					db.exec("ROLLBACK");
+					throw err;
+				}
+			});
+		},
 		withReadDb<T>(fn: (db: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
 		},

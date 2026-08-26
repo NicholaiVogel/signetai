@@ -226,11 +226,9 @@ export function startHintsWorker(deps: {
 
 		let job: HintJobRow | null = null;
 		try {
-			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-			job = accessor.withWriteTx(
-				(db: import("../db-accessor").WriteDb) => leaseJob(db, 3),
-				"pipeline/prospective-index.ts:230",
-			);
+			job = await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => leaseJob(db, 3), {
+				siteToken: "pipeline/prospective-index.ts:229",
+			});
 			if (!job) {
 				schedule();
 				return;
@@ -241,10 +239,9 @@ export function startHintsWorker(deps: {
 			try {
 				payload = JSON.parse(j.payload) as HintPayload;
 			} catch {
-				// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-				accessor.withWriteTx(
+				await accessor.withWriteTxAsync(
 					(db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"),
-					"pipeline/prospective-index.ts:245",
+					{ siteToken: "pipeline/prospective-index.ts:242" },
 				);
 				schedule();
 				return;
@@ -254,21 +251,21 @@ export function startHintsWorker(deps: {
 			const hints = await generateHints(provider, payload.content, cfg);
 
 			if (hints.length > 0) {
-				// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-				accessor.withWriteTx((db: import("../db-accessor").WriteDb) => {
-					writeHints(db, payload.memoryId, hints);
-					completeJob(db, j.id);
-				}, "pipeline/prospective-index.ts:258");
+				await accessor.withWriteTxAsync(
+					(db: import("../db-accessor").WriteDb) => {
+						writeHints(db, payload.memoryId, hints);
+						completeJob(db, j.id);
+					},
+					{ siteToken: "pipeline/prospective-index.ts:254" },
+				);
 				logger.info("pipeline", "Prospective hints generated", {
 					memoryId: payload.memoryId,
 					hints: hints.length,
 				});
 			} else {
-				// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-				accessor.withWriteTx(
-					(db: import("../db-accessor").WriteDb) => completeJob(db, j.id),
-					"pipeline/prospective-index.ts:268",
-				);
+				await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => completeJob(db, j.id), {
+					siteToken: "pipeline/prospective-index.ts:266",
+				});
 				logger.debug("pipeline", "No hints generated (empty LLM response)", {
 					memoryId: payload.memoryId,
 				});
@@ -277,11 +274,9 @@ export function startHintsWorker(deps: {
 			if (job) {
 				const j = job;
 				const msg = e instanceof Error ? e.message : String(e);
-				// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-				accessor.withWriteTx(
-					(db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg),
-					"pipeline/prospective-index.ts:281",
-				);
+				await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg), {
+					siteToken: "pipeline/prospective-index.ts:277",
+				});
 				logger.warn("pipeline", "Hints worker job failed", {
 					jobId: j.id,
 					memoryId: j.memory_id,
