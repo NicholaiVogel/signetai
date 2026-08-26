@@ -587,6 +587,81 @@ describe("prospective-index", () => {
 			expect(getHints(db, mid)).toHaveLength(5);
 		});
 
+		it("requeues terminal completion failures and continues with later jobs", async () => {
+			const firstId = crypto.randomUUID();
+			const secondId = crypto.randomUUID();
+			insertMemory(db, firstId, "first permanently failing memory");
+			insertMemory(db, secondId, "second memory after terminal failure");
+			accessor.withWriteTx((wdb) => {
+				enqueueHintsJob(wdb, firstId, "first permanently failing memory");
+				enqueueHintsJob(wdb, secondId, "second memory after terminal failure");
+			});
+
+			let asyncWriteCalls = 0;
+			const terminalFailureAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls === 2) return Promise.reject(new Error("permanent transaction failure"));
+					return accessor.withWriteTxAsync(fn);
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: terminalFailureAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => getJob(db, secondId)?.status === "completed", 2_000);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(getJob(db, firstId)).toMatchObject({ status: "pending", attempts: 1 });
+			expect(getJob(db, secondId)).toMatchObject({ status: "completed", attempts: 1 });
+			expect(asyncWriteCalls).toBe(5);
+		});
+
+		it("does not retry a terminal failure transition", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "terminally unavailable memory");
+			accessor.withWriteTx((wdb) => {
+				enqueueHintsJob(wdb, mid, "terminally unavailable memory");
+			});
+
+			let asyncWriteCalls = 0;
+			let failureTransitionAttempts = 0;
+			const unavailableAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls === 2) return Promise.reject(new Error("completion transaction failure"));
+					if (asyncWriteCalls === 3) {
+						failureTransitionAttempts++;
+						return Promise.reject(new Error("failure transition unavailable"));
+					}
+					return accessor.withWriteTxAsync(fn);
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: unavailableAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => failureTransitionAttempts === 1, 2_000);
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			} finally {
+				await handle.stop();
+			}
+
+			expect(failureTransitionAttempts).toBe(1);
+			expect(asyncWriteCalls).toBeGreaterThan(3);
+			expect(getJob(db, mid)?.status).toBe("leased");
+		});
+
 		it("writes hints to FTS5 index via triggers", async () => {
 			const mid = crypto.randomUUID();
 			insertMemory(db, mid, "Caroline moved to Seattle");

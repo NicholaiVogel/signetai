@@ -8,7 +8,7 @@
  */
 
 import { type LlmProvider, type PipelineHintsConfig, scanMemoryContent } from "@signet/core";
-import type { DbAccessor, WriteDb } from "../db-accessor";
+import { DbWriteQueueFullError, type DbAccessor, type WriteDb } from "../db-accessor";
 import { logger } from "../logger";
 import type { PipelineV2Config } from "../memory-config";
 import { isSystemPressureHigh } from "../system-pressure";
@@ -198,6 +198,13 @@ function writeHints(db: WriteDb, memoryId: string, hints: readonly string[]): nu
 	return inserted;
 }
 
+function isRetryableWriteAdmissionError(error: unknown): boolean {
+	// Queue admission pressure is the only error this worker can safely retry
+	// without changing the leased job's state. Callback, transaction, timeout,
+	// and cancellation errors must go through the job failure transition.
+	return error instanceof DbWriteQueueFullError;
+}
+
 // ---------------------------------------------------------------------------
 // Worker loop
 // ---------------------------------------------------------------------------
@@ -229,10 +236,38 @@ export function startHintsWorker(deps: {
 			if (pendingWrite === write) pendingWrite = null;
 			return true;
 		} catch (error) {
-			logger.warn("pipeline", "Hints worker write admission deferred", {
+			const retryable = isRetryableWriteAdmissionError(error);
+			if (retryable) {
+				logger.warn("pipeline", "Hints worker write admission deferred", {
+					jobId: write.job.id,
+					memoryId: write.job.memory_id,
+					kind: write.kind,
+					retryable: true,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
+			}
+			if (write.kind === "completion") {
+				const message = error instanceof Error ? error.message : String(error);
+				const failure: PendingWrite = {
+					kind: "failure",
+					job: write.job,
+					run: async () => {
+						await accessor.withWriteTxAsync(
+							(db: import("../db-accessor").WriteDb) => failJob(db, write.job.id, message),
+							{ siteToken: "pipeline/prospective-index.ts:256" },
+						);
+					},
+				};
+				pendingWrite = failure;
+				return executePendingWrite(failure);
+			}
+			if (pendingWrite === write) pendingWrite = null;
+			logger.warn("pipeline", "Hints worker write admission failed", {
 				jobId: write.job.id,
 				memoryId: write.job.memory_id,
 				kind: write.kind,
+				retryable: false,
 				error: error instanceof Error ? error.message : String(error),
 			});
 			return false;
@@ -251,7 +286,7 @@ export function startHintsWorker(deps: {
 			}
 
 			job = await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => leaseJob(db, 3), {
-				siteToken: "pipeline/prospective-index.ts:253",
+				siteToken: "pipeline/prospective-index.ts:288",
 			});
 			if (!job) return;
 			const j = job;
@@ -266,7 +301,7 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteTxAsync(
 							(db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"),
-							{ siteToken: "pipeline/prospective-index.ts:267" },
+							{ siteToken: "pipeline/prospective-index.ts:302" },
 						);
 					},
 				};
@@ -288,7 +323,7 @@ export function startHintsWorker(deps: {
 								writeHints(db, payload.memoryId, hints);
 								completeJob(db, j.id);
 							},
-							{ siteToken: "pipeline/prospective-index.ts:286" },
+							{ siteToken: "pipeline/prospective-index.ts:321" },
 						);
 					},
 				};
@@ -304,7 +339,7 @@ export function startHintsWorker(deps: {
 					job: j,
 					run: async () => {
 						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => completeJob(db, j.id), {
-							siteToken: "pipeline/prospective-index.ts:306",
+							siteToken: "pipeline/prospective-index.ts:341",
 						});
 					},
 				};
@@ -323,7 +358,7 @@ export function startHintsWorker(deps: {
 					job: j,
 					run: async () => {
 						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg), {
-							siteToken: "pipeline/prospective-index.ts:325",
+							siteToken: "pipeline/prospective-index.ts:360",
 						});
 					},
 				};

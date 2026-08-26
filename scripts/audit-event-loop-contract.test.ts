@@ -16,10 +16,10 @@ import {
 
 test("the deterministic ledger retains the exact current source inventory", () => {
 	const baseline = loadBaseline(resolve("scripts/event-loop-contract-baseline.json"));
-	expect(baseline).toHaveLength(993);
+	expect(baseline).toHaveLength(994);
 	expect(baseline.filter((site) => site.api === "withWriteTx")).toHaveLength(68);
 	expect(baseline.filter((site) => site.api === "withReadDb")).toHaveLength(115);
-	expect(baseline.filter((site) => site.api === "withWriteTxAsync")).toHaveLength(64);
+	expect(baseline.filter((site) => site.api === "withWriteTxAsync")).toHaveLength(65);
 	expect(baseline.filter((site) => site.api === "withReadDbAsync")).toHaveLength(227);
 });
 
@@ -326,8 +326,8 @@ test("the production TypeScript project cannot import the compatibility module",
 test("the generated report describes the type boundary and transitional counts", () => {
 	const baseline = loadBaseline(resolve("scripts/event-loop-contract-baseline.json"));
 	const report = renderReport(baseline, { total: 183, withWriteTx: 68, withReadDb: 115 });
-	expect(report).toContain("Exact ledger inventory: 993 sites");
-	expect(report).toContain("68 synchronous writes, 115 synchronous reads, and 294 async-named parent DB sites");
+	expect(report).toContain("Exact ledger inventory: 994 sites");
+	expect(report).toContain("68 synchronous writes, 115 synchronous reads, and 295 async-named parent DB sites");
 	expect(report).toContain("type boundary");
 	expect(report).not.toContain("1061");
 });
