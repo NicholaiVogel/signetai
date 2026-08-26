@@ -164,7 +164,7 @@ async function runOwnerStartupRecovery(owner: DbOwnerClient): Promise<StartupRec
 			[
 				ownerRunStatement(
 					`UPDATE memory_jobs
-					 SET status = 'dead', leased_at = NULL, failed_at = ?,
+					 SET status = 'dead', leased_at = NULL, lease_token = NULL, failed_at = ?,
 					     error = COALESCE(error, ?), updated_at = ?
 					 WHERE status = 'leased' AND job_type = 'document_ingest'
 					   AND attempts >= max_attempts`,
@@ -172,14 +172,14 @@ async function runOwnerStartupRecovery(owner: DbOwnerClient): Promise<StartupRec
 				),
 				ownerRunStatement(
 					`UPDATE memory_jobs
-					 SET status = 'pending', leased_at = NULL, updated_at = ?
+					 SET status = 'pending', leased_at = NULL, lease_token = NULL, updated_at = ?
 					 WHERE status = 'leased' AND job_type = 'document_ingest'
 					   AND attempts < max_attempts`,
 					[now],
 				),
 				ownerRunStatement(
 					`UPDATE memory_jobs
-					 SET status = 'dead', leased_at = NULL, failed_at = ?,
+					 SET status = 'dead', leased_at = NULL, lease_token = NULL, failed_at = ?,
 					     error = COALESCE(error, ?), updated_at = ?
 					 WHERE status = 'leased' AND job_type = 'prospective_index'
 					   AND attempts >= max_attempts`,
@@ -187,7 +187,7 @@ async function runOwnerStartupRecovery(owner: DbOwnerClient): Promise<StartupRec
 				),
 				ownerRunStatement(
 					`UPDATE memory_jobs
-					 SET status = 'pending', leased_at = NULL, updated_at = ?
+					 SET status = 'pending', leased_at = NULL, lease_token = NULL, updated_at = ?
 					 WHERE status = 'leased' AND job_type = 'prospective_index'
 					   AND attempts < max_attempts`,
 					[now],

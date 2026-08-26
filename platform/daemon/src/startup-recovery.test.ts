@@ -28,7 +28,7 @@ function seedTables(db: WriteDb): void {
 			id TEXT PRIMARY KEY, job_type TEXT, status TEXT,
 			memory_id TEXT, document_id TEXT, created_at TEXT, updated_at TEXT,
 			attempts INTEGER DEFAULT 0, max_attempts INTEGER DEFAULT 5,
-			leased_at TEXT, failed_at TEXT, error TEXT
+			leased_at TEXT, lease_token TEXT, failed_at TEXT, error TEXT
 		);
 		CREATE TABLE IF NOT EXISTS documents (
 			id TEXT PRIMARY KEY, status TEXT, error TEXT, updated_at TEXT
@@ -48,6 +48,10 @@ function seedTables(db: WriteDb): void {
 			started_at TEXT, completed_at TEXT, error TEXT
 		);
 	`);
+	const columns = db.prepare("PRAGMA table_info(memory_jobs)").all() as Array<{ name?: unknown }>;
+	if (!columns.some((column) => column.name === "lease_token")) {
+		db.exec("ALTER TABLE memory_jobs ADD COLUMN lease_token TEXT");
+	}
 }
 
 function insertJob(db: WriteDb, id: string, status: string, createdAt: string): void {
@@ -128,6 +132,54 @@ describe("runStartupRecovery", () => {
 			expect(owner.health().state).toBe("ready");
 			expect(owner.health().generation).toBe(1);
 			expect(countRows("memory_jobs")).toBe(0);
+		} finally {
+			await owner.close();
+		}
+	});
+
+	it("clears document and prospective lease tokens through the DB owner", async () => {
+		const now = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				"INSERT INTO documents (id, source_type, status, error, created_at, updated_at) VALUES (?, 'test', 'extracting', NULL, ?, ?)",
+			).run("owner-doc", now, now);
+			db.prepare(
+				`INSERT INTO memory_jobs
+				 (id, job_type, status, document_id, attempts, max_attempts, leased_at, lease_token, created_at, updated_at)
+				 VALUES (?, 'document_ingest', 'leased', ?, 1, 3, ?, ?, ?, ?)`,
+			).run("owner-document-pending", "owner-doc", now, "document-token", now, now);
+			db.prepare(
+				`INSERT INTO memory_jobs
+				 (id, job_type, status, document_id, attempts, max_attempts, leased_at, lease_token, created_at, updated_at)
+				 VALUES (?, 'document_ingest', 'leased', ?, 3, 3, ?, ?, ?, ?)`,
+			).run("owner-document-dead", "owner-doc", now, "dead-document-token", now, now);
+			db.prepare(
+				`INSERT INTO memory_jobs
+				 (id, job_type, status, memory_id, attempts, max_attempts, leased_at, lease_token, created_at, updated_at)
+				 VALUES (?, 'prospective_index', 'leased', NULL, 1, 3, ?, ?, ?, ?)`,
+			).run("owner-prospective-pending", now, "prospective-token", now, now);
+		});
+
+		const owner = createDbOwnerClient({ dbPath: join(agentsDir, "memory", "memories.db") });
+		try {
+			const report = await runStartupRecoveryAsync(getDbAccessor(), { owner });
+			expect(report.documentLeasesRecovered).toBe(2);
+			expect(report.prospectiveLeasesRecovered).toBe(1);
+			const jobs = getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare("SELECT id, status, lease_token FROM memory_jobs WHERE id LIKE 'owner-%' ORDER BY id")
+						.all() as Array<{
+						id: string;
+						status: string;
+						lease_token: string | null;
+					}>,
+			);
+			expect(jobs).toEqual([
+				{ id: "owner-document-dead", status: "dead", lease_token: null },
+				{ id: "owner-document-pending", status: "pending", lease_token: null },
+				{ id: "owner-prospective-pending", status: "pending", lease_token: null },
+			]);
 		} finally {
 			await owner.close();
 		}
