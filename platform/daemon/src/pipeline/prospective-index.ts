@@ -170,7 +170,9 @@ function failJob(db: WriteDb, jobId: string, error: string): void {
 		`UPDATE memory_jobs
 		 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
 		     leased_at = NULL, failed_at = ?, updated_at = ?,
-		     payload = json_set(COALESCE(payload, '{}'), '$.lastError', ?)
+		     payload = CASE WHEN json_valid(payload)
+		                    THEN json_set(payload, '$.lastError', ?)
+		                    ELSE payload END
 		 WHERE id = ?`,
 	).run(now, now, error, jobId);
 }
@@ -186,7 +188,9 @@ function recoverFailedJob(db: WriteDb, jobId: string, error: string): void {
 		`UPDATE memory_jobs
 		 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
 		     leased_at = NULL, failed_at = ?, updated_at = ?,
-		     payload = json_set(COALESCE(payload, '{}'), '$.lastError', ?)
+		     payload = CASE WHEN json_valid(payload)
+		                    THEN json_set(payload, '$.lastError', ?)
+		                    ELSE payload END
 		 WHERE id = ? AND status = 'leased'`,
 	).run(now, now, error, jobId);
 }
@@ -239,6 +243,8 @@ export function startHintsWorker(deps: {
 
 	let running = true;
 	let timer: ReturnType<typeof setTimeout> | null = null;
+	let tickPromise: Promise<void> | null = null;
+	let stopPromise: Promise<void> | null = null;
 	type PendingWrite = {
 		readonly kind: "completion" | "failure" | "recovery";
 		readonly job: HintJobRow;
@@ -276,13 +282,14 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteTxAsync(
 							(db: import("../db-accessor").WriteDb) => failJob(db, write.job.id, message),
-							{ siteToken: "pipeline/prospective-index.ts:277" },
+							{ siteToken: "pipeline/prospective-index.ts:283" },
 						);
 					},
 					retryAt: 0,
 				};
 				pendingWrite = failure;
-				return executePendingWrite(failure);
+				await executePendingWrite(failure);
+				return false;
 			}
 			if (write.kind === "failure") {
 				const message = error instanceof Error ? error.message : String(error);
@@ -336,7 +343,7 @@ export function startHintsWorker(deps: {
 			}
 
 			job = await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => leaseJob(db, 3), {
-				siteToken: "pipeline/prospective-index.ts:338",
+				siteToken: "pipeline/prospective-index.ts:345",
 			});
 			if (!job) return;
 			const j = job;
@@ -351,7 +358,7 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteTxAsync(
 							(db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"),
-							{ siteToken: "pipeline/prospective-index.ts:352" },
+							{ siteToken: "pipeline/prospective-index.ts:359" },
 						);
 					},
 					retryAt: 0,
@@ -374,7 +381,7 @@ export function startHintsWorker(deps: {
 								writeHints(db, payload.memoryId, hints);
 								completeJob(db, j.id);
 							},
-							{ siteToken: "pipeline/prospective-index.ts:372" },
+							{ siteToken: "pipeline/prospective-index.ts:379" },
 						);
 					},
 					retryAt: 0,
@@ -391,7 +398,7 @@ export function startHintsWorker(deps: {
 					job: j,
 					run: async () => {
 						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => completeJob(db, j.id), {
-							siteToken: "pipeline/prospective-index.ts:393",
+							siteToken: "pipeline/prospective-index.ts:400",
 						});
 					},
 					retryAt: 0,
@@ -411,7 +418,7 @@ export function startHintsWorker(deps: {
 					job: j,
 					run: async () => {
 						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg), {
-							siteToken: "pipeline/prospective-index.ts:413",
+							siteToken: "pipeline/prospective-index.ts:420",
 						});
 					},
 					retryAt: 0,
@@ -435,7 +442,28 @@ export function startHintsWorker(deps: {
 
 	function schedule(): void {
 		if (!running) return;
-		timer = setTimeout(tick, cfg.poll);
+		timer = setTimeout(() => {
+			const current = tick();
+			tickPromise = current;
+			void current.then(
+				() => {
+					if (tickPromise === current) tickPromise = null;
+				},
+				() => {
+					if (tickPromise === current) tickPromise = null;
+				},
+			);
+		}, cfg.poll);
+	}
+
+	async function drainPendingWrite(): Promise<void> {
+		while (pendingWrite) {
+			const write = pendingWrite;
+			const waitMs = Math.max(0, write.retryAt - Date.now());
+			if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+			if (pendingWrite !== write) continue;
+			await executePendingWrite(write);
+		}
 	}
 
 	// Start
@@ -443,8 +471,17 @@ export function startHintsWorker(deps: {
 
 	return {
 		async stop() {
-			running = false;
-			if (timer) clearTimeout(timer);
+			if (stopPromise) return stopPromise;
+			stopPromise = (async () => {
+				running = false;
+				if (timer) {
+					clearTimeout(timer);
+					timer = null;
+				}
+				if (tickPromise) await tickPromise;
+				await drainPendingWrite();
+			})();
+			return stopPromise;
 		},
 		get running() {
 			return running;

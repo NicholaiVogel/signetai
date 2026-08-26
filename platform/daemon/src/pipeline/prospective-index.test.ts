@@ -590,6 +590,75 @@ describe("prospective-index", () => {
 			expect(getHints(db, mid)).toHaveLength(5);
 		});
 
+		it("drains a deferred completion before stop resolves", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "Caroline moved from Portland to Seattle in 2019");
+			enqueueHintsJob(db as unknown as WriteDb, mid, "Caroline moved from Portland to Seattle in 2019");
+
+			let asyncWriteCalls = 0;
+			const flakyAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls === 2) return Promise.reject(new DbWriteQueueFullError());
+					return accessor.withWriteTxAsync(fn);
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: flakyAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => asyncWriteCalls === 2 && getJob(db, mid)?.status === "leased", 2_000);
+				await handle.stop();
+			} finally {
+				await handle.stop();
+			}
+
+			expect(asyncWriteCalls).toBe(3);
+			expect(getJob(db, mid)).toMatchObject({ status: "completed", attempts: 1 });
+			expect(getHints(db, mid)).toHaveLength(5);
+		});
+
+		it("requeues malformed payloads and continues with later jobs", async () => {
+			const firstId = crypto.randomUUID();
+			const secondId = crypto.randomUUID();
+			insertMemory(db, firstId, "malformed payload memory");
+			insertMemory(db, secondId, "memory after malformed payload");
+			enqueueHintsJob(db as unknown as WriteDb, firstId, "malformed payload memory");
+			enqueueHintsJob(db as unknown as WriteDb, secondId, "memory after malformed payload");
+			db.prepare("UPDATE memory_jobs SET payload = ? WHERE memory_id = ? AND job_type = 'prospective_index'").run(
+				"not-json",
+				firstId,
+			);
+
+			const handle = startHintsWorker({
+				accessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => getJob(db, secondId)?.status === "completed", 2_000);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(getJob(db, firstId)).toMatchObject({ status: "pending", attempts: 1 });
+			expect(getJob(db, firstId)?.leased_at).toBeNull();
+			expect(getJob(db, firstId)?.failed_at).not.toBeNull();
+			expect(
+				(
+					db
+						.prepare("SELECT payload FROM memory_jobs WHERE memory_id = ? AND job_type = 'prospective_index'")
+						.get(firstId) as {
+						payload: string;
+					}
+				).payload,
+			).toBe("not-json");
+		});
+
 		it("requeues terminal completion failures and continues with later jobs", async () => {
 			const firstId = crypto.randomUUID();
 			const secondId = crypto.randomUUID();

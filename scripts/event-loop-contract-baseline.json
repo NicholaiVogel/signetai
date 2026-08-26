@@ -3434,42 +3434,42 @@
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 277,
+      "line": 283,
       "api": "withWriteTxAsync",
       "source": "await accessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 338,
+      "line": 345,
       "api": "withWriteTxAsync",
       "source": "job = await accessor.withWriteTxAsync((db: import(\"../db-accessor\").WriteDb) => leaseJob(db, 3), {",
       "category": "hot-path"
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 352,
+      "line": 359,
       "api": "withWriteTxAsync",
       "source": "await accessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 372,
+      "line": 379,
       "api": "withWriteTxAsync",
       "source": "await accessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 393,
+      "line": 400,
       "api": "withWriteTxAsync",
       "source": "await accessor.withWriteTxAsync((db: import(\"../db-accessor\").WriteDb) => completeJob(db, j.id), {",
       "category": "hot-path"
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 413,
+      "line": 420,
       "api": "withWriteTxAsync",
       "source": "await accessor.withWriteTxAsync((db: import(\"../db-accessor\").WriteDb) => failJob(db, j.id, msg), {",
       "category": "hot-path"
