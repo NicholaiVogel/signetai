@@ -13,6 +13,12 @@ import { logger } from "../logger";
 import type { PipelineV2Config } from "../memory-config";
 import { isSystemPressureHigh } from "../system-pressure";
 
+// A transient write can usually clear during one or two queue turns, but a
+// shutdown must not wait forever for an unavailable database. If recovery is
+// still pending after this grace period, the leased row remains durable and
+// startup/stale-lease recovery can release it on the next worker run.
+export const HINTS_WORKER_STOP_GRACE_MS = 250;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -282,7 +288,7 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteTxAsync(
 							(db: import("../db-accessor").WriteDb) => failJob(db, write.job.id, message),
-							{ siteToken: "pipeline/prospective-index.ts:283" },
+							{ siteToken: "pipeline/prospective-index.ts:289" },
 						);
 					},
 					retryAt: 0,
@@ -299,7 +305,7 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteDbAsync(
 							(db: import("../db-accessor").WriteDb) => recoverFailedJob(db, write.job.id, message),
-							{ siteToken: "pipeline/prospective-index.ts:293" },
+							{ siteToken: "pipeline/prospective-index.ts:299" },
 						);
 					},
 					retryAt: 0,
@@ -343,7 +349,7 @@ export function startHintsWorker(deps: {
 			}
 
 			job = await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => leaseJob(db, 3), {
-				siteToken: "pipeline/prospective-index.ts:345",
+				siteToken: "pipeline/prospective-index.ts:351",
 			});
 			if (!job) return;
 			const j = job;
@@ -358,7 +364,7 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteTxAsync(
 							(db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"),
-							{ siteToken: "pipeline/prospective-index.ts:359" },
+							{ siteToken: "pipeline/prospective-index.ts:365" },
 						);
 					},
 					retryAt: 0,
@@ -381,7 +387,7 @@ export function startHintsWorker(deps: {
 								writeHints(db, payload.memoryId, hints);
 								completeJob(db, j.id);
 							},
-							{ siteToken: "pipeline/prospective-index.ts:379" },
+							{ siteToken: "pipeline/prospective-index.ts:385" },
 						);
 					},
 					retryAt: 0,
@@ -398,7 +404,7 @@ export function startHintsWorker(deps: {
 					job: j,
 					run: async () => {
 						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => completeJob(db, j.id), {
-							siteToken: "pipeline/prospective-index.ts:400",
+							siteToken: "pipeline/prospective-index.ts:406",
 						});
 					},
 					retryAt: 0,
@@ -418,7 +424,7 @@ export function startHintsWorker(deps: {
 					job: j,
 					run: async () => {
 						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg), {
-							siteToken: "pipeline/prospective-index.ts:420",
+							siteToken: "pipeline/prospective-index.ts:426",
 						});
 					},
 					retryAt: 0,
@@ -456,13 +462,22 @@ export function startHintsWorker(deps: {
 		}, cfg.poll);
 	}
 
-	async function drainPendingWrite(): Promise<void> {
-		while (pendingWrite) {
+	async function drainPendingWrite(deadlineAt: number): Promise<void> {
+		while (pendingWrite && Date.now() < deadlineAt) {
 			const write = pendingWrite;
-			const waitMs = Math.max(0, write.retryAt - Date.now());
+			const waitMs = Math.min(Math.max(0, write.retryAt - Date.now()), Math.max(0, deadlineAt - Date.now()));
 			if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
 			if (pendingWrite !== write) continue;
+			if (Date.now() >= deadlineAt) break;
 			await executePendingWrite(write);
+		}
+		if (pendingWrite) {
+			logger.warn("pipeline", "Hints worker shutdown drain expired", {
+				jobId: pendingWrite.job.id,
+				memoryId: pendingWrite.job.memory_id,
+				kind: pendingWrite.kind,
+				retryable: false,
+			});
 		}
 	}
 
@@ -479,7 +494,7 @@ export function startHintsWorker(deps: {
 					timer = null;
 				}
 				if (tickPromise) await tickPromise;
-				await drainPendingWrite();
+				await drainPendingWrite(Date.now() + HINTS_WORKER_STOP_GRACE_MS);
 			})();
 			return stopPromise;
 		},

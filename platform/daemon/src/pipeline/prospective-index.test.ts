@@ -12,7 +12,7 @@ import type { PipelineHintsConfig } from "@signet/core";
 import { type MigrationDb, runMigrations } from "../../../core/src/migrations";
 import { DbWriteQueueFullError, type DbAccessor, type ReadDb, type WriteDb } from "../db-accessor";
 import { DEFAULT_PIPELINE_V2 } from "../memory-config";
-import { enqueueHintsJob, generateHints, startHintsWorker } from "./prospective-index";
+import { enqueueHintsJob, generateHints, HINTS_WORKER_STOP_GRACE_MS, startHintsWorker } from "./prospective-index";
 import type { LlmProvider } from "./provider";
 
 // ---------------------------------------------------------------------------
@@ -741,6 +741,49 @@ describe("prospective-index", () => {
 			expect(getJob(db, firstId)).toMatchObject({ status: "pending", attempts: 1 });
 			expect(getJob(db, firstId)?.leased_at).toBeNull();
 			expect(getJob(db, secondId)).toMatchObject({ status: "completed", attempts: 1 });
+		});
+
+		it("bounds shutdown when lease recovery remains unavailable", async () => {
+			const firstId = crypto.randomUUID();
+			const secondId = crypto.randomUUID();
+			insertMemory(db, firstId, "memory with unavailable recovery");
+			insertMemory(db, secondId, "memory after unavailable recovery");
+			enqueueHintsJob(db as unknown as WriteDb, firstId, "memory with unavailable recovery");
+			enqueueHintsJob(db as unknown as WriteDb, secondId, "memory after unavailable recovery");
+
+			let asyncWriteCalls = 0;
+			let recoveryAttempts = 0;
+			const unavailableAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls === 2) return Promise.reject(new Error("completion transaction unavailable"));
+					if (asyncWriteCalls === 3) return Promise.reject(new Error("failure transition unavailable"));
+					return accessor.withWriteTxAsync(fn);
+				},
+				withWriteDbAsync<T>(_fn: (db: WriteDb) => T): Promise<T> {
+					recoveryAttempts++;
+					return Promise.reject(new Error("lease recovery unavailable"));
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: unavailableAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => recoveryAttempts > 0, 2_000);
+				const startedAt = Date.now();
+				await handle.stop();
+				expect(Date.now() - startedAt).toBeLessThan(HINTS_WORKER_STOP_GRACE_MS + 500);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(recoveryAttempts).toBeGreaterThan(0);
+			expect(getJob(db, firstId)).toMatchObject({ status: "leased", attempts: 1 });
+			expect(getJob(db, secondId)).toMatchObject({ status: "pending", attempts: 0 });
 		});
 
 		it("writes hints to FTS5 index via triggers", async () => {
