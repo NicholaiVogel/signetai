@@ -209,41 +209,69 @@ export function startHintsWorker(deps: {
 }): HintsWorkerHandle {
 	const { accessor, provider, pipelineCfg } = deps;
 	const rawCfg = pipelineCfg.hints;
-	if (!rawCfg || !rawCfg.enabled) {
+	if (!rawCfg?.enabled) {
 		return { stop: async () => {}, running: false };
 	}
 	const cfg = rawCfg;
 
 	let running = true;
 	let timer: ReturnType<typeof setTimeout> | null = null;
+	type PendingWrite = {
+		readonly kind: "completion" | "failure";
+		readonly job: HintJobRow;
+		readonly run: () => Promise<void>;
+	};
+	let pendingWrite: PendingWrite | null = null;
+
+	async function executePendingWrite(write: PendingWrite): Promise<boolean> {
+		try {
+			await write.run();
+			if (pendingWrite === write) pendingWrite = null;
+			return true;
+		} catch (error) {
+			logger.warn("pipeline", "Hints worker write admission deferred", {
+				jobId: write.job.id,
+				memoryId: write.job.memory_id,
+				kind: write.kind,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return false;
+		}
+	}
 
 	async function tick(): Promise<void> {
 		if (!running) return;
-		if (isSystemPressureHigh()) {
-			schedule();
-			return;
-		}
-
 		let job: HintJobRow | null = null;
 		try {
-			job = await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => leaseJob(db, 3), {
-				siteToken: "pipeline/prospective-index.ts:229",
-			});
-			if (!job) {
-				schedule();
+			if (isSystemPressureHigh()) return;
+
+			if (pendingWrite) {
+				await executePendingWrite(pendingWrite);
 				return;
 			}
+
+			job = await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => leaseJob(db, 3), {
+				siteToken: "pipeline/prospective-index.ts:253",
+			});
+			if (!job) return;
 			const j = job;
 
 			let payload: HintPayload;
 			try {
 				payload = JSON.parse(j.payload) as HintPayload;
 			} catch {
-				await accessor.withWriteTxAsync(
-					(db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"),
-					{ siteToken: "pipeline/prospective-index.ts:242" },
-				);
-				schedule();
+				const write: PendingWrite = {
+					kind: "failure",
+					job: j,
+					run: async () => {
+						await accessor.withWriteTxAsync(
+							(db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"),
+							{ siteToken: "pipeline/prospective-index.ts:267" },
+						);
+					},
+				};
+				pendingWrite = write;
+				await executePendingWrite(write);
 				return;
 			}
 
@@ -251,21 +279,37 @@ export function startHintsWorker(deps: {
 			const hints = await generateHints(provider, payload.content, cfg);
 
 			if (hints.length > 0) {
-				await accessor.withWriteTxAsync(
-					(db: import("../db-accessor").WriteDb) => {
-						writeHints(db, payload.memoryId, hints);
-						completeJob(db, j.id);
+				const write: PendingWrite = {
+					kind: "completion",
+					job: j,
+					run: async () => {
+						await accessor.withWriteTxAsync(
+							(db: import("../db-accessor").WriteDb) => {
+								writeHints(db, payload.memoryId, hints);
+								completeJob(db, j.id);
+							},
+							{ siteToken: "pipeline/prospective-index.ts:286" },
+						);
 					},
-					{ siteToken: "pipeline/prospective-index.ts:254" },
-				);
+				};
+				pendingWrite = write;
+				if (!(await executePendingWrite(write))) return;
 				logger.info("pipeline", "Prospective hints generated", {
 					memoryId: payload.memoryId,
 					hints: hints.length,
 				});
 			} else {
-				await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => completeJob(db, j.id), {
-					siteToken: "pipeline/prospective-index.ts:266",
-				});
+				const write: PendingWrite = {
+					kind: "completion",
+					job: j,
+					run: async () => {
+						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => completeJob(db, j.id), {
+							siteToken: "pipeline/prospective-index.ts:306",
+						});
+					},
+				};
+				pendingWrite = write;
+				if (!(await executePendingWrite(write))) return;
 				logger.debug("pipeline", "No hints generated (empty LLM response)", {
 					memoryId: payload.memoryId,
 				});
@@ -274,9 +318,17 @@ export function startHintsWorker(deps: {
 			if (job) {
 				const j = job;
 				const msg = e instanceof Error ? e.message : String(e);
-				await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg), {
-					siteToken: "pipeline/prospective-index.ts:277",
-				});
+				const write: PendingWrite = {
+					kind: "failure",
+					job: j,
+					run: async () => {
+						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg), {
+							siteToken: "pipeline/prospective-index.ts:325",
+						});
+					},
+				};
+				pendingWrite = write;
+				await executePendingWrite(write);
 				logger.warn("pipeline", "Hints worker job failed", {
 					jobId: j.id,
 					memoryId: j.memory_id,
@@ -287,9 +339,9 @@ export function startHintsWorker(deps: {
 			logger.warn("pipeline", "Hints worker tick failed", {
 				error: e instanceof Error ? e.message : String(e),
 			});
+		} finally {
+			schedule();
 		}
-
-		schedule();
 	}
 
 	function schedule(): void {

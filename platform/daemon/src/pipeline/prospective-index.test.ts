@@ -10,7 +10,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { PipelineHintsConfig } from "@signet/core";
 import { type MigrationDb, runMigrations } from "../../../core/src/migrations";
-import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
+import { DbWriteQueueFullError, type DbAccessor, type ReadDb, type WriteDb } from "../db-accessor";
 import { DEFAULT_PIPELINE_V2 } from "../memory-config";
 import { enqueueHintsJob, generateHints, startHintsWorker } from "./prospective-index";
 import type { LlmProvider } from "./provider";
@@ -551,6 +551,40 @@ describe("prospective-index", () => {
 			const hints = getHints(db, mid);
 			expect(hints.length).toBe(5);
 			expect(hints).toContain("Where does Caroline live now?");
+		});
+
+		it("retries completion after queue admission failure without re-leasing the job", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "Caroline moved from Portland to Seattle in 2019");
+			enqueueHintsJob(db as unknown as WriteDb, mid, "Caroline moved from Portland to Seattle in 2019");
+
+			let asyncWriteCalls = 0;
+			let completionAttempts = 0;
+			const flakyAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls >= 2) completionAttempts++;
+					if (asyncWriteCalls === 2) return Promise.reject(new DbWriteQueueFullError());
+					return accessor.withWriteTxAsync(fn);
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: flakyAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => getJob(db, mid)?.status === "completed", 2_000);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(asyncWriteCalls).toBe(3);
+			expect(completionAttempts).toBe(2);
+			expect(getJob(db, mid)?.attempts).toBe(1);
+			expect(getHints(db, mid)).toHaveLength(5);
 		});
 
 		it("writes hints to FTS5 index via triggers", async () => {
