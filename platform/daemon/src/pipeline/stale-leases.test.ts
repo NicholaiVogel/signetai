@@ -69,37 +69,41 @@ describe("recoverStaleLeases", () => {
 
 		const stale = db
 			.prepare(
-				`SELECT status, leased_at, failed_at, error
+				`SELECT status, leased_at, lease_token, failed_at, error
 				 FROM memory_jobs WHERE id = 'job-stale'`,
 			)
 			.get() as
 			| {
 					status: string;
 					leased_at: string | null;
+					lease_token: string | null;
 					failed_at: string | null;
 					error: string | null;
 			  }
 			| undefined;
 		expect(stale?.status).toBe("pending");
 		expect(stale?.leased_at).toBeNull();
+		expect(stale?.lease_token).toBeNull();
 		expect(stale?.failed_at).toBeNull();
 		expect(stale?.error).toBeNull();
 
 		const dead = db
 			.prepare(
-				`SELECT status, leased_at, failed_at, error
+				`SELECT status, leased_at, lease_token, failed_at, error
 				 FROM memory_jobs WHERE id = 'job-dead'`,
 			)
 			.get() as
 			| {
 					status: string;
 					leased_at: string | null;
+					lease_token: string | null;
 					failed_at: string | null;
 					error: string | null;
 			  }
 			| undefined;
 		expect(dead?.status).toBe("dead");
 		expect(dead?.leased_at).toBeNull();
+		expect(dead?.lease_token).toBeNull();
 		expect(dead?.failed_at).toBe(now);
 		expect(dead?.error).toBe("lease expired before completion");
 

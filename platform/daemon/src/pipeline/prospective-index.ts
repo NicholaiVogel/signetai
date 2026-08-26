@@ -35,6 +35,7 @@ interface HintJobRow {
 	readonly payload: string;
 	readonly attempts: number;
 	readonly max_attempts: number;
+	readonly lease_token: string;
 }
 
 interface HintPayload {
@@ -135,6 +136,7 @@ export async function generateHints(
 function leaseJob(db: WriteDb, maxAttempts: number): HintJobRow | null {
 	const now = new Date().toISOString();
 	const epoch = Math.floor(Date.now() / 1000);
+	const leaseToken = crypto.randomUUID();
 
 	const row = db
 		.prepare(
@@ -155,33 +157,36 @@ function leaseJob(db: WriteDb, maxAttempts: number): HintJobRow | null {
 
 	db.prepare(
 		`UPDATE memory_jobs
-		 SET status = 'leased', leased_at = ?, attempts = attempts + 1, updated_at = ?
+		 SET status = 'leased', leased_at = ?, lease_token = ?, attempts = attempts + 1, updated_at = ?
 		 WHERE id = ?`,
-	).run(now, now, row.id);
+	).run(now, leaseToken, now, row.id);
 
-	return { ...row, attempts: row.attempts + 1 };
+	return { ...row, attempts: row.attempts + 1, lease_token: leaseToken };
 }
 
-function completeJob(db: WriteDb, jobId: string): void {
+function completeJob(db: WriteDb, jobId: string, leaseToken: string): boolean {
 	const now = new Date().toISOString();
-	db.prepare(`UPDATE memory_jobs SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?`).run(
-		now,
-		now,
-		jobId,
-	);
+	const result = db
+		.prepare(
+			`UPDATE memory_jobs
+			 SET status = 'completed', completed_at = ?, leased_at = NULL, lease_token = NULL, updated_at = ?
+			 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+		)
+		.run(now, now, jobId, leaseToken);
+	return result.changes === 1;
 }
 
-function failJob(db: WriteDb, jobId: string, error: string): void {
+function failJob(db: WriteDb, jobId: string, leaseToken: string, error: string): void {
 	const now = new Date().toISOString();
 	db.prepare(
 		`UPDATE memory_jobs
 		 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
-		     leased_at = NULL, failed_at = ?, updated_at = ?,
+		     leased_at = NULL, lease_token = NULL, failed_at = ?, updated_at = ?,
 		     payload = CASE WHEN json_valid(payload)
 		                    THEN json_set(payload, '$.lastError', ?)
 		                    ELSE payload END
-		 WHERE id = ?`,
-	).run(now, now, error, jobId);
+		 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+	).run(now, now, error, jobId, leaseToken);
 }
 
 /**
@@ -189,26 +194,26 @@ function failJob(db: WriteDb, jobId: string, error: string): void {
  * failed. This is deliberately a single autocommit statement: it is the last
  * recovery boundary before the in-memory pending write is allowed to clear.
  */
-function recoverFailedJob(db: WriteDb, jobId: string, error: string): void {
+function recoverFailedJob(db: WriteDb, jobId: string, leaseToken: string, error: string): void {
 	const now = new Date().toISOString();
 	db.prepare(
 		`UPDATE memory_jobs
 		 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
-		     leased_at = NULL, failed_at = ?, updated_at = ?,
+		     leased_at = NULL, lease_token = NULL, failed_at = ?, updated_at = ?,
 		     payload = CASE WHEN json_valid(payload)
 		                    THEN json_set(payload, '$.lastError', ?)
 		                    ELSE payload END
-		 WHERE id = ? AND status = 'leased'`,
-	).run(now, now, error, jobId);
+		 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+	).run(now, now, error, jobId, leaseToken);
 }
 
-function releaseJob(db: WriteDb, jobId: string): void {
+function releaseJob(db: WriteDb, jobId: string, leaseToken: string): void {
 	const now = new Date().toISOString();
 	db.prepare(
 		`UPDATE memory_jobs
-		 SET status = 'pending', leased_at = NULL, updated_at = ?
-		 WHERE id = ? AND status = 'leased'`,
-	).run(now, jobId);
+		 SET status = 'pending', leased_at = NULL, lease_token = NULL, updated_at = ?
+		 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+	).run(now, jobId, leaseToken);
 }
 
 // ---------------------------------------------------------------------------
@@ -276,9 +281,12 @@ export function startHintsWorker(deps: {
 			kind: "recovery",
 			job,
 			run: async () => {
-				await accessor.withWriteDbAsync((db: import("../db-accessor").WriteDb) => recoverFailedJob(db, job.id, error), {
-					siteToken: "pipeline/prospective-index.ts:279",
-				});
+				await accessor.withWriteDbAsync(
+					(db: import("../db-accessor").WriteDb) => recoverFailedJob(db, job.id, job.lease_token, error),
+					{
+						siteToken: "pipeline/prospective-index.ts:284",
+					},
+				);
 			},
 			retryAt: 0,
 		};
@@ -289,9 +297,10 @@ export function startHintsWorker(deps: {
 			kind: "recovery",
 			job,
 			run: async () => {
-				await accessor.withWriteDbAsync((db: import("../db-accessor").WriteDb) => releaseJob(db, job.id), {
-					siteToken: "pipeline/prospective-index.ts:292",
-				});
+				await accessor.withWriteDbAsync(
+					(db: import("../db-accessor").WriteDb) => releaseJob(db, job.id, job.lease_token),
+					{ siteToken: "pipeline/prospective-index.ts:300" },
+				);
 			},
 			retryAt: 0,
 		};
@@ -325,8 +334,8 @@ export function startHintsWorker(deps: {
 					job: write.job,
 					run: async () => {
 						await accessor.withWriteTxAsync(
-							(db: import("../db-accessor").WriteDb) => failJob(db, write.job.id, message),
-							{ siteToken: "pipeline/prospective-index.ts:327" },
+							(db: import("../db-accessor").WriteDb) => failJob(db, write.job.id, write.job.lease_token, message),
+							{ siteToken: "pipeline/prospective-index.ts:336" },
 						);
 					},
 					retryAt: 0,
@@ -383,7 +392,7 @@ export function startHintsWorker(deps: {
 			}
 
 			job = await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => leaseJob(db, 3), {
-				siteToken: "pipeline/prospective-index.ts:385",
+				siteToken: "pipeline/prospective-index.ts:394",
 			});
 			if (!job) return;
 			const j = job;
@@ -401,8 +410,8 @@ export function startHintsWorker(deps: {
 					job: j,
 					run: async () => {
 						await accessor.withWriteTxAsync(
-							(db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"),
-							{ siteToken: "pipeline/prospective-index.ts:403" },
+							(db: import("../db-accessor").WriteDb) => failJob(db, j.id, j.lease_token, "invalid payload"),
+							{ siteToken: "pipeline/prospective-index.ts:412" },
 						);
 					},
 					retryAt: 0,
@@ -426,10 +435,12 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteTxAsync(
 							(db: import("../db-accessor").WriteDb) => {
-								writeHints(db, payload.memoryId, hints);
-								completeJob(db, j.id);
+								// Complete with a compare-and-set before writing derived hints.
+								// If a restart has re-leased this job, the stale worker must
+								// not publish results under its old lease.
+								if (completeJob(db, j.id, j.lease_token)) writeHints(db, payload.memoryId, hints);
 							},
-							{ siteToken: "pipeline/prospective-index.ts:427" },
+							{ siteToken: "pipeline/prospective-index.ts:436" },
 						);
 					},
 					retryAt: 0,
@@ -445,9 +456,12 @@ export function startHintsWorker(deps: {
 					kind: "completion",
 					job: j,
 					run: async () => {
-						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => completeJob(db, j.id), {
-							siteToken: "pipeline/prospective-index.ts:448",
-						});
+						await accessor.withWriteTxAsync(
+							(db: import("../db-accessor").WriteDb) => completeJob(db, j.id, j.lease_token),
+							{
+								siteToken: "pipeline/prospective-index.ts:459",
+							},
+						);
 					},
 					retryAt: 0,
 				};
@@ -468,9 +482,12 @@ export function startHintsWorker(deps: {
 						kind: "failure",
 						job: j,
 						run: async () => {
-							await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg), {
-								siteToken: "pipeline/prospective-index.ts:471",
-							});
+							await accessor.withWriteTxAsync(
+								(db: import("../db-accessor").WriteDb) => failJob(db, j.id, j.lease_token, msg),
+								{
+									siteToken: "pipeline/prospective-index.ts:485",
+								},
+							);
 						},
 						retryAt: 0,
 					};
@@ -573,7 +590,7 @@ export function startHintsWorker(deps: {
 			.withWriteTxAsync(
 				(db: import("../db-accessor").WriteDb) =>
 					recoverStaleLeases(db, { now: new Date().toISOString(), jobType: "prospective_index" }),
-				{ siteToken: "pipeline/prospective-index.ts:573" },
+				{ siteToken: "pipeline/prospective-index.ts:590" },
 			)
 			.then((recovered) => {
 				if (recovered.total > 0) {

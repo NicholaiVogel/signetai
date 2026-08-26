@@ -104,12 +104,13 @@ function getJob(
 			status: string;
 			attempts: number;
 			leased_at: string | null;
+			lease_token: string | null;
 			failed_at: string | null;
 	  }
 	| undefined {
 	return db
 		.prepare(
-			`SELECT status, attempts, leased_at, failed_at FROM memory_jobs
+			`SELECT status, attempts, leased_at, lease_token, failed_at FROM memory_jobs
 			 WHERE memory_id = ? AND job_type = 'prospective_index'`,
 		)
 		.get(memoryId) as
@@ -117,6 +118,7 @@ function getJob(
 				status: string;
 				attempts: number;
 				leased_at: string | null;
+				lease_token: string | null;
 				failed_at: string | null;
 		  }
 		| undefined;
@@ -528,6 +530,85 @@ describe("prospective-index", () => {
 
 			expect(calls).toBe(1);
 			expect(getJob(db, memoryId)?.attempts).toBe(1);
+		});
+
+		it("fences a stale worker release after startup recovery re-leases a job", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "memory for a restart lease race");
+			enqueueHintsJob(db as unknown as WriteDb, mid, "memory for a restart lease race");
+
+			let oldStarted = false;
+			let freshStarted = false;
+			let releaseOld: () => void = () => undefined;
+			let releaseFresh: () => void = () => undefined;
+			const oldGate = new Promise<void>((resolve) => {
+				releaseOld = () => resolve();
+			});
+			const freshGate = new Promise<void>((resolve) => {
+				releaseFresh = () => resolve();
+			});
+			const oldProvider: LlmProvider = {
+				name: "mock-old-worker",
+				async generate() {
+					oldStarted = true;
+					await oldGate;
+					return "Where does the old worker's hint belong?";
+				},
+				async available() {
+					return true;
+				},
+			};
+			const freshProvider: LlmProvider = {
+				name: "mock-fresh-worker",
+				async generate() {
+					freshStarted = true;
+					await freshGate;
+					return "Where does the replacement worker's hint belong?";
+				},
+				async available() {
+					return true;
+				},
+			};
+
+			const old = startHintsWorker({ accessor, provider: oldProvider, pipelineCfg: pipelineCfg() });
+			try {
+				await waitFor(() => oldStarted && getJob(db, mid)?.status === "leased", 2_000);
+				await old.stop();
+
+				const fresh = startHintsWorker({
+					accessor,
+					provider: freshProvider,
+					pipelineCfg: pipelineCfg(),
+					recoverLeasesOnStart: true,
+				});
+				try {
+					await waitFor(
+						() => freshStarted && getJob(db, mid)?.status === "leased" && getJob(db, mid)?.attempts === 2,
+						2_000,
+					);
+					const replacement = getJob(db, mid);
+					expect(replacement?.lease_token).toBeTruthy();
+
+					releaseOld();
+					await new Promise((resolve) => setTimeout(resolve, 50));
+					expect(getJob(db, mid)).toMatchObject({
+						status: "leased",
+						attempts: 2,
+						lease_token: replacement?.lease_token,
+					});
+
+					releaseFresh();
+					await waitFor(() => getJob(db, mid)?.status === "completed", 2_000);
+				} finally {
+					releaseFresh();
+					await fresh.stop();
+				}
+			} finally {
+				releaseOld();
+				await old.stop();
+			}
+
+			expect(getHints(db, mid)).toEqual(["Where does the replacement worker's hint belong?"]);
 		});
 
 		it("processes a job and writes hints to memory_hints", async () => {
