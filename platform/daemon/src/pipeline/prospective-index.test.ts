@@ -608,7 +608,7 @@ describe("prospective-index", () => {
 			const handle = startHintsWorker({
 				accessor: flakyAccessor,
 				provider: cleanProvider(),
-				pipelineCfg: pipelineCfg(),
+				pipelineCfg: pipelineCfg({ ...HINTS_CFG, poll: 1000 }),
 			});
 			try {
 				await waitFor(() => asyncWriteCalls === 2 && getJob(db, mid)?.status === "leased", 2_000);
@@ -784,6 +784,87 @@ describe("prospective-index", () => {
 			expect(recoveryAttempts).toBeGreaterThan(0);
 			expect(getJob(db, firstId)).toMatchObject({ status: "leased", attempts: 1 });
 			expect(getJob(db, secondId)).toMatchObject({ status: "pending", attempts: 0 });
+		});
+
+		it("releases a leased job when shutdown interrupts hint generation", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "memory with interrupted hint generation");
+			enqueueHintsJob(db as unknown as WriteDb, mid, "memory with interrupted hint generation");
+
+			let generationStarted = false;
+			let releaseGeneration: () => void = () => undefined;
+			const generationGate = new Promise<void>((resolve) => {
+				releaseGeneration = () => resolve();
+			});
+			const provider: LlmProvider = {
+				name: "mock-interrupted-generation",
+				async generate() {
+					generationStarted = true;
+					await generationGate;
+					return "Where does this memory matter later?";
+				},
+				async available() {
+					return true;
+				},
+			};
+
+			let recoveryAttempts = 0;
+			const flakyRecoveryAccessor: DbAccessor = {
+				...accessor,
+				withWriteDbAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					recoveryAttempts++;
+					if (recoveryAttempts === 1) return Promise.reject(new DbWriteQueueFullError());
+					return accessor.withWriteDbAsync(fn);
+				},
+			};
+			const handle = startHintsWorker({ accessor: flakyRecoveryAccessor, provider, pipelineCfg: pipelineCfg() });
+			try {
+				await waitFor(() => generationStarted, 2_000);
+				const startedAt = Date.now();
+				await handle.stop();
+				expect(Date.now() - startedAt).toBeLessThan(HINTS_WORKER_STOP_GRACE_MS + 500);
+				releaseGeneration();
+				await waitFor(() => getJob(db, mid)?.status === "pending", 2_000);
+			} finally {
+				releaseGeneration();
+				await handle.stop();
+			}
+
+			expect(getJob(db, mid)).toMatchObject({ status: "pending", attempts: 1 });
+			expect(recoveryAttempts).toBe(2);
+			expect(getHints(db, mid)).toHaveLength(0);
+		});
+
+		it("bounds shutdown while an in-flight write never settles", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "memory with a stuck completion");
+			enqueueHintsJob(db as unknown as WriteDb, mid, "memory with a stuck completion");
+
+			let asyncWriteCalls = 0;
+			const stuckAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls === 2) return new Promise<T>(() => {});
+					return accessor.withWriteTxAsync(fn);
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: stuckAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => asyncWriteCalls === 2, 2_000);
+				const startedAt = Date.now();
+				await handle.stop();
+				expect(Date.now() - startedAt).toBeLessThan(HINTS_WORKER_STOP_GRACE_MS + 500);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(getJob(db, mid)).toMatchObject({ status: "leased", attempts: 1 });
 		});
 
 		it("writes hints to FTS5 index via triggers", async () => {

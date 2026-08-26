@@ -12,6 +12,7 @@ import { DbWriteQueueFullError, type DbAccessor, type WriteDb } from "../db-acce
 import { logger } from "../logger";
 import type { PipelineV2Config } from "../memory-config";
 import { isSystemPressureHigh } from "../system-pressure";
+import { recoverStaleLeases } from "./stale-leases";
 
 // A transient write can usually clear during one or two queue turns, but a
 // shutdown must not wait forever for an unavailable database. If recovery is
@@ -201,6 +202,15 @@ function recoverFailedJob(db: WriteDb, jobId: string, error: string): void {
 	).run(now, now, error, jobId);
 }
 
+function releaseJob(db: WriteDb, jobId: string): void {
+	const now = new Date().toISOString();
+	db.prepare(
+		`UPDATE memory_jobs
+		 SET status = 'pending', leased_at = NULL, updated_at = ?
+		 WHERE id = ? AND status = 'leased'`,
+	).run(now, jobId);
+}
+
 // ---------------------------------------------------------------------------
 // Persist hints
 // ---------------------------------------------------------------------------
@@ -239,6 +249,7 @@ export function startHintsWorker(deps: {
 	readonly accessor: DbAccessor;
 	readonly provider: LlmProvider;
 	readonly pipelineCfg: PipelineV2Config;
+	readonly recoverLeasesOnStart?: boolean;
 }): HintsWorkerHandle {
 	const { accessor, provider, pipelineCfg } = deps;
 	const rawCfg = pipelineCfg.hints;
@@ -246,6 +257,7 @@ export function startHintsWorker(deps: {
 		return { stop: async () => {}, running: false };
 	}
 	const cfg = rawCfg;
+	const recoverLeasesOnStart = deps.recoverLeasesOnStart === true;
 
 	let running = true;
 	let timer: ReturnType<typeof setTimeout> | null = null;
@@ -259,8 +271,34 @@ export function startHintsWorker(deps: {
 	};
 	let pendingWrite: PendingWrite | null = null;
 
-	async function executePendingWrite(write: PendingWrite): Promise<boolean> {
-		if (write.retryAt > Date.now()) return false;
+	function makeRecoveryWrite(job: HintJobRow, error: string): PendingWrite {
+		return {
+			kind: "recovery",
+			job,
+			run: async () => {
+				await accessor.withWriteDbAsync((db: import("../db-accessor").WriteDb) => recoverFailedJob(db, job.id, error), {
+					siteToken: "pipeline/prospective-index.ts:279",
+				});
+			},
+			retryAt: 0,
+		};
+	}
+
+	function makeLeaseReleaseWrite(job: HintJobRow): PendingWrite {
+		return {
+			kind: "recovery",
+			job,
+			run: async () => {
+				await accessor.withWriteDbAsync((db: import("../db-accessor").WriteDb) => releaseJob(db, job.id), {
+					siteToken: "pipeline/prospective-index.ts:292",
+				});
+			},
+			retryAt: 0,
+		};
+	}
+
+	async function executePendingWrite(write: PendingWrite, ignoreRetryAt = false): Promise<boolean> {
+		if (!ignoreRetryAt && write.retryAt > Date.now()) return false;
 		try {
 			await write.run();
 			if (pendingWrite === write) pendingWrite = null;
@@ -288,7 +326,7 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteTxAsync(
 							(db: import("../db-accessor").WriteDb) => failJob(db, write.job.id, message),
-							{ siteToken: "pipeline/prospective-index.ts:289" },
+							{ siteToken: "pipeline/prospective-index.ts:327" },
 						);
 					},
 					retryAt: 0,
@@ -299,17 +337,7 @@ export function startHintsWorker(deps: {
 			}
 			if (write.kind === "failure") {
 				const message = error instanceof Error ? error.message : String(error);
-				const recovery: PendingWrite = {
-					kind: "recovery",
-					job: write.job,
-					run: async () => {
-						await accessor.withWriteDbAsync(
-							(db: import("../db-accessor").WriteDb) => recoverFailedJob(db, write.job.id, message),
-							{ siteToken: "pipeline/prospective-index.ts:299" },
-						);
-					},
-					retryAt: 0,
-				};
+				const recovery = makeRecoveryWrite(write.job, message);
 				pendingWrite = recovery;
 				return executePendingWrite(recovery);
 			}
@@ -337,6 +365,12 @@ export function startHintsWorker(deps: {
 		}
 	}
 
+	async function releaseLeasedJob(job: HintJobRow): Promise<void> {
+		const release = makeLeaseReleaseWrite(job);
+		pendingWrite = release;
+		await executePendingWrite(release);
+	}
+
 	async function tick(): Promise<void> {
 		if (!running) return;
 		let job: HintJobRow | null = null;
@@ -349,10 +383,14 @@ export function startHintsWorker(deps: {
 			}
 
 			job = await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => leaseJob(db, 3), {
-				siteToken: "pipeline/prospective-index.ts:351",
+				siteToken: "pipeline/prospective-index.ts:385",
 			});
 			if (!job) return;
 			const j = job;
+			if (!running) {
+				await releaseLeasedJob(j);
+				return;
+			}
 
 			let payload: HintPayload;
 			try {
@@ -364,7 +402,7 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteTxAsync(
 							(db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"),
-							{ siteToken: "pipeline/prospective-index.ts:365" },
+							{ siteToken: "pipeline/prospective-index.ts:403" },
 						);
 					},
 					retryAt: 0,
@@ -376,6 +414,10 @@ export function startHintsWorker(deps: {
 
 			// Generate hints outside of any db lock
 			const hints = await generateHints(provider, payload.content, cfg);
+			if (!running) {
+				await releaseLeasedJob(j);
+				return;
+			}
 
 			if (hints.length > 0) {
 				const write: PendingWrite = {
@@ -387,7 +429,7 @@ export function startHintsWorker(deps: {
 								writeHints(db, payload.memoryId, hints);
 								completeJob(db, j.id);
 							},
-							{ siteToken: "pipeline/prospective-index.ts:385" },
+							{ siteToken: "pipeline/prospective-index.ts:427" },
 						);
 					},
 					retryAt: 0,
@@ -404,7 +446,7 @@ export function startHintsWorker(deps: {
 					job: j,
 					run: async () => {
 						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => completeJob(db, j.id), {
-							siteToken: "pipeline/prospective-index.ts:406",
+							siteToken: "pipeline/prospective-index.ts:448",
 						});
 					},
 					retryAt: 0,
@@ -419,30 +461,41 @@ export function startHintsWorker(deps: {
 			if (job) {
 				const j = job;
 				const msg = e instanceof Error ? e.message : String(e);
-				const write: PendingWrite = {
-					kind: "failure",
-					job: j,
-					run: async () => {
-						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg), {
-							siteToken: "pipeline/prospective-index.ts:426",
-						});
-					},
-					retryAt: 0,
-				};
-				pendingWrite = write;
-				await executePendingWrite(write);
-				logger.warn("pipeline", "Hints worker job failed", {
-					jobId: j.id,
-					memoryId: j.memory_id,
-					error: msg,
-					attempt: j.attempts,
-				});
+				if (!running) {
+					await releaseLeasedJob(j);
+				} else {
+					const write: PendingWrite = {
+						kind: "failure",
+						job: j,
+						run: async () => {
+							await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg), {
+								siteToken: "pipeline/prospective-index.ts:471",
+							});
+						},
+						retryAt: 0,
+					};
+					pendingWrite = write;
+					await executePendingWrite(write);
+					logger.warn("pipeline", "Hints worker job failed", {
+						jobId: j.id,
+						memoryId: j.memory_id,
+						error: msg,
+						attempt: j.attempts,
+					});
+				}
 			}
 			logger.warn("pipeline", "Hints worker tick failed", {
 				error: e instanceof Error ? e.message : String(e),
 			});
 		} finally {
-			schedule();
+			if (running) {
+				schedule();
+			} else if (pendingWrite) {
+				// A bounded stop may return while inference is still unwinding. If
+				// that unwind creates a deferred lease recovery, keep draining it
+				// after the tick settles so a pause/resume cannot strand the lease.
+				startDeferredDrain();
+			}
 		}
 	}
 
@@ -462,16 +515,19 @@ export function startHintsWorker(deps: {
 		}, cfg.poll);
 	}
 
-	async function drainPendingWrite(deadlineAt: number): Promise<void> {
+	async function drainPendingWrite(deadlineAt: number, logExpired = true): Promise<void> {
 		while (pendingWrite && Date.now() < deadlineAt) {
 			const write = pendingWrite;
-			const waitMs = Math.min(Math.max(0, write.retryAt - Date.now()), Math.max(0, deadlineAt - Date.now()));
+			// Shutdown has its own short grace window. Do not inherit the normal
+			// poll cadence (production clamps it to 1s), or a deferred write would
+			// consume the entire drain without a single retry attempt.
+			const waitMs = Math.min(Math.max(0, write.retryAt - Date.now()), 25, Math.max(0, deadlineAt - Date.now()));
 			if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
 			if (pendingWrite !== write) continue;
 			if (Date.now() >= deadlineAt) break;
-			await executePendingWrite(write);
+			if (!(await waitForPromiseOrDeadline(executePendingWrite(write, true), deadlineAt))) break;
 		}
-		if (pendingWrite) {
+		if (pendingWrite && logExpired) {
 			logger.warn("pipeline", "Hints worker shutdown drain expired", {
 				jobId: pendingWrite.job.id,
 				memoryId: pendingWrite.job.memory_id,
@@ -481,8 +537,62 @@ export function startHintsWorker(deps: {
 		}
 	}
 
+	function startDeferredDrain(): void {
+		void drainPendingWrite(Date.now() + HINTS_WORKER_STOP_GRACE_MS, false).catch((error) => {
+			logger.warn("pipeline", "Hints worker post-stop recovery drain failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+	}
+
+	async function waitForPromiseOrDeadline(promise: Promise<unknown>, deadlineAt: number): Promise<boolean> {
+		let settled = false;
+		const completion = promise.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		const remainingMs = Math.max(0, deadlineAt - Date.now());
+		if (remainingMs > 0) {
+			let timeout: ReturnType<typeof setTimeout> | null = null;
+			const deadline = new Promise<void>((resolve) => {
+				timeout = setTimeout(resolve, remainingMs);
+			});
+			await Promise.race([completion, deadline]);
+			if (timeout !== null) clearTimeout(timeout);
+		}
+		return settled;
+	}
+
 	// Start
-	schedule();
+	if (recoverLeasesOnStart) {
+		void accessor
+			.withWriteTxAsync(
+				(db: import("../db-accessor").WriteDb) =>
+					recoverStaleLeases(db, { now: new Date().toISOString(), jobType: "prospective_index" }),
+				{ siteToken: "pipeline/prospective-index.ts:573" },
+			)
+			.then((recovered) => {
+				if (recovered.total > 0) {
+					logger.info("pipeline", "Recovered prospective index leases before worker start", {
+						count: recovered.total,
+					});
+				}
+			})
+			.catch((error) => {
+				logger.warn("pipeline", "Prospective index lease recovery before worker start failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			})
+			.finally(() => {
+				if (running) schedule();
+			});
+	} else {
+		schedule();
+	}
 
 	return {
 		async stop() {
@@ -493,8 +603,17 @@ export function startHintsWorker(deps: {
 					clearTimeout(timer);
 					timer = null;
 				}
-				if (tickPromise) await tickPromise;
-				await drainPendingWrite(Date.now() + HINTS_WORKER_STOP_GRACE_MS);
+				const deadlineAt = Date.now() + HINTS_WORKER_STOP_GRACE_MS;
+				const tickAtStop = tickPromise;
+				if (tickAtStop && !(await waitForPromiseOrDeadline(tickAtStop, deadlineAt))) {
+					logger.warn("pipeline", "Hints worker shutdown tick still in flight", {
+						graceMs: HINTS_WORKER_STOP_GRACE_MS,
+						pendingWrite: pendingWrite?.kind ?? null,
+					});
+					return;
+				}
+				await drainPendingWrite(deadlineAt);
+				if (pendingWrite?.retryAt && pendingWrite.retryAt > Date.now()) startDeferredDrain();
 			})();
 			return stopPromise;
 		},

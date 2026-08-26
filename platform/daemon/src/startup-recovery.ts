@@ -24,6 +24,7 @@ export interface StartupRecoveryReport {
 	readonly walCheckpointed: boolean;
 	readonly databaseIntegrity: DatabaseIntegrityStatus;
 	readonly documentLeasesRecovered: number;
+	readonly prospectiveLeasesRecovered: number;
 	readonly deadJobsPurged: number;
 	readonly stagingRowsCleaned: number;
 	readonly orphanedPassesSwept: number;
@@ -74,7 +75,7 @@ function yieldToEventLoop(): Promise<void> {
 }
 
 async function writeBatch<Result>(accessor: DbAccessor, processBatch: (db: WriteDb) => Result): Promise<Result> {
-	return accessor.withWriteTxAsync(processBatch, { siteToken: "startup-recovery.ts:77" });
+	return accessor.withWriteTxAsync(processBatch, { siteToken: "startup-recovery.ts:78" });
 }
 
 /**
@@ -97,7 +98,7 @@ async function drainBatchesAsync<Item>(
 	while (processed < maxTotal) {
 		const limit = Math.min(BATCH_SIZE, maxTotal - processed);
 		const batch = await accessor.withReadDbAsync(async (db) => fetchBatch(db, limit), {
-			siteToken: "startup-recovery.ts:99",
+			siteToken: "startup-recovery.ts:100",
 		});
 		if (!batch || batch.length === 0) return processed;
 		await writeBatch(accessor, (db) => processBatch(db, batch));
@@ -154,6 +155,7 @@ async function runOwnerStartupRecovery(owner: DbOwnerClient): Promise<StartupRec
 	};
 
 	let documentLeasesRecovered = 0;
+	let prospectiveLeasesRecovered = 0;
 	try {
 		const now = new Date().toISOString();
 		const results = await ownerTransaction(
@@ -176,6 +178,21 @@ async function runOwnerStartupRecovery(owner: DbOwnerClient): Promise<StartupRec
 					[now],
 				),
 				ownerRunStatement(
+					`UPDATE memory_jobs
+					 SET status = 'dead', leased_at = NULL, failed_at = ?,
+					     error = COALESCE(error, ?), updated_at = ?
+					 WHERE status = 'leased' AND job_type = 'prospective_index'
+					   AND attempts >= max_attempts`,
+					[now, "lease expired before completion", now],
+				),
+				ownerRunStatement(
+					`UPDATE memory_jobs
+					 SET status = 'pending', leased_at = NULL, updated_at = ?
+					 WHERE status = 'leased' AND job_type = 'prospective_index'
+					   AND attempts < max_attempts`,
+					[now],
+				),
+				ownerRunStatement(
 					`UPDATE documents
 					 SET status = 'failed',
 					     error = COALESCE(error, ?), updated_at = ?
@@ -187,15 +204,21 @@ async function runOwnerStartupRecovery(owner: DbOwnerClient): Promise<StartupRec
 					["Document ingest lease expired before completion", now, now],
 				),
 			],
-			{ estimatedWorkUnits: 3 },
+			{ estimatedWorkUnits: 5 },
 		);
 		documentLeasesRecovered = ownerChanges(results[0]) + ownerChanges(results[1]);
+		prospectiveLeasesRecovered = ownerChanges(results[2]) + ownerChanges(results[3]);
 		if (documentLeasesRecovered > 0) {
 			logger.info("startup-recovery", "Recovered document ingest leases through the DB owner", {
 				count: documentLeasesRecovered,
 			});
 		}
-		logProgress("document-leases", documentLeasesRecovered);
+		if (prospectiveLeasesRecovered > 0) {
+			logger.info("startup-recovery", "Recovered prospective index leases through the DB owner", {
+				count: prospectiveLeasesRecovered,
+			});
+		}
+		logProgress("document-leases", documentLeasesRecovered + prospectiveLeasesRecovered);
 	} catch (error) {
 		logger.warn("startup-recovery", "Owner document lease recovery failed", {
 			error: error instanceof Error ? error.message : String(error),
@@ -356,6 +379,7 @@ async function runOwnerStartupRecovery(owner: DbOwnerClient): Promise<StartupRec
 		walCheckpointed: false,
 		databaseIntegrity: PENDING_INTEGRITY,
 		documentLeasesRecovered,
+		prospectiveLeasesRecovered,
 		deadJobsPurged,
 		stagingRowsCleaned,
 		orphanedPassesSwept,
@@ -370,6 +394,7 @@ function pendingReport(): StartupRecoveryReport {
 		walCheckpointed: false,
 		databaseIntegrity: PENDING_INTEGRITY,
 		documentLeasesRecovered: 0,
+		prospectiveLeasesRecovered: 0,
 		deadJobsPurged: 0,
 		stagingRowsCleaned: 0,
 		orphanedPassesSwept: 0,
@@ -417,12 +442,14 @@ async function runStartupRecoveryInternal(accessor: DbAccessor, owner?: DbOwnerC
 	logger.info("startup-recovery", "Running startup recovery asynchronously");
 
 	let documentLeasesRecovered = 0;
+	let prospectiveLeasesRecovered = 0;
 	try {
 		const now = new Date().toISOString();
-		documentLeasesRecovered = await writeBatch(accessor, (db) => {
+		const leaseRecovery = await writeBatch(accessor, (db) => {
 			// The daemon lock is held before recovery starts, so these leases belong
 			// to a process that is no longer alive.
 			const recovered = recoverStaleLeases(db, { now, jobType: "document_ingest" });
+			const prospectiveRecovered = recoverStaleLeases(db, { now, jobType: "prospective_index" });
 			if (recovered.dead > 0) {
 				db.prepare(
 					`UPDATE documents
@@ -439,11 +466,21 @@ async function runStartupRecoveryInternal(accessor: DbAccessor, owner?: DbOwnerC
 					   AND status != 'deleted'`,
 				).run("Document ingest lease expired before completion", now, now);
 			}
-			return recovered.total;
+			return {
+				document: recovered.total,
+				prospective: prospectiveRecovered.total,
+			};
 		});
+		documentLeasesRecovered = leaseRecovery.document;
+		prospectiveLeasesRecovered = leaseRecovery.prospective;
 		if (documentLeasesRecovered > 0) {
 			logger.info("startup-recovery", "Recovered document ingest leases", {
 				count: documentLeasesRecovered,
+			});
+		}
+		if (prospectiveLeasesRecovered > 0) {
+			logger.info("startup-recovery", "Recovered prospective index leases", {
+				count: prospectiveLeasesRecovered,
 			});
 		}
 	} catch (err) {
@@ -492,7 +529,7 @@ async function runStartupRecoveryInternal(accessor: DbAccessor, owner?: DbOwnerC
 					| undefined;
 				return state?.state === "building";
 			},
-			{ siteToken: "startup-recovery.ts:484" },
+			{ siteToken: "startup-recovery.ts:521" },
 		);
 
 		if (migrationInProgress) {
@@ -575,6 +612,7 @@ async function runStartupRecoveryInternal(accessor: DbAccessor, owner?: DbOwnerC
 		walCheckpointed: false,
 		databaseIntegrity: PENDING_INTEGRITY,
 		documentLeasesRecovered,
+		prospectiveLeasesRecovered,
 		deadJobsPurged,
 		stagingRowsCleaned,
 		orphanedPassesSwept,
@@ -583,7 +621,12 @@ async function runStartupRecoveryInternal(accessor: DbAccessor, owner?: DbOwnerC
 	};
 
 	const totalCleaned =
-		documentLeasesRecovered + deadJobsPurged + stagingRowsCleaned + orphanedPassesSwept + acpDeliveriesReconciled;
+		documentLeasesRecovered +
+		prospectiveLeasesRecovered +
+		deadJobsPurged +
+		stagingRowsCleaned +
+		orphanedPassesSwept +
+		acpDeliveriesReconciled;
 	if (totalCleaned > 0) {
 		logger.info("startup-recovery", "Asynchronous recovery complete", { ...report });
 	} else {

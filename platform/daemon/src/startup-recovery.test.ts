@@ -133,7 +133,7 @@ describe("runStartupRecovery", () => {
 		}
 	});
 
-	it("recovers every document lease during startup without touching other job types", async () => {
+	it("recovers every startup lease and updates only document state for document jobs", async () => {
 		const now = Date.now();
 		const createdAt = new Date(now - 20 * 60 * 1000).toISOString();
 		const staleAt = new Date(now - 10 * 60 * 1000).toISOString();
@@ -174,6 +174,7 @@ describe("runStartupRecovery", () => {
 		const report = await runStartupRecoveryAsync(getDbAccessor());
 
 		expect(report.documentLeasesRecovered).toBe(3);
+		expect(report.prospectiveLeasesRecovered).toBe(1);
 		const statuses = getDbAccessor().withReadDb(
 			(db) =>
 				db.prepare("SELECT id, status, leased_at FROM memory_jobs ORDER BY id").all() as Array<{
@@ -186,7 +187,7 @@ describe("runStartupRecovery", () => {
 			{ id: "document-exhausted", status: "dead", leased_at: null },
 			{ id: "document-fresh", status: "pending", leased_at: null },
 			{ id: "document-stale", status: "pending", leased_at: null },
-			{ id: "other-stale", status: "leased", leased_at: staleAt },
+			{ id: "other-stale", status: "pending", leased_at: null },
 		]);
 		const documents = getDbAccessor().withReadDb(
 			(db) =>
