@@ -45,6 +45,9 @@ function makeAccessor(db: Database): DbAccessor {
 				}
 			});
 		},
+		withWriteDbAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+			return Promise.resolve().then(() => fn(db as unknown as WriteDb));
+		},
 		withReadDb<T>(fn: (db: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
 		},
@@ -623,15 +626,19 @@ describe("prospective-index", () => {
 			expect(asyncWriteCalls).toBe(5);
 		});
 
-		it("does not retry a terminal failure transition", async () => {
-			const mid = crypto.randomUUID();
-			insertMemory(db, mid, "terminally unavailable memory");
+		it("recovers a leased job when its failure transition fails", async () => {
+			const firstId = crypto.randomUUID();
+			const secondId = crypto.randomUUID();
+			insertMemory(db, firstId, "terminally unavailable memory");
+			insertMemory(db, secondId, "memory after lease recovery");
 			accessor.withWriteTx((wdb) => {
-				enqueueHintsJob(wdb, mid, "terminally unavailable memory");
+				enqueueHintsJob(wdb, firstId, "terminally unavailable memory");
+				enqueueHintsJob(wdb, secondId, "memory after lease recovery");
 			});
 
 			let asyncWriteCalls = 0;
 			let failureTransitionAttempts = 0;
+			let recoveryAttempts = 0;
 			const unavailableAccessor: DbAccessor = {
 				...accessor,
 				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
@@ -643,6 +650,10 @@ describe("prospective-index", () => {
 					}
 					return accessor.withWriteTxAsync(fn);
 				},
+				withWriteDbAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					recoveryAttempts++;
+					return accessor.withWriteDbAsync(fn);
+				},
 			};
 
 			const handle = startHintsWorker({
@@ -651,15 +662,16 @@ describe("prospective-index", () => {
 				pipelineCfg: pipelineCfg(),
 			});
 			try {
-				await waitFor(() => failureTransitionAttempts === 1, 2_000);
-				await new Promise((resolve) => setTimeout(resolve, 100));
+				await waitFor(() => getJob(db, secondId)?.status === "completed", 2_000);
 			} finally {
 				await handle.stop();
 			}
 
 			expect(failureTransitionAttempts).toBe(1);
-			expect(asyncWriteCalls).toBeGreaterThan(3);
-			expect(getJob(db, mid)?.status).toBe("leased");
+			expect(recoveryAttempts).toBe(1);
+			expect(getJob(db, firstId)).toMatchObject({ status: "pending", attempts: 1 });
+			expect(getJob(db, firstId)?.leased_at).toBeNull();
+			expect(getJob(db, secondId)).toMatchObject({ status: "completed", attempts: 1 });
 		});
 
 		it("writes hints to FTS5 index via triggers", async () => {

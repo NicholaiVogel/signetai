@@ -169,9 +169,25 @@ function failJob(db: WriteDb, jobId: string, error: string): void {
 	db.prepare(
 		`UPDATE memory_jobs
 		 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
-		     failed_at = ?, updated_at = ?,
+		     leased_at = NULL, failed_at = ?, updated_at = ?,
 		     payload = json_set(COALESCE(payload, '{}'), '$.lastError', ?)
 		 WHERE id = ?`,
+	).run(now, now, error, jobId);
+}
+
+/**
+ * Release a leased job without relying on the transaction callback that just
+ * failed. This is deliberately a single autocommit statement: it is the last
+ * recovery boundary before the in-memory pending write is allowed to clear.
+ */
+function recoverFailedJob(db: WriteDb, jobId: string, error: string): void {
+	const now = new Date().toISOString();
+	db.prepare(
+		`UPDATE memory_jobs
+		 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
+		     leased_at = NULL, failed_at = ?, updated_at = ?,
+		     payload = json_set(COALESCE(payload, '{}'), '$.lastError', ?)
+		 WHERE id = ? AND status = 'leased'`,
 	).run(now, now, error, jobId);
 }
 
@@ -224,13 +240,15 @@ export function startHintsWorker(deps: {
 	let running = true;
 	let timer: ReturnType<typeof setTimeout> | null = null;
 	type PendingWrite = {
-		readonly kind: "completion" | "failure";
+		readonly kind: "completion" | "failure" | "recovery";
 		readonly job: HintJobRow;
 		readonly run: () => Promise<void>;
+		readonly retryAt: number;
 	};
 	let pendingWrite: PendingWrite | null = null;
 
 	async function executePendingWrite(write: PendingWrite): Promise<boolean> {
+		if (write.retryAt > Date.now()) return false;
 		try {
 			await write.run();
 			if (pendingWrite === write) pendingWrite = null;
@@ -238,6 +256,9 @@ export function startHintsWorker(deps: {
 		} catch (error) {
 			const retryable = isRetryableWriteAdmissionError(error);
 			if (retryable) {
+				if (pendingWrite === write) {
+					pendingWrite = { ...write, retryAt: Date.now() + Math.max(cfg.poll, 25) };
+				}
 				logger.warn("pipeline", "Hints worker write admission deferred", {
 					jobId: write.job.id,
 					memoryId: write.job.memory_id,
@@ -255,12 +276,41 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteTxAsync(
 							(db: import("../db-accessor").WriteDb) => failJob(db, write.job.id, message),
-							{ siteToken: "pipeline/prospective-index.ts:256" },
+							{ siteToken: "pipeline/prospective-index.ts:277" },
 						);
 					},
+					retryAt: 0,
 				};
 				pendingWrite = failure;
 				return executePendingWrite(failure);
+			}
+			if (write.kind === "failure") {
+				const message = error instanceof Error ? error.message : String(error);
+				const recovery: PendingWrite = {
+					kind: "recovery",
+					job: write.job,
+					run: async () => {
+						await accessor.withWriteDbAsync(
+							(db: import("../db-accessor").WriteDb) => recoverFailedJob(db, write.job.id, message),
+							{ siteToken: "pipeline/prospective-index.ts:293" },
+						);
+					},
+					retryAt: 0,
+				};
+				pendingWrite = recovery;
+				return executePendingWrite(recovery);
+			}
+			if (write.kind === "recovery") {
+				if (pendingWrite === write) {
+					pendingWrite = { ...write, retryAt: Date.now() + Math.max(cfg.poll, 25) };
+				}
+				logger.warn("pipeline", "Hints worker lease recovery deferred", {
+					jobId: write.job.id,
+					memoryId: write.job.memory_id,
+					retryable: false,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
 			}
 			if (pendingWrite === write) pendingWrite = null;
 			logger.warn("pipeline", "Hints worker write admission failed", {
@@ -286,7 +336,7 @@ export function startHintsWorker(deps: {
 			}
 
 			job = await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => leaseJob(db, 3), {
-				siteToken: "pipeline/prospective-index.ts:288",
+				siteToken: "pipeline/prospective-index.ts:338",
 			});
 			if (!job) return;
 			const j = job;
@@ -301,9 +351,10 @@ export function startHintsWorker(deps: {
 					run: async () => {
 						await accessor.withWriteTxAsync(
 							(db: import("../db-accessor").WriteDb) => failJob(db, j.id, "invalid payload"),
-							{ siteToken: "pipeline/prospective-index.ts:302" },
+							{ siteToken: "pipeline/prospective-index.ts:352" },
 						);
 					},
+					retryAt: 0,
 				};
 				pendingWrite = write;
 				await executePendingWrite(write);
@@ -323,9 +374,10 @@ export function startHintsWorker(deps: {
 								writeHints(db, payload.memoryId, hints);
 								completeJob(db, j.id);
 							},
-							{ siteToken: "pipeline/prospective-index.ts:321" },
+							{ siteToken: "pipeline/prospective-index.ts:372" },
 						);
 					},
+					retryAt: 0,
 				};
 				pendingWrite = write;
 				if (!(await executePendingWrite(write))) return;
@@ -339,9 +391,10 @@ export function startHintsWorker(deps: {
 					job: j,
 					run: async () => {
 						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => completeJob(db, j.id), {
-							siteToken: "pipeline/prospective-index.ts:341",
+							siteToken: "pipeline/prospective-index.ts:393",
 						});
 					},
+					retryAt: 0,
 				};
 				pendingWrite = write;
 				if (!(await executePendingWrite(write))) return;
@@ -358,9 +411,10 @@ export function startHintsWorker(deps: {
 					job: j,
 					run: async () => {
 						await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => failJob(db, j.id, msg), {
-							siteToken: "pipeline/prospective-index.ts:360",
+							siteToken: "pipeline/prospective-index.ts:413",
 						});
 					},
+					retryAt: 0,
 				};
 				pendingWrite = write;
 				await executePendingWrite(write);
