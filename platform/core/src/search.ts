@@ -200,7 +200,8 @@ function boundedCosineFallback(
 		predicates.push("COALESCE(m.source_type, '') != 'aggregate-recall'");
 	}
 	// Fetch one sentinel row so an exact-cap result is distinguishable from a
-	// truncated recent window without a second count query.
+	// truncated recent window without a second count query. This keeps the
+	// completeness metadata accurate when the eligible set fits the cap.
 	params.push(maxScanRows + 1);
 
 	const rows = db
