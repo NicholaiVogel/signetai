@@ -750,8 +750,9 @@ export function runDbOwnerWorker(): void {
 			recallAccessorReady = true;
 		}
 		const { getDbAccessor } = await import("./db-accessor");
-		return await getDbAccessor().withReadDbAsync((db) =>
-			vectorSearchWithMetadata(db, new Float32Array(payload.queryEmbedding), payload.options),
+		return await getDbAccessor().withReadDbAsync(
+			(db) => vectorSearchWithMetadata(db, new Float32Array(payload.queryEmbedding), payload.options),
+			{ siteToken: "db-owner-worker.ts:750" },
 		);
 	}
 
