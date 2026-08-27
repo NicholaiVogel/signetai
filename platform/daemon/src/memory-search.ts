@@ -23,7 +23,8 @@ import {
 	type RecallTemporalMeta,
 	SOURCE_CHUNK_SOURCE_TYPE,
 	scanMemoryContent,
-	vectorSearch,
+	vectorSearchWithMetadata,
+	type VectorSearchCompleteness,
 } from "@signet/core";
 import { normalizeAndHashContent } from "./content-normalization";
 import { type ReadDb, getDbAccessor, runWriteTxAsync, prepareTypedStatement } from "./db-accessor";
@@ -141,6 +142,10 @@ export interface RecallResponse {
 		totalReturned: number;
 		hasSupplementary: boolean;
 		noHits: boolean;
+		/** Completeness of the semantic vector channel, when it ran. */
+		vectorCompleteness?: VectorSearchCompleteness;
+		/** Maximum canonical rows inspected by a bounded fallback scan. */
+		searchedWindow?: number;
 		/**
 		 * True when lexical coverage is known incomplete because FTS rows are
 		 * missing. The response remains successful and may contain bounded bridge
@@ -1718,6 +1723,8 @@ export async function hybridRecall(
 	// This keeps constrained queries eligible for vector similarity when graph
 	// traversal yields no focal entities.
 	const vectorMap = new Map<string, number>();
+	let vectorCompleteness: VectorSearchCompleteness | undefined;
+	let searchedWindow: number | undefined;
 	if (queryVecF32) {
 		const queryVector = queryVecF32;
 		const excludeAggregateRecall = params.aggregate === true || params.excludeAggregateRecallMemories === true;
@@ -1726,13 +1733,15 @@ export async function hybridRecall(
 			timings.timeAsync("vector_search", async () => {
 				await getDbAccessor().withReadDbAsync(
 					async (db) => {
-						const vecResults = vectorSearch(db, queryVector, {
+						const vectorResult = vectorSearchWithMetadata(db, queryVector, {
 							limit: vecLimit,
 							type: params.type,
 							excludeAggregateRecall,
 							maxScanRows: DB_OWNER_MAX_WORK_UNITS,
 						});
-						for (const r of vecResults) {
+						vectorCompleteness = vectorResult.completeness;
+						searchedWindow = vectorResult.searchedWindow;
+						for (const r of vectorResult.results) {
 							vectorMap.set(r.id, r.score);
 						}
 					},
@@ -2631,6 +2640,8 @@ export async function hybridRecall(
 				totalReturned: results.length,
 				hasSupplementary: results.some((row) => row.supplementary === true),
 				noHits: results.length === 0,
+				...(vectorCompleteness === undefined ? {} : { vectorCompleteness }),
+				...(searchedWindow === undefined ? {} : { searchedWindow }),
 			},
 		});
 	}
@@ -3130,6 +3141,8 @@ export async function hybridRecall(
 			totalReturned: results.length,
 			hasSupplementary: results.some((row) => row.supplementary === true),
 			noHits: results.length === 0,
+			...(vectorCompleteness === undefined ? {} : { vectorCompleteness }),
+			...(searchedWindow === undefined ? {} : { searchedWindow }),
 			...(temporal.meta ? { temporal: temporal.meta } : {}),
 		},
 		entities: entityContext && entityContext.length > 0 ? entityContext : undefined,

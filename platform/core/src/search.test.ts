@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findSqliteVecExtension } from "./database";
-import { vectorSearch } from "./search";
+import { vectorSearch, vectorSearchWithMetadata } from "./search";
 
 describe("vector search fallback", () => {
 	it("returns bounded cosine matches when sqlite-vec is unavailable", () => {
@@ -32,6 +32,29 @@ describe("vector search fallback", () => {
 				maxScanRows: 10,
 			}),
 		).toEqual([{ id: "memory-fact", score: 1 }]);
+		const metadata = vectorSearchWithMetadata(raw, new Float32Array([1, 0, 0]), { maxScanRows: 10 });
+		expect(metadata.completeness).toBe("recent-window");
+		expect(metadata.searchedWindow).toBe(10);
+		raw.close();
+	});
+
+	it("skips a truncated vector blob instead of scoring its prefix", () => {
+		const raw = new Database(":memory:");
+		raw.exec(`
+			CREATE TABLE memories (id TEXT PRIMARY KEY, type TEXT, source_type TEXT);
+			CREATE TABLE embeddings (
+				id TEXT PRIMARY KEY,
+				source_id TEXT NOT NULL,
+				dimensions INTEGER NOT NULL,
+				vector BLOB
+			);
+			INSERT INTO memories VALUES ('memory-truncated', 'fact', NULL);
+		`);
+		raw
+			.prepare("INSERT INTO embeddings VALUES (?, ?, ?, ?)")
+			.run("embedding-truncated", "memory-truncated", 3, new Float32Array([1]));
+
+		expect(vectorSearch(raw, new Float32Array([1, 0, 0]), { limit: 1, maxScanRows: 10 })).toEqual([]);
 		raw.close();
 	});
 });

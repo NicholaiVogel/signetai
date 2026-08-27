@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { applyRecallScoreThreshold, scanMemoryContent, vectorSearch } from "@signet/core";
+import { applyRecallScoreThreshold, scanMemoryContent, vectorSearchWithMetadata } from "@signet/core";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { ensureAgentRegistered, getAgentScope, resolveAgentId } from "../agent-id";
 import { aggregateRecall, parseAggregateRecallBudget, readAggregateRecallBudgetInput } from "../aggregate-recall";
@@ -10,7 +10,7 @@ import { checkScope, requirePermission, requireRateLimit } from "../auth";
 import { type ConcurrencyAdmission, createConcurrencyAdmission } from "../concurrency-admission";
 import type { DbOwnerClient } from "../db-owner-client";
 import { DB_OWNER_MAX_WORK_UNITS } from "../db-owner-protocol";
-import { hybridRecallThroughDbOwner } from "../db-owner-recall";
+import { hybridRecallThroughDbOwner, vectorSearchThroughDbOwner } from "../db-owner-recall";
 import { normalizeAndHashContent } from "../content-normalization";
 import { type ReadDb, type WriteDb, getDbAccessor, runWriteTxAsync, prepareTypedStatement } from "../db-accessor";
 import { syncVecDeleteBySourceId, syncVecInsert, vectorToBlob } from "../db-helpers";
@@ -3651,9 +3651,9 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		const type = c.req.query("type");
 
 		try {
-			const searchData = await getDbAccessor().withReadDbAsync(
-				async (db) => {
-					const embeddingRow = db
+			const embeddingRow = await getDbAccessor().withReadDbAsync(
+				async (db) =>
+					db
 						.prepare(`
         SELECT e.vector
         FROM embeddings e
@@ -3663,35 +3663,39 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
         ${memoryLifecycleSql(db)}
         LIMIT 1
       `)
-						.get(id) as { vector: Buffer } | undefined;
-
-					if (!embeddingRow) return null;
-
-					const queryVector = new Float32Array(
-						embeddingRow.vector.buffer.slice(
-							embeddingRow.vector.byteOffset,
-							embeddingRow.vector.byteOffset + embeddingRow.vector.byteLength,
-						),
-					);
-
-					return vectorSearch(db, queryVector, {
-						limit: k + 1,
-						type,
-						excludeAggregateRecall: true,
-						maxScanRows: DB_OWNER_MAX_WORK_UNITS,
-					});
-				},
+						.get(id) as { vector: Buffer } | undefined,
 				{ siteToken: "routes/memory-routes.ts:3653" },
 			);
 
-			if (!searchData) {
+			if (!embeddingRow) {
 				return c.json({ error: "No embedding found for this memory", results: [] }, 404);
 			}
 
-			const filteredResults = searchData.filter((r) => r.id !== id).slice(0, k);
+			const queryVector = new Float32Array(
+				embeddingRow.vector.buffer.slice(
+					embeddingRow.vector.byteOffset,
+					embeddingRow.vector.byteOffset + embeddingRow.vector.byteLength,
+				),
+			);
+			const searchOptions = {
+				limit: k + 1,
+				type,
+				excludeAggregateRecall: true,
+				maxScanRows: DB_OWNER_MAX_WORK_UNITS,
+			};
+			const searchData =
+				recallOwner === undefined
+					? await getDbAccessor().withReadDbAsync((db) => vectorSearchWithMetadata(db, queryVector, searchOptions))
+					: await vectorSearchThroughDbOwner(recallOwner, [...queryVector], searchOptions);
+
+			const filteredResults = searchData.results.filter((r) => r.id !== id).slice(0, k);
 
 			if (filteredResults.length === 0) {
-				return c.json({ results: [] });
+				return c.json({
+					results: [],
+					completeness: searchData.completeness,
+					...(searchData.searchedWindow === undefined ? {} : { searchedWindow: searchData.searchedWindow }),
+				});
 			}
 
 			const ids = filteredResults.map((r) => r.id);
@@ -3744,7 +3748,11 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				})
 				.filter((r): r is NonNullable<typeof r> => r !== null);
 
-			return c.json({ results });
+			return c.json({
+				results,
+				completeness: searchData.completeness,
+				...(searchData.searchedWindow === undefined ? {} : { searchedWindow: searchData.searchedWindow }),
+			});
 		} catch (e) {
 			logger.error("memory", "Similarity search failed", e as Error);
 			return c.json({ error: "Similarity search failed", results: [] }, 500);

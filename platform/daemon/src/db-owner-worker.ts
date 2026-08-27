@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { Database as BunDatabase } from "bun:sqlite";
-import { findSqliteVecExtension } from "@signet/core";
+import { findSqliteVecExtension, vectorSearchWithMetadata } from "@signet/core";
 import {
 	applyObsidianSourceStructureInTx,
 	applyObsidianSourceStructurePurgeInTx,
@@ -22,6 +22,7 @@ import type {
 	DbOwnerRecallPayload,
 	DbOwnerStatement,
 	DbOwnerNativeMemoryIndex,
+	DbOwnerVectorSearchPayload,
 } from "./db-owner-protocol";
 import type { EmbeddingConfig } from "./memory-config";
 import { vectorToBlob } from "./db-helpers";
@@ -739,6 +740,21 @@ export function runDbOwnerWorker(): void {
 		);
 	}
 
+	async function executeVectorSearch(payload: DbOwnerVectorSearchPayload): Promise<unknown> {
+		if (process.env.SIGNET_DB_OWNER_RECALL_WORKER !== "1") {
+			throw new Error("DB owner vector-search jobs require a recall worker");
+		}
+		if (!recallAccessorReady) {
+			const { initDbAccessorAsync } = await import("./db-accessor");
+			await initDbAccessorAsync(ownerDbPath);
+			recallAccessorReady = true;
+		}
+		const { getDbAccessor } = await import("./db-accessor");
+		return await getDbAccessor().withReadDbAsync((db) =>
+			vectorSearchWithMetadata(db, new Float32Array(payload.queryEmbedding), payload.options),
+		);
+	}
+
 	async function executeInitialization(agentsDir: string | undefined, context?: JobExecutionContext): Promise<unknown> {
 		const startedMarker = process.env.SIGNET_DB_OWNER_TEST_INIT_STARTED;
 		const releaseMarker = process.env.SIGNET_DB_OWNER_TEST_INIT_RELEASE;
@@ -770,6 +786,7 @@ export function runDbOwnerWorker(): void {
 		if (job.request.kind === "source_snapshot_import") return executeSourceSnapshotImport(job.request, context);
 		if (job.request.kind === "source_artifact_upsert" || job.request.kind === "source_artifact_upsert_batch")
 			return executeSourceArtifactUpsert(job.request, context);
+		if (job.request.kind === "vector_search") return await executeVectorSearch(job.request.payload);
 		if (
 			job.request.kind === "source_graph_index" ||
 			job.request.kind === "source_graph_file_purge" ||

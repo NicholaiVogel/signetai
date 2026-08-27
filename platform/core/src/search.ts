@@ -132,6 +132,14 @@ interface VectorSearchTables {
 	readonly embeddings: "embeddings" | "embeddings_staging";
 }
 
+export type VectorSearchCompleteness = "complete" | "recent-window" | "unavailable";
+
+export interface VectorSearchResponse {
+	readonly results: Array<{ id: string; score: number }>;
+	readonly completeness: VectorSearchCompleteness;
+	readonly searchedWindow?: number;
+}
+
 function withReadTransaction(db: SQLiteDatabase, read: () => void): void {
 	if (db.exec === undefined) {
 		read();
@@ -206,8 +214,8 @@ function boundedCosineFallback(
 
 	return rows
 		.flatMap((row) => {
-			if (!row.vector || row.vector.byteLength === 0 || row.vector.byteLength % 4 !== 0) return [];
-			const memory = new Float32Array(row.vector.buffer, row.vector.byteOffset, row.vector.byteLength / 4);
+			if (!row.vector || row.vector.byteLength !== queryVector.length * 4) return [];
+			const memory = blobToVector(row.vector);
 			const score = Math.max(0, Math.min(1, cosineSimilarity(queryVector, memory)));
 			return score > 0 ? [{ id: row.source_id, score }] : [];
 		})
@@ -215,11 +223,11 @@ function boundedCosineFallback(
 		.slice(0, limit);
 }
 
-export function vectorSearch(
+export function vectorSearchWithMetadata(
 	db: SQLiteDatabase,
 	queryVector: Float32Array,
 	options?: VectorSearchOptions,
-): Array<{ id: string; score: number }> {
+): VectorSearchResponse {
 	const effectiveOptions = options ?? {};
 	const limit = effectiveOptions.limit ?? 20;
 	const results: Array<{ id: string; score: number }> = [];
@@ -279,14 +287,31 @@ export function vectorSearch(
 		// Keep semantic recall functional by scanning a bounded canonical-vector
 		// window instead of silently reducing the request to keyword-only recall.
 		try {
-			const searchTables = activeVectorSearchTables(db);
-			return boundedCosineFallback(db, queryVector, searchTables, effectiveOptions);
+			let fallbackResults: Array<{ id: string; score: number }> = [];
+			withReadTransaction(db, () => {
+				const searchTables = activeVectorSearchTables(db);
+				fallbackResults = boundedCosineFallback(db, queryVector, searchTables, effectiveOptions);
+			});
+			return {
+				results: fallbackResults,
+				completeness: "recent-window",
+				searchedWindow: Math.max(1, Math.min(effectiveOptions.maxScanRows ?? 10_000, 10_000)),
+			};
 		} catch (fallbackError) {
 			console.warn("Vector search failed, including bounded cosine fallback:", fallbackError, e);
+			return { results: [], completeness: "unavailable" };
 		}
 	}
 
-	return results;
+	return { results, completeness: "complete" };
+}
+
+export function vectorSearch(
+	db: SQLiteDatabase,
+	queryVector: Float32Array,
+	options?: VectorSearchOptions,
+): Array<{ id: string; score: number }> {
+	return vectorSearchWithMetadata(db, queryVector, options).results;
 }
 
 /**

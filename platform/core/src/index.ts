@@ -221,6 +221,7 @@ export {
 export {
 	search,
 	vectorSearch,
+	vectorSearchWithMetadata,
 	keywordSearch,
 	hybridSearch,
 	cosineSimilarity,
@@ -228,6 +229,8 @@ export {
 	type SearchOptions,
 	type SearchResult,
 	type VectorSearchOptions,
+	type VectorSearchCompleteness,
+	type VectorSearchResponse,
 	type HybridSearchOptions,
 } from "./search";
 export {
