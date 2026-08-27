@@ -79,11 +79,11 @@ export async function startDbOwner(
 }
 
 /** Lazily start an isolated owner when the daemon has not registered its shared owner. */
-export async function getDbOwner(): Promise<DbOwnerClient> {
+export async function getDbOwner(dbPath?: string): Promise<DbOwnerClient> {
 	const registered = getDbOwnerMaintenance()?.owner;
 	if (registered !== undefined) return registered;
 	if (!hasDbAccessor()) throw new Error("DbAccessor not initialised — call initDbAccessor() first");
-	return await startDbOwner();
+	return await startDbOwner(dbPath);
 }
 
 export interface DbOwnerSqlOptions {

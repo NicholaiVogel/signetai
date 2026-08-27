@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { type AgentRosterReadPolicy, scanMemoryContent } from "@signet/core";
 import { yieldEvery } from "./async-yield";
 import { getDbAccessor } from "./db-accessor";
+import { getDbOwner } from "./db-owner-runtime";
+import { ownerReadAll, ownerReadOne } from "./db-owner-sql";
 import { logger } from "./logger";
 import { effectiveScore } from "./memory-classification";
 import { isMemoryContentContextEligible } from "./memory-content-safety";
@@ -201,19 +203,41 @@ export async function fetchTraversalCandidates(
  * sorted by project match + score. No budget applied — caller
  * handles truncation via selectWithBudget().
  */
-export function getAllScoredCandidates(
+export async function getAllScoredCandidates(
 	memoryDbPath: string,
 	project: string | undefined,
 	limit: number,
 	agentId = "default",
 	readPolicy: AgentRosterReadPolicy = "isolated",
 	policyGroup: string | null = null,
-): ScoredMemory[] {
+): Promise<ScoredMemory[]> {
 	if (!existsSync(memoryDbPath)) return [];
 
 	try {
 		const scope = buildAgentScopeClause(agentId, readPolicy, policyGroup);
-		const rows: Array<{
+		const owner = await getDbOwner(memoryDbPath);
+		const readOptions = {
+			operation: "session-start.candidate-pool",
+			lane: "read" as const,
+			deadlineMs: 5_000,
+			estimatedWorkUnits: Math.max(1, Math.min(10_000, limit * 3)),
+		};
+		// Legacy databases may predate the safety ledger. Discover that in the
+		// owner before selecting rows so the parent never touches SQLite.
+		const safetyTable = await ownerReadOne<{ readonly name: string }>(
+			owner,
+			"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+			["memory_content_safety"],
+			{ ...readOptions, operation: "session-start.candidate-pool.safety-table" },
+		);
+		const hasSafetyTable = safetyTable != null;
+		const safetyJoin = hasSafetyTable
+			? " LEFT JOIN memory_content_safety safety ON safety.agent_id = ? AND safety.source_kind = 'memory' AND safety.source_id = m.id"
+			: "";
+		const safetyPredicate = hasSafetyTable
+			? " AND (safety.agent_id IS NULL OR (safety.status = 'clean' AND safety.context_eligible = 1))"
+			: "";
+		const rows: ReadonlyArray<{
 			id: string;
 			content: string;
 			type: string;
@@ -223,39 +247,19 @@ export function getAllScoredCandidates(
 			project: string | null;
 			created_at: string;
 			access_count: number;
-		}> =
-			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			getDbAccessor().withReadDb((db: import("./db-accessor").ReadDb) => {
-				const queried = db
-					.prepare(
-						`SELECT m.id, m.content, m.type, m.importance, m.tags, m.pinned, m.project, m.created_at,
-						        COALESCE(access_count, 0) AS access_count
-					 FROM memories m
-					 WHERE m.is_deleted = 0${scope.sql}
-					 ORDER BY created_at DESC LIMIT ?`,
-					)
-					.all(...scope.args, limit * 3) as Array<{
-					id: string;
-					content: string;
-					type: string;
-					importance: number;
-					tags: string | null;
-					pinned: number;
-					project: string | null;
-					created_at: string;
-					access_count: number;
-				}>;
-				return queried.filter((row) =>
-					isMemoryContentContextEligible(db, {
-						agentId,
-						sourceKind: "memory",
-						sourceId: row.id,
-						content: row.content,
-					}),
-				);
-			}, "memory-candidates.ts:228");
+		}> = await ownerReadAll(
+			owner,
+			`SELECT m.id, m.content, m.type, m.importance, m.tags, m.pinned, m.project, m.created_at,
+			        COALESCE(m.access_count, 0) AS access_count
+			 FROM memories m${safetyJoin}
+			 WHERE m.is_deleted = 0${scope.sql}${safetyPredicate}
+			 ORDER BY m.created_at DESC LIMIT ?`,
+			hasSafetyTable ? [agentId, ...scope.args, limit * 3] : [...scope.args, limit * 3],
+			readOptions,
+		);
 
 		const scored: ScoredMemory[] = rows
+			.filter((row) => scanMemoryContent(row.content).contextEligible)
 			.map((r) => ({
 				...r,
 				effScore: effectiveScore(r.importance, r.created_at, r.pinned === 1),
