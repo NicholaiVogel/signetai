@@ -222,6 +222,11 @@ export type DbOwnerRequest =
 			/** Serialized recall inputs. The owner reconstructs no daemon callbacks. */
 			readonly payload: DbOwnerRecallPayload;
 	  }
+	| {
+			readonly kind: "vector_search";
+			/** The owner performs the potentially expensive cosine scan. */
+			readonly payload: DbOwnerVectorSearchPayload;
+	  }
 	| { readonly kind: "source_snapshot_import"; readonly input: DbOwnerSourceSnapshotImport }
 	| { readonly kind: "source_graph_index"; readonly input: DbOwnerSourceGraphIndex }
 	| { readonly kind: "source_graph_file_purge"; readonly input: DbOwnerSourceGraphFilePurge }
@@ -250,6 +255,16 @@ export interface DbOwnerRecallPayload {
 	readonly query?: string;
 	/** Precomputed embedding for callers that already own the embedding boundary. */
 	readonly queryEmbedding?: readonly number[] | null;
+}
+
+export interface DbOwnerVectorSearchPayload {
+	readonly queryEmbedding: readonly number[];
+	readonly options?: {
+		readonly limit?: number;
+		readonly type?: string;
+		readonly excludeAggregateRecall?: boolean;
+		readonly maxScanRows?: number;
+	};
 }
 
 export interface DbOwnerJob {

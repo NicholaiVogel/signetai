@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { Database as BunDatabase } from "bun:sqlite";
-import { findSqliteVecExtension } from "@signet/core";
+import { findSqliteVecExtension, vectorSearchWithMetadata } from "@signet/core";
 import {
 	applyObsidianSourceStructureInTx,
 	applyObsidianSourceStructurePurgeInTx,
@@ -22,6 +22,7 @@ import type {
 	DbOwnerRecallPayload,
 	DbOwnerStatement,
 	DbOwnerNativeMemoryIndex,
+	DbOwnerVectorSearchPayload,
 } from "./db-owner-protocol";
 import type { EmbeddingConfig } from "./memory-config";
 import { vectorToBlob } from "./db-helpers";
@@ -92,7 +93,7 @@ export function loadSqliteVecIfAvailable(db: SqliteDatabase, extension: string):
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.warn(
-			`sqlite-vec extension could not be loaded on ${process.platform}: ${message}; continuing without vec, KNN recall is degraded`,
+			`sqlite-vec extension could not be loaded on ${process.platform}: ${message}; continuing with bounded canonical-vector fallback, KNN throughput is degraded`,
 		);
 		return false;
 	}
@@ -718,7 +719,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:719" },
+			{ siteToken: "db-owner-worker.ts:720" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
@@ -736,6 +737,22 @@ export function runDbOwnerWorker(): void {
 			payload.params as Parameters<typeof hybridRecall>[0],
 			{ ...config, embedding },
 			async () => (queryEmbedding === null ? null : queryEmbedding === undefined ? null : [...queryEmbedding]),
+		);
+	}
+
+	async function executeVectorSearch(payload: DbOwnerVectorSearchPayload): Promise<unknown> {
+		if (process.env.SIGNET_DB_OWNER_RECALL_WORKER !== "1") {
+			throw new Error("DB owner vector-search jobs require a recall worker");
+		}
+		if (!recallAccessorReady) {
+			const { initDbAccessorAsync } = await import("./db-accessor");
+			await initDbAccessorAsync(ownerDbPath);
+			recallAccessorReady = true;
+		}
+		const { getDbAccessor } = await import("./db-accessor");
+		return await getDbAccessor().withReadDbAsync(
+			(db) => vectorSearchWithMetadata(db, new Float32Array(payload.queryEmbedding), payload.options),
+			{ siteToken: "db-owner-worker.ts:753" },
 		);
 	}
 
@@ -770,6 +787,7 @@ export function runDbOwnerWorker(): void {
 		if (job.request.kind === "source_snapshot_import") return executeSourceSnapshotImport(job.request, context);
 		if (job.request.kind === "source_artifact_upsert" || job.request.kind === "source_artifact_upsert_batch")
 			return executeSourceArtifactUpsert(job.request, context);
+		if (job.request.kind === "vector_search") return await executeVectorSearch(job.request.payload);
 		if (
 			job.request.kind === "source_graph_index" ||
 			job.request.kind === "source_graph_file_purge" ||

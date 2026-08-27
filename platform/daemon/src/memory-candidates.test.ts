@@ -3,7 +3,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
-import { MAX_TRAVERSAL_CANDIDATE_IDS, fetchTraversalCandidates } from "./memory-candidates";
+import { MAX_TRAVERSAL_CANDIDATE_IDS, fetchTraversalCandidates, getAllScoredCandidates } from "./memory-candidates";
 
 function temporaryDbPath(): { readonly directory: string; readonly path: string } {
 	const directory = join(tmpdir(), `signet-memory-candidates-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -45,8 +45,8 @@ describe("fetchTraversalCandidates (#1250)", () => {
 		initDbAccessor(dbPath);
 	});
 
-	afterEach(() => {
-		closeDbAccessor();
+	afterEach(async () => {
+		await closeDbAccessor();
 		rmSync(directory, { recursive: true, force: true });
 	});
 
@@ -110,5 +110,28 @@ describe("fetchTraversalCandidates (#1250)", () => {
 		expect(rows).toHaveLength(MAX_TRAVERSAL_CANDIDATE_IDS);
 		expect(rows.some((row) => row.id === ids[MAX_TRAVERSAL_CANDIDATE_IDS])).toBe(false);
 		expect(loopBreaths).toBeGreaterThan(0);
+	});
+
+	test("routes the candidate pool through the DB owner, not the parent DB seams", async () => {
+		insertMemory("memory-owner", "agent-a", 0.9);
+		const accessor = getDbAccessor() as unknown as {
+			withReadDb: (...args: never[]) => unknown;
+			withReadDbAsync: (...args: never[]) => Promise<unknown>;
+		};
+		const originalWithReadDb = accessor.withReadDb;
+		const originalWithReadDbAsync = accessor.withReadDbAsync;
+		accessor.withReadDb = () => {
+			throw new Error("candidate pool crossed the parent sync DB seam");
+		};
+		accessor.withReadDbAsync = async () => {
+			throw new Error("candidate pool crossed the parent async DB seam");
+		};
+		try {
+			const rows = await getAllScoredCandidates(dbPath, undefined, 30, "agent-a");
+			expect(rows.map((row) => row.id)).toEqual(["memory-owner"]);
+		} finally {
+			accessor.withReadDb = originalWithReadDb;
+			accessor.withReadDbAsync = originalWithReadDbAsync;
+		}
 	});
 });

@@ -4,7 +4,89 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findSqliteVecExtension } from "./database";
-import { vectorSearch } from "./search";
+import { vectorSearch, vectorSearchWithMetadata } from "./search";
+
+describe("vector search fallback", () => {
+	it("returns bounded cosine matches when sqlite-vec is unavailable", () => {
+		const raw = new Database(":memory:");
+		raw.exec(`
+			CREATE TABLE memories (id TEXT PRIMARY KEY, type TEXT, source_type TEXT);
+			CREATE TABLE embeddings (
+				id TEXT PRIMARY KEY,
+				source_id TEXT NOT NULL,
+				dimensions INTEGER NOT NULL,
+				vector BLOB
+			);
+			INSERT INTO memories VALUES ('memory-fact', 'fact', NULL), ('memory-other', 'other', NULL), ('memory-aggregate', 'fact', 'aggregate-recall');
+		`);
+		const insert = raw.prepare("INSERT INTO embeddings VALUES (?, ?, ?, ?)");
+		insert.run("embedding-fact", "memory-fact", 3, new Float32Array([1, 0, 0]));
+		insert.run("embedding-other", "memory-other", 3, new Float32Array([0, 1, 0]));
+		insert.run("embedding-aggregate", "memory-aggregate", 3, new Float32Array([1, 0, 0]));
+
+		expect(
+			vectorSearch(raw, new Float32Array([1, 0, 0]), {
+				limit: 2,
+				type: "fact",
+				excludeAggregateRecall: true,
+				maxScanRows: 10,
+			}),
+		).toEqual([{ id: "memory-fact", score: 1 }]);
+		const metadata = vectorSearchWithMetadata(raw, new Float32Array([1, 0, 0]), { maxScanRows: 10 });
+		expect(metadata.completeness).toBe("complete");
+		expect(metadata.searchedWindow).toBeUndefined();
+		raw.close();
+	});
+
+	it("reports a bounded window only when an extra row proves truncation", () => {
+		const raw = new Database(":memory:");
+		raw.exec(`
+			CREATE TABLE memories (id TEXT PRIMARY KEY, type TEXT, source_type TEXT);
+			CREATE TABLE embeddings (
+				id TEXT PRIMARY KEY,
+				source_id TEXT NOT NULL,
+				dimensions INTEGER NOT NULL,
+				vector BLOB
+			);
+			INSERT INTO memories VALUES ('memory-old', 'fact', NULL), ('memory-new', 'fact', NULL);
+		`);
+		const insert = raw.prepare("INSERT INTO embeddings VALUES (?, ?, ?, ?)");
+		insert.run("embedding-old", "memory-old", 3, new Float32Array([1, 0, 0]));
+		insert.run("embedding-new", "memory-new", 3, new Float32Array([1, 0, 0]));
+
+		const exactCap = vectorSearchWithMetadata(raw, new Float32Array([1, 0, 0]), { maxScanRows: 2 });
+		expect(exactCap.completeness).toBe("complete");
+		expect(exactCap.searchedWindow).toBeUndefined();
+
+		raw.exec("INSERT INTO memories VALUES ('memory-latest', 'fact', NULL)");
+		insert.run("embedding-latest", "memory-latest", 3, new Float32Array([1, 0, 0]));
+		const truncated = vectorSearchWithMetadata(raw, new Float32Array([1, 0, 0]), { maxScanRows: 2 });
+		expect(truncated.completeness).toBe("recent-window");
+		expect(truncated.searchedWindow).toBe(2);
+		expect(truncated.results.map((row) => row.id)).toEqual(["memory-latest", "memory-new"]);
+		raw.close();
+	});
+
+	it("skips a truncated vector blob instead of scoring its prefix", () => {
+		const raw = new Database(":memory:");
+		raw.exec(`
+			CREATE TABLE memories (id TEXT PRIMARY KEY, type TEXT, source_type TEXT);
+			CREATE TABLE embeddings (
+				id TEXT PRIMARY KEY,
+				source_id TEXT NOT NULL,
+				dimensions INTEGER NOT NULL,
+				vector BLOB
+			);
+			INSERT INTO memories VALUES ('memory-truncated', 'fact', NULL);
+		`);
+		raw
+			.prepare("INSERT INTO embeddings VALUES (?, ?, ?, ?)")
+			.run("embedding-truncated", "memory-truncated", 3, new Float32Array([1]));
+
+		expect(vectorSearch(raw, new Float32Array([1, 0, 0]), { limit: 1, maxScanRows: 10 })).toEqual([]);
+		raw.close();
+	});
+});
 
 describe("vector search during embedding projection cutover", () => {
 	it("joins the consistent old view during rebuild and the new view after completion", () => {

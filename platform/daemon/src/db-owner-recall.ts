@@ -1,5 +1,7 @@
 import type { DbOwnerClient } from "./db-owner-client";
 import type { DbOwnerParameter } from "./db-owner-protocol";
+import { DB_OWNER_MAX_WORK_UNITS } from "./db-owner-protocol";
+import type { VectorSearchOptions, VectorSearchResponse } from "@signet/core";
 import type { RecallParams, RecallResponse } from "./memory-search";
 import type { ResolvedMemoryConfig } from "./memory-config";
 
@@ -44,6 +46,31 @@ export async function hybridRecallThroughDbOwner(
 			lane: "read",
 			deadlineMs: options.deadlineMs ?? 30_000,
 			estimatedWorkUnits: Math.max(1, Math.min(10_000, (params.limit ?? 10) * 100)),
+		},
+	);
+	return await client.awaitResult(handle);
+}
+
+/** Execute vector scoring, including the bounded fallback scan, in the owner. */
+export async function vectorSearchThroughDbOwner(
+	client: DbOwnerClient,
+	queryEmbedding: readonly number[],
+	options: VectorSearchOptions = {},
+): Promise<VectorSearchResponse> {
+	const maxScanRows = Math.max(1, Math.min(options.maxScanRows ?? DB_OWNER_MAX_WORK_UNITS, DB_OWNER_MAX_WORK_UNITS));
+	const handle = client.submit<VectorSearchResponse>(
+		{
+			kind: "vector_search",
+			payload: {
+				queryEmbedding,
+				options: { ...options, maxScanRows },
+			},
+		},
+		{
+			operation: "recall.vector-search",
+			lane: "read",
+			deadlineMs: 30_000,
+			estimatedWorkUnits: maxScanRows,
 		},
 	);
 	return await client.awaitResult(handle);

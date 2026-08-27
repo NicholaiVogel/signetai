@@ -539,13 +539,13 @@ async function fetchTraversalCandidates(memoryIds: ReadonlyArray<string>, agentI
  * sorted by project match + score. No budget applied — caller
  * handles truncation via selectWithBudget().
  */
-export function getAllScoredCandidates(
+export async function getAllScoredCandidates(
 	project: string | undefined,
 	limit: number,
 	agentId = "default",
 	readPolicy: AgentRosterReadPolicy = "isolated",
 	policyGroup: string | null = null,
-): ScoredMemory[] {
+): Promise<ScoredMemory[]> {
 	return memoryCandidates.getAllScoredCandidates(getMemoryDbPath(), project, limit, agentId, readPolicy, policyGroup);
 }
 
@@ -856,7 +856,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	const recallLimit = Math.max(1, config.recallLimit ?? 50);
 	const candidatePoolLimit = Math.max(recallLimit, config.candidatePoolLimit ?? 100);
 	const _candidatesStart = Date.now();
-	const allCandidates = getAllScoredCandidates(
+	const allCandidates = await getAllScoredCandidates(
 		req.project,
 		candidatePoolLimit,
 		traversalAgentId,

@@ -569,7 +569,7 @@ afterEach(async () => {
 	await flushSessionEndDeferredWork();
 	setLifecycleObservers(undefined);
 	resetProjectionPurgeState();
-	closeDbAccessor();
+	await closeDbAccessor();
 	if (existsSync(TEST_DIR)) {
 		rmSync(TEST_DIR, { recursive: true, force: true });
 	}
@@ -3510,7 +3510,7 @@ describe("getAllScoredCandidates", () => {
 			{ content: "Memory C", importance: 0.7 },
 		]);
 
-		const candidates = getAllScoredCandidates(undefined, 30);
+		const candidates = await getAllScoredCandidates(undefined, 30);
 
 		// All three should be returned (no budget applied)
 		expect(candidates.length).toBe(3);
@@ -3533,7 +3533,7 @@ describe("getAllScoredCandidates", () => {
 			{ content: "Recent important fact", importance: 0.9 },
 		]);
 
-		const candidates = getAllScoredCandidates(undefined, 30);
+		const candidates = await getAllScoredCandidates(undefined, 30);
 
 		// Only the recent one should pass
 		expect(candidates.length).toBe(1);
@@ -3554,7 +3554,7 @@ describe("getAllScoredCandidates", () => {
 			},
 		]);
 
-		const candidates = getAllScoredCandidates("/home/user/myproject", 30);
+		const candidates = await getAllScoredCandidates("/home/user/myproject", 30);
 
 		if (candidates.length >= 2) {
 			expect(candidates[0].content).toBe("Project-specific memory");
@@ -3563,7 +3563,7 @@ describe("getAllScoredCandidates", () => {
 
 	test.serial("returns empty for missing database", async () => {
 		// No createMemoryDb call
-		const candidates = getAllScoredCandidates(undefined, 30);
+		const candidates = await getAllScoredCandidates(undefined, 30);
 		expect(candidates).toEqual([]);
 	});
 });

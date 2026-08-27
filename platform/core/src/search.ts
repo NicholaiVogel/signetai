@@ -34,6 +34,8 @@ export interface VectorSearchOptions {
 	limit?: number;
 	type?: string;
 	excludeAggregateRecall?: boolean;
+	/** Maximum canonical embedding rows to inspect when sqlite-vec is unavailable. */
+	maxScanRows?: number;
 }
 
 export interface HybridSearchOptions {
@@ -130,6 +132,14 @@ interface VectorSearchTables {
 	readonly embeddings: "embeddings" | "embeddings_staging";
 }
 
+export type VectorSearchCompleteness = "complete" | "recent-window" | "unavailable";
+
+export interface VectorSearchResponse {
+	readonly results: Array<{ id: string; score: number }>;
+	readonly completeness: VectorSearchCompleteness;
+	readonly searchedWindow?: number;
+}
+
 function withReadTransaction(db: SQLiteDatabase, read: () => void): void {
 	if (db.exec === undefined) {
 		read();
@@ -172,12 +182,64 @@ function activeVectorSearchTables(db: SQLiteDatabase): VectorSearchTables {
 	}
 }
 
-export function vectorSearch(
+function boundedCosineFallback(
+	db: SQLiteDatabase,
+	queryVector: Float32Array,
+	searchTables: VectorSearchTables,
+	options: VectorSearchOptions,
+): VectorSearchResponse {
+	const limit = options.limit ?? 20;
+	const maxScanRows = Math.max(1, Math.min(options.maxScanRows ?? 10_000, 10_000));
+	const params: unknown[] = [queryVector.length];
+	const predicates = ["e.vector IS NOT NULL", "e.dimensions = ?"];
+	if (options.type) {
+		predicates.push("m.type = ?");
+		params.push(options.type);
+	}
+	if (options.excludeAggregateRecall) {
+		predicates.push("COALESCE(m.source_type, '') != 'aggregate-recall'");
+	}
+	// Fetch one sentinel row so an exact-cap result is distinguishable from a
+	// truncated recent window without a second count query. This keeps the
+	// completeness metadata accurate when the eligible set fits the cap.
+	params.push(maxScanRows + 1);
+
+	const rows = db
+		.prepare(
+			`SELECT e.source_id, e.vector
+			 FROM ${searchTables.embeddings} e
+			 JOIN memories m ON e.source_id = m.id
+			 WHERE ${predicates.join(" AND ")}
+			 ORDER BY e.rowid DESC
+			 LIMIT ?`,
+		)
+		.all(...params) as Array<{ source_id: string; vector: Buffer | null }>;
+	const truncated = rows.length > maxScanRows;
+	const scannedRows = truncated ? rows.slice(0, maxScanRows) : rows;
+	const results = scannedRows
+		.flatMap((row) => {
+			if (!row.vector || row.vector.byteLength !== queryVector.length * 4) return [];
+			const memory = blobToVector(row.vector);
+			const score = Math.max(0, Math.min(1, cosineSimilarity(queryVector, memory)));
+			return score > 0 ? [{ id: row.source_id, score }] : [];
+		})
+		.sort((a, b) => b.score - a.score)
+		.slice(0, limit);
+
+	return {
+		results,
+		completeness: truncated ? "recent-window" : "complete",
+		...(truncated ? { searchedWindow: maxScanRows } : {}),
+	};
+}
+
+export function vectorSearchWithMetadata(
 	db: SQLiteDatabase,
 	queryVector: Float32Array,
 	options?: VectorSearchOptions,
-): Array<{ id: string; score: number }> {
-	const limit = options?.limit ?? 20;
+): VectorSearchResponse {
+	const effectiveOptions = options ?? {};
+	const limit = effectiveOptions.limit ?? 20;
 	const results: Array<{ id: string; score: number }> = [];
 
 	try {
@@ -186,7 +248,7 @@ export function vectorSearch(
 			// sqlite-vec uses MATCH syntax for vector search
 			// The query vector must be serialized as a blob
 			const queryBlob = new Float32Array(queryVector);
-			const maxK = options?.excludeAggregateRecall ? Math.max(limit, Math.min(limit * 8, 1000)) : limit;
+			const maxK = effectiveOptions.excludeAggregateRecall ? Math.max(limit, Math.min(limit * 8, 1000)) : limit;
 			let k = limit;
 
 			while (true) {
@@ -195,11 +257,11 @@ export function vectorSearch(
 
 				// Build type filter if specified
 				let typeFilter = "";
-				if (options?.type) {
+				if (effectiveOptions.type) {
 					typeFilter = " AND m.type = ?";
-					params.push(options.type);
+					params.push(effectiveOptions.type);
 				}
-				if (options?.excludeAggregateRecall) {
+				if (effectiveOptions.excludeAggregateRecall) {
 					typeFilter += " AND COALESCE(m.source_type, '') != 'aggregate-recall'";
 				}
 
@@ -225,16 +287,37 @@ export function vectorSearch(
 					const similarity = 1 - row.distance;
 					results.push({ id: row.source_id, score: Math.max(0, similarity) });
 				}
-				if (results.length >= limit || k >= maxK || (!options?.excludeAggregateRecall && rows.length < k)) break;
+				if (results.length >= limit || k >= maxK || (!effectiveOptions.excludeAggregateRecall && rows.length < k))
+					break;
 				k = Math.min(k * 2, maxK);
 			}
 		});
 	} catch (e) {
-		// Vector search may fail if no embeddings exist or vec table unavailable
-		console.warn("Vector search failed:", e);
+		// macOS Bun may use Apple's SQLite build, which omits loadExtension().
+		// Keep semantic recall functional by scanning a bounded canonical-vector
+		// window instead of silently reducing the request to keyword-only recall.
+		try {
+			let fallbackResponse: VectorSearchResponse | undefined;
+			withReadTransaction(db, () => {
+				const searchTables = activeVectorSearchTables(db);
+				fallbackResponse = boundedCosineFallback(db, queryVector, searchTables, effectiveOptions);
+			});
+			return fallbackResponse ?? { results: [], completeness: "unavailable" };
+		} catch (fallbackError) {
+			console.warn("Vector search failed, including bounded cosine fallback:", fallbackError, e);
+			return { results: [], completeness: "unavailable" };
+		}
 	}
 
-	return results;
+	return { results, completeness: "complete" };
+}
+
+export function vectorSearch(
+	db: SQLiteDatabase,
+	queryVector: Float32Array,
+	options?: VectorSearchOptions,
+): Array<{ id: string; score: number }> {
+	return vectorSearchWithMetadata(db, queryVector, options).results;
 }
 
 /**
