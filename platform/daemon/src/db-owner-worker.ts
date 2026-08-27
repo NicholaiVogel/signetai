@@ -776,6 +776,18 @@ export function runDbOwnerWorker(): void {
 		if (job.request.kind === "source_artifact_index") return executeSourceArtifactIndex(job.request, context);
 		if (job.request.kind === "source_native_memory_index") return executeNativeMemoryIndex(job.request, context);
 		if (job.request.kind === "source_artifact_purge") return executeSourceArtifactPurge(job.request, context);
+		if (job.request.kind === "vector_backfill") {
+			if (!Number.isInteger(job.request.expectedDimensions) || job.request.expectedDimensions <= 0) {
+				throw new RangeError("DB owner vector backfill dimensions must be a positive integer");
+			}
+			const { backfillVecEmbeddings } = await import("./db-accessor");
+			backfillVecEmbeddings(db as never, job.request.expectedDimensions, context.deadlineAt, {
+				maxBatches: job.request.maxBatches,
+				batchSize: job.request.batchSize,
+			});
+			if (context !== undefined) context.committed = true;
+			return { completed: true };
+		}
 		if (job.request.kind === "vacuum_conversion") {
 			const { convertToIncrementalVacuum } = await import("./db-vacuum");
 			const pauseMs = Number.parseInt(process.env.SIGNET_TEST_DB_OWNER_VACUUM_PAUSE_MS ?? "0", 10);

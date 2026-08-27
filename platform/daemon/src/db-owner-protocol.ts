@@ -231,6 +231,12 @@ export type DbOwnerRequest =
 	| { readonly kind: "source_artifact_purge"; readonly input: DbOwnerSourceArtifactPurge }
 	| { readonly kind: "source_artifact_upsert"; readonly input: DbOwnerSourceArtifactUpsert }
 	| { readonly kind: "source_artifact_upsert_batch"; readonly input: readonly DbOwnerSourceArtifactUpsert[] }
+	| {
+			readonly kind: "vector_backfill";
+			readonly expectedDimensions: number;
+			readonly maxBatches?: number;
+			readonly batchSize?: number;
+	  }
 	| { readonly kind: "vacuum_conversion" }
 	| { readonly kind: "incremental_vacuum"; readonly pages: number }
 	| { readonly kind: "sleep"; readonly durationMs: number };

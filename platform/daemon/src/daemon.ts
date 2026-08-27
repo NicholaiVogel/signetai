@@ -68,7 +68,6 @@ import {
 } from "./database-integrity";
 import {
 	closeDbAccessor,
-	backfillVecEmbeddings,
 	DatabaseIntegrityCorruptError,
 	getDbAccessor,
 	getVectorRuntimeStatus,
@@ -2605,16 +2604,30 @@ async function main() {
 								budgetExpired = true;
 								return;
 							}
-							await getDbAccessor().withWriteDbAsync(
-								(db) =>
-									backfillVecEmbeddings(db, activeEmbedding.dimensions, deadlineAt, {
-										maxBatches: 1,
-										batchSize: 500,
-									}),
-								{ siteToken: "daemon.ts:2608", operation: "maintenance.vec-backfill" },
+							const remainingMs = Math.max(1, Math.floor(deadlineAt - Date.now()));
+							if (remainingMs <= 5_000) {
+								budgetExpired = true;
+								return;
+							}
+							const vectorBackfillOwner = dbOwnerClient;
+							if (vectorBackfillOwner === null) return;
+							const backfill = vectorBackfillOwner.submit<{ readonly completed: boolean }>(
+								{
+									kind: "vector_backfill",
+									expectedDimensions: activeEmbedding.dimensions,
+									maxBatches: 1,
+									batchSize: 500,
+								},
+								{
+									operation: "maintenance.vec-backfill",
+									lane: "maintenance",
+									deadlineMs: remainingMs,
+									estimatedWorkUnits: 1,
+								},
 							);
-							// The writer callback is synchronous on this isolate. Yield after
-							// every bounded batch so health and ready can run between slices.
+							await vectorBackfillOwner.awaitResult(backfill, remainingMs);
+							// Yield after every bounded owner batch so health and ready can run
+							// between slices without this isolate executing SQLite writes.
 							await new Promise<void>((resolve) => setImmediate(resolve));
 							if (!(await probePendingVecBackfillWithRetry())) return;
 						}
