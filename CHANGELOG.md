@@ -6,6 +6,10 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-27
+- Bug fixes: clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
+- Refactoring: migrate prospective-index hints writes to async admission.
+
 ### 2026-08-25
 - Bug fixes: kill delayed recovery targets; harden transcript recovery shutdown; rebase recovery site tokens after retry-bounding edit; bound transcript recovery retries.
 
@@ -28,11 +32,27 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: baseline event-loop monitor restarts; latch event-loop wedge state; expose truthful event-loop health; checkpoint integrity maintenance; bound integrity maintenance retries; harden incremental integrity maintenance; validate live PR body in readiness checklist; read PR checklist body live; close owner lane review findings; unblock DB-owner startup handshake; address db owner startup review findings; unblock db owner startup handshake; bound status and diagnostics projections; close phase d pollers deterministically; harden phase d acceptance harness; hard self-destruct timer in acceptance runner; seed real embedding vectors; fail loudly on shape drift; resolve core migrations via relative path; format count baseline with Biome-canonical tabs.
 - Docs: add documentation site guidance.
 
-### 2026-08-18
-- Features: implement agents view.
-- Bug fixes: degrade instead of die when sqlite-vec fails to load; degrade when sqlite-vec load fails; bound /health DB read admission to 500ms; retire db owner synchronously on write rejection; requeue undispatched job; stop DB owner transport retry loop; preserve db owner transport stderr; create db owner parent directory; preserve async embedding usage read; wire chunked vacuum reclaim into maintenance; chunk incremental vacuum reclaim; move vacuum conversion to owner; isolate dashboard status reads; support daemonless update recovery; isolate database initialization from event loop; publish head and manifest atomically; preserve unknown backup space metrics; handle degenerate statfs block sizes; resolve macOS Homebrew outside PATH; gate reindex before scanning; honor open circuit in reindex; wire provider breaker notices and probes; wire embedding breaker failure paths; share embedding provider circuit breaker; isolate embedding usage database work; persist embedding provider failure retry; retire remaining completion callers; align patch policy group validation; accept null policy group on agent creation; honor Hermes profile targets; restore Biome and daemon typecheck gates; clear group when changing memory scope; confirm agent scope edits.
-
 ## Release Ledger
+
+## [0.214.13] - 2026-08-27
+
+Release summary: 8 bug fixes and 1 refactor.
+Tag range: `v0.214.12..v0.214.13`.
+
+### Bug Fixes
+
+- **daemon**: clear lease tokens in owner recovery
+- **daemon**: fence prospective hint job leases
+- **daemon**: bound hints worker stop tick
+- **daemon**: bound hints worker shutdown drain
+- **daemon**: drain pending hints writes on stop
+- **daemon**: recover failed hints leases
+- **daemon**: classify hints write errors
+- **daemon**: retry hints writes after admission failure
+
+### Refactoring
+
+- **daemon**: migrate prospective-index hints writes to async admission
 
 ## [0.214.12] - 2026-08-25
 
