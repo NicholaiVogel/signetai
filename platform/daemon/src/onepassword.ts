@@ -293,7 +293,7 @@ export async function defaultOnePasswordClientFactory(token: string): Promise<On
 				const obj = toObject(entry);
 				if (!obj) continue;
 				const id = readString(obj.id);
-				const name = readString(obj.name);
+				const name = readString(obj.name) ?? readString(obj.title) ?? id;
 				if (!id || !name) continue;
 				parsed.push({ id, name });
 			}
@@ -341,7 +341,7 @@ export async function defaultOnePasswordClientFactory(token: string): Promise<On
 				const id = readString(field.id) ?? "field";
 				const title = readString(field.title);
 				const label = readString(field.label) ?? title ?? id;
-				const type = readString(field.type) ?? "";
+				const type = readString(field.fieldType) ?? readString(field.type) ?? "";
 				const purpose = readString(field.purpose) ?? "";
 
 				fields.push({ id, label, value, type, purpose });
