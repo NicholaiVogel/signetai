@@ -132,6 +132,9 @@ export function runDbOwnerWorker(): void {
 	function send(event: DbOwnerEvent): void {
 		process.stdout.write(`${JSON.stringify(event)}\n`);
 	}
+	function writeDiagnostic(message: string): void {
+		process.stderr.write(`${message}\n`);
+	}
 
 	// Readiness attests only that the protocol channel is available. Database
 	// construction, custom SQLite selection, and extension loading are startup
@@ -784,6 +787,8 @@ export function runDbOwnerWorker(): void {
 			backfillVecEmbeddings(db as never, job.request.expectedDimensions, context.deadlineAt, {
 				maxBatches: job.request.maxBatches,
 				batchSize: job.request.batchSize,
+				log: writeDiagnostic,
+				warn: writeDiagnostic,
 			});
 			if (context !== undefined) context.committed = true;
 			return { completed: true };

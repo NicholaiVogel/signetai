@@ -93,7 +93,7 @@ describe("DB owner client", () => {
 		}
 	}
 
-	test("runs vector backfill in bounded owner slices and reaches a terminal iteration", async () => {
+	test("keeps owner IPC clean while running vector backfill slices", async () => {
 		const database = makeDb();
 		directory = database.directory;
 		const fixture = new Database(database.path);
@@ -109,6 +109,10 @@ describe("DB owner client", () => {
 
 		client = createDbOwnerClient({ dbPath: database.path });
 		await client.start();
+		const maintenanceBefore = client.health().lanes?.maintenance;
+		if (maintenanceBefore === undefined || maintenanceBefore.pid === null) {
+			throw new Error("maintenance owner did not publish a pid");
+		}
 		for (let iteration = 0; iteration < 4; iteration += 1) {
 			await expect(
 				client.submit<{ readonly completed: boolean }>(
@@ -116,6 +120,13 @@ describe("DB owner client", () => {
 					{ operation: "maintenance.vector-backfill-regression", lane: "maintenance", deadlineMs: 10_000 },
 				).result,
 			).resolves.toEqual({ completed: true });
+			const maintenance = client.health().lanes?.maintenance;
+			expect(maintenance).toMatchObject({
+				state: "ready",
+				generation: 1,
+				pid: maintenanceBefore.pid,
+				lastError: null,
+			});
 		}
 		const counts = await client.submit<
 			readonly { readonly embeddings: number; readonly vectors: number; readonly quarantined: number }[]
