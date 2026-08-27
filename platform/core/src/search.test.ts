@@ -33,8 +33,37 @@ describe("vector search fallback", () => {
 			}),
 		).toEqual([{ id: "memory-fact", score: 1 }]);
 		const metadata = vectorSearchWithMetadata(raw, new Float32Array([1, 0, 0]), { maxScanRows: 10 });
-		expect(metadata.completeness).toBe("recent-window");
-		expect(metadata.searchedWindow).toBe(10);
+		expect(metadata.completeness).toBe("complete");
+		expect(metadata.searchedWindow).toBeUndefined();
+		raw.close();
+	});
+
+	it("reports a bounded window only when an extra row proves truncation", () => {
+		const raw = new Database(":memory:");
+		raw.exec(`
+			CREATE TABLE memories (id TEXT PRIMARY KEY, type TEXT, source_type TEXT);
+			CREATE TABLE embeddings (
+				id TEXT PRIMARY KEY,
+				source_id TEXT NOT NULL,
+				dimensions INTEGER NOT NULL,
+				vector BLOB
+			);
+			INSERT INTO memories VALUES ('memory-old', 'fact', NULL), ('memory-new', 'fact', NULL);
+		`);
+		const insert = raw.prepare("INSERT INTO embeddings VALUES (?, ?, ?, ?)");
+		insert.run("embedding-old", "memory-old", 3, new Float32Array([1, 0, 0]));
+		insert.run("embedding-new", "memory-new", 3, new Float32Array([1, 0, 0]));
+
+		const exactCap = vectorSearchWithMetadata(raw, new Float32Array([1, 0, 0]), { maxScanRows: 2 });
+		expect(exactCap.completeness).toBe("complete");
+		expect(exactCap.searchedWindow).toBeUndefined();
+
+		raw.exec("INSERT INTO memories VALUES ('memory-latest', 'fact', NULL)");
+		insert.run("embedding-latest", "memory-latest", 3, new Float32Array([1, 0, 0]));
+		const truncated = vectorSearchWithMetadata(raw, new Float32Array([1, 0, 0]), { maxScanRows: 2 });
+		expect(truncated.completeness).toBe("recent-window");
+		expect(truncated.searchedWindow).toBe(2);
+		expect(truncated.results.map((row) => row.id)).toEqual(["memory-latest", "memory-new"]);
 		raw.close();
 	});
 
