@@ -1957,77 +1957,70 @@
     },
     {
       "path": "memory-candidates.ts",
-      "line": 132,
+      "line": 134,
       "api": "existsSync",
       "source": "if (memoryIds.length === 0 || !existsSync(memoryDbPath)) return [];",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 150,
+      "line": 152,
       "api": "withReadDb",
       "source": "const batchRows: ScoredMemory[] = getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 212,
+      "line": 214,
       "api": "existsSync",
       "source": "if (!existsSync(memoryDbPath)) return [];",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 228,
-      "api": "withReadDb",
-      "source": "getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
-      "category": "hot-path"
-    },
-    {
-      "path": "memory-candidates.ts",
-      "line": 298,
+      "line": 302,
       "api": "existsSync",
       "source": "if (!existsSync(memoryDbPath)) return [];",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 306,
+      "line": 310,
       "api": "withReadDb",
       "source": "getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 368,
+      "line": 372,
       "api": "withReadDb",
       "source": "getDbAccessor().withReadDb(",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 430,
+      "line": 434,
       "api": "existsSync",
       "source": "if (!existsSync(memoryDbPath)) return [];",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 434,
+      "line": 438,
       "api": "withReadDb",
       "source": "const rows: SimpleMemory[] = getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 470,
+      "line": 474,
       "api": "existsSync",
       "source": "if (!existsSync(memoryDbPath)) return [];",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 475,
+      "line": 479,
       "api": "withReadDb",
       "source": "const rows: SimpleMemory[] = getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
       "category": "hot-path"

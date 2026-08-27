@@ -184,7 +184,7 @@ export async function fetchTraversalCandidates(
 						content: row.content,
 					}),
 				);
-			}, "memory-candidates.ts:150");
+			}, "memory-candidates.ts:152");
 			rows.push(...batchRows);
 			await yieldBetweenBatches();
 		}
@@ -324,7 +324,7 @@ export function getPredictedContextMemories(
 						content: row.transcript,
 					}),
 				);
-			}, "memory-candidates.ts:306");
+			}, "memory-candidates.ts:310");
 
 		if (transcriptRows.length === 0) return [];
 
@@ -405,7 +405,7 @@ export function getPredictedContextMemories(
 							content: row.content,
 						}),
 					),
-				"memory-candidates.ts:368",
+				"memory-candidates.ts:372",
 			);
 
 		const selected: ScoredMemory[] = [];
@@ -452,7 +452,7 @@ export function getRecentMemories(memoryDbPath: string, limit: number, recencyBi
 			return (db.prepare(query).all(limit) as unknown as Array<SimpleMemory>).filter(
 				(row) => scanMemoryContent(row.content).contextEligible,
 			);
-		}, "memory-candidates.ts:434");
+		}, "memory-candidates.ts:438");
 
 		return rows.map((r) => ({
 			id: r.id,
@@ -487,7 +487,7 @@ export function getMemoriesSince(memoryDbPath: string, sinceMs: number, limit: n
 			`)
 				.all(sinceIso, limit) as unknown as Array<SimpleMemory>;
 			return rows.filter((row) => scanMemoryContent(row.content).contextEligible);
-		}, "memory-candidates.ts:475");
+		}, "memory-candidates.ts:479");
 
 		return rows.map((r) => ({
 			id: r.id,
