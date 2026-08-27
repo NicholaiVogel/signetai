@@ -7,8 +7,9 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-27
-- Bug fixes: refresh owner site token baseline; keep owner IPC protocol pure; update event loop ledger for owner backfill; refresh db accessor site tokens; route vector backfill through db owner; repair dreaming accessor site tokens; preserve reviewed evidence scope; close reviewed evidence loops; gate ACPX same-agent re-admission; reap ACPX workers before re-admission; handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
+- Bug fixes: correct owner-worker site tokens to actual call lines; report fallback scan completeness; refresh event-loop audit ledger; refresh async DB site attribution; harden sqlite-vec fallback contract; preserve semantic recall without sqlite-vec; refresh owner site token baseline; keep owner IPC protocol pure; update event loop ledger for owner backfill; refresh db accessor site tokens; route vector backfill through db owner; repair dreaming accessor site tokens; preserve reviewed evidence scope; close reviewed evidence loops; gate ACPX same-agent re-admission; reap ACPX workers before re-admission; handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
 - Refactoring: async agent-id + dreaming-worker DB admission with scope caching; migrate prospective-index hints writes to async admission.
+- Docs: clarify fallback completeness.
 
 ### 2026-08-25
 - Bug fixes: kill delayed recovery targets; harden transcript recovery shutdown; rebase recovery site tokens after retry-bounding edit; bound transcript recovery retries.
@@ -33,6 +34,24 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: add documentation site guidance.
 
 ## Release Ledger
+
+## [0.214.19] - 2026-08-27
+
+Release summary: 6 bug fixes and 1 docs update.
+Tag range: `v0.214.18..v0.214.19`.
+
+### Bug Fixes
+
+- **daemon**: correct owner-worker site tokens to actual call lines
+- **core**: report fallback scan completeness
+- refresh event-loop audit ledger
+- refresh async DB site attribution
+- harden sqlite-vec fallback contract
+- preserve semantic recall without sqlite-vec
+
+### Docs
+
+- **core**: clarify fallback completeness
 
 ## [0.214.18] - 2026-08-27
 
