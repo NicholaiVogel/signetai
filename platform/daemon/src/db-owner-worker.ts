@@ -718,7 +718,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:716" },
+			{ siteToken: "db-owner-worker.ts:719" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
