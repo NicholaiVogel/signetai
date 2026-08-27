@@ -2,7 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureAgentRegistered, resolveAgentId, resolveDaemonAgentId } from "./agent-id";
+import {
+	ensureAgentRegistered,
+	getAgentScope,
+	invalidateAgentScopeCache,
+	resolveAgentId,
+	resolveDaemonAgentId,
+} from "./agent-id";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 
 function makeDbPath(): string {
@@ -43,36 +49,51 @@ describe("agent id registration", () => {
 		expect(resolveAgentId({ sessionKey: "agent:agent-b:session-1" })).toBe("agent-b");
 	});
 
-	test("registers first-seen named agents with shared read policy", () => {
+	test("registers first-seen named agents with shared read policy", async () => {
 		dbPath = makeDbPath();
 		initDbAccessor(dbPath);
 
-		ensureAgentRegistered("noam");
+		await ensureAgentRegistered("noam");
 
-		const row = getDbAccessor().withReadDb((db) =>
+		const row = (await getDbAccessor().withReadDbAsync((db) =>
 			db.prepare("SELECT id, name, read_policy FROM agents WHERE id = 'noam'").get(),
-		) as { id: string; name: string; read_policy: string } | undefined;
+		)) as { id: string; name: string; read_policy: string } | undefined;
 
 		expect(row).toEqual({ id: "noam", name: "noam", read_policy: "shared" });
 	});
 
-	test("does not overwrite existing agent policies", () => {
+	test("does not overwrite existing agent policies", async () => {
 		dbPath = makeDbPath();
 		initDbAccessor(dbPath);
 		const now = new Date().toISOString();
-		getDbAccessor().withWriteTx((db) => {
+		await getDbAccessor().withWriteTxAsync((db) => {
 			db.prepare(
 				`INSERT INTO agents (id, name, read_policy, policy_group, created_at, updated_at)
 				 VALUES ('noam', 'Noam', 'isolated', 'private-team', ?, ?)`,
 			).run(now, now);
 		});
 
-		ensureAgentRegistered("noam");
+		await ensureAgentRegistered("noam");
 
-		const row = getDbAccessor().withReadDb((db) =>
+		const row = (await getDbAccessor().withReadDbAsync((db) =>
 			db.prepare("SELECT name, read_policy, policy_group FROM agents WHERE id = 'noam'").get(),
-		) as { name: string; read_policy: string; policy_group: string | null } | undefined;
+		)) as { name: string; read_policy: string; policy_group: string | null } | undefined;
 
 		expect(row).toEqual({ name: "Noam", read_policy: "isolated", policy_group: "private-team" });
+	});
+
+	test("caches scope reads until roster invalidation", async () => {
+		dbPath = makeDbPath();
+		initDbAccessor(dbPath);
+		await ensureAgentRegistered("cache-agent");
+
+		expect(await getAgentScope("cache-agent")).toEqual({ readPolicy: "shared", policyGroup: null });
+		await getDbAccessor().withWriteTxAsync((db) => {
+			db.prepare("UPDATE agents SET read_policy = 'isolated' WHERE id = 'cache-agent'").run();
+		});
+		expect(await getAgentScope("cache-agent")).toEqual({ readPolicy: "shared", policyGroup: null });
+
+		invalidateAgentScopeCache("cache-agent");
+		expect(await getAgentScope("cache-agent")).toEqual({ readPolicy: "isolated", policyGroup: null });
 	});
 });

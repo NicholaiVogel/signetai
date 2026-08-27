@@ -120,35 +120,37 @@ function rejectedIndexes(
 }
 
 /** Resolve rejected citations to the source state that caused the rejection. */
-export function collectRejectedDreamingEvidence(
+export async function collectRejectedDreamingEvidence(
 	accessor: DbAccessor,
 	agentId: string,
 	result: ApplyDreamingOperationsResult,
 	operations: readonly Pick<DreamingOperationRequest, "evidence">[],
-): readonly RejectedDreamingEvidence[] {
+): Promise<readonly RejectedDreamingEvidence[]> {
 	const indexes = rejectedIndexes(result, operations);
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) => {
-		const candidates = new Map<string, RejectedDreamingEvidence>();
-		for (const index of indexes) {
-			const operation = operations[index];
-			if (!operation) continue;
-			for (const rawEvidence of operation.evidence ?? []) {
-				const reference = sourceReference(rawEvidence);
-				const candidate = reference ? failureClass(db, agentId, reference) : null;
-				if (!candidate) continue;
-				const key = `${agentId}:${candidate.kind}:${candidate.id}`;
-				candidates.set(key, {
-					agentId,
-					sourceKind: candidate.kind,
-					sourceId: candidate.id,
-					failureClass: candidate.failureClass,
-					sourceFingerprint: candidate.sourceFingerprint,
-				});
+	return await accessor.withReadDbAsync(
+		(db) => {
+			const candidates = new Map<string, RejectedDreamingEvidence>();
+			for (const index of indexes) {
+				const operation = operations[index];
+				if (!operation) continue;
+				for (const rawEvidence of operation.evidence ?? []) {
+					const reference = sourceReference(rawEvidence);
+					const candidate = reference ? failureClass(db, agentId, reference) : null;
+					if (!candidate) continue;
+					const key = `${agentId}:${candidate.kind}:${candidate.id}`;
+					candidates.set(key, {
+						agentId,
+						sourceKind: candidate.kind,
+						sourceId: candidate.id,
+						failureClass: candidate.failureClass,
+						sourceFingerprint: candidate.sourceFingerprint,
+					});
+				}
 			}
-		}
-		return [...candidates.values()];
-	}, "pipeline/dreaming-evidence-retry.ts:131");
+			return [...candidates.values()];
+		},
+		{ siteToken: "pipeline/dreaming-evidence-retry.ts:130", operation: "dreaming.evidence.classify" },
+	);
 }
 
 export function recordRejectedDreamingEvidenceInTx(
@@ -238,68 +240,70 @@ function parsedTime(value: string | null): number | null {
  * rejection. The update and attention mint are atomic, and retry_count plus
  * the hourly budget make this a bounded repair aid rather than a hot loop.
  */
-export function autoRequeueRepairedDreamingEvidence(
+export async function autoRequeueRepairedDreamingEvidence(
 	accessor: DbAccessor,
 	policy: DreamingEvidenceRetryPolicy,
 	nowMs = Date.now(),
-): number {
+): Promise<number> {
 	const cooldownMs = Math.max(0, Math.floor(policy.cooldownMs));
 	const hourlyBudget = Math.max(0, Math.floor(policy.hourlyBudget));
 	const maxAttempts = Math.max(0, Math.floor(policy.maxAttempts));
 	if (hourlyBudget === 0 || maxAttempts === 0) return 0;
 	const now = new Date(nowMs).toISOString();
 	const hourAgo = nowMs - 60 * 60 * 1000;
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-	return accessor.withWriteTx((db: import("../db-accessor").WriteDb) => {
-		const recent = db
-			.prepare(
-				`SELECT COUNT(*) AS count FROM dreaming_evidence_exclusions
+	return await accessor.withWriteTxAsync(
+		(db) => {
+			const recent = db
+				.prepare(
+					`SELECT COUNT(*) AS count FROM dreaming_evidence_exclusions
 				 WHERE last_requeued_at IS NOT NULL AND julianday(last_requeued_at) >= julianday(?)`,
-			)
-			.get(new Date(hourAgo).toISOString()) as { count: number };
-		let budget = Math.max(0, hourlyBudget - (recent.count ?? 0));
-		if (budget === 0) return 0;
-		const rows = db
-			.prepare(
-				`SELECT agent_id, source_kind, source_id, failure_class, source_fingerprint,
+				)
+				.get(new Date(hourAgo).toISOString()) as { count: number };
+			let budget = Math.max(0, hourlyBudget - (recent.count ?? 0));
+			if (budget === 0) return 0;
+			const rows = db
+				.prepare(
+					`SELECT agent_id, source_kind, source_id, failure_class, source_fingerprint,
 				        retry_count, last_requeued_at
 				 FROM dreaming_evidence_exclusions
 				 WHERE resolved_at IS NULL AND requeue_requested_at IS NULL
 				   AND failure_class IN ('incomplete_transcript', 'source_projection', 'scope_mismatch', 'quote_mismatch')
 				   AND retry_count < ?
 				 ORDER BY excluded_at ASC, source_kind ASC, source_id ASC`,
-			)
-			.all(maxAttempts) as RetryRow[];
-		let affected = 0;
-		for (const row of rows) {
-			if (budget === 0) break;
-			const lastRequeued = parsedTime(row.last_requeued_at);
-			if (lastRequeued !== null && nowMs - lastRequeued < cooldownMs) continue;
-			const source = readEpisodicSource(db, { agentId: row.agent_id, from: `${row.source_kind}:${row.source_id}` });
-			if (source === null) continue;
-			if (row.failure_class === "incomplete_transcript" && !source.completed) continue;
-			const currentFingerprint = sourceFingerprint(source);
-			if (row.source_fingerprint === currentFingerprint) continue;
-			const updated = db
-				.prepare(
-					`UPDATE dreaming_evidence_exclusions
+				)
+				.all(maxAttempts) as RetryRow[];
+			let affected = 0;
+			for (const row of rows) {
+				if (budget === 0) break;
+				const lastRequeued = parsedTime(row.last_requeued_at);
+				if (lastRequeued !== null && nowMs - lastRequeued < cooldownMs) continue;
+				const source = readEpisodicSource(db, { agentId: row.agent_id, from: `${row.source_kind}:${row.source_id}` });
+				if (source === null) continue;
+				if (row.failure_class === "incomplete_transcript" && !source.completed) continue;
+				const currentFingerprint = sourceFingerprint(source);
+				if (row.source_fingerprint === currentFingerprint) continue;
+				const updated = db
+					.prepare(
+						`UPDATE dreaming_evidence_exclusions
 					 SET requeue_requested_at = ?, last_requeued_at = ?, retry_count = retry_count + 1
 					 WHERE agent_id = ? AND source_kind = ? AND source_id = ?
 					   AND resolved_at IS NULL AND requeue_requested_at IS NULL
 					   AND retry_count < ?`,
-				)
-				.run(now, now, row.agent_id, row.source_kind, row.source_id, maxAttempts) as { changes: number };
-			if (updated.changes !== 1) continue;
-			enqueueDreamingAttentionInTx(db, {
-				agentId: row.agent_id,
-				kind: "evidence_requeue",
-				subjectRef: `${row.source_kind}:${row.source_id}`,
-				details: { sourceKind: row.source_kind, sourceId: row.source_id, automatic: "true" },
-				priority: 80,
-			});
-			budget -= 1;
-			affected += 1;
-		}
-		return affected;
-	}, "pipeline/dreaming-evidence-retry.ts:253");
+					)
+					.run(now, now, row.agent_id, row.source_kind, row.source_id, maxAttempts) as { changes: number };
+				if (updated.changes !== 1) continue;
+				enqueueDreamingAttentionInTx(db, {
+					agentId: row.agent_id,
+					kind: "evidence_requeue",
+					subjectRef: `${row.source_kind}:${row.source_id}`,
+					details: { sourceKind: row.source_kind, sourceId: row.source_id, automatic: "true" },
+					priority: 80,
+				});
+				budget -= 1;
+				affected += 1;
+			}
+			return affected;
+		},
+		{ siteToken: "pipeline/dreaming-evidence-retry.ts:254", operation: "dreaming.evidence.requeue" },
+	);
 }

@@ -1148,7 +1148,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			});
 			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
 			const agentId = scopedAgent.agentId;
-			const agentScope = getAgentScope(agentId);
+			const agentScope = await getAgentScope(agentId);
 			const access = buildAgentScopeClause(agentId, agentScope.readPolicy, agentScope.policyGroup ?? null);
 			const claims = c.get("auth")?.claims;
 			const scopeProject = claims?.role === "admin" ? undefined : claims?.scope?.project;
@@ -1256,7 +1256,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				sessionKey: c.req.header("x-signet-session-key"),
 			});
 			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
-			const agentScope = getAgentScope(scopedAgent.agentId);
+			const agentScope = await getAgentScope(scopedAgent.agentId);
 			const timeline = await getDbAccessor().withReadDbAsync(
 				async (db) =>
 					buildMemoryTimeline(db, {
@@ -1298,7 +1298,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				sessionKey: c.req.header("x-signet-session-key"),
 			});
 			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
-			const agentScope = getAgentScope(scopedAgent.agentId);
+			const agentScope = await getAgentScope(scopedAgent.agentId);
 			const access = buildAgentScopeClause(scopedAgent.agentId, agentScope.readPolicy, agentScope.policyGroup);
 			const scopeProject = c.get("auth")?.claims?.scope?.project;
 			const projectSql = scopeProject ? " AND m.project = ?" : "";
@@ -1599,7 +1599,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			}
 		}
 
-		ensureAgentRegistered(agentId);
+		await ensureAgentRegistered(agentId);
 		const visibility: RememberDedupeScope["visibility"] = body.visibility === "private" ? "private" : "global";
 		const dedupeScope: RememberDedupeScope = { agentId, visibility, project: body.project ?? null, scope };
 		const hasBodyTags = Object.hasOwn(body, "tags");
@@ -2264,7 +2264,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			agentId: c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id"),
 			sessionKey: sessionKeyRaw,
 		});
-		const agentScope = getAgentScope(agentId);
+		const agentScope = await getAgentScope(agentId);
 		const access = buildAgentScopeClause(agentId, agentScope.readPolicy, agentScope.policyGroup);
 		const scopeProject = c.get("auth")?.claims?.scope?.project;
 		const projectSql = scopeProject ? " AND m.project = ?" : "";
@@ -2419,7 +2419,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			agentId: c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id"),
 			sessionKey: sessionKeyRaw,
 		});
-		const agentScope = getAgentScope(agentId);
+		const agentScope = await getAgentScope(agentId);
 		const access = buildAgentScopeClause(agentId, agentScope.readPolicy, agentScope.policyGroup);
 
 		type LineageRow = {
@@ -3464,7 +3464,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 
 			recordRecallAttempt(recallSurface);
 			recallAttempted = true;
-			const agentScope = getAgentScope(agentId);
+			const agentScope = await getAgentScope(agentId);
 			const scopeProject = c.get("auth")?.claims?.scope?.project;
 			const params = {
 				...body,
@@ -3572,7 +3572,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				sessionKey: sessionKeyRaw,
 			});
 			recordRecallAttempt(recallSurface);
-			const agentScope = getAgentScope(agentId);
+			const agentScope = await getAgentScope(agentId);
 			const params = {
 				query: q,
 				limit,
@@ -4095,7 +4095,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			parseOptionalString(body.project) ?? parseOptionalString(metadataRecord?.project),
 		);
 		if (scopedProject.error) return c.json({ error: scopedProject.error }, 403);
-		ensureAgentRegistered(scopedAgent.agentId);
+		await ensureAgentRegistered(scopedAgent.agentId);
 		const metadataJson = documentMetadataJson(body.metadata);
 
 		const accessor = getDbAccessor();
@@ -4242,7 +4242,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				sessionKey: c.req.header("x-signet-session-key"),
 			});
 			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
-			const agentScope = getAgentScope(scopedAgent.agentId);
+			const agentScope = await getAgentScope(scopedAgent.agentId);
 			const access = buildAgentScopeClause(scopedAgent.agentId, agentScope.readPolicy, agentScope.policyGroup);
 			const scopeProject = c.get("auth")?.claims?.scope?.project;
 			const projectSql = scopeProject ? " AND m.project = ? AND d.project = ?" : "";
