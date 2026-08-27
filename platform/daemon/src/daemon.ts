@@ -848,7 +848,7 @@ interface LegacyMarkdownFileState {
 async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
 	const accessor = getDbAccessor();
 	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:852" });
+	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:851" });
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -891,7 +891,7 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 					| undefined;
 				return row ?? null;
 			},
-			{ siteToken: "daemon.ts:874" },
+			{ siteToken: "daemon.ts:873" },
 		);
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
@@ -968,7 +968,7 @@ async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Pr
 					.get(filePath, chunkHash);
 				return row != null;
 			},
-			{ siteToken: "daemon.ts:965" },
+			{ siteToken: "daemon.ts:964" },
 		);
 	} catch {
 		return false;
@@ -1592,7 +1592,7 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
 			}
 		},
-		{ siteToken: "daemon.ts:1579", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
+		{ siteToken: "daemon.ts:1578", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
 	);
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
@@ -1660,7 +1660,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
 		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1662", operation: "startup.resolve-active-embedding" },
+		{ siteToken: "daemon.ts:1661", operation: "startup.resolve-active-embedding" },
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2459,11 +2459,11 @@ async function main() {
 										.get() as { cnt: number } | undefined;
 									return row?.cnt ?? 0;
 								},
-								{ siteToken: "daemon.ts:2456", operation: "heartbeat.memory-count" },
+								{ siteToken: "daemon.ts:2455", operation: "heartbeat.memory-count" },
 							),
 							listConnectorsAsync(accessor),
 							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2466",
+								siteToken: "daemon.ts:2465",
 								operation: "heartbeat.queue-pressure",
 							}),
 						]);
@@ -2558,7 +2558,7 @@ async function main() {
 		if (migrationIntegrityWritesBlocked) return false;
 		const activeEmbedding = await getDbAccessor().withReadDbAsync(
 			(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-			{ siteToken: "daemon.ts:2560", operation: "maintenance.vec-backfill-config" },
+			{ siteToken: "daemon.ts:2559", operation: "maintenance.vec-backfill-config" },
 		);
 		return await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions);
 	};
@@ -2590,7 +2590,7 @@ async function main() {
 					try {
 						const activeEmbedding = await getDbAccessor().withReadDbAsync(
 							(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-							{ siteToken: "daemon.ts:2592", operation: "maintenance.vec-backfill-config" },
+							{ siteToken: "daemon.ts:2591", operation: "maintenance.vec-backfill-config" },
 						);
 						if (migrationIntegrityWritesBlocked) return;
 						if (!isVectorRuntimeUsable()) {
