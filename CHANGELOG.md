@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-27
-- Bug fixes: handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
+- Bug fixes: gate ACPX same-agent re-admission; reap ACPX workers before re-admission; handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
 - Refactoring: async agent-id + dreaming-worker DB admission with scope caching; migrate prospective-index hints writes to async admission.
 
 ### 2026-08-25
@@ -33,6 +33,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: add documentation site guidance.
 
 ## Release Ledger
+
+## [0.214.16] - 2026-08-27
+
+Release summary: 2 bug fixes.
+Tag range: `v0.214.15..v0.214.16`.
+
+### Bug Fixes
+
+- **daemon**: gate ACPX same-agent re-admission
+- **daemon**: reap ACPX workers before re-admission
 
 ## [0.214.15] - 2026-08-27
 
