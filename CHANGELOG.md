@@ -7,8 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-27
-- Bug fixes: clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
-- Refactoring: migrate prospective-index hints writes to async admission.
+- Bug fixes: invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
+- Refactoring: async agent-id + dreaming-worker DB admission with scope caching; migrate prospective-index hints writes to async admission.
 
 ### 2026-08-25
 - Bug fixes: kill delayed recovery targets; harden transcript recovery shutdown; rebase recovery site tokens after retry-bounding edit; bound transcript recovery retries.
@@ -33,6 +33,19 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: add documentation site guidance.
 
 ## Release Ledger
+
+## [0.214.14] - 2026-08-27
+
+Release summary: 1 bug fix and 1 refactor.
+Tag range: `v0.214.13..v0.214.14`.
+
+### Bug Fixes
+
+- **daemon**: invalidate agent-scope cache on DB accessor close
+
+### Refactoring
+
+- **daemon**: async agent-id + dreaming-worker DB admission with scope caching
 
 ## [0.214.13] - 2026-08-27
 
