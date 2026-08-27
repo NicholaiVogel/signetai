@@ -124,9 +124,12 @@ Candidate collection uses several independent channels:
   the same words as the current query.
 - **Vector search** embeds the original query and searches `vec_embeddings`
   through `sqlite-vec`. When that extension is unavailable, it uses a bounded
-  cosine scan over canonical vectors instead. Vector search cannot pre-filter
-  every recall scope, so constrained searches over-fetch and rely on
-  authorization after merge.
+  cosine scan over the newest canonical vectors instead. The fallback is an
+  explicitly partial `recent-window` channel: responses expose
+  `meta.vectorCompleteness: "recent-window"` and `meta.searchedWindow` (the
+  default is 10,000 rows), so it must not be read as complete workspace recall.
+  Vector search cannot pre-filter every recall scope, so constrained searches
+  over-fetch and rely on authorization after merge.
 - **Structured path candidates** search entity/aspect/group/claim paths so
   structured knowledge can surface even when its prose is sparse.
 - **Graph traversal** resolves focal entities and walks the knowledge graph.

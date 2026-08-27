@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { createDbOwnerClient } from "./db-owner-client";
-import { hybridRecallThroughDbOwner } from "./db-owner-recall";
+import { vectorSearchThroughDbOwner, hybridRecallThroughDbOwner } from "./db-owner-recall";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "./memory-config";
 import { hybridRecall, type RecallResponse } from "./memory-search";
 
@@ -97,6 +97,35 @@ describe("DB owner recall lane", () => {
 			const routed = await hybridRecallThroughDbOwner(client, params, cfg, { queryEmbedding: null });
 			expect(comparable(routed)).toEqual(comparable(direct));
 			expect(routed.results.map((result) => result.id)).not.toContain("owner-fact-other-agent");
+		} finally {
+			await client.close();
+		}
+	});
+
+	test("executes vector scoring in the recall owner lane", async () => {
+		directory = mkdtempSync(join(tmpdir(), "signet-db-owner-vector-search-"));
+		previousSignetPath = process.env.SIGNET_PATH;
+		mkdirSync(join(directory, "memory"), { recursive: true });
+		writeFileSync(join(directory, "agent.yaml"), "name: DbOwnerVectorSearchTest\n");
+		process.env.SIGNET_PATH = directory;
+		const databasePath = join(directory, "memory", "memories.db");
+		initDbAccessor(databasePath);
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memories (id, content, type, agent_id, visibility, created_at, updated_at, updated_by)
+				 VALUES (?, ?, 'fact', 'agent-a', 'global', datetime('now'), datetime('now'), 'test')`,
+			).run("owner-vector-fact", "owner vector fixture");
+			db.prepare(
+				"INSERT INTO embeddings (content_hash, source_id, source_type, vector, dimensions, chunk_text, created_at) VALUES (?, ?, 'memory', ?, ?, '', datetime('now'))",
+			).run("owner-vector-hash", "owner-vector-fact", new Float32Array([1, 0, 0]), 3);
+		});
+		closeDbAccessor();
+
+		const client = createDbOwnerClient({ dbPath: databasePath, workerRole: "recall" });
+		try {
+			const result = await vectorSearchThroughDbOwner(client, [1, 0, 0], { limit: 1, maxScanRows: 10 });
+			expect(result.results).toEqual([{ id: "owner-vector-fact", score: 1 }]);
+			expect(["complete", "recent-window"]).toContain(result.completeness);
 		} finally {
 			await client.close();
 		}
