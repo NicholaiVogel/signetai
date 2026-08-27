@@ -124,7 +124,7 @@ export function pipelineQueueBlock(options: { readonly allowSynchronousRead?: bo
 				summary: snapshot.summary,
 				oldestDeadSummaryJob: snapshot.oldestDeadSummaryJob,
 			};
-		}, "routes/pipeline-routes.ts:118");
+		}, "routes/pipeline-routes.ts:120");
 	} catch {
 		return {
 			memory: { ...UNKNOWN_QUEUE_COUNTS_SHAPE },
@@ -341,7 +341,7 @@ export function registerPipelineRoutes(app: Hono): void {
 		try {
 			embeddingMigration = await getDbAccessor().withReadDbAsync(
 				(db) => readEmbeddingIndexMigrationProgress(db, config.embedding),
-				{ siteToken: "routes/pipeline-routes.ts:340" },
+				{ siteToken: "routes/pipeline-routes.ts:342" },
 			);
 		} catch {
 			// Database may still be initializing; omit migration visibility.
@@ -523,7 +523,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					limit,
 					offset,
 				}),
-			"routes/pipeline-routes.ts:515",
+			"routes/pipeline-routes.ts:517",
 		);
 		return c.json({
 			agentId: resolveAgentId({ agentId: scopedAgent.agentId }),
@@ -640,7 +640,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					},
 				};
 			},
-			{ siteToken: "routes/pipeline-routes.ts:614", operation: "pipeline.status" },
+			{ siteToken: "routes/pipeline-routes.ts:616", operation: "pipeline.status" },
 		);
 		const diagnostics = getCachedDiagnosticsReport();
 
@@ -975,7 +975,7 @@ export function registerPipelineRoutes(app: Hono): void {
 							"SELECT 1 FROM dreaming_evidence_exclusions WHERE agent_id = ? AND source_kind = 'summary' AND source_id = ? AND resolved_at IS NULL",
 						)
 						.get(agentId, sourceId) != null,
-				{ siteToken: "routes/pipeline-routes.ts:970" },
+				{ siteToken: "routes/pipeline-routes.ts:971" },
 			);
 			if (hasTransientSummaryExclusion) {
 				return c.json({ error: "Summary evidence requeue is retired; requeue the completed transcript instead" }, 410);
