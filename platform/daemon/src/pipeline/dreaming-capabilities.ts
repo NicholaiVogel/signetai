@@ -697,7 +697,7 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 		capability(
 			"runbook_write",
 			"Write Dreaming runbook",
-			"Before finishing a Dreaming pass, store one short structured note for future passes to review. Deferred evidence in another scope must include its agentId. Use reviewedExcludedEvidence only after inspecting an entire source revision and deciding it contains no durable fact; temporary blockers belong in deferredEvidence.",
+			"Before finishing a Dreaming pass, store one short structured note for future passes to review. Deferred evidence in another scope must include its agentId. Reviewed exclusions must include the agentId of the scope that owns the sourceRef. Use reviewedExcludedEvidence only after inspecting an entire source revision and deciding it contains no durable fact; temporary blockers belong in deferredEvidence.",
 			false,
 			z.object({
 				summary: z.string().trim().min(1).max(2_000),
@@ -718,6 +718,7 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 				reviewedExcludedEvidence: z
 					.array(
 						z.object({
+							agentId: z.string().trim().min(1),
 							sourceRef: z.string().regex(/^(memory|artifact|transcript|summary):.+$/),
 							reason: z.string().trim().min(1).max(500),
 						}),

@@ -94,12 +94,15 @@ function parseReviewedExcludedEvidenceList(value: unknown): readonly DreamingRev
 	return value.flatMap((item) => {
 		if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
 		const entry = item as Record<string, unknown>;
-		if (typeof entry.sourceRef !== "string" || typeof entry.reason !== "string") return [];
+		if (typeof entry.agentId !== "string" || typeof entry.sourceRef !== "string" || typeof entry.reason !== "string")
+			return [];
+		const agentId = entry.agentId.trim();
 		const sourceRef = entry.sourceRef.trim();
 		const reason = entry.reason.trim();
-		if (!sourceRef || !reason) return [];
+		if (!agentId || !sourceRef || !reason) return [];
 		return [
 			{
+				agentId,
 				sourceRef,
 				reason,
 			},

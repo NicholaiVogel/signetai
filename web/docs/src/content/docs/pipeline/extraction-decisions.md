@@ -92,8 +92,10 @@ and graph reads and writes remain bound to the requested agent scope.
 
 `runbook_write` accepts `reviewedExcludedEvidence` for source revisions that the
 pass inspected completely and intentionally found to contain no durable fact.
-This terminal disposition is revision-scoped. A newer source revision becomes
-eligible again, while a temporary blocker must remain in `deferredEvidence`.
+Each entry includes the owning `agentId` and `sourceRef`, so multi-scope passes
+cannot attribute a reviewed source to the primary scope. This terminal
+disposition is revision-scoped. A newer source revision becomes eligible again,
+while a temporary blocker must remain in `deferredEvidence`.
 
 ### 3. Propose and validate ontology operations
 

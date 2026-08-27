@@ -355,7 +355,11 @@ describe("Dreaming", () => {
 						{
 							summary: "No durable fact found.",
 							reviewedExcludedEvidence: [
-								{ sourceRef: "transcript:reviewed-noop", reason: "Discussion contained no settled outcome." },
+								{
+									agentId: AGENT,
+									sourceRef: "transcript:reviewed-noop",
+									reason: "Discussion contained no settled outcome.",
+								},
 							],
 						},
 						undefined,
@@ -428,6 +432,104 @@ describe("Dreaming", () => {
 		expect(await getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
 	});
 
+	it("terminalizes reviewed evidence after cross-pass fragments (#1712)", async () => {
+		seedTranscript(db, "reviewed-large", "x".repeat(5_000));
+		let passNumber = 0;
+		const run = async () =>
+			runDreamingAgentPass(
+				accessor,
+				{
+					async run(input) {
+						passNumber += 1;
+						const search = input.tools.find((tool) => tool.name === "search_evidence");
+						const runbook = input.tools.find((tool) => tool.name === "runbook_write");
+						if (!search || !runbook) throw new Error("Missing Dreaming evidence tools");
+						await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
+						if (passNumber === 3) {
+							await runbook.execute(
+								"call",
+								{
+									summary: "No durable fact found.",
+									reviewedExcludedEvidence: [
+										{ agentId: AGENT, sourceRef: "transcript:reviewed-large", reason: "No durable fact." },
+									],
+								},
+								undefined,
+								undefined,
+								{} as never,
+							);
+						}
+						return { summary: "Reviewed" };
+					},
+				},
+				defaultCfg(),
+				"/tmp",
+				AGENT,
+				[AGENT],
+				"incremental-content",
+			);
+
+		await run();
+		await run();
+		await run();
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_reviews WHERE agent_id = ? AND source_id = ?")
+					.get(AGENT, "reviewed-large") as { count: number }
+			).count,
+		).toBe(1);
+		expect(await getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBe(0);
+	});
+
+	it("records reviewed evidence under its owning scope in a multi-scope pass (#1712)", async () => {
+		const secondary = "secondary-scope";
+		seedTranscript(db, "secondary-only", "A discussion with no durable fact.", undefined, secondary);
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const search = input.tools.find((tool) => tool.name === "search_evidence");
+					const runbook = input.tools.find((tool) => tool.name === "runbook_write");
+					if (!search || !runbook) throw new Error("Missing Dreaming evidence tools");
+					await search.execute("call", { agentId: secondary }, undefined, undefined, {} as never);
+					await runbook.execute(
+						"call",
+						{
+							summary: "No durable fact found.",
+							reviewedExcludedEvidence: [
+								{ agentId: secondary, sourceRef: "transcript:secondary-only", reason: "No durable fact." },
+							],
+						},
+						undefined,
+						undefined,
+						{} as never,
+					);
+					return { summary: "Reviewed" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT, secondary],
+			"incremental-content",
+		);
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_reviews WHERE agent_id = ? AND source_id = ?")
+					.get(secondary, "secondary-only") as { count: number }
+			).count,
+		).toBe(1);
+		expect(
+			(
+				db.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_reviews WHERE agent_id = ?").get(AGENT) as {
+					count: number;
+				}
+			).count,
+		).toBe(0);
+	});
+
 	it("does not terminalize explicitly deferred evidence (#1710)", async () => {
 		seedTranscript(db, "deferred-reviewed", "A discussion awaiting an external decision.");
 		await runDreamingAgentPass(
@@ -444,7 +546,11 @@ describe("Dreaming", () => {
 							summary: "Decision is pending.",
 							deferredEvidence: [{ agentId: AGENT, sourceRef: "transcript:deferred-reviewed" }],
 							reviewedExcludedEvidence: [
-								{ sourceRef: "transcript:deferred-reviewed", reason: "The decision is not settled yet." },
+								{
+									agentId: AGENT,
+									sourceRef: "transcript:deferred-reviewed",
+									reason: "The decision is not settled yet.",
+								},
 							],
 						},
 						undefined,

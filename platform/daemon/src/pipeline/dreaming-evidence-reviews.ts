@@ -2,10 +2,15 @@ import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { runWriteTxAsync } from "../db-accessor";
 import { type EpisodicSourceKind, readEpisodicSource } from "../episodic-sources";
 import { enqueueDreamingAttentionInTx } from "./dreaming-attention";
-import { persistedEvidenceDeliveries, verifiedDreamingEvidenceDelivery } from "./dreaming-evidence-consumption";
+import {
+	deliveredOffsetForSource,
+	persistedEvidenceDeliveries,
+	verifiedDreamingEvidenceDelivery,
+} from "./dreaming-evidence-consumption";
 import { renderDreamingEvidence } from "./dreaming-evidence";
 
 export interface DreamingReviewedExcludedEvidenceEntry {
+	readonly agentId: string;
 	readonly sourceRef: string;
 	readonly reason: string;
 }
@@ -57,12 +62,18 @@ export function parseDreamingReviewedExcludedEvidence(
 	if (!Array.isArray(value.reviewedExcludedEvidence)) return null;
 	const entries: DreamingReviewedExcludedEvidenceEntry[] = [];
 	for (const item of value.reviewedExcludedEvidence) {
-		if (!isRecord(item) || typeof item.sourceRef !== "string" || typeof item.reason !== "string") return null;
+		if (
+			!isRecord(item) ||
+			typeof item.agentId !== "string" ||
+			typeof item.sourceRef !== "string" ||
+			typeof item.reason !== "string"
+		)
+			return null;
+		const agentId = item.agentId.trim();
 		const sourceRefValue = item.sourceRef.trim();
 		const reason = item.reason.trim();
-		if (!sourceRefValue || !reason) return null;
-		if (item.agentId !== undefined) return null;
-		entries.push({ sourceRef: sourceRefValue, reason });
+		if (!agentId || !sourceRefValue || !reason) return null;
+		entries.push({ agentId, sourceRef: sourceRefValue, reason });
 	}
 	return entries;
 }
@@ -76,9 +87,10 @@ function wasFullyDelivered(
 	sourceCapturedAt: string,
 	sourceEntryId: string,
 	revision: string,
+	initialOffset: number,
 	length: number,
 ): boolean {
-	let offset = 0;
+	let offset = Math.min(initialOffset, length);
 	const matches = deliveries
 		.filter(
 			(delivery) =>
@@ -103,7 +115,7 @@ export function recordDreamingReviewedExcludedEvidenceInTx(
 	db: WriteDb,
 	params: {
 		readonly passId: string;
-		readonly primaryAgentId: string;
+		readonly scopeIds: ReadonlySet<string>;
 		readonly entries: readonly DreamingReviewedExcludedEvidenceEntry[];
 		readonly deferredEvidence: ReadonlySet<string>;
 	},
@@ -123,7 +135,8 @@ export function recordDreamingReviewedExcludedEvidenceInTx(
 	const seen = new Set<string>();
 	let recorded = 0;
 	for (const entry of params.entries) {
-		const agentId = params.primaryAgentId;
+		const agentId = entry.agentId;
+		if (!params.scopeIds.has(agentId)) continue;
 		const parsed = sourceRef(entry.sourceRef);
 		if (!parsed) continue;
 		const source = readEpisodicSource(db, { agentId, from: entry.sourceRef });
@@ -144,6 +157,7 @@ export function recordDreamingReviewedExcludedEvidenceInTx(
 				source.capturedAt,
 				sourceEntryId(source),
 				revision,
+				deliveredOffsetForSource(db, agentId, source),
 				renderDreamingEvidence(source).length,
 			)
 		)
