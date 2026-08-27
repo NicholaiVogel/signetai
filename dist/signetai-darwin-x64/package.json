@@ -1,6 +1,6 @@
 {
   "name": "signetai-darwin-x64",
-  "version": "0.214.16",
+  "version": "0.214.17",
   "description": "Signet native binary for macOS x64",
   "os": [
     "darwin"

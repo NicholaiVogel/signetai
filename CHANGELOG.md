@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-27
-- Bug fixes: gate ACPX same-agent re-admission; reap ACPX workers before re-admission; handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
+- Bug fixes: repair dreaming accessor site tokens; preserve reviewed evidence scope; close reviewed evidence loops; gate ACPX same-agent re-admission; reap ACPX workers before re-admission; handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
 - Refactoring: async agent-id + dreaming-worker DB admission with scope caching; migrate prospective-index hints writes to async admission.
 
 ### 2026-08-25
@@ -33,6 +33,17 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: add documentation site guidance.
 
 ## Release Ledger
+
+## [0.214.17] - 2026-08-27
+
+Release summary: 3 bug fixes.
+Tag range: `v0.214.16..v0.214.17`.
+
+### Bug Fixes
+
+- **daemon**: repair dreaming accessor site tokens
+- **dreaming**: preserve reviewed evidence scope
+- **dreaming**: close reviewed evidence loops
 
 ## [0.214.16] - 2026-08-27
 
