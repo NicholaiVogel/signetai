@@ -1,4 +1,32 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, mock } from "bun:test";
+
+// Exercise the adapter against the raw SDK v0.3 response shapes rather than
+// an already-normalized OnePasswordClient supplied through clientFactory.
+mock.module("@1password/sdk", () => ({
+	createClient: async () => ({
+		secrets: { resolve: async () => "resolved-secret" },
+		vaults: {
+			list: async () => [{ id: "v1", title: "Engineering Vault" }],
+		},
+		items: {
+			list: async () => [{ id: "item-1", title: "GitHub", vaultId: "v1" }],
+			get: async () => ({
+				id: "item-1",
+				title: "GitHub",
+				fields: [
+					{
+						id: "credential",
+						label: "credential",
+						value: "ghp_v03",
+						fieldType: "CONCEALED",
+						purpose: "",
+					},
+				],
+			}),
+		},
+	}),
+}));
+
 import {
 	type OnePasswordClientFactory,
 	type OnePasswordField,
@@ -12,6 +40,39 @@ describe("buildImportedSecretName", () => {
 		const name = buildImportedSecretName("op", "Engineering Vault", "GitHub.com", "api token");
 
 		expect(name).toBe("OP_ENGINEERING_VAULT_GITHUB_COM_API_TOKEN");
+	});
+});
+
+describe("raw SDK adapter boundary", () => {
+	it("imports a v0.3 vault title and concealed fieldType", async () => {
+		const writes: Array<{ name: string; value: string }> = [];
+
+		const result = await importOnePasswordSecrets({
+			token: "sdk-token",
+			hasSecret: () => false,
+			putSecret: async (name, value) => {
+				writes.push({ name, value });
+			},
+		});
+
+		expect(result.vaultsScanned).toBe(1);
+		expect(result.itemsScanned).toBe(1);
+		expect(result.importedCount).toBe(1);
+		expect(result.skippedCount).toBe(0);
+		expect(result.errorCount).toBe(0);
+		expect(result.imported[0]).toMatchObject({
+			vaultId: "v1",
+			vaultName: "Engineering Vault",
+			itemId: "item-1",
+			fieldId: "credential",
+			fieldLabel: "credential",
+		});
+		expect(writes).toEqual([
+			{
+				name: buildImportedSecretName("OP", "Engineering Vault", "GitHub", "credential"),
+				value: "ghp_v03",
+			},
+		]);
 	});
 });
 
