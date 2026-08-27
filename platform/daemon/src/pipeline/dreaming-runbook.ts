@@ -5,6 +5,7 @@
  */
 import type { DbAccessor, WriteDb } from "../db-accessor";
 import type { DreamingAgentEvidence } from "./dreaming-evidence";
+import type { DreamingReviewedExcludedEvidenceEntry } from "./dreaming-evidence-reviews";
 
 export interface DreamingDeferredEvidence {
 	readonly agentId: string;
@@ -19,6 +20,8 @@ export interface DreamingRunbookEntry {
 	readonly deferred: readonly string[];
 	/** Canonical source refs deliberately deferred, never acknowledged as consumed. */
 	readonly deferredEvidence: readonly DreamingDeferredEvidenceEntry[];
+	/** Fully inspected source revisions with no durable fact to retain. */
+	readonly reviewedExcludedEvidence: readonly DreamingReviewedExcludedEvidenceEntry[];
 }
 
 export interface DreamingEvidenceWindow {
@@ -86,6 +89,27 @@ function parseDeferredEvidenceList(value: unknown): readonly DreamingDeferredEvi
 	return entries;
 }
 
+function parseReviewedExcludedEvidenceList(value: unknown): readonly DreamingReviewedExcludedEvidenceEntry[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((item) => {
+		if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
+		const entry = item as Record<string, unknown>;
+		if (typeof entry.agentId !== "string" || typeof entry.sourceRef !== "string" || typeof entry.reason !== "string")
+			return [];
+		const agentId = entry.agentId.trim();
+		const sourceRef = entry.sourceRef.trim();
+		const reason = entry.reason.trim();
+		if (!agentId || !sourceRef || !reason) return [];
+		return [
+			{
+				agentId,
+				sourceRef,
+				reason,
+			},
+		];
+	});
+}
+
 function parseRunbook(value: string | null): DreamingRunbookEntry | null {
 	const row = parseRecord(value);
 	if (!row || typeof row.summary !== "string") return null;
@@ -94,6 +118,7 @@ function parseRunbook(value: string | null): DreamingRunbookEntry | null {
 		openQuestions: parseTextList(row.openQuestions),
 		deferred: parseTextList(row.deferred),
 		deferredEvidence: parseDeferredEvidenceList(row.deferredEvidence),
+		reviewedExcludedEvidence: parseReviewedExcludedEvidenceList(row.reviewedExcludedEvidence),
 	};
 }
 
@@ -182,7 +207,7 @@ export function writeDreamingRunbook(
 			)
 			.run(serializeRunbook(params.entry), params.passId, params.agentId);
 		return result.changes === 1;
-	}, "pipeline/dreaming-runbook.ts:177");
+	}, "pipeline/dreaming-runbook.ts:202");
 }
 
 /** Persist the exact source references presented to one pass, never their content. */
@@ -252,7 +277,7 @@ export function readDreamingRunbook(accessor: DbAccessor, agentId: string, limit
 			runbook: parseRunbook((row.runbookJson as string) ?? null),
 			quarantines: quarantines.all(agentId, row.id) as DreamingRunbookPass["quarantines"],
 		}));
-	}, "pipeline/dreaming-runbook.ts:219");
+	}, "pipeline/dreaming-runbook.ts:244");
 }
 
 /** Compact, delimited local history for a later pass; never a semantic claim source. */

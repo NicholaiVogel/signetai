@@ -64,6 +64,10 @@ export function markImportedSourceUnsupported(
 			agentId,
 			sourceId,
 		);
+		db.prepare("DELETE FROM dreaming_evidence_reviews WHERE agent_id = ? AND source_entry_id = ?").run(
+			agentId,
+			sourceId,
+		);
 		const prefix = `${sourceId}:`;
 		const embeddingRows = db
 			.prepare(

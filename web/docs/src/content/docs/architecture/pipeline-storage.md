@@ -332,6 +332,8 @@ The Dreaming subsystem persists its own state rather than hiding it in logs:
 - `dreaming_tool_calls` stores the ordered tool-call trace for a pass;
 - `dreaming_evidence_exclusions` records evidence rejected or deferred by a
   pass, including retry state;
+- `dreaming_evidence_reviews` records terminal reviewed dispositions for
+  immutable source revisions without changing the underlying evidence;
 - `dreaming_runbook` and evidence-window columns preserve the pass context used
   for later inspection;
 - `ontology_proposals` and related provenance tables preserve structured

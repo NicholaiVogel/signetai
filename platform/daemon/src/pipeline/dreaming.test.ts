@@ -43,6 +43,7 @@ import {
 	resolveRequeuedDreamingEvidenceInTx,
 } from "./dreaming-evidence-retry";
 import { readDreamingRunbook } from "./dreaming-runbook";
+import { requestDreamingReviewedEvidenceRequeue } from "./dreaming-evidence-reviews";
 
 const AGENT = "default";
 
@@ -338,6 +339,248 @@ describe("Dreaming", () => {
 		await run();
 		expect(await getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBe(0);
 	}, 15_000);
+
+	it("terminalizes fully reviewed evidence without hiding direct recall (#1710)", async () => {
+		seedTranscript(db, "reviewed-noop", "A discussion with no settled fact to retain.");
+		const result = await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const search = input.tools.find((tool) => tool.name === "search_evidence");
+					const runbook = input.tools.find((tool) => tool.name === "runbook_write");
+					if (!search || !runbook) throw new Error("Missing Dreaming evidence tools");
+					await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
+					await runbook.execute(
+						"call",
+						{
+							summary: "No durable fact found.",
+							reviewedExcludedEvidence: [
+								{
+									agentId: AGENT,
+									sourceRef: "transcript:reviewed-noop",
+									reason: "Discussion contained no settled outcome.",
+								},
+							],
+						},
+						undefined,
+						undefined,
+						{} as never,
+					);
+					return { summary: "No durable fact found." };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental-content",
+		);
+		expect(result.summary).toContain("No durable fact found.");
+		expect(
+			(
+				db.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_reviews WHERE agent_id = ?").get(AGENT) as {
+					count: number;
+				}
+			).count,
+		).toBe(1);
+		expect(await getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBe(0);
+		expect(
+			searchEpisodicSources(db as unknown as ReadDb, {
+				agentId: AGENT,
+				query: "discussion",
+				excludeDelivered: true,
+			}).some((source) => source.id === "reviewed-noop"),
+		).toBe(false);
+		expect(
+			searchEpisodicSources(db as unknown as ReadDb, {
+				agentId: AGENT,
+				query: "discussion",
+			}).some((source) => source.id === "reviewed-noop"),
+		).toBe(true);
+		db.prepare(
+			"UPDATE session_transcripts SET content = ?, updated_at = ?, completed_at = ? WHERE session_key = ? AND agent_id = ?",
+		).run(
+			"The revised session records a settled outcome.",
+			"2099-01-02 00:00:00",
+			"2099-01-03 00:00:00",
+			"reviewed-noop",
+			AGENT,
+		);
+		expect(
+			searchEpisodicSources(db as unknown as ReadDb, {
+				agentId: AGENT,
+				query: "settled outcome",
+				excludeDelivered: true,
+			}).some((source) => source.id === "reviewed-noop"),
+		).toBe(true);
+		expect(await getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
+		expect(await requestDreamingReviewedEvidenceRequeue(accessor, AGENT, "transcript", "reviewed-noop")).toBe(true);
+		expect(
+			(
+				db.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_reviews WHERE agent_id = ?").get(AGENT) as {
+					count: number;
+				}
+			).count,
+		).toBe(0);
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_consumption WHERE agent_id = ? AND source_id = ?")
+					.get(AGENT, "reviewed-noop") as { count: number }
+			).count,
+		).toBe(0);
+		expect(await getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
+	});
+
+	it("terminalizes reviewed evidence after cross-pass fragments (#1712)", async () => {
+		seedTranscript(db, "reviewed-large", "x".repeat(5_000));
+		let passNumber = 0;
+		const run = async () =>
+			runDreamingAgentPass(
+				accessor,
+				{
+					async run(input) {
+						passNumber += 1;
+						const search = input.tools.find((tool) => tool.name === "search_evidence");
+						const runbook = input.tools.find((tool) => tool.name === "runbook_write");
+						if (!search || !runbook) throw new Error("Missing Dreaming evidence tools");
+						await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
+						if (passNumber === 3) {
+							await runbook.execute(
+								"call",
+								{
+									summary: "No durable fact found.",
+									reviewedExcludedEvidence: [
+										{ agentId: AGENT, sourceRef: "transcript:reviewed-large", reason: "No durable fact." },
+									],
+								},
+								undefined,
+								undefined,
+								{} as never,
+							);
+						}
+						return { summary: "Reviewed" };
+					},
+				},
+				defaultCfg(),
+				"/tmp",
+				AGENT,
+				[AGENT],
+				"incremental-content",
+			);
+
+		await run();
+		await run();
+		await run();
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_reviews WHERE agent_id = ? AND source_id = ?")
+					.get(AGENT, "reviewed-large") as { count: number }
+			).count,
+		).toBe(1);
+		expect(await getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBe(0);
+	});
+
+	it("records reviewed evidence under its owning scope in a multi-scope pass (#1712)", async () => {
+		const secondary = "secondary-scope";
+		seedTranscript(db, "secondary-only", "A discussion with no durable fact.", undefined, secondary);
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const search = input.tools.find((tool) => tool.name === "search_evidence");
+					const runbook = input.tools.find((tool) => tool.name === "runbook_write");
+					if (!search || !runbook) throw new Error("Missing Dreaming evidence tools");
+					await search.execute("call", { agentId: secondary }, undefined, undefined, {} as never);
+					await runbook.execute(
+						"call",
+						{
+							summary: "No durable fact found.",
+							reviewedExcludedEvidence: [
+								{ agentId: secondary, sourceRef: "transcript:secondary-only", reason: "No durable fact." },
+							],
+						},
+						undefined,
+						undefined,
+						{} as never,
+					);
+					return { summary: "Reviewed" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT, secondary],
+			"incremental-content",
+		);
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_reviews WHERE agent_id = ? AND source_id = ?")
+					.get(secondary, "secondary-only") as { count: number }
+			).count,
+		).toBe(1);
+		expect(
+			(
+				db.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_reviews WHERE agent_id = ?").get(AGENT) as {
+					count: number;
+				}
+			).count,
+		).toBe(0);
+	});
+
+	it("does not terminalize explicitly deferred evidence (#1710)", async () => {
+		seedTranscript(db, "deferred-reviewed", "A discussion awaiting an external decision.");
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const search = input.tools.find((tool) => tool.name === "search_evidence");
+					const runbook = input.tools.find((tool) => tool.name === "runbook_write");
+					if (!search || !runbook) throw new Error("Missing Dreaming evidence tools");
+					await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
+					await runbook.execute(
+						"call",
+						{
+							summary: "Decision is pending.",
+							deferredEvidence: [{ agentId: AGENT, sourceRef: "transcript:deferred-reviewed" }],
+							reviewedExcludedEvidence: [
+								{
+									agentId: AGENT,
+									sourceRef: "transcript:deferred-reviewed",
+									reason: "The decision is not settled yet.",
+								},
+							],
+						},
+						undefined,
+						undefined,
+						{} as never,
+					);
+					return { summary: "Deferred pending decision." };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental-content",
+		);
+		expect(
+			(
+				db.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_reviews WHERE agent_id = ?").get(AGENT) as {
+					count: number;
+				}
+			).count,
+		).toBe(0);
+		expect(
+			searchEpisodicSources(db as unknown as ReadDb, {
+				agentId: AGENT,
+				query: "discussion",
+				excludeDelivered: true,
+			}).some((source) => source.id === "deferred-reviewed"),
+		).toBe(true);
+	});
 
 	it("does not consume evidence delivered by a failed pass (#1430)", async () => {
 		seedTranscript(db, "failed-delivery", "Evidence must survive an interrupted pass.");

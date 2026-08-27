@@ -20,6 +20,7 @@ import {
 	getDreamingAttention,
 	getDreamingEpisodicTokenBacklog,
 	getDreamingEvidenceExclusions,
+	getDreamingReviewedEvidence,
 	getDreamingPasses,
 	getDreamingPass,
 	getActiveDreamingPasses,
@@ -30,6 +31,7 @@ import {
 	getDreamingWorkloadDiagnostics,
 	getPipelineWorkerStatus,
 	requestDreamingEvidenceRequeue,
+	requestDreamingReviewedEvidenceRequeue,
 } from "../pipeline";
 import {
 	DREAMING_LIVE_HEARTBEAT_MS,
@@ -122,7 +124,7 @@ export function pipelineQueueBlock(options: { readonly allowSynchronousRead?: bo
 				summary: snapshot.summary,
 				oldestDeadSummaryJob: snapshot.oldestDeadSummaryJob,
 			};
-		}, "routes/pipeline-routes.ts:118");
+		}, "routes/pipeline-routes.ts:120");
 	} catch {
 		return {
 			memory: { ...UNKNOWN_QUEUE_COUNTS_SHAPE },
@@ -339,7 +341,7 @@ export function registerPipelineRoutes(app: Hono): void {
 		try {
 			embeddingMigration = await getDbAccessor().withReadDbAsync(
 				(db) => readEmbeddingIndexMigrationProgress(db, config.embedding),
-				{ siteToken: "routes/pipeline-routes.ts:340" },
+				{ siteToken: "routes/pipeline-routes.ts:342" },
 			);
 		} catch {
 			// Database may still be initializing; omit migration visibility.
@@ -521,7 +523,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					limit,
 					offset,
 				}),
-			"routes/pipeline-routes.ts:515",
+			"routes/pipeline-routes.ts:517",
 		);
 		return c.json({
 			agentId: resolveAgentId({ agentId: scopedAgent.agentId }),
@@ -638,7 +640,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					},
 				};
 			},
-			{ siteToken: "routes/pipeline-routes.ts:614", operation: "pipeline.status" },
+			{ siteToken: "routes/pipeline-routes.ts:616", operation: "pipeline.status" },
 		);
 		const diagnostics = getCachedDiagnosticsReport();
 
@@ -751,6 +753,7 @@ export function registerPipelineRoutes(app: Hono): void {
 		const episodicTokensPending = await getDreamingEpisodicTokenBacklog(accessor, agentId);
 		const passes = await getDreamingPasses(accessor, agentId, 10);
 		const exclusions = await getDreamingEvidenceExclusions(accessor, agentId);
+		const reviewedEvidence = await getDreamingReviewedEvidence(accessor, agentId);
 		const attention = getDreamingAttention(accessor, agentId);
 		const worker = getDreamingWorker();
 
@@ -774,6 +777,7 @@ export function registerPipelineRoutes(app: Hono): void {
 			passes,
 			attention,
 			exclusions,
+			reviewedEvidence,
 		});
 	});
 
@@ -949,10 +953,12 @@ export function registerPipelineRoutes(app: Hono): void {
 		if (raw === null) return c.json({ error: "Malformed JSON body" }, 400);
 		const body = asRecord(raw);
 		const sourceKind = readString(body, "sourceKind");
-		if (sourceKind === "summary") {
-			return c.json({ error: "Summary evidence requeue is retired; requeue the completed transcript instead" }, 410);
-		}
-		if (sourceKind !== "memory" && sourceKind !== "artifact" && sourceKind !== "transcript") {
+		if (
+			sourceKind !== "memory" &&
+			sourceKind !== "artifact" &&
+			sourceKind !== "transcript" &&
+			sourceKind !== "summary"
+		) {
 			return c.json({ error: "Invalid episodic source kind" }, 400);
 		}
 		const sourceId = readString(body, "sourceId");
@@ -960,9 +966,46 @@ export function registerPipelineRoutes(app: Hono): void {
 		const scopedAgent = resolveScopedDreamAgent(c, body);
 		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
 		const agentId = scopedAgent.agentId;
-		const requeued = requestDreamingEvidenceRequeue(getDbAccessor(), agentId, sourceKind, sourceId);
-		if (!requeued) return c.json({ error: "Dreaming evidence exclusion not found" }, 404);
-		return c.json({ requeued: true, agentId, sourceKind, sourceId });
+		if (sourceKind === "summary") {
+			const accessor = getDbAccessor();
+			const hasTransientSummaryExclusion = await accessor.withReadDbAsync(
+				(db) =>
+					db
+						.prepare(
+							"SELECT 1 FROM dreaming_evidence_exclusions WHERE agent_id = ? AND source_kind = 'summary' AND source_id = ? AND resolved_at IS NULL",
+						)
+						.get(agentId, sourceId) != null,
+				{ siteToken: "routes/pipeline-routes.ts:971" },
+			);
+			if (hasTransientSummaryExclusion) {
+				return c.json({ error: "Summary evidence requeue is retired; requeue the completed transcript instead" }, 410);
+			}
+			const reviewedSummaryRequeued = await requestDreamingReviewedEvidenceRequeue(
+				accessor,
+				agentId,
+				sourceKind,
+				sourceId,
+			);
+			if (!reviewedSummaryRequeued) {
+				return c.json({ error: "Summary evidence requeue is retired; requeue the completed transcript instead" }, 410);
+			}
+			return c.json({ requeued: true, reviewedExcluded: true, agentId, sourceKind, sourceId });
+		}
+		const requeued = await requestDreamingEvidenceRequeue(getDbAccessor(), agentId, sourceKind, sourceId);
+		const reviewedRequeued = await requestDreamingReviewedEvidenceRequeue(
+			getDbAccessor(),
+			agentId,
+			sourceKind,
+			sourceId,
+		);
+		if (!requeued && !reviewedRequeued) return c.json({ error: "Dreaming evidence exclusion not found" }, 404);
+		return c.json({
+			requeued: true,
+			...(reviewedRequeued ? { reviewedExcluded: true } : {}),
+			agentId,
+			sourceKind,
+			sourceId,
+		});
 	});
 
 	/**

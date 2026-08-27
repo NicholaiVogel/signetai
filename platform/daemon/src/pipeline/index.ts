@@ -54,6 +54,7 @@ export {
 	recordDreamingFailure,
 	requestDreamingEvidenceRequeue,
 } from "./dreaming";
+export { getDreamingReviewedEvidence, requestDreamingReviewedEvidenceRequeue } from "./dreaming-evidence-reviews";
 export { getDreamingAttention } from "./dreaming-attention";
 export { getDreamingWorkloadDiagnostics } from "./dreaming";
 export { getDreamingQualityReport } from "./dreaming-quality";
