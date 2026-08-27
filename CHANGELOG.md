@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-27
-- Bug fixes: repair dreaming accessor site tokens; preserve reviewed evidence scope; close reviewed evidence loops; gate ACPX same-agent re-admission; reap ACPX workers before re-admission; handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
+- Bug fixes: refresh owner site token baseline; keep owner IPC protocol pure; update event loop ledger for owner backfill; refresh db accessor site tokens; route vector backfill through db owner; repair dreaming accessor site tokens; preserve reviewed evidence scope; close reviewed evidence loops; gate ACPX same-agent re-admission; reap ACPX workers before re-admission; handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
 - Refactoring: async agent-id + dreaming-worker DB admission with scope caching; migrate prospective-index hints writes to async admission.
 
 ### 2026-08-25
@@ -33,6 +33,19 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: add documentation site guidance.
 
 ## Release Ledger
+
+## [0.214.18] - 2026-08-27
+
+Release summary: 5 bug fixes.
+Tag range: `v0.214.17..v0.214.18`.
+
+### Bug Fixes
+
+- **daemon**: refresh owner site token baseline
+- **daemon**: keep owner IPC protocol pure
+- **daemon**: update event loop ledger for owner backfill
+- **daemon**: refresh db accessor site tokens
+- **daemon**: route vector backfill through db owner
 
 ## [0.214.17] - 2026-08-27
 
