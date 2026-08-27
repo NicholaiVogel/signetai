@@ -2139,6 +2139,9 @@ export interface VecBackfillOptions {
 	readonly maxBatches?: number;
 	/** Bound one synchronous writer turn so the daemon can yield between slices. */
 	readonly batchSize?: number;
+	/** Optional log sinks for callers whose stdout is a protocol channel. */
+	readonly log?: (message: string) => void;
+	readonly warn?: (message: string) => void;
 }
 
 export function backfillVecEmbeddings(
@@ -2147,6 +2150,8 @@ export function backfillVecEmbeddings(
 	deadlineAt?: number,
 	options: VecBackfillOptions = {},
 ): void {
+	const log = options.log ?? console.log;
+	const warn = options.warn ?? console.warn;
 	// Keep quarantine state durable across restarts and exclude it from every
 	// subsequent pending probe. The table contains IDs and diagnostics only.
 	ensureVecEmbeddingsQuarantineTable(db);
@@ -2207,7 +2212,7 @@ export function backfillVecEmbeddings(
 					const result = quarantine.run(row.id, expectedDimensions, reason, new Date().toISOString());
 					if (result.changes > 0) {
 						// Log once per validated malformed row; retries do not spam logs.
-						console.warn(`[db-accessor] Quarantined malformed embedding row ${row.id}: ${reason}`);
+						warn(`[db-accessor] Quarantined malformed embedding row ${row.id}: ${reason}`);
 					}
 				} else {
 					// Insert failures are operational errors (for example, SQLITE_BUSY).
@@ -2251,11 +2256,10 @@ export function backfillVecEmbeddings(
 	}
 
 	if (migrated > 0) {
-		// eslint-disable-next-line no-console
-		console.log(`[db-accessor] Backfilled ${migrated}/${totalRows} missing embeddings into vec_embeddings`);
+		log(`[db-accessor] Backfilled ${migrated}/${totalRows} missing embeddings into vec_embeddings`);
 	}
 	if (deferred) {
-		console.warn(
+		warn(
 			`[db-accessor] Deferred vector embedding backfill after ${migrated} rows; remaining rows at least ${remainingRowsAtLeast} will be completed post-ready`,
 		);
 		return;
@@ -2279,8 +2283,7 @@ export function backfillVecEmbeddings(
 		const orphanCount = orphanRow?.n ?? 0;
 		if (orphanCount > 0) {
 			db.prepare("DELETE FROM vec_embeddings WHERE id NOT IN (SELECT id FROM embeddings)").run();
-			// eslint-disable-next-line no-console
-			console.log(`[db-accessor] Cleaned ${orphanCount} orphaned vec_embeddings rows`);
+			log(`[db-accessor] Cleaned ${orphanCount} orphaned vec_embeddings rows`);
 		}
 	} catch {
 		// vec_embeddings may not exist — non-fatal

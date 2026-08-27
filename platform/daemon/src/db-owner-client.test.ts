@@ -93,6 +93,56 @@ describe("DB owner client", () => {
 		}
 	}
 
+	test("keeps owner IPC clean while running vector backfill slices", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		const fixture = new Database(database.path);
+		fixture.exec(
+			"CREATE TABLE embeddings (id TEXT PRIMARY KEY, dimensions INTEGER NOT NULL, vector BLOB); CREATE TABLE vec_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL); CREATE TABLE vec_embeddings_rowids (id TEXT PRIMARY KEY); CREATE TRIGGER vec_embeddings_rowids_after_insert AFTER INSERT ON vec_embeddings BEGIN INSERT OR REPLACE INTO vec_embeddings_rowids (id) VALUES (NEW.id); END",
+		);
+		const vector = Buffer.from(new Float32Array([1, 2]).buffer);
+		const insert = fixture.prepare("INSERT INTO embeddings (id, dimensions, vector) VALUES (?, 2, ?)");
+		for (let index = 0; index < 1_201; index += 1) {
+			insert.run(`embedding-${String(index).padStart(4, "0")}`, index === 600 ? Buffer.from([1]) : vector);
+		}
+		fixture.close();
+
+		client = createDbOwnerClient({ dbPath: database.path });
+		await client.start();
+		const maintenanceBefore = client.health().lanes?.maintenance;
+		if (maintenanceBefore === undefined || maintenanceBefore.pid === null) {
+			throw new Error("maintenance owner did not publish a pid");
+		}
+		for (let iteration = 0; iteration < 4; iteration += 1) {
+			await expect(
+				client.submit<{ readonly completed: boolean }>(
+					{ kind: "vector_backfill", expectedDimensions: 2, maxBatches: 1, batchSize: 500 },
+					{ operation: "maintenance.vector-backfill-regression", lane: "maintenance", deadlineMs: 10_000 },
+				).result,
+			).resolves.toEqual({ completed: true });
+			const maintenance = client.health().lanes?.maintenance;
+			expect(maintenance).toMatchObject({
+				state: "ready",
+				generation: 1,
+				pid: maintenanceBefore.pid,
+				lastError: null,
+			});
+		}
+		const counts = await client.submit<
+			readonly { readonly embeddings: number; readonly vectors: number; readonly quarantined: number }[]
+		>(
+			{
+				kind: "query",
+				statement: {
+					sql: "SELECT (SELECT COUNT(*) FROM embeddings) AS embeddings, (SELECT COUNT(*) FROM vec_embeddings) AS vectors, (SELECT COUNT(*) FROM vec_embeddings_quarantine) AS quarantined",
+					result: "all",
+				},
+			},
+			{ operation: "maintenance.vector-backfill-regression-verify", lane: "read", deadlineMs: 5_000 },
+		).result;
+		expect(counts).toEqual([{ embeddings: 1_201, vectors: 1_200, quarantined: 1 }]);
+	});
+
 	test("keeps the owner alive when sqlite-vec cannot be loaded", async () => {
 		const database = makeDb();
 		directory = database.directory;
