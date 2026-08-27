@@ -4,16 +4,16 @@
   "sites": [
     {
       "path": "agent-id.ts",
-      "line": 56,
-      "api": "withReadDb",
-      "source": "return getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
+      "line": 97,
+      "api": "withReadDbAsync",
+      "source": "getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "agent-id.ts",
-      "line": 82,
-      "api": "withWriteTx",
-      "source": "getDbAccessor().withWriteTx((db: import(\"./db-accessor\").WriteDb) => {",
+      "line": 136,
+      "api": "withWriteTxAsync",
+      "source": "const created = await getDbAccessor().withWriteTxAsync(",
       "category": "hot-path"
     },
     {
@@ -3182,16 +3182,16 @@
     },
     {
       "path": "pipeline/dreaming-evidence-retry.ts",
-      "line": 131,
-      "api": "withReadDb",
-      "source": "return accessor.withReadDb((db: import(\"../db-accessor\").ReadDb) => {",
+      "line": 130,
+      "api": "withReadDbAsync",
+      "source": "return await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-evidence-retry.ts",
-      "line": 253,
-      "api": "withWriteTx",
-      "source": "return accessor.withWriteTx((db: import(\"../db-accessor\").WriteDb) => {",
+      "line": 254,
+      "api": "withWriteTxAsync",
+      "source": "return await accessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
@@ -3273,30 +3273,30 @@
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 100,
-      "api": "withReadDb",
-      "source": "return accessor.withReadDb(",
+      "line": 99,
+      "api": "withReadDbAsync",
+      "source": "return await accessor.withReadDbAsync((db) => getQueueHealth(db).status !== \"healthy\", {",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 121,
-      "api": "withReadDb",
-      "source": "return accessor.withReadDb((db: import(\"../db-accessor\").ReadDb) => {",
+      "line": 122,
+      "api": "withReadDbAsync",
+      "source": "return await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 197,
-      "api": "withReadDb",
-      "source": "accessor.withReadDb(",
+      "line": 213,
+      "api": "withReadDbAsync",
+      "source": "accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, [\"hygiene\"]), {",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 204,
-      "api": "withReadDb",
-      "source": "accessor.withReadDb(",
+      "line": 223,
+      "api": "withReadDbAsync",
+      "source": "accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS), {",
       "category": "hot-path"
     },
     {
@@ -4694,119 +4694,119 @@
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 132,
+      "line": 133,
       "api": "readdirSync",
       "source": "const dirFiles = readdirSync(AGENTS_DIR);",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 137,
+      "line": 138,
       "api": "statSync",
       "source": "const fileStat = statSync(filePath);",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 139,
+      "line": 140,
       "api": "readFileSync",
       "source": "const content = readFileSync(filePath, \"utf-8\");",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 200,
+      "line": 201,
       "api": "writeFileSync",
       "source": "writeFileSync(filePath, content, \"utf-8\");",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 289,
+      "line": 291,
       "api": "withReadDbAsync",
       "source": "const created = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 304,
+      "line": 306,
       "api": "withReadDbAsync",
       "source": "const existing = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 337,
+      "line": 340,
       "api": "withReadDbAsync",
       "source": "const updated = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 351,
+      "line": 354,
       "api": "withReadDbAsync",
       "source": "const agent = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 514,
+      "line": 518,
       "api": "withReadDbAsync",
       "source": "const taskExists = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 611,
+      "line": 615,
       "api": "withReadDbAsync",
       "source": "const tasks = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 707,
+      "line": 711,
       "api": "withReadDbAsync",
       "source": "const task = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 716,
+      "line": 720,
       "api": "withReadDbAsync",
       "source": "const runs = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 736,
+      "line": 740,
       "api": "withReadDbAsync",
       "source": "const existing = (await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 811,
+      "line": 815,
       "api": "withReadDbAsync",
       "source": "const task = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 820,
+      "line": 824,
       "api": "withReadDbAsync",
       "source": "const running = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 944,
+      "line": 948,
       "api": "withReadDbAsync",
       "source": "const runs = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 957,
+      "line": 961,
       "api": "withReadDbAsync",
       "source": "const total = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"

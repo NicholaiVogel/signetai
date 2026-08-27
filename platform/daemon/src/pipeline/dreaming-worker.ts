@@ -95,12 +95,11 @@ const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 min
 const AGENT_SCOPE_SNAPSHOT_REFRESH_MS = 30 * 60 * 1000; // 30 min
 
 /** Dreaming is deferrable work. Yield an entire sweep while live queues are under pressure. */
-export function shouldDeferDreamingSweep(accessor: DbAccessor): boolean {
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb(
-		(db: import("../db-accessor").ReadDb) => getQueueHealth(db).status !== "healthy",
-		"pipeline/dreaming-worker.ts:100",
-	);
+export async function shouldDeferDreamingSweep(accessor: DbAccessor): Promise<boolean> {
+	return await accessor.withReadDbAsync((db) => getQueueHealth(db).status !== "healthy", {
+		siteToken: "pipeline/dreaming-worker.ts:99",
+		operation: "dreaming.worker.queue-health",
+	});
 }
 
 export async function shouldDeferDreamingSweepAsync(
@@ -108,7 +107,7 @@ export async function shouldDeferDreamingSweepAsync(
 	ownerMaintenance?: DbOwnerMaintenance,
 ): Promise<boolean> {
 	if (ownerMaintenance) return !(await ownerMaintenance.queueIsHealthy());
-	return shouldDeferDreamingSweep(accessor);
+	return await shouldDeferDreamingSweep(accessor);
 }
 
 function normalizeAgentId(agentId: string | undefined, fallback: string): string {
@@ -116,18 +115,21 @@ function normalizeAgentId(agentId: string | undefined, fallback: string): string
 	return trimmed ? trimmed : fallback;
 }
 
-export function getDreamingWorkerAgentIds(accessor: DbAccessor, defaultAgentId: string): readonly string[] {
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return accessor.withReadDb((db: import("../db-accessor").ReadDb) => {
-		// UNION ALL + app-side dedup instead of UNION: the caller collapses
-		// rows into a Set, so the cross-branch sort/merge UNION performs is
-		// pure waste. UNION ALL concatenates the per-table index scans
-		// (every branch resolves through an agent_id-prefix or covering
-		// index), bounding the query by index size rather than table
-		// content (#1094).
-		const rows = db
-			.prepare(
-				`SELECT id AS id FROM agents
+export async function getDreamingWorkerAgentIds(
+	accessor: DbAccessor,
+	defaultAgentId: string,
+): Promise<readonly string[]> {
+	return await accessor.withReadDbAsync(
+		(db) => {
+			// UNION ALL + app-side dedup instead of UNION: the caller collapses
+			// rows into a Set, so the cross-branch sort/merge UNION performs is
+			// pure waste. UNION ALL concatenates the per-table index scans
+			// (every branch resolves through an agent_id-prefix or covering
+			// index), bounding the query by index size rather than table
+			// content (#1094).
+			const rows = db
+				.prepare(
+					`SELECT id AS id FROM agents
 				 UNION ALL
 				 SELECT DISTINCT agent_id AS id FROM dreaming_state
 				 UNION ALL
@@ -146,15 +148,17 @@ export function getDreamingWorkerAgentIds(accessor: DbAccessor, defaultAgentId: 
 				 SELECT DISTINCT agent_id AS id FROM dreaming_evidence_exclusions WHERE resolved_at IS NULL
 				 UNION ALL
 				 SELECT DISTINCT agent_id AS id FROM entities`,
-			)
-			.all() as Array<{ id: string | null }>;
-		const ids = new Set<string>([defaultAgentId]);
-		for (const row of rows) {
-			const id = normalizeAgentId(row.id ?? undefined, "");
-			if (id) ids.add(id);
-		}
-		return [...ids].sort();
-	}, "pipeline/dreaming-worker.ts:121");
+				)
+				.all() as Array<{ id: string | null }>;
+			const ids = new Set<string>([defaultAgentId]);
+			for (const row of rows) {
+				const id = normalizeAgentId(row.id ?? undefined, "");
+				if (id) ids.add(id);
+			}
+			return [...ids].sort();
+		},
+		{ siteToken: "pipeline/dreaming-worker.ts:122", operation: "dreaming.worker.agent-scopes" },
+	);
 }
 
 /**
@@ -166,18 +170,29 @@ export function getDreamingWorkerAgentIds(accessor: DbAccessor, defaultAgentId: 
  */
 export function createAgentScopeSnapshot(
 	refreshMs: number,
-	resolve: () => readonly string[],
+	resolve: () => readonly string[] | Promise<readonly string[]>,
 	now: () => number = Date.now,
-): () => readonly string[] {
+): () => Promise<readonly string[]> {
 	let snapshot: readonly string[] | null = null;
 	let at = 0;
-	return () => {
+	let refresh: Promise<readonly string[]> | null = null;
+	return async () => {
 		const t = now();
-		if (snapshot === null || t - at >= refreshMs) {
-			snapshot = resolve();
-			at = t;
+		if (snapshot !== null && t - at < refreshMs) return snapshot;
+		if (refresh === null) {
+			refresh = Promise.resolve()
+				.then(resolve)
+				.then((next) => {
+					snapshot = next;
+					at = now();
+					return next;
+				})
+				.finally(() => {
+					refresh = null;
+				});
 		}
-		return snapshot;
+		const pending = refresh;
+		return await pending;
 	};
 }
 
@@ -192,21 +207,26 @@ export async function selectDreamingCheckMode(
 	scopes: readonly string[],
 	lastScheduled: DreamingPassFocus | null,
 ): Promise<DreamingMode> {
-	const hasPendingHygieneAttention = scopes.some((scope) =>
-		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		accessor.withReadDb(
-			(db: import("../db-accessor").ReadDb) => hasDreamingAttentionKindInDb(db, scope, ["hygiene"]),
-			"pipeline/dreaming-worker.ts:197",
-		),
-	);
-	const hasPendingContentAttention = scopes.some((scope) =>
-		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		accessor.withReadDb(
-			(db: import("../db-accessor").ReadDb) =>
-				hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS),
-			"pipeline/dreaming-worker.ts:204",
-		),
-	);
+	const hasPendingHygieneAttention = (
+		await Promise.all(
+			scopes.map((scope) =>
+				accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, ["hygiene"]), {
+					siteToken: "pipeline/dreaming-worker.ts:213",
+					operation: "dreaming.worker.hygiene-attention",
+				}),
+			),
+		)
+	).some(Boolean);
+	const hasPendingContentAttention = (
+		await Promise.all(
+			scopes.map((scope) =>
+				accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS), {
+					siteToken: "pipeline/dreaming-worker.ts:223",
+					operation: "dreaming.worker.content-attention",
+				}),
+			),
+		)
+	).some(Boolean);
 	const backlogs = await Promise.all(scopes.map((scope) => getDreamingEpisodicTokenBacklog(accessor, scope)));
 	const hasBacklog = backlogs.some((backlog) => backlog > 0);
 	return selectDreamingPassMode(lastScheduled, hasPendingHygieneAttention, hasBacklog, hasPendingContentAttention);
@@ -302,28 +322,30 @@ export function startDreamingWorker(
 		if (active) throw new AlreadyRunningError();
 		active = true;
 		activeAgent = runAgentId;
-		// Periodic sweeps pass their snapshot through; explicit triggers and
-		// CLI passes resolve fresh so operator intent is never stale.
-		const passScopes = scopes ?? getDreamingWorkerAgentIds(accessor, defaultAgentId);
-		const p = runDreamingAgentPass(
-			accessor,
-			executorForAgent(runAgentId),
-			cfg,
-			agentsDir,
-			runAgentId,
-			passScopes,
-			mode,
-			existingPassId,
-			caps,
-			undefined,
-			options.ownerMaintenance,
-		);
-		activePassPromise = p;
 		try {
-			return await p;
-		} catch (e) {
-			recordDreamingFailure(accessor, runAgentId);
-			throw e;
+			// Periodic sweeps pass their snapshot through; explicit triggers and
+			// CLI passes resolve fresh so operator intent is never stale.
+			const passScopes = scopes ?? (await getDreamingWorkerAgentIds(accessor, defaultAgentId));
+			const p = runDreamingAgentPass(
+				accessor,
+				executorForAgent(runAgentId),
+				cfg,
+				agentsDir,
+				runAgentId,
+				passScopes,
+				mode,
+				existingPassId,
+				caps,
+				undefined,
+				options.ownerMaintenance,
+			);
+			activePassPromise = p;
+			try {
+				return await p;
+			} catch (e) {
+				recordDreamingFailure(accessor, runAgentId);
+				throw e;
+			}
 		} finally {
 			active = false;
 			activeAgent = null;
@@ -348,8 +370,8 @@ export function startDreamingWorker(
 		// One Dreaming universe: a single pass covers every agent scope. The
 		// sweep runs one pass when any scope has attention or a backlog; the
 		// pass itself addresses scopes via the per-call agentId on its tools.
-		const scopes = getAgentScopes();
-		const autoRequeued = autoRequeueRepairedDreamingEvidence(accessor, evidenceRetry);
+		const scopes = await getAgentScopes();
+		const autoRequeued = await autoRequeueRepairedDreamingEvidence(accessor, evidenceRetry);
 		if (autoRequeued > 0) {
 			logger.info("dreaming-worker", "Automatically requeued repaired Dreaming evidence", {
 				affected: autoRequeued,
@@ -479,7 +501,7 @@ export function startDreamingWorker(
 				cfg,
 				agentsDir,
 				runAgentId,
-				getDreamingWorkerAgentIds(accessor, defaultAgentId),
+				await getDreamingWorkerAgentIds(accessor, defaultAgentId),
 				mode,
 				passId,
 				caps,

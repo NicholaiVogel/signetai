@@ -99,7 +99,7 @@ describe("dreaming worker agent scope", () => {
 		db.close();
 	});
 
-	it("discovers registered and data-bearing agents for periodic checks", () => {
+	it("discovers registered and data-bearing agents for periodic checks", async () => {
 		const now = new Date().toISOString();
 		db.prepare(
 			`INSERT INTO agents (id, name, read_policy, created_at, updated_at)
@@ -132,7 +132,7 @@ describe("dreaming worker agent scope", () => {
 			 VALUES ('quarantine-agent', 'transcript', 'repaired-later', 'semantic_operation_rejected', 'pass-1')`,
 		).run();
 
-		expect(getDreamingWorkerAgentIds(accessor, "default")).toEqual([
+		expect(await getDreamingWorkerAgentIds(accessor, "default")).toEqual([
 			"artifact-agent",
 			"default",
 			"memory-agent",
@@ -144,7 +144,7 @@ describe("dreaming worker agent scope", () => {
 		]);
 	});
 
-	it("serves the agent-scope union from a snapshot refreshed on a cadence", () => {
+	it("serves the agent-scope union from a snapshot refreshed on a cadence", async () => {
 		let resolves = 0;
 		let now = 0;
 		const scopes = createAgentScopeSnapshot(
@@ -155,14 +155,14 @@ describe("dreaming worker agent scope", () => {
 			},
 			() => now,
 		);
-		expect(scopes()).toEqual(["default", "new-scope"]);
+		expect(await scopes()).toEqual(["default", "new-scope"]);
 		// Within the refresh window the union query does not run again.
 		now = 999;
-		expect(scopes()).toEqual(["default", "new-scope"]);
+		expect(await scopes()).toEqual(["default", "new-scope"]);
 		expect(resolves).toBe(1);
 		// Past the window the next read re-resolves the union.
 		now = 1_000;
-		expect(scopes()).toEqual(["default", "new-scope"]);
+		expect(await scopes()).toEqual(["default", "new-scope"]);
 		expect(resolves).toBe(2);
 	});
 
@@ -182,7 +182,7 @@ describe("dreaming worker agent scope", () => {
 		}
 	});
 
-	it("defers a sweep while the shared queue health watermark is exceeded", () => {
+	it("defers a sweep while the shared queue health watermark is exceeded", async () => {
 		const now = new Date().toISOString();
 		for (let index = 0; index <= 50; index += 1) {
 			db.prepare(
@@ -190,7 +190,7 @@ describe("dreaming worker agent scope", () => {
 				 VALUES (?, ?, 'index', 'pending', ?, ?)`,
 			).run(`pressure-${index}`, `memory-${index}`, now, now);
 		}
-		expect(shouldDeferDreamingSweep(accessor)).toBe(true);
+		expect(await shouldDeferDreamingSweep(accessor)).toBe(true);
 	});
 
 	it("reports queue pressure only after the scheduler defers a sweep (#1393)", async () => {
