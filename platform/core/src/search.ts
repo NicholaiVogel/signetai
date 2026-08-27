@@ -187,7 +187,7 @@ function boundedCosineFallback(
 	queryVector: Float32Array,
 	searchTables: VectorSearchTables,
 	options: VectorSearchOptions,
-): Array<{ id: string; score: number }> {
+): VectorSearchResponse {
 	const limit = options.limit ?? 20;
 	const maxScanRows = Math.max(1, Math.min(options.maxScanRows ?? 10_000, 10_000));
 	const params: unknown[] = [queryVector.length];
@@ -199,7 +199,9 @@ function boundedCosineFallback(
 	if (options.excludeAggregateRecall) {
 		predicates.push("COALESCE(m.source_type, '') != 'aggregate-recall'");
 	}
-	params.push(maxScanRows);
+	// Fetch one sentinel row so an exact-cap result is distinguishable from a
+	// truncated recent window without a second count query.
+	params.push(maxScanRows + 1);
 
 	const rows = db
 		.prepare(
@@ -211,8 +213,9 @@ function boundedCosineFallback(
 			 LIMIT ?`,
 		)
 		.all(...params) as Array<{ source_id: string; vector: Buffer | null }>;
-
-	return rows
+	const truncated = rows.length > maxScanRows;
+	const scannedRows = truncated ? rows.slice(0, maxScanRows) : rows;
+	const results = scannedRows
 		.flatMap((row) => {
 			if (!row.vector || row.vector.byteLength !== queryVector.length * 4) return [];
 			const memory = blobToVector(row.vector);
@@ -221,6 +224,12 @@ function boundedCosineFallback(
 		})
 		.sort((a, b) => b.score - a.score)
 		.slice(0, limit);
+
+	return {
+		results,
+		completeness: truncated ? "recent-window" : "complete",
+		...(truncated ? { searchedWindow: maxScanRows } : {}),
+	};
 }
 
 export function vectorSearchWithMetadata(
@@ -287,16 +296,12 @@ export function vectorSearchWithMetadata(
 		// Keep semantic recall functional by scanning a bounded canonical-vector
 		// window instead of silently reducing the request to keyword-only recall.
 		try {
-			let fallbackResults: Array<{ id: string; score: number }> = [];
+			let fallbackResponse: VectorSearchResponse | undefined;
 			withReadTransaction(db, () => {
 				const searchTables = activeVectorSearchTables(db);
-				fallbackResults = boundedCosineFallback(db, queryVector, searchTables, effectiveOptions);
+				fallbackResponse = boundedCosineFallback(db, queryVector, searchTables, effectiveOptions);
 			});
-			return {
-				results: fallbackResults,
-				completeness: "recent-window",
-				searchedWindow: Math.max(1, Math.min(effectiveOptions.maxScanRows ?? 10_000, 10_000)),
-			};
+			return fallbackResponse ?? { results: [], completeness: "unavailable" };
 		} catch (fallbackError) {
 			console.warn("Vector search failed, including bounded cosine fallback:", fallbackError, e);
 			return { results: [], completeness: "unavailable" };
