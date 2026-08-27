@@ -1351,7 +1351,7 @@ describe("Dreaming", () => {
 		expect(Object.keys(attention[0] ?? {})).not.toContain("detailsJson");
 	});
 
-	it("classifies rejected evidence by the repair that can make it retryable", () => {
+	it("classifies rejected evidence by the repair that can make it retryable", async () => {
 		const timestamp = "2026-08-10T12:00:00.000Z";
 		db.prepare(
 			`INSERT INTO session_transcripts
@@ -1371,7 +1371,7 @@ describe("Dreaming", () => {
 			{ evidence: [{ source_ref: "transcript:missing", quote: "projected later" }] },
 			{ evidence: [{ source_ref: "transcript:other-scope", quote: "private evidence" }] },
 		] as const;
-		const rejected = collectRejectedDreamingEvidence(
+		const rejected = await collectRejectedDreamingEvidence(
 			accessor,
 			AGENT,
 			{
@@ -1392,7 +1392,7 @@ describe("Dreaming", () => {
 		expect(rejected).toHaveLength(4);
 	});
 
-	it("requeues repaired quarantines once, within budget, without deleting the audit row", () => {
+	it("requeues repaired quarantines once, within budget, without deleting the audit row", async () => {
 		const timestamp = "2026-08-10T12:00:00.000Z";
 		db.prepare(
 			`INSERT INTO session_transcripts
@@ -1424,7 +1424,7 @@ describe("Dreaming", () => {
 		// The incomplete transcript, absent projection, and scope mismatch
 		// remain quarantined; only the changed rendered source is retryable.
 		expect(
-			autoRequeueRepairedDreamingEvidence(
+			await autoRequeueRepairedDreamingEvidence(
 				accessor,
 				{ cooldownMs: 0, hourlyBudget: 10, maxAttempts: 3 },
 				Date.parse(timestamp),
@@ -1439,7 +1439,7 @@ describe("Dreaming", () => {
 			AGENT,
 		);
 		expect(
-			autoRequeueRepairedDreamingEvidence(
+			await autoRequeueRepairedDreamingEvidence(
 				accessor,
 				{ cooldownMs: 0, hourlyBudget: 10, maxAttempts: 3 },
 				Date.parse(timestamp) + 1_000,
@@ -1447,7 +1447,7 @@ describe("Dreaming", () => {
 		).toBe(3);
 		// A requested repair is not re-enqueued on every sweep.
 		expect(
-			autoRequeueRepairedDreamingEvidence(
+			await autoRequeueRepairedDreamingEvidence(
 				accessor,
 				{ cooldownMs: 0, hourlyBudget: 10, maxAttempts: 3 },
 				Date.parse(timestamp) + 2_000,

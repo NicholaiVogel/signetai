@@ -1,6 +1,6 @@
 import type { MigrationDb } from "./index";
 
-/** Migration 144: durable reviewed exclusions for immutable Dreaming evidence revisions. */
+/** Migration 145: durable reviewed exclusions for immutable Dreaming evidence revisions. */
 export function up(db: MigrationDb): void {
 	db.exec(`
 		CREATE TABLE IF NOT EXISTS dreaming_evidence_reviews (

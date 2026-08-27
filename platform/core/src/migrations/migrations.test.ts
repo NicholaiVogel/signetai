@@ -139,7 +139,12 @@ describe("migration framework", () => {
 			runMigrations(db);
 
 			const applied = db.query("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number };
-			expect(applied.version).toBe(144);
+			expect(applied.version).toBe(145);
+			expect(
+				(db.query("PRAGMA table_info(memory_jobs)").all() as Array<{ name: string }>).some(
+					(column) => column.name === "lease_token",
+				),
+			).toBe(true);
 			expect(
 				db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_source_sync_state'").get(),
 			).toBeTruthy();
@@ -366,7 +371,7 @@ describe("migration framework", () => {
 		// v131 records successful source-fragment delivery independently of the time watermark.
 		expect(tableNames).toContain("dreaming_evidence_consumption");
 
-		// v144 records terminal reviewed dispositions for immutable evidence revisions.
+		// v145 records terminal reviewed dispositions for immutable evidence revisions.
 		expect(tableNames).toContain("dreaming_evidence_reviews");
 
 		// v14 tables

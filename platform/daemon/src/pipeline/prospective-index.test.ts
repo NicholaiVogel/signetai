@@ -10,9 +10,9 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { PipelineHintsConfig } from "@signet/core";
 import { type MigrationDb, runMigrations } from "../../../core/src/migrations";
-import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
+import { DbWriteQueueFullError, type DbAccessor, type ReadDb, type WriteDb } from "../db-accessor";
 import { DEFAULT_PIPELINE_V2 } from "../memory-config";
-import { enqueueHintsJob, generateHints, startHintsWorker } from "./prospective-index";
+import { enqueueHintsJob, generateHints, HINTS_WORKER_STOP_GRACE_MS, startHintsWorker } from "./prospective-index";
 import type { LlmProvider } from "./provider";
 
 // ---------------------------------------------------------------------------
@@ -31,6 +31,22 @@ function makeAccessor(db: Database): DbAccessor {
 				db.exec("ROLLBACK");
 				throw err;
 			}
+		},
+		withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+			return Promise.resolve().then(() => {
+				db.exec("BEGIN IMMEDIATE");
+				try {
+					const result = fn(db as unknown as WriteDb);
+					db.exec("COMMIT");
+					return result;
+				} catch (err) {
+					db.exec("ROLLBACK");
+					throw err;
+				}
+			});
+		},
+		withWriteDbAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+			return Promise.resolve().then(() => fn(db as unknown as WriteDb));
 		},
 		withReadDb<T>(fn: (db: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
@@ -88,12 +104,13 @@ function getJob(
 			status: string;
 			attempts: number;
 			leased_at: string | null;
+			lease_token: string | null;
 			failed_at: string | null;
 	  }
 	| undefined {
 	return db
 		.prepare(
-			`SELECT status, attempts, leased_at, failed_at FROM memory_jobs
+			`SELECT status, attempts, leased_at, lease_token, failed_at FROM memory_jobs
 			 WHERE memory_id = ? AND job_type = 'prospective_index'`,
 		)
 		.get(memoryId) as
@@ -101,6 +118,7 @@ function getJob(
 				status: string;
 				attempts: number;
 				leased_at: string | null;
+				lease_token: string | null;
 				failed_at: string | null;
 		  }
 		| undefined;
@@ -514,6 +532,85 @@ describe("prospective-index", () => {
 			expect(getJob(db, memoryId)?.attempts).toBe(1);
 		});
 
+		it("fences a stale worker release after startup recovery re-leases a job", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "memory for a restart lease race");
+			enqueueHintsJob(db as unknown as WriteDb, mid, "memory for a restart lease race");
+
+			let oldStarted = false;
+			let freshStarted = false;
+			let releaseOld: () => void = () => undefined;
+			let releaseFresh: () => void = () => undefined;
+			const oldGate = new Promise<void>((resolve) => {
+				releaseOld = () => resolve();
+			});
+			const freshGate = new Promise<void>((resolve) => {
+				releaseFresh = () => resolve();
+			});
+			const oldProvider: LlmProvider = {
+				name: "mock-old-worker",
+				async generate() {
+					oldStarted = true;
+					await oldGate;
+					return "Where does the old worker's hint belong?";
+				},
+				async available() {
+					return true;
+				},
+			};
+			const freshProvider: LlmProvider = {
+				name: "mock-fresh-worker",
+				async generate() {
+					freshStarted = true;
+					await freshGate;
+					return "Where does the replacement worker's hint belong?";
+				},
+				async available() {
+					return true;
+				},
+			};
+
+			const old = startHintsWorker({ accessor, provider: oldProvider, pipelineCfg: pipelineCfg() });
+			try {
+				await waitFor(() => oldStarted && getJob(db, mid)?.status === "leased", 2_000);
+				await old.stop();
+
+				const fresh = startHintsWorker({
+					accessor,
+					provider: freshProvider,
+					pipelineCfg: pipelineCfg(),
+					recoverLeasesOnStart: true,
+				});
+				try {
+					await waitFor(
+						() => freshStarted && getJob(db, mid)?.status === "leased" && getJob(db, mid)?.attempts === 2,
+						2_000,
+					);
+					const replacement = getJob(db, mid);
+					expect(replacement?.lease_token).toBeTruthy();
+
+					releaseOld();
+					await new Promise((resolve) => setTimeout(resolve, 50));
+					expect(getJob(db, mid)).toMatchObject({
+						status: "leased",
+						attempts: 2,
+						lease_token: replacement?.lease_token,
+					});
+
+					releaseFresh();
+					await waitFor(() => getJob(db, mid)?.status === "completed", 2_000);
+				} finally {
+					releaseFresh();
+					await fresh.stop();
+				}
+			} finally {
+				releaseOld();
+				await old.stop();
+			}
+
+			expect(getHints(db, mid)).toEqual(["Where does the replacement worker's hint belong?"]);
+		});
+
 		it("processes a job and writes hints to memory_hints", async () => {
 			const mid = crypto.randomUUID();
 			insertMemory(db, mid, "Caroline moved from Portland to Seattle in 2019");
@@ -538,6 +635,317 @@ describe("prospective-index", () => {
 			const hints = getHints(db, mid);
 			expect(hints.length).toBe(5);
 			expect(hints).toContain("Where does Caroline live now?");
+		});
+
+		it("retries completion after queue admission failure without re-leasing the job", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "Caroline moved from Portland to Seattle in 2019");
+			enqueueHintsJob(db as unknown as WriteDb, mid, "Caroline moved from Portland to Seattle in 2019");
+
+			let asyncWriteCalls = 0;
+			let completionAttempts = 0;
+			const flakyAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls >= 2) completionAttempts++;
+					if (asyncWriteCalls === 2) return Promise.reject(new DbWriteQueueFullError());
+					return accessor.withWriteTxAsync(fn);
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: flakyAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => getJob(db, mid)?.status === "completed", 2_000);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(asyncWriteCalls).toBe(3);
+			expect(completionAttempts).toBe(2);
+			expect(getJob(db, mid)?.attempts).toBe(1);
+			expect(getHints(db, mid)).toHaveLength(5);
+		});
+
+		it("drains a deferred completion before stop resolves", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "Caroline moved from Portland to Seattle in 2019");
+			enqueueHintsJob(db as unknown as WriteDb, mid, "Caroline moved from Portland to Seattle in 2019");
+
+			let asyncWriteCalls = 0;
+			const flakyAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls === 2) return Promise.reject(new DbWriteQueueFullError());
+					return accessor.withWriteTxAsync(fn);
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: flakyAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg({ ...HINTS_CFG, poll: 1000 }),
+			});
+			try {
+				await waitFor(() => asyncWriteCalls === 2 && getJob(db, mid)?.status === "leased", 2_000);
+				await handle.stop();
+			} finally {
+				await handle.stop();
+			}
+
+			expect(asyncWriteCalls).toBe(3);
+			expect(getJob(db, mid)).toMatchObject({ status: "completed", attempts: 1 });
+			expect(getHints(db, mid)).toHaveLength(5);
+		});
+
+		it("requeues malformed payloads and continues with later jobs", async () => {
+			const firstId = crypto.randomUUID();
+			const secondId = crypto.randomUUID();
+			insertMemory(db, firstId, "malformed payload memory");
+			insertMemory(db, secondId, "memory after malformed payload");
+			enqueueHintsJob(db as unknown as WriteDb, firstId, "malformed payload memory");
+			enqueueHintsJob(db as unknown as WriteDb, secondId, "memory after malformed payload");
+			db.prepare("UPDATE memory_jobs SET payload = ? WHERE memory_id = ? AND job_type = 'prospective_index'").run(
+				"not-json",
+				firstId,
+			);
+
+			const handle = startHintsWorker({
+				accessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => getJob(db, secondId)?.status === "completed", 2_000);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(getJob(db, firstId)).toMatchObject({ status: "pending", attempts: 1 });
+			expect(getJob(db, firstId)?.leased_at).toBeNull();
+			expect(getJob(db, firstId)?.failed_at).not.toBeNull();
+			expect(
+				(
+					db
+						.prepare("SELECT payload FROM memory_jobs WHERE memory_id = ? AND job_type = 'prospective_index'")
+						.get(firstId) as {
+						payload: string;
+					}
+				).payload,
+			).toBe("not-json");
+		});
+
+		it("requeues terminal completion failures and continues with later jobs", async () => {
+			const firstId = crypto.randomUUID();
+			const secondId = crypto.randomUUID();
+			insertMemory(db, firstId, "first permanently failing memory");
+			insertMemory(db, secondId, "second memory after terminal failure");
+			accessor.withWriteTx((wdb) => {
+				enqueueHintsJob(wdb, firstId, "first permanently failing memory");
+				enqueueHintsJob(wdb, secondId, "second memory after terminal failure");
+			});
+
+			let asyncWriteCalls = 0;
+			const terminalFailureAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls === 2) return Promise.reject(new Error("permanent transaction failure"));
+					return accessor.withWriteTxAsync(fn);
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: terminalFailureAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => getJob(db, secondId)?.status === "completed", 2_000);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(getJob(db, firstId)).toMatchObject({ status: "pending", attempts: 1 });
+			expect(getJob(db, secondId)).toMatchObject({ status: "completed", attempts: 1 });
+			expect(asyncWriteCalls).toBe(5);
+		});
+
+		it("recovers a leased job when its failure transition fails", async () => {
+			const firstId = crypto.randomUUID();
+			const secondId = crypto.randomUUID();
+			insertMemory(db, firstId, "terminally unavailable memory");
+			insertMemory(db, secondId, "memory after lease recovery");
+			accessor.withWriteTx((wdb) => {
+				enqueueHintsJob(wdb, firstId, "terminally unavailable memory");
+				enqueueHintsJob(wdb, secondId, "memory after lease recovery");
+			});
+
+			let asyncWriteCalls = 0;
+			let failureTransitionAttempts = 0;
+			let recoveryAttempts = 0;
+			const unavailableAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls === 2) return Promise.reject(new Error("completion transaction failure"));
+					if (asyncWriteCalls === 3) {
+						failureTransitionAttempts++;
+						return Promise.reject(new Error("failure transition unavailable"));
+					}
+					return accessor.withWriteTxAsync(fn);
+				},
+				withWriteDbAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					recoveryAttempts++;
+					return accessor.withWriteDbAsync(fn);
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: unavailableAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => getJob(db, secondId)?.status === "completed", 2_000);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(failureTransitionAttempts).toBe(1);
+			expect(recoveryAttempts).toBe(1);
+			expect(getJob(db, firstId)).toMatchObject({ status: "pending", attempts: 1 });
+			expect(getJob(db, firstId)?.leased_at).toBeNull();
+			expect(getJob(db, secondId)).toMatchObject({ status: "completed", attempts: 1 });
+		});
+
+		it("bounds shutdown when lease recovery remains unavailable", async () => {
+			const firstId = crypto.randomUUID();
+			const secondId = crypto.randomUUID();
+			insertMemory(db, firstId, "memory with unavailable recovery");
+			insertMemory(db, secondId, "memory after unavailable recovery");
+			enqueueHintsJob(db as unknown as WriteDb, firstId, "memory with unavailable recovery");
+			enqueueHintsJob(db as unknown as WriteDb, secondId, "memory after unavailable recovery");
+
+			let asyncWriteCalls = 0;
+			let recoveryAttempts = 0;
+			const unavailableAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls === 2) return Promise.reject(new Error("completion transaction unavailable"));
+					if (asyncWriteCalls === 3) return Promise.reject(new Error("failure transition unavailable"));
+					return accessor.withWriteTxAsync(fn);
+				},
+				withWriteDbAsync<T>(_fn: (db: WriteDb) => T): Promise<T> {
+					recoveryAttempts++;
+					return Promise.reject(new Error("lease recovery unavailable"));
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: unavailableAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => recoveryAttempts > 0, 2_000);
+				const startedAt = Date.now();
+				await handle.stop();
+				expect(Date.now() - startedAt).toBeLessThan(HINTS_WORKER_STOP_GRACE_MS + 500);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(recoveryAttempts).toBeGreaterThan(0);
+			expect(getJob(db, firstId)).toMatchObject({ status: "leased", attempts: 1 });
+			expect(getJob(db, secondId)).toMatchObject({ status: "pending", attempts: 0 });
+		});
+
+		it("releases a leased job when shutdown interrupts hint generation", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "memory with interrupted hint generation");
+			enqueueHintsJob(db as unknown as WriteDb, mid, "memory with interrupted hint generation");
+
+			let generationStarted = false;
+			let releaseGeneration: () => void = () => undefined;
+			const generationGate = new Promise<void>((resolve) => {
+				releaseGeneration = () => resolve();
+			});
+			const provider: LlmProvider = {
+				name: "mock-interrupted-generation",
+				async generate() {
+					generationStarted = true;
+					await generationGate;
+					return "Where does this memory matter later?";
+				},
+				async available() {
+					return true;
+				},
+			};
+
+			let recoveryAttempts = 0;
+			const flakyRecoveryAccessor: DbAccessor = {
+				...accessor,
+				withWriteDbAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					recoveryAttempts++;
+					if (recoveryAttempts === 1) return Promise.reject(new DbWriteQueueFullError());
+					return accessor.withWriteDbAsync(fn);
+				},
+			};
+			const handle = startHintsWorker({ accessor: flakyRecoveryAccessor, provider, pipelineCfg: pipelineCfg() });
+			try {
+				await waitFor(() => generationStarted, 2_000);
+				const startedAt = Date.now();
+				await handle.stop();
+				expect(Date.now() - startedAt).toBeLessThan(HINTS_WORKER_STOP_GRACE_MS + 500);
+				releaseGeneration();
+				await waitFor(() => getJob(db, mid)?.status === "pending", 2_000);
+			} finally {
+				releaseGeneration();
+				await handle.stop();
+			}
+
+			expect(getJob(db, mid)).toMatchObject({ status: "pending", attempts: 1 });
+			expect(recoveryAttempts).toBe(2);
+			expect(getHints(db, mid)).toHaveLength(0);
+		});
+
+		it("bounds shutdown while an in-flight write never settles", async () => {
+			const mid = crypto.randomUUID();
+			insertMemory(db, mid, "memory with a stuck completion");
+			enqueueHintsJob(db as unknown as WriteDb, mid, "memory with a stuck completion");
+
+			let asyncWriteCalls = 0;
+			const stuckAccessor: DbAccessor = {
+				...accessor,
+				withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+					asyncWriteCalls++;
+					if (asyncWriteCalls === 2) return new Promise<T>(() => {});
+					return accessor.withWriteTxAsync(fn);
+				},
+			};
+
+			const handle = startHintsWorker({
+				accessor: stuckAccessor,
+				provider: cleanProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => asyncWriteCalls === 2, 2_000);
+				const startedAt = Date.now();
+				await handle.stop();
+				expect(Date.now() - startedAt).toBeLessThan(HINTS_WORKER_STOP_GRACE_MS + 500);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(getJob(db, mid)).toMatchObject({ status: "leased", attempts: 1 });
 		});
 
 		it("writes hints to FTS5 index via triggers", async () => {

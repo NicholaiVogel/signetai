@@ -1812,7 +1812,7 @@ async function readTopMemories(agentId: string): Promise<
 	}>
 > {
 	try {
-		const scope = getAgentScope(agentId);
+		const scope = await getAgentScope(agentId);
 		const clause = buildAgentScopeClause(agentId, scope.readPolicy, scope.policyGroup);
 		const rows = await getDbAccessor().withReadDbAsync(
 			async (db) => {

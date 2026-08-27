@@ -968,7 +968,7 @@ function registerRecall(app: Hono): void {
 					}
 				}
 
-				const agentScope = getAgentScope(agentId);
+				const agentScope = await getAgentScope(agentId);
 				const cfg = loadMemoryConfig(AGENTS_DIR);
 				const recallSurface = "tool_call" as const;
 				if (body.aggregate === true && authConfig.mode !== "local") {

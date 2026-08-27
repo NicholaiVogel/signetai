@@ -7,6 +7,7 @@ export const SYNC_APIS = [
 	"withWriteTx",
 	"withReadDb",
 	"withWriteTxAsync",
+	"withWriteDbAsync",
 	"withReadDbAsync",
 	"checkpointWalAsync",
 	"incrementalVacuumAsync",
@@ -38,6 +39,7 @@ const ATTRIBUTED_DB_APIS = [
 	"withWriteTx",
 	"withReadDb",
 	"withWriteTxAsync",
+	"withWriteDbAsync",
 	"withReadDbAsync",
 	"checkpointWalAsync",
 	"incrementalVacuumAsync",
@@ -264,7 +266,8 @@ function staticAsyncSiteToken(
 	bindings: ReadonlyMap<string, ts.Expression>,
 	api: Exclude<AttributedDbApi, LegacyDbApi>,
 ): string | null {
-	const options = node.arguments[api === "withReadDbAsync" || api === "withWriteTxAsync" ? 1 : 0];
+	const options =
+		node.arguments[api === "withReadDbAsync" || api === "withWriteTxAsync" || api === "withWriteDbAsync" ? 1 : 0];
 	if (options === undefined) return null;
 	const unwrapped = unwrapStaticStringExpression(options);
 	if (ts.isStringLiteral(unwrapped) || ts.isNoSubstitutionTemplateLiteral(unwrapped)) return unwrapped.text;

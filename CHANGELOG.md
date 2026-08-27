@@ -6,6 +6,13 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-27
+- Bug fixes: handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
+- Refactoring: async agent-id + dreaming-worker DB admission with scope caching; migrate prospective-index hints writes to async admission.
+
+### 2026-08-25
+- Bug fixes: kill delayed recovery targets; harden transcript recovery shutdown; rebase recovery site tokens after retry-bounding edit; bound transcript recovery retries.
+
 ### 2026-08-23
 - Bug fixes: rebase site tokens after vacuum space-guard edit; allow unknown migration backup space; harden vector backfill and migration cursors; validate backup cursors and quarantine only malformed vectors; legacy backup classification and quarantined backfill; verifiable bridge state and equipped backfill; ordered verdicts, blocked children, yielding backfill; process-wide corruption block and recoverable verification; progress-capable backfill and corruption-safe maintenance; pre-init corruption gate and owner-spanning backfill; fail-close corrupt writes and defer heavy backfill; gate runtime writers and vacuum on verification outcome; preserve unverified rollback points and bound backfill; admissible scan budgets and regular-file backup inventory; uncapped size budgets, staged startup fencing, safe destinations; unblock runtime on scheduled verify and test production deadline; honest scan exclusion and crash-safe backup resume; monotonic corruption latch and verified backup resume; serialize verify maintenance and keep backup lifecycle honest; keep corruption verdicts and startup budgets honest; scope verify outcomes honestly and confirm prune results; severity-merge integrity states and retry verify gate setup; bind migration budgets to owner deadline and surface verify failures; harden migration backup recovery status; close migration startup races; upgrade checkpoint attempt_count column before first reference; preserve unverified rollback point and scope verify checkpoint per generation; lint-clean probe handles; no non-null assertions; complete r6 bounded-verify and absolute-deadline fixes; make post-migration verification full-equivalent and resume admission-closed; scope artifact verification and close probe write gap; close admission gaps flagged in review of #1709; bound startup migration work behind admission guarantees.
 
@@ -25,15 +32,68 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: baseline event-loop monitor restarts; latch event-loop wedge state; expose truthful event-loop health; checkpoint integrity maintenance; bound integrity maintenance retries; harden incremental integrity maintenance; validate live PR body in readiness checklist; read PR checklist body live; close owner lane review findings; unblock DB-owner startup handshake; address db owner startup review findings; unblock db owner startup handshake; bound status and diagnostics projections; close phase d pollers deterministically; harden phase d acceptance harness; hard self-destruct timer in acceptance runner; seed real embedding vectors; fail loudly on shape drift; resolve core migrations via relative path; format count baseline with Biome-canonical tabs.
 - Docs: add documentation site guidance.
 
-### 2026-08-18
-- Features: implement agents view.
-- Bug fixes: degrade instead of die when sqlite-vec fails to load; degrade when sqlite-vec load fails; bound /health DB read admission to 500ms; retire db owner synchronously on write rejection; requeue undispatched job; stop DB owner transport retry loop; preserve db owner transport stderr; create db owner parent directory; preserve async embedding usage read; wire chunked vacuum reclaim into maintenance; chunk incremental vacuum reclaim; move vacuum conversion to owner; isolate dashboard status reads; support daemonless update recovery; isolate database initialization from event loop; publish head and manifest atomically; preserve unknown backup space metrics; handle degenerate statfs block sizes; resolve macOS Homebrew outside PATH; gate reindex before scanning; honor open circuit in reindex; wire provider breaker notices and probes; wire embedding breaker failure paths; share embedding provider circuit breaker; isolate embedding usage database work; persist embedding provider failure retry; retire remaining completion callers; align patch policy group validation; accept null policy group on agent creation; honor Hermes profile targets; restore Biome and daemon typecheck gates; clear group when changing memory scope; confirm agent scope edits.
-
-### 2026-08-17
-- Features: enforce memory policy mutations; add Hermes profile connect and disconnect; add explicit target resolution; wire Dreaming head capability and manifest; add Dreaming curated head.
-- Bug fixes: validate agent policy route fields; harden policy route validation; repair retired synthesis hook regressions; restore Dreaming memory publication; close synthesis publication side doors; retire idle-gap head publication; validate profile descendant paths; enforce Hermes profile ownership; preserve detached resume checkout; bound release resume tag length; safely resume releases from exact tag; make nightly release resumable; contain uninstall profile mutations; close explicit target registration gaps; harden explicit target writes; enforce explicit target ownership; route memory head curation through async writer; make head curation atomic; reap orphaned db owner workers; fence valid addon versions during sweep; use hash-keyed addon materialization; preserve live addon during publish retries; publish embedded addons safely on Windows; repair Windows keyring asset and materialization parity; enforce compiled keyring asset contracts; require keyring native addon by absolute path in compiled builds; finish memory lineage lifecycle; retire legacy writer protocol; enforce curated head authority and agent scope; await memory head database access; report missing head commits; enforce Dreaming head provenance; report import cleanup failures; restore generation-safe import cleanup; migrate import extraction write; migrate source purge to async owner; route import writes through owner; honor tombstone contract in lifecycle cleanup; scope lifecycle cleanup generations; CAS dashboard import cleanup; CAS source deletion generations; retain legacy deletion barriers; make legacy tombstones unknown; use durable lifecycle generations; gate source tombstones by generation; retain deletion tombstones; hide tombstoned sources; defer tombstone cleanup; await synthesis purge; await async source-owner tests; serialize legacy reads; restore exec concurrency; fail open Discord tails; clean Discord gateway failures; resume startup FTS recovery.
-
 ## Release Ledger
+
+## [0.214.15] - 2026-08-27
+
+Release summary: 1 bug fix.
+Tag range: `v0.214.14..v0.214.15`.
+
+### Bug Fixes
+
+- **onepassword**: handle SDK v0.3.x vault and field shapes
+
+## [0.214.14] - 2026-08-27
+
+Release summary: 1 bug fix and 1 refactor.
+Tag range: `v0.214.13..v0.214.14`.
+
+### Bug Fixes
+
+- **daemon**: invalidate agent-scope cache on DB accessor close
+
+### Refactoring
+
+- **daemon**: async agent-id + dreaming-worker DB admission with scope caching
+
+## [0.214.13] - 2026-08-27
+
+Release summary: 8 bug fixes and 1 refactor.
+Tag range: `v0.214.12..v0.214.13`.
+
+### Bug Fixes
+
+- **daemon**: clear lease tokens in owner recovery
+- **daemon**: fence prospective hint job leases
+- **daemon**: bound hints worker stop tick
+- **daemon**: bound hints worker shutdown drain
+- **daemon**: drain pending hints writes on stop
+- **daemon**: recover failed hints leases
+- **daemon**: classify hints write errors
+- **daemon**: retry hints writes after admission failure
+
+### Refactoring
+
+- **daemon**: migrate prospective-index hints writes to async admission
+
+## [0.214.12] - 2026-08-25
+
+Release summary: 4 bug fixes.
+Tag range: `v0.214.11..v0.214.12`.
+
+### Bug Fixes
+
+- **daemon**: kill delayed recovery targets
+- **daemon**: harden transcript recovery shutdown
+- **daemon**: rebase recovery site tokens after retry-bounding edit
+- **daemon**: bound transcript recovery retries
+
+## [0.214.11] - 2026-08-25
+
+Release summary: internal maintenance release with no conventional commit entries captured.
+Tag range: `v0.214.10..v0.214.11`.
+
+No notable changes were captured from conventional commit subjects for this release.
 
 ## [0.214.10] - 2026-08-23
 

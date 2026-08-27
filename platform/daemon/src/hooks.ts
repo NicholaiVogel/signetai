@@ -675,7 +675,7 @@ function getMemoriesSince(
 export async function handleSessionStart(req: SessionStartRequest): Promise<SessionStartResponse> {
 	const start = Date.now();
 	const agentId = resolveAgentId(req);
-	ensureAgentRegistered(agentId);
+	await ensureAgentRegistered(agentId);
 	const resolvedHooksConfig = loadHooksConfigForHarness(req.harness);
 	const config = resolvedHooksConfig.sessionStart || {};
 	const memoryCfg = loadMemoryConfig(getAgentsDir());
@@ -808,7 +808,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	const traversalCfg = memoryCfg.pipelineV2.traversal;
 	const traversalEnabled = memoryCfg.pipelineV2.graph.enabled && traversalCfg?.enabled === true;
 	const traversalAgentId = agentId;
-	const agentScope = getAgentScope(traversalAgentId);
+	const agentScope = await getAgentScope(traversalAgentId);
 	let inheritedSection = "";
 	if (req.sessionKey && existsSync(getMemoryDbPath())) {
 		try {
@@ -1356,7 +1356,7 @@ ${guidelines}
 
 	if (config.includeRecentMemories !== false) {
 		const agentId = resolveAgentId(req);
-		const agentScope = getAgentScope(agentId);
+		const agentScope = await getAgentScope(agentId);
 		const configuredLimit =
 			typeof config.memoryLimit === "number" && Number.isFinite(config.memoryLimit) ? config.memoryLimit : 5;
 		const memoryLimit = Math.max(0, Math.min(50, Math.trunc(configuredLimit)));
@@ -1973,7 +1973,7 @@ function isClearSessionStart(req: SessionStartRequest): boolean {
 export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionEndResponse> {
 	const sessionKey = req.sessionKey || req.sessionId;
 	const agentId = resolveAgentId({ agentId: req.agentId, sessionKey: req.sessionKey || req.sessionId });
-	ensureAgentRegistered(agentId);
+	await ensureAgentRegistered(agentId);
 	const endedAt = req.capturedAt ?? new Date().toISOString();
 	const boundaryReason = normalizeSessionBoundaryReason(req.reason);
 
@@ -2326,7 +2326,7 @@ async function deferSessionEndWork(params: {
 
 export async function handleCheckpointExtract(req: CheckpointExtractRequest): Promise<CheckpointExtractResponse> {
 	const agentId = resolveAgentId({ agentId: req.agentId, sessionKey: req.sessionKey });
-	ensureAgentRegistered(agentId);
+	await ensureAgentRegistered(agentId);
 
 	// Respect the pipeline master switch
 	const memoryCfg = loadMemoryConfig(getAgentsDir());

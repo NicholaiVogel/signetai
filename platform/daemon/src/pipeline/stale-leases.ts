@@ -27,6 +27,7 @@ export function recoverStaleLeases(db: WriteDb, opts: RecoverOpts): StaleLeaseRe
 				`UPDATE memory_jobs
 				 SET status = 'dead',
 				     leased_at = NULL,
+				     lease_token = NULL,
 				     failed_at = ?,
 				     error = COALESCE(error, ?),
 				     updated_at = ?
@@ -45,6 +46,7 @@ export function recoverStaleLeases(db: WriteDb, opts: RecoverOpts): StaleLeaseRe
 				`UPDATE memory_jobs
 				 SET status = 'pending',
 				     leased_at = NULL,
+				     lease_token = NULL,
 				     updated_at = ?
 				 WHERE status = 'leased'
 				   ${jobTypeFilter}

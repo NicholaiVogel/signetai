@@ -1587,7 +1587,7 @@ export async function runDreamingAgentPass(
 				await recordDreamingOperationEffects(accessor, scopeId, effects, result, operations, retirementCandidates);
 				retirementCandidates = new Map();
 				await writeTx(accessor, (db) => resolveRequeuedDreamingEvidenceInTx(db, scopeId, passId, result, operations));
-				rejectedEvidence.push(...collectRejectedDreamingEvidence(accessor, scopeId, result, operations));
+				rejectedEvidence.push(...(await collectRejectedDreamingEvidence(accessor, scopeId, result, operations)));
 			},
 			async onToolCall(trace) {
 				publishDreamingToolTrace(passId, trace, live);
@@ -1635,12 +1635,12 @@ export async function runDreamingAgentPass(
 							const operationAgentId =
 								typeof input?.agentId === "string" && input.agentId.trim().length > 0 ? input.agentId.trim() : agentId;
 							rejectedEvidence.push(
-								...collectRejectedDreamingEvidence(
+								...(await collectRejectedDreamingEvidence(
 									accessor,
 									operationAgentId,
 									{ ok: false, items: [] },
 									evidenceOperations,
-								),
+								)),
 							);
 						}
 						failed++;

@@ -4,16 +4,16 @@
   "sites": [
     {
       "path": "agent-id.ts",
-      "line": 56,
-      "api": "withReadDb",
-      "source": "return getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
+      "line": 97,
+      "api": "withReadDbAsync",
+      "source": "getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "agent-id.ts",
-      "line": 82,
-      "api": "withWriteTx",
-      "source": "getDbAccessor().withWriteTx((db: import(\"./db-accessor\").WriteDb) => {",
+      "line": 136,
+      "api": "withWriteTxAsync",
+      "source": "const created = await getDbAccessor().withWriteTxAsync(",
       "category": "hot-path"
     },
     {
@@ -574,6 +574,13 @@
       "line": 2592,
       "api": "withReadDbAsync",
       "source": "const activeEmbedding = await getDbAccessor().withReadDbAsync(",
+      "category": "hot-path"
+    },
+    {
+      "path": "daemon.ts",
+      "line": 2608,
+      "api": "withWriteDbAsync",
+      "source": "await getDbAccessor().withWriteDbAsync(",
       "category": "hot-path"
     },
     {
@@ -3175,16 +3182,16 @@
     },
     {
       "path": "pipeline/dreaming-evidence-retry.ts",
-      "line": 131,
-      "api": "withReadDb",
-      "source": "return accessor.withReadDb((db: import(\"../db-accessor\").ReadDb) => {",
+      "line": 130,
+      "api": "withReadDbAsync",
+      "source": "return await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-evidence-retry.ts",
-      "line": 253,
-      "api": "withWriteTx",
-      "source": "return accessor.withWriteTx((db: import(\"../db-accessor\").WriteDb) => {",
+      "line": 254,
+      "api": "withWriteTxAsync",
+      "source": "return await accessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
@@ -3266,30 +3273,30 @@
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 100,
-      "api": "withReadDb",
-      "source": "return accessor.withReadDb(",
+      "line": 99,
+      "api": "withReadDbAsync",
+      "source": "return await accessor.withReadDbAsync((db) => getQueueHealth(db).status !== \"healthy\", {",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 121,
-      "api": "withReadDb",
-      "source": "return accessor.withReadDb((db: import(\"../db-accessor\").ReadDb) => {",
+      "line": 122,
+      "api": "withReadDbAsync",
+      "source": "return await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 197,
-      "api": "withReadDb",
-      "source": "accessor.withReadDb(",
+      "line": 213,
+      "api": "withReadDbAsync",
+      "source": "accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, [\"hygiene\"]), {",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 204,
-      "api": "withReadDb",
-      "source": "accessor.withReadDb(",
+      "line": 223,
+      "api": "withReadDbAsync",
+      "source": "accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS), {",
       "category": "hot-path"
     },
     {
@@ -3434,37 +3441,65 @@
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 230,
-      "api": "withWriteTx",
-      "source": "job = accessor.withWriteTx(",
+      "line": 284,
+      "api": "withWriteDbAsync",
+      "source": "await accessor.withWriteDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 245,
-      "api": "withWriteTx",
-      "source": "accessor.withWriteTx(",
+      "line": 300,
+      "api": "withWriteDbAsync",
+      "source": "await accessor.withWriteDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 258,
-      "api": "withWriteTx",
-      "source": "accessor.withWriteTx((db: import(\"../db-accessor\").WriteDb) => {",
+      "line": 336,
+      "api": "withWriteTxAsync",
+      "source": "await accessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 268,
-      "api": "withWriteTx",
-      "source": "accessor.withWriteTx(",
+      "line": 394,
+      "api": "withWriteTxAsync",
+      "source": "job = await accessor.withWriteTxAsync((db: import(\"../db-accessor\").WriteDb) => leaseJob(db, 3), {",
       "category": "hot-path"
     },
     {
       "path": "pipeline/prospective-index.ts",
-      "line": 281,
-      "api": "withWriteTx",
-      "source": "accessor.withWriteTx(",
+      "line": 412,
+      "api": "withWriteTxAsync",
+      "source": "await accessor.withWriteTxAsync(",
+      "category": "hot-path"
+    },
+    {
+      "path": "pipeline/prospective-index.ts",
+      "line": 436,
+      "api": "withWriteTxAsync",
+      "source": "await accessor.withWriteTxAsync(",
+      "category": "hot-path"
+    },
+    {
+      "path": "pipeline/prospective-index.ts",
+      "line": 459,
+      "api": "withWriteTxAsync",
+      "source": "await accessor.withWriteTxAsync(",
+      "category": "hot-path"
+    },
+    {
+      "path": "pipeline/prospective-index.ts",
+      "line": 485,
+      "api": "withWriteTxAsync",
+      "source": "await accessor.withWriteTxAsync(",
+      "category": "hot-path"
+    },
+    {
+      "path": "pipeline/prospective-index.ts",
+      "line": 590,
+      "api": "withWriteTxAsync",
+      "source": ".withWriteTxAsync(",
       "category": "hot-path"
     },
     {
@@ -4659,119 +4694,119 @@
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 132,
+      "line": 133,
       "api": "readdirSync",
       "source": "const dirFiles = readdirSync(AGENTS_DIR);",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 137,
+      "line": 138,
       "api": "statSync",
       "source": "const fileStat = statSync(filePath);",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 139,
+      "line": 140,
       "api": "readFileSync",
       "source": "const content = readFileSync(filePath, \"utf-8\");",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 200,
+      "line": 201,
       "api": "writeFileSync",
       "source": "writeFileSync(filePath, content, \"utf-8\");",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 289,
+      "line": 291,
       "api": "withReadDbAsync",
       "source": "const created = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 304,
+      "line": 306,
       "api": "withReadDbAsync",
       "source": "const existing = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 337,
+      "line": 340,
       "api": "withReadDbAsync",
       "source": "const updated = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 351,
+      "line": 354,
       "api": "withReadDbAsync",
       "source": "const agent = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 514,
+      "line": 518,
       "api": "withReadDbAsync",
       "source": "const taskExists = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 611,
+      "line": 615,
       "api": "withReadDbAsync",
       "source": "const tasks = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 707,
+      "line": 711,
       "api": "withReadDbAsync",
       "source": "const task = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 716,
+      "line": 720,
       "api": "withReadDbAsync",
       "source": "const runs = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 736,
+      "line": 740,
       "api": "withReadDbAsync",
       "source": "const existing = (await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 811,
+      "line": 815,
       "api": "withReadDbAsync",
       "source": "const task = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 820,
+      "line": 824,
       "api": "withReadDbAsync",
       "source": "const running = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 944,
+      "line": 948,
       "api": "withReadDbAsync",
       "source": "const runs = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/misc-routes.ts",
-      "line": 957,
+      "line": 961,
       "api": "withReadDbAsync",
       "source": "const total = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
@@ -6234,21 +6269,21 @@
     },
     {
       "path": "startup-recovery.ts",
-      "line": 77,
+      "line": 78,
       "api": "withWriteTxAsync",
-      "source": "return accessor.withWriteTxAsync(processBatch, { siteToken: \"startup-recovery.ts:77\" });",
+      "source": "return accessor.withWriteTxAsync(processBatch, { siteToken: \"startup-recovery.ts:78\" });",
       "category": "hot-path"
     },
     {
       "path": "startup-recovery.ts",
-      "line": 99,
+      "line": 100,
       "api": "withReadDbAsync",
       "source": "const batch = await accessor.withReadDbAsync(async (db) => fetchBatch(db, limit), {",
       "category": "hot-path"
     },
     {
       "path": "startup-recovery.ts",
-      "line": 484,
+      "line": 521,
       "api": "withReadDbAsync",
       "source": "const migrationInProgress = await accessor.withReadDbAsync(",
       "category": "hot-path"
@@ -6682,63 +6717,63 @@
     },
     {
       "path": "transcript-recovery-worker.ts",
-      "line": 269,
+      "line": 221,
+      "api": "withReadDbAsync",
+      "source": "const rows = await dbAccessor.withReadDbAsync(",
+      "category": "hot-path"
+    },
+    {
+      "path": "transcript-recovery-worker.ts",
+      "line": 330,
       "api": "withReadDbAsync",
       "source": "return dbAccessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "transcript-recovery-worker.ts",
-      "line": 287,
+      "line": 348,
       "api": "withWriteTxAsync",
       "source": "await dbAccessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "transcript-recovery-worker.ts",
-      "line": 307,
+      "line": 368,
       "api": "withWriteTxAsync",
       "source": "await dbAccessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "transcript-recovery-worker.ts",
-      "line": 386,
-      "api": "withReadDbAsync",
-      "source": "await dbAccessor.withReadDbAsync((db) => unchanged(db, agentId, candidate), {",
-      "category": "hot-path"
-    },
-    {
-      "path": "transcript-recovery-worker.ts",
-      "line": 422,
+      "line": 491,
       "api": "withWriteTxAsync",
       "source": "await dbAccessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "transcript-recovery-worker.ts",
-      "line": 436,
+      "line": 505,
       "api": "withReadDbAsync",
       "source": "const alreadyCaptured = await dbAccessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "transcript-recovery-worker.ts",
-      "line": 445,
+      "line": 514,
       "api": "withWriteTxAsync",
       "source": "await dbAccessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "transcript-recovery-worker.ts",
-      "line": 475,
+      "line": 544,
       "api": "withWriteTxAsync",
       "source": "await dbAccessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "transcript-recovery-worker.ts",
-      "line": 533,
+      "line": 602,
       "api": "withWriteTxAsync",
       "source": "await dbAccessor.withWriteTxAsync(",
       "category": "hot-path"

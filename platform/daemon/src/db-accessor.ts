@@ -3032,6 +3032,10 @@ export async function closeDbAccessor(): Promise<void> {
 	databaseIntegrityWritesBlocked = false;
 	pendingVecBackfillDimensions = null;
 	dbOwnerHealthProvider = null;
+	// The agent-scope cache may hold policies read from the closing database;
+	// a reinitialized accessor (same process, different DB) must never serve them.
+	const { invalidateAgentScopeCache } = await import("./agent-id");
+	invalidateAgentScopeCache();
 	if (accessor) {
 		accessor.close();
 		accessor = null;
