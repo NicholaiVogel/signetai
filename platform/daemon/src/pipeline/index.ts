@@ -231,7 +231,7 @@ export function startPipeline(
 	// Prospective indexing worker — generates hypothetical future queries
 	// for memories to improve search recall.
 	if (!hintsWorkerHandle && pipelineCfg.hints?.enabled && !pipelineCfg.mutationsFrozen) {
-		hintsWorkerHandle = startHintsWorker({ accessor, provider, pipelineCfg });
+		hintsWorkerHandle = startHintsWorker({ accessor, provider, pipelineCfg, recoverLeasesOnStart: true });
 	}
 
 	// Daily Brief generation is dashboard-open driven. Do not start a

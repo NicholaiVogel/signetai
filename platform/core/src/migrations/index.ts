@@ -149,6 +149,7 @@ import { up as transcriptRecoveryFrontier } from "./140-transcript-recovery-fron
 import { up as sourceSyncCheckpoints } from "./141-source-sync-checkpoints";
 import { up as sourceSyncFrontier } from "./142-source-sync-frontier";
 import { up as embeddingIndexProgress } from "./143-embedding-index-progress";
+import { up as memoryJobLeaseToken } from "./144-memory-job-lease-token";
 
 // -- Public interface consumed by Database.init() --
 
@@ -1322,6 +1323,12 @@ export const MIGRATIONS: readonly Migration[] = [
 				{ table: "embedding_index_state", column: "provider_endpoint" },
 			],
 		},
+	},
+	{
+		version: 144,
+		name: "memory-job-lease-token",
+		up: memoryJobLeaseToken,
+		artifacts: { columns: [{ table: "memory_jobs", column: "lease_token" }] },
 	},
 ];
 
