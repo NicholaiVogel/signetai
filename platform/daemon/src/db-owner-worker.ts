@@ -716,7 +716,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:716" },
+			{ siteToken: "db-owner-worker.ts:717" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
@@ -747,8 +747,9 @@ export function runDbOwnerWorker(): void {
 			recallAccessorReady = true;
 		}
 		const { getDbAccessor } = await import("./db-accessor");
-		return await getDbAccessor().withReadDbAsync((db) =>
-			vectorSearchWithMetadata(db, new Float32Array(payload.queryEmbedding), payload.options),
+		return await getDbAccessor().withReadDbAsync(
+			(db) => vectorSearchWithMetadata(db, new Float32Array(payload.queryEmbedding), payload.options),
+			{ siteToken: "db-owner-worker.ts:750" },
 		);
 	}
 
