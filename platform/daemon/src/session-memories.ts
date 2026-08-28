@@ -10,6 +10,9 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { resolveDefaultBasePath } from "@signet/core";
 import { type WriteDb, getDbAccessor } from "./db-accessor";
+import { getDbOwner } from "./db-owner-runtime";
+import { DB_OWNER_MAX_TRANSACTION_STATEMENTS } from "./db-owner-protocol";
+import { ownerBatch } from "./db-owner-sql";
 import { logger } from "./logger";
 
 function getMemoryDbPath(): string {
@@ -46,75 +49,68 @@ export interface SessionMemoryCandidate {
  * between Bun and SQLite. Records are processed in chunks of 50 to
  * stay safely within SQLite's parameter limits.
  */
-export function recordSessionCandidates(
+export async function recordSessionCandidates(
 	sessionKey: string | undefined,
 	candidates: ReadonlyArray<SessionMemoryCandidate>,
 	injectedIds: ReadonlySet<string>,
 	agentId = "default",
-): void {
+): Promise<void> {
 	if (!sessionKey || candidates.length === 0 || !existsSync(getMemoryDbPath())) return;
 
 	try {
-		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
-		getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) => {
-			const now = new Date().toISOString();
-			const CHUNK_SIZE = 50;
-			const ROW = "(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)";
-			const BASE_SQL = `INSERT OR IGNORE INTO session_memories
-					 (id, session_key, agent_id, memory_id, source, effective_score,
-					  final_score, rank, was_injected,
-					  fts_hit_count, created_at,
-					  entity_slot, aspect_slot, is_constraint, structural_density,
-					  path_json)
-					 VALUES `;
+		const owner = await getDbOwner();
+		const now = new Date().toISOString();
+		const CHUNK_SIZE = 50;
+		const ROW = "(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)";
+		const BASE_SQL = `INSERT OR IGNORE INTO session_memories
+			 (id, session_key, agent_id, memory_id, source, effective_score,
+			  final_score, rank, was_injected,
+			  fts_hit_count, created_at,
+			  entity_slot, aspect_slot, is_constraint, structural_density,
+			  path_json)
+			 VALUES `;
+		const statements: Array<{ readonly sql: string; readonly params: readonly unknown[] }> = [];
+		let rank = 0;
 
-			// Pre-compile the full-chunk statement once to avoid recompiling
-			// identical SQL on every iteration of the loop.
-			const fullChunkStmt =
-				candidates.length >= CHUNK_SIZE
-					? db.prepare(BASE_SQL + Array.from({ length: CHUNK_SIZE }, () => ROW).join(","))
-					: null;
-
-			let rank = 0;
-			for (let i = 0; i < candidates.length; i += CHUNK_SIZE) {
-				const chunk = candidates.slice(i, i + CHUNK_SIZE);
-
-				// Reuse pre-compiled statement for full chunks; compile once for
-				// the remainder chunk (different SQL, can't reuse).
-				let stmt: NonNullable<typeof fullChunkStmt>;
-				if (chunk.length === CHUNK_SIZE) {
-					if (!fullChunkStmt) throw new Error("full session-memory statement was not prepared");
-					stmt = fullChunkStmt;
-				} else {
-					stmt = db.prepare(BASE_SQL + Array.from({ length: chunk.length }, () => ROW).join(","));
-				}
-
-				const values: unknown[] = [];
-				for (const c of chunk) {
-					const wasInjected = injectedIds.has(c.id) ? 1 : 0;
-					const finalScore = c.finalScore ?? c.effScore;
-					values.push(
-						crypto.randomUUID(),
-						sessionKey,
-						agentId,
-						c.id,
-						c.source,
-						c.effScore,
-						finalScore,
-						rank++,
-						wasInjected,
-						now,
-						c.entitySlot ?? null,
-						c.aspectSlot ?? null,
-						c.isConstraint ?? 0,
-						c.structuralDensity ?? null,
-						c.pathJson ?? null,
-					);
-				}
-
-				stmt.run(...values);
+		for (let i = 0; i < candidates.length; i += CHUNK_SIZE) {
+			const chunk = candidates.slice(i, i + CHUNK_SIZE);
+			const values: unknown[] = [];
+			for (const c of chunk) {
+				const wasInjected = injectedIds.has(c.id) ? 1 : 0;
+				const finalScore = c.finalScore ?? c.effScore;
+				values.push(
+					crypto.randomUUID(),
+					sessionKey,
+					agentId,
+					c.id,
+					c.source,
+					c.effScore,
+					finalScore,
+					rank++,
+					wasInjected,
+					now,
+					c.entitySlot ?? null,
+					c.aspectSlot ?? null,
+					c.isConstraint ?? 0,
+					c.structuralDensity ?? null,
+					c.pathJson ?? null,
+				);
 			}
-		}, "session-memories.ts:59");
+			statements.push({
+				sql: BASE_SQL + Array.from({ length: chunk.length }, () => ROW).join(","),
+				params: values,
+			});
+		}
+
+		for (let i = 0; i < statements.length; i += DB_OWNER_MAX_TRANSACTION_STATEMENTS) {
+			await ownerBatch(owner, statements.slice(i, i + DB_OWNER_MAX_TRANSACTION_STATEMENTS), {
+				operation: "session-start.session-memories.record-candidates",
+				lane: "write",
+				workloadClass: "foreground",
+				deadlineMs: 5_000,
+				estimatedWorkUnits: Math.max(1, Math.min(1_200, candidates.length)),
+			});
+		}
 
 		logger.debug("session-memories", "Recorded session candidates", {
 			sessionKey,
@@ -188,7 +184,7 @@ export function trackFtsHits(
 
 				stmt.run(...values);
 			}
-		}, "session-memories.ts:153");
+		}, "session-memories.ts:149");
 	} catch (e) {
 		logger.warn("session-memories", "Failed to track FTS hits", {
 			error: e instanceof Error ? e.message : String(e),
@@ -267,7 +263,7 @@ export function recordAgentFeedback(
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
 		getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) => {
 			recordAgentFeedbackInner(db, sessionKey, feedback, agentId);
-		}, "session-memories.ts:268");
+		}, "session-memories.ts:264");
 
 		logger.debug("session-memories", "Recorded agent feedback", {
 			sessionKey,

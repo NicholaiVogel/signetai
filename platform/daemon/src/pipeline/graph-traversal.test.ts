@@ -8,7 +8,14 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { ReadDb } from "../db-accessor";
-import { invalidateTraversalCache, traverseKnowledgeGraph } from "./graph-traversal";
+import type { DbOwnerClient } from "../db-owner-client";
+import type { DbOwnerRequest } from "../db-owner-protocol";
+import {
+	invalidateTraversalCache,
+	resolveFocalEntitiesViaOwner,
+	traverseKnowledgeGraph,
+	traverseKnowledgeGraphViaOwner,
+} from "./graph-traversal";
 
 const CONFIG = {
 	maxAspectsPerEntity: 10,
@@ -23,7 +30,7 @@ const CONFIG = {
 
 function seedGraph(db: Database): void {
 	db.exec(`
-		CREATE TABLE entities (id TEXT PRIMARY KEY, name TEXT, agent_id TEXT);
+	CREATE TABLE entities (id TEXT PRIMARY KEY, name TEXT, agent_id TEXT, canonical_name TEXT, mentions INTEGER DEFAULT 0);
 		CREATE TABLE entity_aspects (id TEXT PRIMARY KEY, entity_id TEXT, agent_id TEXT, weight REAL, canonical_name TEXT);
 		CREATE TABLE entity_attributes (aspect_id TEXT, memory_id TEXT, agent_id TEXT, status TEXT, kind TEXT, content TEXT, importance REAL);
 		CREATE TABLE entity_dependencies (id TEXT PRIMARY KEY, source_entity_id TEXT, target_entity_id TEXT, agent_id TEXT, confidence REAL, strength REAL);
@@ -34,7 +41,10 @@ function seedGraph(db: Database): void {
 		CREATE INDEX idx_entity_dependencies_source ON entity_dependencies (source_entity_id);
 	`);
 	db.exec(
-		`INSERT INTO entities VALUES ('e1', 'Alpha', 'default'), ('e2', 'Beta', 'default'), ('e3', 'Other', 'other')`,
+		`INSERT INTO entities (id, name, agent_id, canonical_name, mentions) VALUES
+			('e1', 'Alpha', 'default', 'alpha', 2),
+			('e2', 'Beta', 'default', 'beta', 1),
+			('e3', 'Other', 'other', 'other', 1)`,
 	);
 	db.exec(
 		`INSERT INTO entity_aspects VALUES
@@ -54,6 +64,25 @@ function seedGraph(db: Database): void {
 		('a3', 'm-other', 'other', 'active', 'fact', 'other fact', 0.95)`);
 	db.exec(`INSERT INTO entity_dependencies VALUES ('d1', 'e1', 'e2', 'default', 0.9, 0.8)`);
 	db.exec(`INSERT INTO memory_entity_mentions VALUES ('m1', 'e1', 0.9)`);
+}
+
+function createTestOwner(db: Database, operations: string[]): DbOwnerClient {
+	return {
+		submit<Result>(request: DbOwnerRequest, options: { readonly operation: string }) {
+			if (request.kind !== "query") throw new Error("test owner only supports query requests");
+			operations.push(options.operation);
+			const params = request.statement.params ?? [];
+			if (params.some((param) => typeof param === "object")) throw new Error("unexpected test owner byte parameter");
+			const statement = db.prepare(request.statement.sql);
+			const value =
+				request.statement.result === "get"
+					? statement.get(...params)
+					: request.statement.result === "all"
+						? statement.all(...params)
+						: statement.run(...params);
+			return { result: Promise.resolve(value as Result) } as never;
+		},
+	} as unknown as DbOwnerClient;
 }
 
 describe("traverseKnowledgeGraph event-loop yields (#1118)", () => {
@@ -163,5 +192,54 @@ describe("traverseKnowledgeGraph event-loop yields (#1118)", () => {
 		expect(result.memoryIds.size).toBe(0);
 		expect(result.constraints).toEqual([]);
 		expect(activeReads).toBe(0);
+	});
+
+	test("routes focal resolution and traversal through the DB owner adapter", async () => {
+		const operations: string[] = [];
+		const owner = createTestOwner(db, operations);
+		const focal = await resolveFocalEntitiesViaOwner(owner, "default", {
+			checkpointEntityIds: ["e1"],
+			includePinned: false,
+		});
+		const result = await traverseKnowledgeGraphViaOwner(focal.entityIds, owner, "default", CONFIG);
+
+		expect(focal).toEqual({
+			entityIds: ["e1"],
+			entityNames: ["Alpha"],
+			pinnedEntityIds: [],
+			source: "checkpoint",
+		});
+		expect(result.memoryIds.has("m1")).toBe(true);
+		expect(result.memoryIds.has("m3")).toBe(true);
+		expect(operations.every((operation) => operation.startsWith("session-start.graph-"))).toBe(true);
+	});
+
+	test("falls back to LIKE when the owner FTS index has no matching row", async () => {
+		db.exec("CREATE VIRTUAL TABLE entities_fts USING fts5(name)");
+		const owner = createTestOwner(db, []);
+
+		const focal = await resolveFocalEntitiesViaOwner(owner, "default", {
+			queryTokens: ["alpha"],
+			includePinned: false,
+		});
+
+		expect(focal).toEqual({
+			entityIds: ["e1"],
+			entityNames: ["Alpha"],
+			pinnedEntityIds: [],
+			source: "query",
+		});
+	});
+
+	test("does not disclose a cross-agent checkpoint entity name", async () => {
+		const owner = createTestOwner(db, []);
+
+		const focal = await resolveFocalEntitiesViaOwner(owner, "default", {
+			checkpointEntityIds: ["e3"],
+			includePinned: false,
+		});
+
+		expect(focal.entityIds).toEqual(["e3"]);
+		expect(focal.entityNames).toEqual([]);
 	});
 });

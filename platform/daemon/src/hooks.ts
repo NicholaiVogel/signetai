@@ -36,6 +36,8 @@ import {
 } from "./continuity-state";
 import { listAgentPresence } from "./cross-agent";
 import { getDbAccessor } from "./db-accessor";
+import { getDbOwner } from "./db-owner-runtime";
+import { ownerReadOne } from "./db-owner-sql";
 import { fetchEmbedding } from "./embedding-fetch";
 import {
 	DEFAULT_SESSION_START_MAX_INJECT_TOKENS,
@@ -74,9 +76,9 @@ import {
 import { recordFeedbackTelemetry } from "./pipeline/aspect-feedback";
 import {
 	invalidateTraversalCache,
-	resolveFocalEntities,
+	resolveFocalEntitiesViaOwner,
 	setTraversalStatus,
-	traverseKnowledgeGraph,
+	traverseKnowledgeGraphViaOwner,
 } from "./pipeline/graph-traversal";
 import { estimateTokens } from "./pipeline/tokenizer";
 import { getDefaultPluginHost } from "./plugins/index";
@@ -499,32 +501,31 @@ async function getSessionGapSummary(): Promise<string | undefined> {
 	if (!existsSync(getMemoryDbPath())) return undefined;
 
 	try {
-		return await getDbAccessor().withReadDbAsync(
-			async (db) => {
-				// The completion marker covers explicit ends and daemon recovery/TTL
-				// boundaries; all are settled session activity for this brief.
-				const lastSession = db.prepare("SELECT MAX(completed_at) as last_end FROM session_transcripts").get() as
-					| { last_end: string | null }
-					| undefined;
-
-				if (!lastSession?.last_end) return undefined;
-
-				const lastEnd = lastSession.last_end;
-
-				// Count new memories since last session
-				const memCount = db
-					.prepare("SELECT COUNT(*) as cnt FROM memories WHERE created_at > ? AND is_deleted = 0")
-					.get(lastEnd) as { cnt: number };
-
-				// Count sessions since last session
-				const sessionCount = db
-					.prepare("SELECT COUNT(*) as cnt FROM session_transcripts WHERE completed_at > ?")
-					.get(lastEnd) as { cnt: number };
-
-				return `[since last session: ${memCount.cnt} new memories, ${sessionCount.cnt} sessions captured]`;
+		const row = await ownerReadOne<{
+			readonly last_end: string | null;
+			readonly memory_count: number;
+			readonly session_count: number;
+		}>(
+			await getDbOwner(),
+			`WITH last_session AS (
+				SELECT MAX(completed_at) AS last_end FROM session_transcripts
+			)
+			SELECT
+				last_end,
+				(SELECT COUNT(*) FROM memories WHERE created_at > last_end AND is_deleted = 0) AS memory_count,
+				(SELECT COUNT(*) FROM session_transcripts WHERE completed_at > last_end) AS session_count
+			FROM last_session`,
+			[],
+			{
+				operation: "session-start.session-gap-summary",
+				lane: "read",
+				workloadClass: "foreground",
+				deadlineMs: 5_000,
+				estimatedWorkUnits: 3,
 			},
-			{ siteToken: "hooks.ts:502" },
 		);
+		if (!row?.last_end) return undefined;
+		return `[since last session: ${row.memory_count} new memories, ${row.session_count} sessions captured]`;
 	} catch {
 		return undefined;
 	}
@@ -636,7 +637,7 @@ async function getRecentMemories(
 					}),
 				);
 			},
-			{ siteToken: "hooks.ts:605" },
+			{ siteToken: "hooks.ts:606" },
 		);
 
 		return rows.map((r) => ({
@@ -828,7 +829,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 					});
 					return parent ? assembleInheritedContextBlock(db, parent, subagentCfg) : null;
 				},
-				{ siteToken: "hooks.ts:816" },
+				{ siteToken: "hooks.ts:817" },
 			);
 			inheritedSection = block ?? "";
 		} catch (error) {
@@ -891,23 +892,19 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	if (traversalEnabled) {
 		const _traversalStart = Date.now();
 		try {
-			const focal = await getDbAccessor().withReadDbAsync(
-				async (db) =>
-					resolveFocalEntities(db, traversalAgentId, {
-						project: req.project,
-						sessionKey: req.sessionKey,
-					}),
-				{ siteToken: "hooks.ts:894" },
-			);
+			const owner = await getDbOwner();
+			const focal = await resolveFocalEntitiesViaOwner(owner, traversalAgentId, {
+				project: req.project,
+				sessionKey: req.sessionKey,
+			});
 			traversalFocalSource = focal.source;
 			traversalEntities = focal.entityIds.length;
 			traversalEntityNames = focal.entityNames;
 
 			if (focal.entityIds.length > 0) {
-				const traversalResult = await traverseKnowledgeGraph(
+				const traversalResult = await traverseKnowledgeGraphViaOwner(
 					focal.entityIds,
-					(readFn) =>
-						getDbAccessor().withReadDbAsync(readFn, { siteToken: "hooks.ts:910", operation: "hooks.graph-traversal" }),
+					owner,
 					traversalAgentId,
 					traversalRuntimeCfg,
 				);
@@ -1111,7 +1108,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 				};
 			}),
 	];
-	recordSessionCandidates(req.sessionKey, candidatesForRecording, injectedSet, agentId);
+	await recordSessionCandidates(req.sessionKey, candidatesForRecording, injectedSet, agentId);
 
 	// Format the dynamic context separately from the deterministic system
 	// prefix. The aggregate `inject` field below remains for legacy clients.

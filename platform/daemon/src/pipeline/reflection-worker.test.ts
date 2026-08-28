@@ -93,15 +93,16 @@ function seedReflection(
 	return id;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+	await closeDbAccessor();
 	dir = join(tmpdir(), `signet-reflection-worker-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(join(dir, "memory"), { recursive: true });
 	process.env.SIGNET_PATH = dir;
 	initDbAccessor(join(dir, "memory", "memories.db"));
 });
 
-afterEach(() => {
-	closeDbAccessor();
+afterEach(async () => {
+	await closeDbAccessor();
 	if (previousSignetPath === undefined) {
 		process.env.SIGNET_PATH = undefined;
 	} else {
@@ -484,5 +485,32 @@ describe("reflection worker", () => {
 			{ agent_id: "agent-c", memory_ids: JSON.stringify([memoryId]) },
 		]);
 		expect(existsSync(join(dir, ".daemon", "last-reflection.agent-c.json"))).toBe(true);
+	});
+
+	it("routes active-agent discovery through the DB owner, not parent read seams", async () => {
+		const accessor = getDbAccessor() as unknown as {
+			withReadDb: (...args: never[]) => unknown;
+			withReadDbAsync: (...args: never[]) => Promise<unknown>;
+		};
+		const originalWithReadDb = accessor.withReadDb;
+		const originalWithReadDbAsync = accessor.withReadDbAsync;
+		accessor.withReadDb = () => {
+			throw new Error("reflection worker crossed the parent sync read seam");
+		};
+		accessor.withReadDbAsync = async () => {
+			throw new Error("reflection worker crossed the parent async read seam");
+		};
+		const worker = startReflectionWorker(config, {
+			getDbAccessor,
+			getInferenceProvider: () => provider("SUMMARY: Should not run."),
+			logger,
+		});
+		try {
+			await worker.triggerNow();
+		} finally {
+			worker.stop();
+			accessor.withReadDb = originalWithReadDb;
+			accessor.withReadDbAsync = originalWithReadDbAsync;
+		}
 	});
 });

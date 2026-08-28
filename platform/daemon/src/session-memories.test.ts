@@ -16,7 +16,7 @@ import { join } from "node:path";
 const TEST_DIR = join(tmpdir(), `signet-session-mem-test-${Date.now()}`);
 process.env.SIGNET_PATH = TEST_DIR;
 
-const { initDbAccessor, closeDbAccessor } = await import("./db-accessor");
+const { initDbAccessor, closeDbAccessor, getDbAccessor } = await import("./db-accessor");
 const { recordSessionCandidates, trackFtsHits, parseFeedback, recordAgentFeedbackInner } = await import(
 	"./session-memories"
 );
@@ -29,7 +29,7 @@ function ensureDir(path: string): void {
 	mkdirSync(path, { recursive: true });
 }
 
-function setupDb(): Database {
+async function setupDb(): Promise<Database> {
 	const dbPath = join(TEST_DIR, "memory", "memories.db");
 	ensureDir(join(TEST_DIR, "memory"));
 	if (existsSync(dbPath)) rmSync(dbPath);
@@ -49,7 +49,7 @@ function setupDb(): Database {
 	stmt.run("mem-bbb-222", "Project uses TypeScript", now, now);
 	stmt.run("mem-ccc-333", "Bun is the package manager", now, now);
 
-	closeDbAccessor();
+	await closeDbAccessor();
 	initDbAccessor(dbPath);
 
 	return db;
@@ -104,15 +104,15 @@ function getSessionMemoryRows(
 
 let db: Database;
 
-beforeEach(() => {
+beforeEach(async () => {
 	if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
 	ensureDir(TEST_DIR);
-	db = setupDb();
+	db = await setupDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
 	db.close();
-	closeDbAccessor();
+	await closeDbAccessor();
 	if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
@@ -121,7 +121,7 @@ afterEach(() => {
 // ============================================================================
 
 describe("recordSessionCandidates", () => {
-	it("inserts candidate rows with correct was_injected flags", () => {
+	it("inserts candidate rows with correct was_injected flags", async () => {
 		const candidates = [
 			{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const },
 			{ id: "mem-bbb-222", effScore: 0.7, source: "effective" as const },
@@ -129,7 +129,7 @@ describe("recordSessionCandidates", () => {
 		];
 		const injectedIds = new Set(["mem-aaa-111", "mem-bbb-222"]);
 
-		recordSessionCandidates("session-001", candidates, injectedIds);
+		await recordSessionCandidates("session-001", candidates, injectedIds);
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-001");
@@ -144,13 +144,43 @@ describe("recordSessionCandidates", () => {
 		expect(notInjected[0].memory_id).toBe("mem-ccc-333");
 	});
 
-	it("sets rank in order", () => {
+	it("routes the batched write through the DB owner, not parent write seams", async () => {
+		const accessor = getDbAccessor() as unknown as {
+			withWriteTx: (...args: never[]) => unknown;
+			withWriteTxAsync: (...args: never[]) => Promise<unknown>;
+		};
+		const originalWithWriteTx = accessor.withWriteTx;
+		const originalWithWriteTxAsync = accessor.withWriteTxAsync;
+		accessor.withWriteTx = () => {
+			throw new Error("session candidates crossed the parent sync write seam");
+		};
+		accessor.withWriteTxAsync = async () => {
+			throw new Error("session candidates crossed the parent async write seam");
+		};
+		try {
+			await recordSessionCandidates(
+				"session-owner-001",
+				[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
+				new Set(["mem-aaa-111"]),
+			);
+
+			const testDb = openTestDb();
+			const rows = getSessionMemoryRows(testDb, "session-owner-001");
+			testDb.close();
+			expect(rows.map((row) => row.memory_id)).toEqual(["mem-aaa-111"]);
+		} finally {
+			accessor.withWriteTx = originalWithWriteTx;
+			accessor.withWriteTxAsync = originalWithWriteTxAsync;
+		}
+	});
+
+	it("sets rank in order", async () => {
 		const candidates = [
 			{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const },
 			{ id: "mem-bbb-222", effScore: 0.7, source: "effective" as const },
 		];
 
-		recordSessionCandidates("session-002", candidates, new Set(["mem-aaa-111"]));
+		await recordSessionCandidates("session-002", candidates, new Set(["mem-aaa-111"]));
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-002");
@@ -160,10 +190,10 @@ describe("recordSessionCandidates", () => {
 		expect(rows[1].rank).toBe(1);
 	});
 
-	it("stores effective_score and final_score", () => {
+	it("stores effective_score and final_score", async () => {
 		const candidates = [{ id: "mem-aaa-111", effScore: 0.85, source: "effective" as const }];
 
-		recordSessionCandidates("session-003", candidates, new Set(["mem-aaa-111"]));
+		await recordSessionCandidates("session-003", candidates, new Set(["mem-aaa-111"]));
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-003");
@@ -173,7 +203,7 @@ describe("recordSessionCandidates", () => {
 		expect(rows[0].final_score).toBeCloseTo(0.85, 2);
 	});
 
-	it("stores path_json when provided", () => {
+	it("stores path_json when provided", async () => {
 		const candidates = [
 			{
 				id: "mem-aaa-111",
@@ -187,7 +217,7 @@ describe("recordSessionCandidates", () => {
 			},
 		];
 
-		recordSessionCandidates("session-path-001", candidates, new Set(["mem-aaa-111"]));
+		await recordSessionCandidates("session-path-001", candidates, new Set(["mem-aaa-111"]));
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-path-001");
@@ -197,10 +227,10 @@ describe("recordSessionCandidates", () => {
 		expect(rows[0].path_json).toContain("entity_ids");
 	});
 
-	it("stores provided agent_id", () => {
+	it("stores provided agent_id", async () => {
 		const candidates = [{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }];
 
-		recordSessionCandidates("session-agent-001", candidates, new Set(["mem-aaa-111"]), "agent-a");
+		await recordSessionCandidates("session-agent-001", candidates, new Set(["mem-aaa-111"]), "agent-a");
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-agent-001");
@@ -210,11 +240,11 @@ describe("recordSessionCandidates", () => {
 		expect(rows[0].agent_id).toBe("agent-a");
 	});
 
-	it("is idempotent (INSERT OR IGNORE on duplicate session+memory)", () => {
+	it("is idempotent (INSERT OR IGNORE on duplicate session+memory)", async () => {
 		const candidates = [{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }];
 
-		recordSessionCandidates("session-004", candidates, new Set(["mem-aaa-111"]));
-		recordSessionCandidates("session-004", candidates, new Set(["mem-aaa-111"]));
+		await recordSessionCandidates("session-004", candidates, new Set(["mem-aaa-111"]));
+		await recordSessionCandidates("session-004", candidates, new Set(["mem-aaa-111"]));
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-004");
@@ -223,10 +253,10 @@ describe("recordSessionCandidates", () => {
 		expect(rows.length).toBe(1);
 	});
 
-	it("bails on undefined sessionKey", () => {
+	it("bails on undefined sessionKey", async () => {
 		const candidates = [{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }];
 
-		recordSessionCandidates(undefined, candidates, new Set(["mem-aaa-111"]));
+		await recordSessionCandidates(undefined, candidates, new Set(["mem-aaa-111"]));
 
 		const testDb = openTestDb();
 		const count = testDb.prepare("SELECT COUNT(*) as cnt FROM session_memories").get() as { cnt: number };
@@ -235,8 +265,8 @@ describe("recordSessionCandidates", () => {
 		expect(count.cnt).toBe(0);
 	});
 
-	it("bails on empty candidates array", () => {
-		recordSessionCandidates("session-005", [], new Set());
+	it("bails on empty candidates array", async () => {
+		await recordSessionCandidates("session-005", [], new Set());
 
 		const testDb = openTestDb();
 		const count = testDb.prepare("SELECT COUNT(*) as cnt FROM session_memories").get() as { cnt: number };
@@ -245,10 +275,10 @@ describe("recordSessionCandidates", () => {
 		expect(count.cnt).toBe(0);
 	});
 
-	it("sets source field correctly", () => {
+	it("sets source field correctly", async () => {
 		const candidates = [{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }];
 
-		recordSessionCandidates("session-006", candidates, new Set(["mem-aaa-111"]));
+		await recordSessionCandidates("session-006", candidates, new Set(["mem-aaa-111"]));
 
 		const testDb = openTestDb();
 		const rows = getSessionMemoryRows(testDb, "session-006");
@@ -263,8 +293,8 @@ describe("recordSessionCandidates", () => {
 // ============================================================================
 
 describe("trackFtsHits", () => {
-	it("increments fts_hit_count for existing candidate rows", () => {
-		recordSessionCandidates(
+	it("increments fts_hit_count for existing candidate rows", async () => {
+		await recordSessionCandidates(
 			"session-fts-1",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -281,8 +311,8 @@ describe("trackFtsHits", () => {
 		expect(rows[0].source).toBe("effective");
 	});
 
-	it("increments multiple times", () => {
-		recordSessionCandidates(
+	it("increments multiple times", async () => {
+		await recordSessionCandidates(
 			"session-fts-2",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -299,14 +329,14 @@ describe("trackFtsHits", () => {
 		expect(rows[0].fts_hit_count).toBe(3);
 	});
 
-	it("tracks fts hits per agent for same session+memory", () => {
-		recordSessionCandidates(
+	it("tracks fts hits per agent for same session+memory", async () => {
+		await recordSessionCandidates(
 			"session-fts-agent",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
 			"agent-a",
 		);
-		recordSessionCandidates(
+		await recordSessionCandidates(
 			"session-fts-agent",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -348,7 +378,7 @@ describe("trackFtsHits", () => {
 		expect(rows[0].fts_hit_count).toBe(1);
 	});
 
-	it("bails on undefined sessionKey", () => {
+	it("bails on undefined sessionKey", async () => {
 		trackFtsHits(undefined, ["mem-aaa-111"]);
 
 		const testDb = openTestDb();
@@ -368,8 +398,8 @@ describe("trackFtsHits", () => {
 		expect(count.cnt).toBe(0);
 	});
 
-	it("handles mix of existing and new memory IDs", () => {
-		recordSessionCandidates(
+	it("handles mix of existing and new memory IDs", async () => {
+		await recordSessionCandidates(
 			"session-fts-5",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -472,8 +502,8 @@ function getFeedbackColumns(
 }
 
 describe("recordAgentFeedbackInner", () => {
-	it("sets score on first feedback (NULL -> score)", () => {
-		recordSessionCandidates(
+	it("sets score on first feedback (NULL -> score)", async () => {
+		await recordSessionCandidates(
 			"session-fb-1",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -490,8 +520,8 @@ describe("recordAgentFeedbackInner", () => {
 		expect(result?.agent_feedback_count).toBe(1);
 	});
 
-	it("computes running mean on second feedback", () => {
-		recordSessionCandidates(
+	it("computes running mean on second feedback", async () => {
+		await recordSessionCandidates(
 			"session-fb-2",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -509,8 +539,8 @@ describe("recordAgentFeedbackInner", () => {
 		expect(result?.agent_feedback_count).toBe(2);
 	});
 
-	it("multiple feedbacks converge to the mean", () => {
-		recordSessionCandidates(
+	it("multiple feedbacks converge to the mean", async () => {
+		await recordSessionCandidates(
 			"session-fb-3",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -530,8 +560,8 @@ describe("recordAgentFeedbackInner", () => {
 		expect(result?.agent_feedback_count).toBe(5);
 	});
 
-	it("handles multiple memories in one feedback call", () => {
-		recordSessionCandidates(
+	it("handles multiple memories in one feedback call", async () => {
+		await recordSessionCandidates(
 			"session-fb-4",
 			[
 				{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const },
@@ -554,8 +584,8 @@ describe("recordAgentFeedbackInner", () => {
 		expect(b?.agent_relevance_score).toBeCloseTo(-0.5, 6);
 	});
 
-	it("ignores feedback for non-existent session memories", () => {
-		recordSessionCandidates(
+	it("ignores feedback for non-existent session memories", async () => {
+		await recordSessionCandidates(
 			"session-fb-5",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -576,13 +606,13 @@ describe("recordAgentFeedbackInner", () => {
 		expect(ghost).toBeFalsy();
 	});
 
-	it("feedback for wrong session does not affect other sessions", () => {
-		recordSessionCandidates(
+	it("feedback for wrong session does not affect other sessions", async () => {
+		await recordSessionCandidates(
 			"session-fb-6a",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
 		);
-		recordSessionCandidates(
+		await recordSessionCandidates(
 			"session-fb-6b",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -599,14 +629,14 @@ describe("recordAgentFeedbackInner", () => {
 		expect(b?.agent_relevance_score).toBeNull();
 	});
 
-	it("feedback is scoped by agent_id", () => {
-		recordSessionCandidates(
+	it("feedback is scoped by agent_id", async () => {
+		await recordSessionCandidates(
 			"session-fb-agent",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
 			"agent-a",
 		);
-		recordSessionCandidates(
+		await recordSessionCandidates(
 			"session-fb-agent",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -624,8 +654,8 @@ describe("recordAgentFeedbackInner", () => {
 		expect(b?.agent_relevance_score).toBeNull();
 	});
 
-	it("handles negative scores correctly", () => {
-		recordSessionCandidates(
+	it("handles negative scores correctly", async () => {
+		await recordSessionCandidates(
 			"session-fb-7",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),
@@ -643,8 +673,8 @@ describe("recordAgentFeedbackInner", () => {
 		expect(result?.agent_feedback_count).toBe(2);
 	});
 
-	it("empty feedback object is a no-op", () => {
-		recordSessionCandidates(
+	it("empty feedback object is a no-op", async () => {
+		await recordSessionCandidates(
 			"session-fb-8",
 			[{ id: "mem-aaa-111", effScore: 0.9, source: "effective" as const }],
 			new Set(["mem-aaa-111"]),

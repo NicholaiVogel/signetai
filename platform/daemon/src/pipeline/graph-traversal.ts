@@ -1,5 +1,7 @@
 import { yieldEvery } from "../async-yield";
 import type { ReadDb } from "../db-accessor";
+import type { DbOwnerClient } from "../db-owner-client";
+import { ownerReadAll } from "../db-owner-sql";
 
 /**
  * Yield cadence for long row loops inside the traversal. Row work is cheap
@@ -68,10 +70,42 @@ export interface TraversalConfig {
  * callers that already own a bounded read scope.
  */
 type ReadDbSource = ReadDb | (<T>(fn: (db: ReadDb) => T) => T) | (<T>(fn: (db: ReadDb) => T) => Promise<T>);
+type ReadAll = <Row extends object>(
+	sql: string,
+	params: readonly unknown[],
+	operation: string,
+	estimatedWorkUnits: number,
+) => Promise<ReadonlyArray<Row>>;
 
 async function withReadDbAsync<T>(source: ReadDbSource, fn: (db: ReadDb) => T): Promise<T> {
 	if (typeof source !== "function") return fn(source);
 	return await source(fn);
+}
+
+function readAllFromSource(source: ReadDbSource): ReadAll {
+	return async <Row extends object>(
+		sql: string,
+		params: readonly unknown[],
+		_operation: string,
+		_estimatedWorkUnits: number,
+	): Promise<ReadonlyArray<Row>> =>
+		await withReadDbAsync(source, (db) => db.prepare(sql).all(...params) as ReadonlyArray<Row>);
+}
+
+function readAllFromOwner(owner: DbOwnerClient): ReadAll {
+	return async <Row extends object>(
+		sql: string,
+		params: readonly unknown[],
+		operation: string,
+		estimatedWorkUnits: number,
+	): Promise<ReadonlyArray<Row>> =>
+		await ownerReadAll<Row>(owner, sql, params, {
+			operation,
+			lane: "read",
+			workloadClass: "foreground",
+			deadlineMs: 5_000,
+			estimatedWorkUnits: Math.max(1, Math.min(1_200, estimatedWorkUnits)),
+		});
 }
 
 export interface FocalEntityResult {
@@ -245,23 +279,32 @@ function resolveByQueryTokens(db: ReadDb, agentId: string, queryTokens: Readonly
 		// FTS table doesn't exist — fall through to LIKE
 	}
 
-	// LIKE fallback for pre-migration databases
+	return resolveByQueryTokensLike(db, agentId, tokens);
+}
+
+function buildQueryTokenLikeStatement(tokens: ReadonlyArray<string>): {
+	readonly sql: string;
+	readonly params: string[];
+} {
 	const clauses = tokens.map(() => "(canonical_name LIKE ? OR name LIKE ?)").join(" OR ");
 	const args: string[] = [];
 	for (const token of tokens) {
 		const pattern = `%${token}%`;
 		args.push(pattern, pattern);
 	}
-
-	const rows = db
-		.prepare(
-			`SELECT id FROM entities
+	return {
+		sql: `SELECT id FROM entities
 			 WHERE agent_id = ?
 			   AND (${clauses})
 			 ORDER BY mentions DESC
 			 LIMIT 20`,
-		)
-		.all(agentId, ...args) as Array<{ id: string }>;
+		params: args,
+	};
+}
+
+function resolveByQueryTokensLike(db: ReadDb, agentId: string, tokens: ReadonlyArray<string>): string[] {
+	const query = buildQueryTokenLikeStatement(tokens);
+	const rows = db.prepare(query.sql).all(agentId, ...query.params) as Array<{ id: string }>;
 	return sanitizeEntityIds(rows.map((row) => row.id));
 }
 
@@ -313,7 +356,7 @@ export function resolveFocalEntities(
 			source = "session_key";
 		}
 
-		const entityIds = sanitizeEntityIds([...pinnedEntityIds, ...resolvedEntityIds]);
+		const entityIds = sanitizeEntityIds([...pinnedEntityIds, ...resolvedEntityIds]).slice(0, 200);
 		return {
 			entityIds,
 			entityNames: getEntityNames(db, entityIds),
@@ -330,9 +373,138 @@ export function resolveFocalEntities(
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Shared path helpers (used by both old and batched traversal paths)
-// ---------------------------------------------------------------------------
+/** Resolve focal entities through the serialized DB owner. */
+export async function resolveFocalEntitiesViaOwner(
+	owner: DbOwnerClient,
+	agentId: string,
+	signals: {
+		project?: string;
+		sessionKey?: string;
+		checkpointEntityIds?: string[];
+		queryTokens?: string[];
+		includePinned?: boolean;
+	},
+): Promise<FocalEntityResult> {
+	const readAll = readAllFromOwner(owner);
+	try {
+		const tableRows = await readAll<{ readonly name: string }>(
+			`SELECT name FROM sqlite_master
+			 WHERE type = 'table'
+			   AND name IN ('entities', 'entity_aspects', 'entity_attributes', 'entity_dependencies')`,
+			[],
+			"session-start.graph-focal.table-check",
+			4,
+		);
+		const tableNames = new Set(tableRows.map((row) => row.name));
+		if (
+			["entities", "entity_aspects", "entity_attributes", "entity_dependencies"].some((name) => !tableNames.has(name))
+		) {
+			return { entityIds: [], entityNames: [], pinnedEntityIds: [], source: "query" };
+		}
+
+		const pinnedEntityIds =
+			signals.includePinned === false
+				? []
+				: (
+						await readAll<{ readonly id: string }>(
+							`SELECT id FROM entities
+							 WHERE agent_id = ?
+							   AND pinned = 1
+							 ORDER BY pinned_at DESC, updated_at DESC
+			 LIMIT 200`,
+							[agentId],
+							"session-start.graph-focal.pinned",
+							200,
+						)
+					).map((row) => row.id);
+		let resolvedEntityIds: string[] = [];
+		let source: FocalEntityResult["source"] = signals.project ? "project" : "query";
+
+		if (signals.checkpointEntityIds && signals.checkpointEntityIds.length > 0) {
+			resolvedEntityIds = sanitizeEntityIds(signals.checkpointEntityIds);
+			source = "checkpoint";
+		} else if (signals.project) {
+			const tokens = extractProjectTokens(signals.project);
+			if (tokens.length > 0) {
+				const clauses = tokens.map(() => "(canonical_name LIKE ? OR name LIKE ?)").join(" OR ");
+				const args: string[] = [];
+				for (const token of tokens) {
+					const pattern = `%${token}%`;
+					args.push(pattern, pattern);
+				}
+				const projectRows = await readAll<{ readonly id: string }>(
+					`SELECT id FROM entities
+					 WHERE agent_id = ?
+					   AND entity_type = 'project'
+					   AND (${clauses})
+					 ORDER BY mentions DESC
+					 LIMIT 5`,
+					[agentId, ...args],
+					"session-start.graph-focal.project",
+					Math.max(1, tokens.length * 5),
+				);
+				resolvedEntityIds = sanitizeEntityIds(projectRows.map((row) => row.id));
+			}
+		}
+
+		if (resolvedEntityIds.length === 0 && signals.queryTokens && signals.queryTokens.length > 0) {
+			const tokens = sanitizeQueryTokens(signals.queryTokens);
+			if (tokens.length > 0) {
+				let queryIds: string[] = [];
+				try {
+					const queryRows = await readAll<{ readonly id: string }>(
+						`SELECT e.id FROM entities_fts
+						 CROSS JOIN entities e ON e.rowid = entities_fts.rowid
+						 WHERE entities_fts MATCH ?
+						   AND e.agent_id = ?
+						 ORDER BY rank
+						 LIMIT 20`,
+						[tokens.join(" OR "), agentId],
+						"session-start.graph-focal.query-fts",
+						20,
+					);
+					queryIds = sanitizeEntityIds(queryRows.map((row) => row.id));
+				} catch {
+					// FTS is optional on pre-migration databases.
+				}
+				if (queryIds.length === 0) {
+					const likeStatement = buildQueryTokenLikeStatement(tokens);
+					const likeRows = await readAll<{ readonly id: string }>(
+						likeStatement.sql,
+						[agentId, ...likeStatement.params],
+						"session-start.graph-focal.query-like",
+						20,
+					);
+					queryIds = sanitizeEntityIds(likeRows.map((row) => row.id));
+				}
+				resolvedEntityIds = queryIds;
+				if (resolvedEntityIds.length > 0) source = "query";
+			}
+		}
+
+		if (resolvedEntityIds.length === 0 && signals.sessionKey) source = "session_key";
+		const entityIds = sanitizeEntityIds([...pinnedEntityIds, ...resolvedEntityIds]).slice(0, 200);
+		const entityNameRows =
+			entityIds.length === 0
+				? []
+				: await readAll<{ readonly id: string; readonly name: string }>(
+						`SELECT id, name FROM entities
+						 WHERE agent_id = ?
+						   AND id IN (${entityIds.map(() => "?").join(", ")})`,
+						[agentId, ...entityIds],
+						"session-start.graph-focal.names",
+						entityIds.length,
+					);
+		const nameById = new Map(entityNameRows.map((row) => [row.id, row.name]));
+		const entityNames = entityIds.flatMap((id) => {
+			const name = nameById.get(id);
+			return typeof name === "string" && name.length > 0 ? [name] : [];
+		});
+		return { entityIds, entityNames, pinnedEntityIds, source };
+	} catch {
+		return { entityIds: [], entityNames: [], pinnedEntityIds: [], source: "query" };
+	}
+}
 
 function toPathStatic(
 	entityId: string,
@@ -373,7 +545,7 @@ function pathSize(path: TraversalPath): number {
  * long row loops (#1118) — query shapes and result identity are unchanged.
  */
 async function batchCollectForEntities(
-	db: ReadDbSource,
+	readAll: ReadAll,
 	entityIds: ReadonlyArray<string>,
 	agentId: string,
 	config: TraversalConfig,
@@ -403,29 +575,26 @@ async function batchCollectForEntities(
 	const entityPh = entityIds.map(() => "?").join(", ");
 
 	// --- 1. Batch constraints for all entities ---
-	const constraintRows = await withReadDbAsync(
-		db,
-		(readDb) =>
-			readDb
-				.prepare(
-					`SELECT asp.entity_id, e.name as entity_name, ea.content, ea.importance
-				 FROM entity_aspects asp INDEXED BY idx_entity_aspects_entity
-				 CROSS JOIN entity_attributes ea INDEXED BY idx_entity_attributes_aspect
-				   ON ea.aspect_id = asp.id
-				 JOIN entities e ON e.id = asp.entity_id
-				 WHERE asp.entity_id IN (${entityPh})
-				   AND asp.agent_id = ?
-				   AND ea.agent_id = ?
-				   AND ea.kind = 'constraint'
-				   AND ea.status = 'active'
-				 ORDER BY ea.importance DESC`,
-				)
-				.all(...entityIds, agentId, agentId) as Array<{
-				entity_id: string;
-				entity_name: string;
-				content: string;
-				importance: number;
-			}>,
+	const constraintRows = await readAll<{
+		entity_id: string;
+		entity_name: string;
+		content: string;
+		importance: number;
+	}>(
+		`SELECT asp.entity_id, e.name as entity_name, ea.content, ea.importance
+		 FROM entity_aspects asp INDEXED BY idx_entity_aspects_entity
+		 CROSS JOIN entity_attributes ea INDEXED BY idx_entity_attributes_aspect
+		   ON ea.aspect_id = asp.id
+		 JOIN entities e ON e.id = asp.entity_id
+		 WHERE asp.entity_id IN (${entityPh})
+		   AND asp.agent_id = ?
+		   AND ea.agent_id = ?
+		   AND ea.kind = 'constraint'
+		   AND ea.status = 'active'
+		 ORDER BY ea.importance DESC`,
+		[...entityIds, agentId, agentId],
+		"session-start.graph-traversal.constraints",
+		Math.max(1, entityIds.length * config.maxAttributesPerAspect),
 	);
 
 	for (const row of constraintRows) {
@@ -458,13 +627,11 @@ async function batchCollectForEntities(
 		aspectArgs = [...entityIds, agentId];
 	}
 
-	const allAspectRows = await withReadDbAsync(
-		db,
-		(readDb) =>
-			readDb.prepare(aspectQuery).all(...aspectArgs) as Array<{
-				id: string;
-				entity_id: string;
-			}>,
+	const allAspectRows = await readAll<{ id: string; entity_id: string }>(
+		aspectQuery,
+		aspectArgs,
+		"session-start.graph-traversal.aspects",
+		Math.max(1, entityIds.length * config.maxAspectsPerEntity),
 	);
 
 	// Apply maxAspectsPerEntity budget by grouping and slicing
@@ -505,44 +672,42 @@ async function batchCollectForEntities(
 		if (config.scope !== undefined) {
 			const scopeClause = config.scope === null ? "AND m.scope IS NULL" : "AND m.scope = ?";
 			const scopeArgs: unknown[] = config.scope === null ? [] : [config.scope];
-			attributeRows = await withReadDbAsync(
-				db,
-				(readDb) =>
-					readDb
-						.prepare(
-							`SELECT ea.memory_id, ea.importance, ea.aspect_id
-						 FROM entity_attributes ea INDEXED BY idx_entity_attributes_aspect
-						 JOIN memories m ON m.id = ea.memory_id
-						 WHERE ea.aspect_id IN (${aspectPh})
-						   AND ea.agent_id = ?
-						   AND ea.status = 'active'
-						   AND m.is_deleted = 0 ${scopeClause}
-						 ORDER BY ea.importance DESC`,
-						)
-						.all(...budgetedAspectIds, agentId, ...scopeArgs) as Array<{
-						memory_id: string | null;
-						importance: number;
-						aspect_id: string;
-					}>,
-			);
+			attributeRows = [
+				...(await readAll<{
+					memory_id: string | null;
+					importance: number;
+					aspect_id: string;
+				}>(
+					`SELECT ea.memory_id, ea.importance, ea.aspect_id
+				 FROM entity_attributes ea INDEXED BY idx_entity_attributes_aspect
+				 JOIN memories m ON m.id = ea.memory_id
+				 WHERE ea.aspect_id IN (${aspectPh})
+				   AND ea.agent_id = ?
+				   AND ea.status = 'active'
+				   AND m.is_deleted = 0 ${scopeClause}
+				 ORDER BY ea.importance DESC`,
+					[...budgetedAspectIds, agentId, ...scopeArgs],
+					"session-start.graph-traversal.attributes",
+					Math.max(1, budgetedAspectIds.length * config.maxAttributesPerAspect),
+				)),
+			];
 		} else {
-			attributeRows = await withReadDbAsync(
-				db,
-				(readDb) =>
-					readDb
-						.prepare(
-							`SELECT memory_id, importance, aspect_id FROM entity_attributes INDEXED BY idx_entity_attributes_aspect
-						 WHERE aspect_id IN (${aspectPh})
-						   AND agent_id = ?
-						   AND status = 'active'
-						 ORDER BY importance DESC`,
-						)
-						.all(...budgetedAspectIds, agentId) as Array<{
-						memory_id: string | null;
-						importance: number;
-						aspect_id: string;
-					}>,
-			);
+			attributeRows = [
+				...(await readAll<{
+					memory_id: string | null;
+					importance: number;
+					aspect_id: string;
+				}>(
+					`SELECT memory_id, importance, aspect_id FROM entity_attributes INDEXED BY idx_entity_attributes_aspect
+				 WHERE aspect_id IN (${aspectPh})
+				   AND agent_id = ?
+				   AND status = 'active'
+				 ORDER BY importance DESC`,
+					[...budgetedAspectIds, agentId],
+					"session-start.graph-traversal.attributes",
+					Math.max(1, budgetedAspectIds.length * config.maxAttributesPerAspect),
+				)),
+			];
 		}
 
 		// Apply maxAttributesPerAspect budget and collect memories
@@ -578,45 +743,43 @@ async function batchCollectForEntities(
 		if (config.scope !== undefined) {
 			const scopeClause = config.scope === null ? "AND m.scope IS NULL" : "AND m.scope = ?";
 			const scopeArgs: unknown[] = config.scope === null ? [] : [config.scope];
-			mentionRows = await withReadDbAsync(
-				db,
-				(readDb) =>
-					readDb
-						.prepare(
-							`SELECT mem.memory_id, COALESCE(m.importance, 0.5) AS importance, mem.entity_id
-						 FROM memory_entity_mentions mem
-						 JOIN memories m ON m.id = mem.memory_id
-						 WHERE mem.entity_id IN (${entityPh})
-						   AND m.is_deleted = 0 ${scopeClause}
-						 ORDER BY mem.confidence DESC, m.importance DESC
-						 LIMIT ?`,
-						)
-						.all(...entityIds, ...scopeArgs, mentionBudget) as Array<{
-						memory_id: string;
-						importance: number;
-						entity_id: string;
-					}>,
-			);
+			mentionRows = [
+				...(await readAll<{
+					memory_id: string;
+					importance: number;
+					entity_id: string;
+				}>(
+					`SELECT mem.memory_id, COALESCE(m.importance, 0.5) AS importance, mem.entity_id
+				 FROM memory_entity_mentions mem
+				 JOIN memories m ON m.id = mem.memory_id
+				 WHERE mem.entity_id IN (${entityPh})
+				   AND m.is_deleted = 0 ${scopeClause}
+				 ORDER BY mem.confidence DESC, m.importance DESC
+				 LIMIT ?`,
+					[...entityIds, ...scopeArgs, mentionBudget],
+					"session-start.graph-traversal.mentions",
+					mentionBudget,
+				)),
+			];
 		} else {
-			mentionRows = await withReadDbAsync(
-				db,
-				(readDb) =>
-					readDb
-						.prepare(
-							`SELECT mem.memory_id, COALESCE(m.importance, 0.5) AS importance, mem.entity_id
-						 FROM memory_entity_mentions mem
-						 JOIN memories m ON m.id = mem.memory_id
-						 WHERE mem.entity_id IN (${entityPh})
-						   AND m.is_deleted = 0
-						 ORDER BY mem.confidence DESC, m.importance DESC
-						 LIMIT ?`,
-						)
-						.all(...entityIds, mentionBudget) as Array<{
-						memory_id: string;
-						importance: number;
-						entity_id: string;
-					}>,
-			);
+			mentionRows = [
+				...(await readAll<{
+					memory_id: string;
+					importance: number;
+					entity_id: string;
+				}>(
+					`SELECT mem.memory_id, COALESCE(m.importance, 0.5) AS importance, mem.entity_id
+				 FROM memory_entity_mentions mem
+				 JOIN memories m ON m.id = mem.memory_id
+				 WHERE mem.entity_id IN (${entityPh})
+				   AND m.is_deleted = 0
+				 ORDER BY mem.confidence DESC, m.importance DESC
+				 LIMIT ?`,
+					[...entityIds, mentionBudget],
+					"session-start.graph-traversal.mentions",
+					mentionBudget,
+				)),
+			];
 		}
 
 		for (const row of mentionRows) {
@@ -643,9 +806,9 @@ async function batchCollectForEntities(
  * query stages so concurrent session starts interleave instead of
  * serializing on ~1.7s of uninterrupted main-thread work (large graphs).
  */
-export async function traverseKnowledgeGraph(
+async function traverseKnowledgeGraphWithReadAll(
 	focalEntityIds: ReadonlyArray<string>,
-	db: ReadDbSource,
+	readAll: ReadAll,
 	agentId: string,
 	config: TraversalConfig,
 ): Promise<TraversalResult> {
@@ -661,7 +824,20 @@ export async function traverseKnowledgeGraph(
 	};
 
 	try {
-		if (!(await withReadDbAsync(db, hasTraversalTables))) return empty;
+		const tableRows = await readAll<{ readonly name: string }>(
+			`SELECT name FROM sqlite_master
+			 WHERE type = 'table'
+			   AND name IN ('entities', 'entity_aspects', 'entity_attributes', 'entity_dependencies')`,
+			[],
+			"session-start.graph-traversal.table-check",
+			4,
+		);
+		const tableNames = new Set(tableRows.map((row) => row.name));
+		if (
+			tableRows.length < 4 ||
+			!["entities", "entity_aspects", "entity_attributes", "entity_dependencies"].every((name) => tableNames.has(name))
+		)
+			return empty;
 
 		const focalIds = sanitizeEntityIds(focalEntityIds);
 		if (focalIds.length === 0) return empty;
@@ -672,7 +848,7 @@ export async function traverseKnowledgeGraph(
 		const budget = config.maxTraversalPaths;
 
 		// --- Phase 1: Batch-collect for focal entities ---
-		const phase1 = await batchCollectForEntities(db, focalIds, agentId, config, budget);
+		const phase1 = await batchCollectForEntities(readAll, focalIds, agentId, config, budget);
 		let timedOut = Date.now() > deadline;
 
 		await stageYield();
@@ -680,27 +856,24 @@ export async function traverseKnowledgeGraph(
 		// --- Phase 2: Dependency expansion + batch collect for hops ---
 		if (!timedOut && phase1.memoryIds.size < budget) {
 			const focalPh = focalIds.map(() => "?").join(", ");
-			const dependencyRows = await withReadDbAsync(
-				db,
-				(readDb) =>
-					readDb
-						.prepare(
-							`SELECT id, source_entity_id, target_entity_id FROM entity_dependencies
-						 INDEXED BY idx_entity_dependencies_source
-						 WHERE agent_id = ?
-						   AND source_entity_id IN (${focalPh})
-						   AND (COALESCE(confidence, 0.7) * strength) >= ?
-						   AND COALESCE(confidence, 0.7) >= ?
-						 ORDER BY (COALESCE(confidence, 0.7) * strength) DESC
-						 LIMIT ?`,
-						)
-						.all(
-							agentId,
-							...focalIds,
-							config.minDependencyStrength,
-							config.minConfidence,
-							config.maxBranching * focalIds.length,
-						) as Array<{ id: string; source_entity_id: string; target_entity_id: string }>,
+			const dependencyRows = await readAll<{ id: string; source_entity_id: string; target_entity_id: string }>(
+				`SELECT id, source_entity_id, target_entity_id FROM entity_dependencies
+				 INDEXED BY idx_entity_dependencies_source
+				 WHERE agent_id = ?
+				   AND source_entity_id IN (${focalPh})
+				   AND (COALESCE(confidence, 0.7) * strength) >= ?
+				   AND COALESCE(confidence, 0.7) >= ?
+				 ORDER BY (COALESCE(confidence, 0.7) * strength) DESC
+				 LIMIT ?`,
+				[
+					agentId,
+					...focalIds,
+					config.minDependencyStrength,
+					config.minConfidence,
+					config.maxBranching * focalIds.length,
+				],
+				"session-start.graph-traversal.dependencies",
+				Math.max(1, config.maxBranching * focalIds.length),
 			);
 
 			// Filter to hop targets not already visited
@@ -710,7 +883,7 @@ export async function traverseKnowledgeGraph(
 
 			if (hopTargetIds.length > 0) {
 				const remainingBudget = budget - phase1.memoryIds.size;
-				const phase2 = await batchCollectForEntities(db, hopTargetIds, agentId, config, remainingBudget);
+				const phase2 = await batchCollectForEntities(readAll, hopTargetIds, agentId, config, remainingBudget);
 
 				// Merge phase2 results into phase1
 				for (const mid of phase2.memoryIds) {
@@ -798,4 +971,23 @@ export async function traverseKnowledgeGraph(
 	} catch {
 		return empty;
 	}
+}
+
+export async function traverseKnowledgeGraph(
+	focalEntityIds: ReadonlyArray<string>,
+	db: ReadDbSource,
+	agentId: string,
+	config: TraversalConfig,
+): Promise<TraversalResult> {
+	return await traverseKnowledgeGraphWithReadAll(focalEntityIds, readAllFromSource(db), agentId, config);
+}
+
+/** Traverse graph data through the serialized DB owner, outside the parent DB seam. */
+export async function traverseKnowledgeGraphViaOwner(
+	focalEntityIds: ReadonlyArray<string>,
+	owner: DbOwnerClient,
+	agentId: string,
+	config: TraversalConfig,
+): Promise<TraversalResult> {
+	return await traverseKnowledgeGraphWithReadAll(focalEntityIds, readAllFromOwner(owner), agentId, config);
 }
