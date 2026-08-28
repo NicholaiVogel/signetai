@@ -114,15 +114,32 @@ type SqliteDatabase = {
 
 type SqliteWriteSurface = Pick<SqliteDatabase, "prepare" | "exec">;
 
-let Database: new (path: string, opts?: Record<string, unknown>) => SqliteDatabase;
+type DatabaseConstructor = new (path: string, opts?: Record<string, unknown>) => SqliteDatabase;
 
-if (isBun) {
-	// eslint-disable-next-line @typescript-eslint/no-require-imports
-	const mod = require("bun:sqlite");
-	Database = mod.Database;
-} else {
-	// eslint-disable-next-line @typescript-eslint/no-require-imports
-	Database = require("better-sqlite3");
+// Loading the database driver is intentionally deferred until the daemon opens
+// a database. The MCP stdio server imports DB helpers for content-safety
+// projection, but delegates all database work to the daemon over HTTP. Loading
+// better-sqlite3 here would make that otherwise database-free Node entrypoint
+// unusable from the published wrapper, which does not ship this native addon.
+let databaseConstructor: DatabaseConstructor | null = null;
+
+function getDatabaseConstructor(): DatabaseConstructor {
+	if (databaseConstructor !== null) return databaseConstructor;
+	if (isBun) {
+		// eslint-disable-next-line @typescript-eslint/no-require-imports
+		databaseConstructor = require("bun:sqlite").Database as DatabaseConstructor;
+		return databaseConstructor;
+	}
+	try {
+		// eslint-disable-next-line @typescript-eslint/no-require-imports
+		databaseConstructor = require("better-sqlite3") as DatabaseConstructor;
+		return databaseConstructor;
+	} catch (error) {
+		throw new Error(
+			"Signet's Node database path requires the better-sqlite3 npm package. Install it before starting the daemon.",
+			{ cause: error },
+		);
+	}
 }
 
 type SQLQueryBindings = unknown;
@@ -593,7 +610,7 @@ export function resolveSqliteRuntimeConfig(opts?: {
 	const set =
 		opts?.set ??
 		((path: string) => {
-			const sqliteCtor = Database as unknown as { setCustomSQLite?: (p: string) => void };
+			const sqliteCtor = getDatabaseConstructor() as unknown as { setCustomSQLite?: (p: string) => void };
 			if (typeof sqliteCtor.setCustomSQLite === "function") {
 				sqliteCtor.setCustomSQLite(path);
 			}
@@ -1807,7 +1824,7 @@ function openDbAccessorConnection(path: string, opts?: { readonly agentsDir?: st
 
 	configureCustomSqlite(opts?.agentsDir);
 
-	const writeConn = new Database(path);
+	const writeConn = new (getDatabaseConstructor())(path);
 	configurePragmas(writeConn, path);
 	loadVecExtension(writeConn);
 	return writeConn;
@@ -1920,7 +1937,7 @@ export function initDbAccessorLite(dbPathParam: string, vecExtensionPath: string
 	dbPath = dbPathParam;
 	vecExtPath = vecExtensionPath;
 
-	const writeConn = new Database(dbPathParam);
+	const writeConn = new (getDatabaseConstructor())(dbPathParam);
 	configurePragmas(writeConn, dbPathParam);
 
 	if (vecExtensionPath) {
@@ -1956,7 +1973,7 @@ export function initDbAccessorReadOnly(
 	dbPath = dbPathParam;
 	vecExtPath = vecExtensionPath;
 	configureCustomSqlite(opts?.agentsDir);
-	const readConn = new Database(dbPathParam, { readonly: true });
+	const readConn = new (getDatabaseConstructor())(dbPathParam, { readonly: true });
 	loadVecExtension(readConn);
 	accessor = createAccessor(readConn);
 }
@@ -2385,7 +2402,7 @@ function createAccessor(writeConn: SqliteDatabase): RuntimeDbAccessor {
 
 	function openReadConnection(): SqliteDatabase {
 		if (dbPath === null) throw new Error("DbAccessor not initialised");
-		const conn = new Database(dbPath, { readonly: true });
+		const conn = new (getDatabaseConstructor())(dbPath, { readonly: true });
 		conn.exec("PRAGMA busy_timeout = 5000");
 		loadVecExtension(conn);
 		readInUse.add(conn);

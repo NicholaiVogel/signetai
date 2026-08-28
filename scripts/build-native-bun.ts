@@ -92,6 +92,7 @@ if (!existsSync(join(dashboardDir, "index.html"))) {
 const templatesDir = join(root, "surfaces", "cli", "templates");
 const skillsDir = join(root, "skills");
 const hermesPluginDir = join(root, "integrations", "hermes-agent", "connector", "hermes-plugin");
+const graphiqScriptPath = join(root, "scripts", "install-graphiq.sh");
 
 const workerEntries = [
 	["synthesis-render-worker", "platform/daemon/src/synthesis-render-worker.ts"],
@@ -165,6 +166,13 @@ const fileAssetsFor = (dir: string, prefix = "") =>
 const templateAssets = fileAssetsFor(templatesDir);
 const skillAssets = fileAssetsFor(skillsDir);
 const connectorAssets = fileAssetsFor(hermesPluginDir, "hermes-agent/hermes-plugin");
+const graphiqAssets = [
+	{
+		path: "scripts/install-graphiq.sh",
+		contentBase64: readFileSync(graphiqScriptPath).toString("base64"),
+		mode: statSync(graphiqScriptPath).mode & 0o777,
+	},
+];
 
 const workerAssets: { name: string; contentBase64: string }[] = [
 	...workerEntries.map(([name]) => ({
@@ -313,6 +321,7 @@ writeFileSync(
 	join(buildDir, "native-assets.ts"),
 	`export const dashboardAssets = ${JSON.stringify(dashboardAssets)} as const;\n` +
 		`export const connectorAssets = ${JSON.stringify(connectorAssets)} as const;\n` +
+		`export const graphiqAssets = ${JSON.stringify(graphiqAssets)} as const;\n` +
 		`export const skillAssets = ${JSON.stringify(skillAssets)} as const;\n` +
 		`export const templateAssets = ${JSON.stringify(templateAssets)} as const;\n` +
 		`export const workerAssets = ${JSON.stringify(workerAssets)} as const;\n` +
@@ -333,12 +342,12 @@ writeFileSync(
 	join(buildDir, "cli-native.ts"),
 	`import { materializeEmbeddedAssetTree, materializeEmbeddedNativeAddon, registerNativeAssets, registerNativeTransformersBindings } from "../platform/daemon/src/native-runtime-assets";
 import { handoffInspectorParent } from "../surfaces/cli/src/lib/inspector-proxy";
-import { connectorAssets, dashboardAssets, nativeAddonAssets, skillAssets, templateAssets, wasmAssets, workerAssets } from "./native-assets";
+import { connectorAssets, dashboardAssets, graphiqAssets, nativeAddonAssets, skillAssets, templateAssets, wasmAssets, workerAssets } from "./native-assets";
 import * as transformersWebRuntime from "./transformers-web-runtime";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-registerNativeAssets({ connectors: connectorAssets, dashboard: dashboardAssets, skills: skillAssets, templates: templateAssets, workers: workerAssets, wasm: wasmAssets, nativeAddons: nativeAddonAssets });
+registerNativeAssets({ connectors: connectorAssets, dashboard: dashboardAssets, graphiq: graphiqAssets, skills: skillAssets, templates: templateAssets, workers: workerAssets, wasm: wasmAssets, nativeAddons: nativeAddonAssets });
 registerNativeTransformersBindings(transformersWebRuntime);
 process.env.SIGNET_VERSION = process.env.SIGNET_VERSION?.trim() || ${JSON.stringify(nativeVersion)};
 process.env.SIGNET_TEMPLATES_DIR ??= materializeEmbeddedAssetTree("templates") ?? "";
