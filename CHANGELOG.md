@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-28
-- Bug fixes: route predictive context DB scans through owner; restore scoped focal query fallback; owner-route W5 contention paths; owner-route structural feature reads; owner-route traversal candidate hydration.
+- Bug fixes: escape dreaming smoke template interpolation (build break); embed GraphIQ installer in native runtime + npm files; route predictive context DB scans through owner; restore scoped focal query fallback; owner-route W5 contention paths; owner-route structural feature reads; owner-route traversal candidate hydration.
 
 ### 2026-08-27
 - Bug fixes: correct owner-worker site tokens to actual call lines; report fallback scan completeness; refresh event-loop audit ledger; refresh async DB site attribution; harden sqlite-vec fallback contract; preserve semantic recall without sqlite-vec; refresh owner site token baseline; keep owner IPC protocol pure; update event loop ledger for owner backfill; refresh db accessor site tokens; route vector backfill through db owner; repair dreaming accessor site tokens; preserve reviewed evidence scope; close reviewed evidence loops; gate ACPX same-agent re-admission; reap ACPX workers before re-admission; handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
@@ -32,6 +32,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: refresh event-loop inventory report; align owner deadline semantics.
 
 ## Release Ledger
+
+## [0.214.24] - 2026-08-28
+
+Release summary: 2 bug fixes.
+Tag range: `v0.214.23..v0.214.24`.
+
+### Bug Fixes
+
+- **native**: escape dreaming smoke template interpolation (build break)
+- **native**: embed GraphIQ installer in native runtime + npm files
 
 ## [0.214.23] - 2026-08-28
 

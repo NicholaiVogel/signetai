@@ -1,6 +1,6 @@
 {
 	"name": "@signet/core",
-	"version": "0.214.23",
+	"version": "0.214.24",
 	"license": "Apache-2.0",
 	"description": "Core library for Signet - portable AI agent identity",
 	"type": "module",
