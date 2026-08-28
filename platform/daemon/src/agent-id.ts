@@ -3,7 +3,9 @@
  */
 
 import type { AgentRosterReadPolicy } from "@signet/core";
-import { getDbAccessor } from "./db-accessor";
+import { getDbAccessorPath } from "./db-accessor";
+import { getDbOwner } from "./db-owner-runtime";
+import { ownerReadOne, ownerRun } from "./db-owner-sql";
 
 export interface AgentScope {
 	readonly readPolicy: AgentRosterReadPolicy;
@@ -93,18 +95,25 @@ export async function getAgentScope(agentId: string): Promise<AgentScope> {
 		let read = agentScopeReads.get(id);
 		if (read === undefined) {
 			read = Promise.resolve()
-				.then(() =>
-					getDbAccessor().withReadDbAsync(
-						(db) => {
-							const row = db.prepare("SELECT read_policy, policy_group FROM agents WHERE id = ?").get(id);
-							if (!row || typeof row !== "object") return isolatedScope;
-							const readPolicy = parseReadPolicy("read_policy" in row ? row.read_policy : undefined);
-							const policyGroup = parseScopeValue("policy_group" in row ? row.policy_group : undefined);
-							return { readPolicy, policyGroup };
+				.then(async () => {
+					const owner = await getDbOwner(getDbAccessorPath());
+					const row = await ownerReadOne<{ readonly read_policy: unknown; readonly policy_group: unknown }>(
+						owner,
+						"SELECT read_policy, policy_group FROM agents WHERE id = ?",
+						[id],
+						{
+							operation: "agent-scope.read",
+							lane: "read",
+							deadlineMs: 5_000,
+							estimatedWorkUnits: 1,
 						},
-						{ siteToken: "agent-id.ts:97", operation: "agent-scope.read" },
-					),
-				)
+					);
+					if (!row) return isolatedScope;
+					return {
+						readPolicy: parseReadPolicy(row.read_policy),
+						policyGroup: parseScopeValue(row.policy_group),
+					};
+				})
 				.catch(() => isolatedScope)
 				.then((scope) => {
 					if (generation === agentScopeGeneration) {
@@ -133,19 +142,21 @@ export async function ensureAgentRegistered(
 	const id = normalizedAgentId(agentId);
 	const now = new Date().toISOString();
 	try {
-		const created = await getDbAccessor().withWriteTxAsync(
-			(db) => {
-				const existing = db.prepare("SELECT 1 FROM agents WHERE id = ?").get(id);
-				db.prepare(
-					`INSERT INTO agents (id, name, read_policy, policy_group, created_at, updated_at)
-					 VALUES (?, ?, ?, NULL, ?, ?)
-					 ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at`,
-				).run(id, id, readPolicy, now, now);
-				return existing == null;
+		const owner = await getDbOwner(getDbAccessorPath());
+		await ownerRun(
+			owner,
+			`INSERT INTO agents (id, name, read_policy, policy_group, created_at, updated_at)
+			 VALUES (?, ?, ?, NULL, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at`,
+			[id, id, readPolicy, now, now],
+			{
+				operation: "agent-scope.register",
+				lane: "write",
+				deadlineMs: 5_000,
+				estimatedWorkUnits: 1,
 			},
-			{ siteToken: "agent-id.ts:136", operation: "agent-scope.register" },
 		);
-		if (created) invalidateAgentScopeCache(id);
+		invalidateAgentScopeCache(id);
 	} catch (err) {
 		console.warn(
 			`[agent-id] Failed to register agent "${id}" (non-fatal):`,

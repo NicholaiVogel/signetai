@@ -3,7 +3,12 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
-import { MAX_TRAVERSAL_CANDIDATE_IDS, fetchTraversalCandidates, getAllScoredCandidates } from "./memory-candidates";
+import {
+	MAX_TRAVERSAL_CANDIDATE_IDS,
+	fetchTraversalCandidates,
+	getAllScoredCandidates,
+	getPredictedContextMemories,
+} from "./memory-candidates";
 
 function temporaryDbPath(): { readonly directory: string; readonly path: string } {
 	const directory = join(tmpdir(), `signet-memory-candidates-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -19,6 +24,28 @@ function insertMemory(id: string, agentId: string, importance: number, isDeleted
 				(id, content, type, importance, is_deleted, agent_id, visibility, created_at, updated_at, updated_by)
 			 VALUES (?, ?, 'fact', ?, ?, ?, 'global', ?, ?, 'test')`,
 		).run(id, `Memory ${id}`, importance, isDeleted, agentId, now, now);
+	});
+}
+
+function insertTranscript(sessionKey: string, project: string, agentId: string, content: string): void {
+	const now = new Date().toISOString();
+	getDbAccessor().withWriteTx((db) => {
+		db.prepare(
+			`INSERT INTO session_transcripts
+				(session_key, content, harness, project, agent_id, created_at, updated_at, completed_at)
+			 VALUES (?, ?, 'test', ?, ?, ?, ?, ?)`,
+		).run(sessionKey, content, project, agentId, now, now, now);
+	});
+}
+
+function insertProjectMemory(id: string, agentId: string, project: string, content: string): void {
+	const now = new Date().toISOString();
+	getDbAccessor().withWriteTx((db) => {
+		db.prepare(
+			`INSERT INTO memories
+				(id, content, type, importance, is_deleted, agent_id, visibility, project, created_at, updated_at, updated_by)
+			 VALUES (?, ?, 'fact', 0.9, 0, ?, 'global', ?, ?, ?, 'test')`,
+		).run(id, content, agentId, project, now, now);
 	});
 }
 
@@ -152,6 +179,41 @@ describe("fetchTraversalCandidates (#1250)", () => {
 		try {
 			const rows = await getAllScoredCandidates(dbPath, undefined, 30, "agent-a");
 			expect(rows.map((row) => row.id)).toEqual(["memory-owner"]);
+		} finally {
+			accessor.withReadDb = originalWithReadDb;
+			accessor.withReadDbAsync = originalWithReadDbAsync;
+		}
+	});
+	test("returns predicted context through the DB owner, not the parent sync DB seam", async () => {
+		insertTranscript(
+			"session-predicted-a",
+			"/repo",
+			"agent-a",
+			"The phoenix deployment uses a stable editor workflow.",
+		);
+		insertTranscript(
+			"session-predicted-b",
+			"/repo",
+			"agent-a",
+			"The phoenix deployment requires careful editor workflow.",
+		);
+		insertProjectMemory("memory-predicted", "agent-a", "/repo", "The phoenix deployment needs the editor workflow.");
+
+		const accessor = getDbAccessor() as unknown as {
+			withReadDb: (...args: never[]) => unknown;
+			withReadDbAsync: (...args: never[]) => Promise<unknown>;
+		};
+		const originalWithReadDb = accessor.withReadDb;
+		const originalWithReadDbAsync = accessor.withReadDbAsync;
+		accessor.withReadDb = () => {
+			throw new Error("predicted context crossed the parent sync DB seam");
+		};
+		accessor.withReadDbAsync = async () => {
+			throw new Error("predicted context crossed the parent async DB seam");
+		};
+		try {
+			const rows = await getPredictedContextMemories(dbPath, "/repo", 10, 600, new Set(), "agent-a");
+			expect(rows.map((row) => row.id)).toEqual(["memory-predicted"]);
 		} finally {
 			accessor.withReadDb = originalWithReadDb;
 			accessor.withReadDbAsync = originalWithReadDbAsync;

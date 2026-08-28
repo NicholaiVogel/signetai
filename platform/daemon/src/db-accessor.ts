@@ -3025,6 +3025,12 @@ export function hasDbAccessor(): boolean {
 	return accessor !== null;
 }
 
+/** Return the initialized database path for owner-routed helpers. */
+export function getDbAccessorPath(): string {
+	if (dbPath === null) throw new Error("DbAccessor not initialised — call initDbAccessor() first");
+	return dbPath;
+}
+
 /** Register the live bounded DB-owner health provider for diagnostics. */
 export function registerDbOwnerHealthProvider(provider: (() => DbOwnerHealth) | null): void {
 	dbOwnerHealthProvider = provider;

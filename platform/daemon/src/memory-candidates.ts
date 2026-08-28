@@ -6,7 +6,6 @@ import { getDbOwner } from "./db-owner-runtime";
 import { ownerReadAll, ownerReadOne } from "./db-owner-sql";
 import { logger } from "./logger";
 import { effectiveScore } from "./memory-classification";
-import { isMemoryContentContextEligible } from "./memory-content-safety";
 import { buildAgentScopeClause } from "./memory-search";
 
 export interface ScoredMemory {
@@ -316,7 +315,7 @@ export async function getAllScoredCandidates(
  * the regular project-filtered memories with context the user is
  * likely to need based on recent sessions.
  */
-export function getPredictedContextMemories(
+export async function getPredictedContextMemories(
 	memoryDbPath: string,
 	project: string | undefined,
 	limit: number,
@@ -325,39 +324,55 @@ export function getPredictedContextMemories(
 	agentId: string,
 	readPolicy: AgentRosterReadPolicy = "isolated",
 	policyGroup: string | null = null,
-): ScoredMemory[] {
+): Promise<ScoredMemory[]> {
 	if (!existsSync(memoryDbPath)) return [];
 	if (!project || project.trim().length === 0) return [];
 
 	try {
-		// Get recent completed transcripts for this project only. Global predictive
-		// FTS is too broad for session-start latency on large memory stores.
-		const transcriptRows: Array<{ session_key: string; transcript: string }> =
-			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			getDbAccessor().withReadDb((db: import("./db-accessor").ReadDb) => {
-				return (
-					db
-						.prepare(
-							`SELECT session_key, content AS transcript FROM session_transcripts
-					 WHERE project = ? AND completed_at IS NOT NULL AND agent_id = ?
-					 ORDER BY COALESCE(updated_at, created_at) DESC LIMIT 5`,
-						)
-						.all(project, agentId) as Array<{ session_key: string; transcript: string }>
-				).filter((row) =>
-					isMemoryContentContextEligible(db, {
-						agentId,
-						sourceKind: "transcript",
-						sourceId: row.session_key,
-						content: row.transcript,
-					}),
-				);
-			}, "memory-candidates.ts:337");
+		const owner = await getDbOwner(memoryDbPath);
+		const readOptions = {
+			operation: "session-start.predicted-context",
+			lane: "read" as const,
+			deadlineMs: 5_000,
+			estimatedWorkUnits: Math.max(1, Math.min(500, limit * 10)),
+		};
+		const safetyTable = await ownerReadOne<{ readonly name: string }>(
+			owner,
+			"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+			["memory_content_safety"],
+			{ ...readOptions, operation: "session-start.predicted-context.safety-table" },
+		);
+		const hasSafetyTable = safetyTable !== null;
+		const transcriptRows = await ownerReadAll<{
+			readonly session_key: string;
+			readonly transcript: string;
+			readonly safety_status: string | null;
+			readonly safety_context_eligible: number | null;
+		}>(
+			owner,
+			`SELECT st.session_key, st.content AS transcript,
+			        ${hasSafetyTable ? "safety.status" : "NULL"} AS safety_status,
+			        ${hasSafetyTable ? "safety.context_eligible" : "NULL"} AS safety_context_eligible
+			 FROM session_transcripts st
+			 ${hasSafetyTable ? "LEFT JOIN memory_content_safety safety ON safety.agent_id = ? AND safety.source_kind = 'transcript' AND safety.source_id = st.session_key" : ""}
+			 WHERE st.project = ? AND st.completed_at IS NOT NULL AND st.agent_id = ?
+			 ORDER BY COALESCE(st.updated_at, st.created_at) DESC LIMIT 5`,
+			hasSafetyTable ? [agentId, project, agentId] : [project, agentId],
+			{ ...readOptions, operation: "session-start.predicted-context.transcripts" },
+		);
+		const eligibleTranscriptRows = transcriptRows.filter(
+			(row) =>
+				scanMemoryContent(row.transcript).contextEligible &&
+				(!hasSafetyTable ||
+					row.safety_status === null ||
+					(row.safety_status === "clean" && row.safety_context_eligible === 1)),
+		);
 
-		if (transcriptRows.length === 0) return [];
+		if (eligibleTranscriptRows.length === 0) return [];
 
 		// Extract recurring terms from recent sessions.
 		const termFreq = new Map<string, number>();
-		for (const row of transcriptRows) {
+		for (const row of eligibleTranscriptRows) {
 			const text = row.transcript.slice(0, 3000);
 			const words = text
 				.toLowerCase()
@@ -384,60 +399,50 @@ export function getPredictedContextMemories(
 		// Use recurring terms as FTS query.
 		const ftsQuery = recurring.join(" OR ");
 		const scope = buildAgentScopeClause(agentId, readPolicy, policyGroup);
-		const rows: Array<{
-			id: string;
-			content: string;
-			type: string;
-			importance: number;
-			tags: string | null;
-			pinned: number;
-			project: string | null;
-			created_at: string;
-			access_count: number;
-		}> =
-			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			getDbAccessor().withReadDb(
-				(db: import("./db-accessor").ReadDb) =>
-					(
-						db
-							.prepare(
-								`SELECT m.id, m.content, m.type, m.importance, m.tags,
-						        m.pinned, m.project, m.created_at,
-						        COALESCE(m.access_count, 0) AS access_count
-						 FROM memories_fts
-						 JOIN memories m ON memories_fts.rowid = m.rowid
-						 WHERE memories_fts MATCH ?
-						   AND m.is_deleted = 0
-						   AND m.project = ?
-						   ${scope.sql}
-						 ORDER BY bm25(memories_fts)
-						 LIMIT ?`,
-							)
-							.all(ftsQuery, project, ...scope.args, limit * 2) as Array<{
-							id: string;
-							content: string;
-							type: string;
-							importance: number;
-							tags: string | null;
-							pinned: number;
-							project: string | null;
-							created_at: string;
-							access_count: number;
-						}>
-					).filter((row) =>
-						isMemoryContentContextEligible(db, {
-							agentId,
-							sourceKind: "memory",
-							sourceId: row.id,
-							content: row.content,
-						}),
-					),
-				"memory-candidates.ts:399",
-			);
+		const rows = await ownerReadAll<{
+			readonly id: string;
+			readonly content: string;
+			readonly type: string;
+			readonly importance: number;
+			readonly tags: string | null;
+			readonly pinned: number;
+			readonly project: string | null;
+			readonly created_at: string;
+			readonly access_count: number;
+			readonly safety_status: string | null;
+			readonly safety_context_eligible: number | null;
+		}>(
+			owner,
+			`SELECT m.id, m.content, m.type, m.importance, m.tags,
+			        m.pinned, m.project, m.created_at,
+			        COALESCE(m.access_count, 0) AS access_count,
+			        ${hasSafetyTable ? "safety.status" : "NULL"} AS safety_status,
+			        ${hasSafetyTable ? "safety.context_eligible" : "NULL"} AS safety_context_eligible
+			 FROM memories_fts
+			 JOIN memories m ON memories_fts.rowid = m.rowid
+			 ${hasSafetyTable ? "LEFT JOIN memory_content_safety safety ON safety.agent_id = ? AND safety.source_kind = 'memory' AND safety.source_id = m.id" : ""}
+			 WHERE memories_fts MATCH ?
+			   AND m.is_deleted = 0
+			   AND m.project = ?
+			   ${scope.sql}
+			 ORDER BY bm25(memories_fts)
+			 LIMIT ?`,
+			hasSafetyTable
+				? [agentId, ftsQuery, project, ...scope.args, limit * 2]
+				: [ftsQuery, project, ...scope.args, limit * 2],
+			{ ...readOptions, operation: "session-start.predicted-context.fts" },
+		);
+		const eligibleRows = rows.filter(
+			(row) =>
+				scanMemoryContent(row.content).contextEligible &&
+				(!hasSafetyTable ||
+					row.safety_status === null ||
+					(row.safety_status === "clean" && row.safety_context_eligible === 1)),
+		);
 
 		const selected: ScoredMemory[] = [];
 		let used = 0;
-		for (const r of rows) {
+		for (const r of eligibleRows) {
 			if (excludeIds.has(r.id)) continue;
 			if (selected.length >= limit) break;
 			if (used + r.content.length > charBudget) break;
@@ -479,7 +484,7 @@ export function getRecentMemories(memoryDbPath: string, limit: number, recencyBi
 			return (db.prepare(query).all(limit) as unknown as Array<SimpleMemory>).filter(
 				(row) => scanMemoryContent(row.content).contextEligible,
 			);
-		}, "memory-candidates.ts:465");
+		}, "memory-candidates.ts:470");
 
 		return rows.map((r) => ({
 			id: r.id,
@@ -514,7 +519,7 @@ export function getMemoriesSince(memoryDbPath: string, sinceMs: number, limit: n
 			`)
 				.all(sinceIso, limit) as unknown as Array<SimpleMemory>;
 			return rows.filter((row) => scanMemoryContent(row.content).contextEligible);
-		}, "memory-candidates.ts:506");
+		}, "memory-candidates.ts:511");
 
 		return rows.map((r) => ({
 			id: r.id,
