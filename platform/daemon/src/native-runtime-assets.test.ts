@@ -136,6 +136,24 @@ describe("native-runtime-assets", () => {
 		expect(skillsDir ? readFileSync(`${skillsDir}/signet/SKILL.md`, "utf8") : "").toContain("Signet");
 	});
 
+	test("materializes the embedded GraphIQ installer under its packaged scripts path", () => {
+		registerNativeAssets({
+			graphiq: [
+				{
+					path: "scripts/install-graphiq.sh",
+					contentBase64: Buffer.from("#!/bin/sh\necho graphiq\n").toString("base64"),
+					mode: 0o755,
+				},
+			],
+		});
+
+		const graphiqDir = materializeEmbeddedAssetTree("graphiq");
+		expect(graphiqDir).toBeTruthy();
+		expect(graphiqDir ? readFileSync(`${graphiqDir}/scripts/install-graphiq.sh`, "utf8") : "").toBe(
+			"#!/bin/sh\necho graphiq\n",
+		);
+	});
+
 	test("materializes connector assets under a deterministic hash with a content marker", () => {
 		registerNativeAssets({
 			connectors: [

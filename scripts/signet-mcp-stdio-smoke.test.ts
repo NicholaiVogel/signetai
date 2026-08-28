@@ -15,7 +15,8 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
@@ -36,10 +37,15 @@ interface StdioHandshake {
 	readonly stderr: string;
 }
 
-function spawnStdioServer(input: string, timeoutMs = 10_000): Promise<StdioHandshake> {
+function spawnStdioServer(
+	input: string,
+	timeoutMs = 30_000,
+	bundlePath = stdioBundlePath,
+	env = process.env,
+): Promise<StdioHandshake> {
 	return new Promise((resolve, reject) => {
-		const child = spawn("node", [stdioBundlePath], {
-			env: process.env,
+		const child = spawn("node", [bundlePath], {
+			env,
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		runningChildren.push(child);
@@ -116,42 +122,92 @@ describe("signet-mcp stdio server (regression guard for issue #826)", () => {
 		expect(head.startsWith("#!/usr/bin/env node")).toBe(true);
 	});
 
-	test("responds to a JSON-RPC initialize request with a valid handshake", async () => {
-		if (!existsSync(stdioBundlePath)) {
-			// Skipped on clean checkouts — the bundle is a build artifact.
-			return;
-		}
+	test(
+		"responds to a JSON-RPC initialize request with a valid handshake",
+		async () => {
+			if (!existsSync(stdioBundlePath)) {
+				// Skipped on clean checkouts — the bundle is a build artifact.
+				return;
+			}
 
-		const request = JSON.stringify({
-			jsonrpc: "2.0",
-			id: 1,
-			method: "initialize",
-			params: {
-				protocolVersion: "2024-11-05",
-				capabilities: {},
-				clientInfo: { name: "signet-mcp-stdio-smoke", version: "0" },
-			},
-		});
+			const request = JSON.stringify({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "initialize",
+				params: {
+					protocolVersion: "2024-11-05",
+					capabilities: {},
+					clientInfo: { name: "signet-mcp-stdio-smoke", version: "0" },
+				},
+			});
 
-		const result = await spawnStdioServer(request);
+			const result = await spawnStdioServer(request);
 
-		// The server must shut down cleanly when its stdin closes.
-		expect(result.status).toBe(0);
-		// The native management CLI prints "Usage: signet mcp ..." to stderr.
-		// A real stdio server should not produce any non-protocol output.
-		expect(result.stderr.trim()).toBe("");
+			// The server must shut down cleanly when its stdin closes.
+			expect(result.status).toBe(0);
+			// The native management CLI prints "Usage: signet mcp ..." to stderr.
+			// A real stdio server should not produce any non-protocol output.
+			expect(result.stderr.trim()).toBe("");
 
-		// The first non-empty stdout line must be a JSON-RPC response to our
-		// initialize request. This is the exact shape a harness expects to
-		// see during the MCP handshake.
-		const lines = result.stdout.split("\n").filter((line) => line.length > 0);
-		expect(lines.length).toBeGreaterThan(0);
-		const parsed = JSON.parse(lines[0]) as JsonRpcResponse;
-		expect(parsed.jsonrpc).toBe("2.0");
-		expect(parsed.id).toBe(1);
-		expect(parsed.error).toBeUndefined();
-		expect(parsed.result).toBeDefined();
-		expect(typeof parsed.result?.protocolVersion).toBe("string");
-		expect(parsed.result?.capabilities).toBeDefined();
-	});
+			// The first non-empty stdout line must be a JSON-RPC response to our
+			// initialize request. This is the exact shape a harness expects to
+			// see during the MCP handshake.
+			const lines = result.stdout.split("\n").filter((line) => line.length > 0);
+			expect(lines.length).toBeGreaterThan(0);
+			const parsed = JSON.parse(lines[0]) as JsonRpcResponse;
+			expect(parsed.jsonrpc).toBe("2.0");
+			expect(parsed.id).toBe(1);
+			expect(parsed.error).toBeUndefined();
+			expect(parsed.result).toBeDefined();
+			expect(typeof parsed.result?.protocolVersion).toBe("string");
+			expect(parsed.result?.capabilities).toBeDefined();
+		},
+		{ timeout: 30_000 },
+	);
+
+	test(
+		"starts under Node without resolving better-sqlite3 from the package",
+		async () => {
+			if (!existsSync(stdioBundlePath)) {
+				// Skipped on clean checkouts — the bundle is a build artifact.
+				return;
+			}
+
+			// Run a copy outside the repository so Node cannot find workspace
+			// dependencies while resolving the bundle's optional DB code. The MCP
+			// transport must not open SQLite itself; that work belongs to the daemon.
+			const isolatedDir = mkdtempSync(join(tmpdir(), "signet-mcp-node-smoke-"));
+			const isolatedBundlePath = join(isolatedDir, "mcp-stdio.js");
+			copyFileSync(stdioBundlePath, isolatedBundlePath);
+			const env = { ...process.env };
+			delete env.NODE_PATH;
+
+			try {
+				const request = JSON.stringify({
+					jsonrpc: "2.0",
+					id: 1,
+					method: "initialize",
+					params: {
+						protocolVersion: "2024-11-05",
+						capabilities: {},
+						clientInfo: { name: "signet-mcp-node-dependency-smoke", version: "0" },
+					},
+				});
+				const result = await spawnStdioServer(request, 30_000, isolatedBundlePath, env);
+
+				expect(result.status).toBe(0);
+				expect(result.stderr.trim()).toBe("");
+				const lines = result.stdout.split("\n").filter((line) => line.length > 0);
+				expect(lines.length).toBeGreaterThan(0);
+				const parsed = JSON.parse(lines[0]) as JsonRpcResponse;
+				expect(parsed.jsonrpc).toBe("2.0");
+				expect(parsed.id).toBe(1);
+				expect(parsed.error).toBeUndefined();
+				expect(parsed.result).toBeDefined();
+			} finally {
+				rmSync(isolatedDir, { recursive: true, force: true });
+			}
+		},
+		{ timeout: 30_000 },
+	);
 });

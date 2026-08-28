@@ -1585,6 +1585,11 @@ describe("resolveCustomSqlitePath", () => {
 
 describe("sqlite runtime ordering", () => {
 	test("keeps bun sqlite construction centralized in db-accessor", async () => {
+		const accessorSource = readFileSync(join(import.meta.dir, "db-accessor.ts"), "utf8");
+		const accessorConstructors = accessorSource.match(/new \(getDatabaseConstructor\(\)\)\(/g) ?? [];
+		expect(accessorConstructors).toHaveLength(4);
+		expect(accessorSource).not.toContain("new Database(");
+
 		const hits: string[] = [];
 
 		for await (const file of new Bun.Glob("**/*.ts").scan({ cwd: import.meta.dir })) {
@@ -1600,7 +1605,6 @@ describe("sqlite runtime ordering", () => {
 		expect([...new Set(hits)].sort()).toEqual([
 			"database-integrity-worker.ts",
 			"database-integrity.ts",
-			"db-accessor.ts",
 			"db-owner-worker.ts",
 		]);
 	});

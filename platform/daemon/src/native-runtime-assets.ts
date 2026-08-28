@@ -43,6 +43,7 @@ export interface EmbeddedFileAsset {
 
 export interface NativeRuntimeAssets {
 	readonly connectors?: readonly EmbeddedFileAsset[];
+	readonly graphiq?: readonly EmbeddedFileAsset[];
 	readonly dashboard?: readonly EmbeddedDashboardAsset[];
 	readonly skills?: readonly EmbeddedFileAsset[];
 	readonly templates?: readonly EmbeddedFileAsset[];
@@ -58,6 +59,10 @@ declare global {
 
 export function registerNativeAssets(assets: NativeRuntimeAssets): void {
 	globalThis.__SIGNET_NATIVE_RUNTIME_ASSETS__ = assets;
+}
+
+export function hasNativeRuntimeAssets(): boolean {
+	return globalThis.__SIGNET_NATIVE_RUNTIME_ASSETS__ !== undefined;
 }
 
 export function registerNativeTransformersBindings(bindings: unknown): void {
@@ -189,7 +194,7 @@ export function materializeEmbeddedWasmAssets(): string | null {
 	return dir;
 }
 
-export function materializeEmbeddedAssetTree(kind: "connectors" | "skills" | "templates"): string | null {
+export function materializeEmbeddedAssetTree(kind: "connectors" | "graphiq" | "skills" | "templates"): string | null {
 	const assets = nativeRuntimeAssets()[kind] ?? [];
 	if (assets.length === 0) return null;
 

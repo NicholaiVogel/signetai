@@ -14,6 +14,7 @@ import {
 } from "@signet/core";
 import chalk from "chalk";
 import ora from "ora";
+import { materializeEmbeddedAssetTree } from "../../../../platform/daemon/src/native-runtime-assets.js";
 import { readSetupCorePluginEnabled, writeSetupCorePluginRegistry } from "./setup-plugins.js";
 
 export interface GraphiqDeps {
@@ -37,7 +38,9 @@ export interface GraphiqUninstallOptions {
 type GraphiqInstallSource = "script" | "homebrew" | "source" | "existing";
 
 export function resolveInstallScriptPath(thisDir = dirname(fileURLToPath(import.meta.url))): string | null {
+	const embeddedRoot = materializeEmbeddedAssetTree("graphiq");
 	const candidates = [
+		...(embeddedRoot ? [resolve(embeddedRoot, "scripts/install-graphiq.sh")] : []),
 		resolve(thisDir, "../scripts/install-graphiq.sh"),
 		resolve(thisDir, "../../../../scripts/install-graphiq.sh"),
 	];
