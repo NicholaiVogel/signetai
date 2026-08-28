@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type PipelineReflectionsConfig, resolveDefaultBasePath, scanMemoryContent } from "@signet/core";
 import { getDbAccessor } from "../db-accessor";
+import { getDbOwner } from "../db-owner-runtime";
+import { ownerReadAll } from "../db-owner-sql";
 import { getInferenceProvider } from "../llm";
 import { logger } from "../logger";
 import { isMemoryContentContextEligible } from "../memory-content-safety";
@@ -393,7 +395,7 @@ export function collectReflectionContext(
 				tags: r.tags ?? "",
 				createdAt: r.created_at,
 			}));
-	}, "pipeline/reflection-worker.ts:366");
+	}, "pipeline/reflection-worker.ts:368");
 
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
 	const existingReflections = dbAccessor.withReadDb((db: import("../db-accessor").ReadDb) => {
@@ -411,7 +413,7 @@ export function collectReflectionContext(
 					(row.question === null || scanMemoryContent(row.question).contextEligible),
 			)
 			.map((r) => ({ id: r.id, question: r.question, summary: r.summary, createdAt: r.created_at }));
-	}, "pipeline/reflection-worker.ts:399");
+	}, "pipeline/reflection-worker.ts:401");
 
 	return { memories, summaries: [], transcripts: [], graphFacts: [], existingReflections };
 }
@@ -483,7 +485,7 @@ export async function generateDailyBriefInsights(
 				);
 			if (result.changes > 0) ids.push(id);
 		}
-	}, "pipeline/reflection-worker.ts:461");
+	}, "pipeline/reflection-worker.ts:463");
 
 	return ids;
 }
@@ -520,25 +522,27 @@ export function startReflectionWorker(
 		}
 	}
 
-	function listActiveAgentIds(): string[] {
-		const rows: Array<{ agent_id: string | null }> = deps
-			.getDbAccessor()
-			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			.withReadDb((db: import("../db-accessor").ReadDb) => {
-				return db
-					.prepare(
-						`SELECT DISTINCT agent_id FROM memories
-					 WHERE is_deleted = 0`,
-					)
-					.all() as { agent_id: string | null }[];
-			}, "pipeline/reflection-worker.ts:527");
+	async function listActiveAgentIds(): Promise<string[]> {
+		const rows = await ownerReadAll<{ readonly agent_id: string | null }>(
+			await getDbOwner(),
+			`SELECT DISTINCT agent_id FROM memories
+			 WHERE is_deleted = 0`,
+			[],
+			{
+				operation: "pipeline.reflection-worker.list-active-agent-ids",
+				lane: "read",
+				workloadClass: "foreground",
+				deadlineMs: 5_000,
+				estimatedWorkUnits: 100,
+			},
+		);
 		const agentIds = rows.map((row) => row.agent_id).filter((agentId): agentId is string => !!agentId);
 		return agentIds.length > 0 ? agentIds : ["default"];
 	}
 
 	async function runDueAgents(): Promise<void> {
 		const date = todayDateInTimeZone(config.timezone);
-		for (const agentId of listActiveAgentIds()) {
+		for (const agentId of await listActiveAgentIds()) {
 			const lastDate = readLastReflectionTime(agentId);
 			if (lastDate !== date && nextReflectionDelayMs(config.schedule, config.timezone, lastDate) === POLL_INTERVAL_MS) {
 				await runReflection(agentId);
@@ -546,12 +550,25 @@ export function startReflectionWorker(
 		}
 	}
 
-	function nextWorkerDelayMs(): number {
+	async function nextWorkerDelayMs(): Promise<number> {
+		const agentIds = await listActiveAgentIds();
 		return Math.min(
-			...listActiveAgentIds().map((agentId) =>
+			...agentIds.map((agentId) =>
 				nextReflectionDelayMs(config.schedule, config.timezone, readLastReflectionTime(agentId)),
 			),
 		);
+	}
+
+	async function scheduleNextTick(): Promise<void> {
+		try {
+			const delayMs = await nextWorkerDelayMs();
+			if (!stopped) timer = setTimeout(() => void tick(), delayMs);
+		} catch (e) {
+			deps.logger.warn("reflections", "Scheduling failed; using polling interval", {
+				error: e instanceof Error ? e.message : String(e),
+			});
+			if (!stopped) timer = setTimeout(() => void tick(), POLL_INTERVAL_MS);
+		}
 	}
 
 	async function tick(): Promise<void> {
@@ -561,16 +578,14 @@ export function startReflectionWorker(
 			await runDueAgents();
 		} finally {
 			generating = false;
-			if (!stopped) {
-				timer = setTimeout(tick, nextWorkerDelayMs());
-			}
+			if (!stopped) void scheduleNextTick();
 		}
 	}
 
 	function start(): void {
 		if (running) return;
 		running = true;
-		timer = setTimeout(tick, nextWorkerDelayMs());
+		void scheduleNextTick();
 	}
 
 	function stop(): void {

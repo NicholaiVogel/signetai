@@ -8,7 +8,14 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { ReadDb } from "../db-accessor";
-import { invalidateTraversalCache, traverseKnowledgeGraph } from "./graph-traversal";
+import type { DbOwnerClient } from "../db-owner-client";
+import type { DbOwnerRequest } from "../db-owner-protocol";
+import {
+	invalidateTraversalCache,
+	resolveFocalEntitiesViaOwner,
+	traverseKnowledgeGraph,
+	traverseKnowledgeGraphViaOwner,
+} from "./graph-traversal";
 
 const CONFIG = {
 	maxAspectsPerEntity: 10,
@@ -54,6 +61,25 @@ function seedGraph(db: Database): void {
 		('a3', 'm-other', 'other', 'active', 'fact', 'other fact', 0.95)`);
 	db.exec(`INSERT INTO entity_dependencies VALUES ('d1', 'e1', 'e2', 'default', 0.9, 0.8)`);
 	db.exec(`INSERT INTO memory_entity_mentions VALUES ('m1', 'e1', 0.9)`);
+}
+
+function createTestOwner(db: Database, operations: string[]): DbOwnerClient {
+	return {
+		submit<Result>(request: DbOwnerRequest, options: { readonly operation: string }) {
+			if (request.kind !== "query") throw new Error("test owner only supports query requests");
+			operations.push(options.operation);
+			const params = request.statement.params ?? [];
+			if (params.some((param) => typeof param === "object")) throw new Error("unexpected test owner byte parameter");
+			const statement = db.prepare(request.statement.sql);
+			const value =
+				request.statement.result === "get"
+					? statement.get(...params)
+					: request.statement.result === "all"
+						? statement.all(...params)
+						: statement.run(...params);
+			return { result: Promise.resolve(value as Result) } as never;
+		},
+	} as unknown as DbOwnerClient;
 }
 
 describe("traverseKnowledgeGraph event-loop yields (#1118)", () => {
@@ -163,5 +189,25 @@ describe("traverseKnowledgeGraph event-loop yields (#1118)", () => {
 		expect(result.memoryIds.size).toBe(0);
 		expect(result.constraints).toEqual([]);
 		expect(activeReads).toBe(0);
+	});
+
+	test("routes focal resolution and traversal through the DB owner adapter", async () => {
+		const operations: string[] = [];
+		const owner = createTestOwner(db, operations);
+		const focal = await resolveFocalEntitiesViaOwner(owner, "default", {
+			checkpointEntityIds: ["e1"],
+			includePinned: false,
+		});
+		const result = await traverseKnowledgeGraphViaOwner(focal.entityIds, owner, "default", CONFIG);
+
+		expect(focal).toEqual({
+			entityIds: ["e1"],
+			entityNames: ["Alpha"],
+			pinnedEntityIds: [],
+			source: "checkpoint",
+		});
+		expect(result.memoryIds.has("m1")).toBe(true);
+		expect(result.memoryIds.has("m3")).toBe(true);
+		expect(operations.every((operation) => operation.startsWith("session-start.graph-"))).toBe(true);
 	});
 });
