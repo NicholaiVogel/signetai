@@ -142,50 +142,77 @@ export async function fetchTraversalCandidates(
 	}
 
 	try {
+		const owner = await getDbOwner(memoryDbPath);
+		const safetyTable = await ownerReadOne<{ readonly name: string }>(
+			owner,
+			"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+			["memory_content_safety"],
+			{
+				operation: "session-start.traversal-candidate-safety-table",
+				lane: "read",
+				deadlineMs: 5_000,
+				estimatedWorkUnits: 1,
+			},
+		);
+		const hasSafetyTable = safetyTable !== null;
+		const safetyJoin = hasSafetyTable
+			? " LEFT JOIN memory_content_safety safety ON safety.agent_id = ? AND safety.source_kind = 'memory' AND safety.source_id = m.id"
+			: "";
+		const safetySelect = hasSafetyTable
+			? ", safety.status AS safety_status, safety.context_eligible AS safety_context_eligible"
+			: ", NULL AS safety_status, NULL AS safety_context_eligible";
 		const rows: ScoredMemory[] = [];
 		const yieldBetweenBatches = yieldEvery(1);
 
 		for (let offset = 0; offset < boundedMemoryIds.length; offset += TRAVERSAL_CANDIDATE_BATCH_SIZE) {
 			const batch = boundedMemoryIds.slice(offset, offset + TRAVERSAL_CANDIDATE_BATCH_SIZE);
 			const placeholders = batch.map(() => "?").join(", ");
-			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-			const batchRows: ScoredMemory[] = getDbAccessor().withReadDb((db: import("./db-accessor").ReadDb) => {
-				const queried = db
-					.prepare(
-						`SELECT
-						 m.id,
-						 m.content,
-						 m.type,
+			const batchRows = await ownerReadAll<
+				ScoredMemory & {
+					readonly safety_status: string | null;
+					readonly safety_context_eligible: number | null;
+				}
+			>(
+				owner,
+				`SELECT
+					 m.id,
+					 m.content,
+					 m.type,
+					 m.importance,
+					 m.tags,
+					 m.pinned,
+					 m.project,
+					 m.created_at,
+					 COALESCE(m.access_count, 0) AS access_count,
+					 COALESCE(
+						 (SELECT MAX(ea.importance)
+						  FROM entity_attributes ea
+						  WHERE ea.memory_id = m.id
+						    AND ea.agent_id = ?
+						    AND ea.status = 'active'),
 						 m.importance,
-						 m.tags,
-						 m.pinned,
-						 m.project,
-						 m.created_at,
-						 COALESCE(m.access_count, 0) AS access_count,
-						 COALESCE(
-							(SELECT MAX(ea.importance)
-							 FROM entity_attributes ea
-							 WHERE ea.memory_id = m.id
-							   AND ea.agent_id = ?
-							   AND ea.status = 'active'),
-							 m.importance,
-							 0.5
-						 ) AS effScore
-					 FROM memories m
-					 WHERE m.id IN (${placeholders})
-					   AND m.is_deleted = 0`,
-					)
-					.all(agentId, ...batch) as unknown as ScoredMemory[];
-				return queried.filter((row) =>
-					isMemoryContentContextEligible(db, {
-						agentId,
-						sourceKind: "memory",
-						sourceId: row.id,
-						content: row.content,
-					}),
-				);
-			}, "memory-candidates.ts:152");
-			rows.push(...batchRows);
+						 0.5
+					 ) AS effScore${safetySelect}
+				 FROM memories m${safetyJoin}
+				 WHERE m.id IN (${placeholders})
+				   AND m.is_deleted = 0`,
+				hasSafetyTable ? [agentId, agentId, ...batch] : [agentId, ...batch],
+				{
+					operation: "session-start.traversal-candidate-hydration",
+					lane: "read",
+					deadlineMs: 5_000,
+					estimatedWorkUnits: Math.max(1, Math.min(150, batch.length * 3)),
+				},
+			);
+			rows.push(
+				...batchRows.filter(
+					(row) =>
+						scanMemoryContent(row.content).contextEligible &&
+						(!hasSafetyTable ||
+							row.safety_status === null ||
+							(row.safety_status === "clean" && row.safety_context_eligible === 1)),
+				),
+			);
 			await yieldBetweenBatches();
 		}
 

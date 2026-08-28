@@ -112,6 +112,29 @@ describe("fetchTraversalCandidates (#1250)", () => {
 		expect(loopBreaths).toBeGreaterThan(0);
 	});
 
+	test("routes traversal hydration through the DB owner, not the parent DB seams", async () => {
+		insertMemory("memory-traversal-owner", "agent-a", 0.9);
+		const accessor = getDbAccessor() as unknown as {
+			withReadDb: (...args: never[]) => unknown;
+			withReadDbAsync: (...args: never[]) => Promise<unknown>;
+		};
+		const originalWithReadDb = accessor.withReadDb;
+		const originalWithReadDbAsync = accessor.withReadDbAsync;
+		accessor.withReadDb = () => {
+			throw new Error("traversal hydration crossed the parent sync DB seam");
+		};
+		accessor.withReadDbAsync = async () => {
+			throw new Error("traversal hydration crossed the parent async DB seam");
+		};
+		try {
+			const rows = await fetchTraversalCandidates(dbPath, ["memory-traversal-owner"], "agent-a");
+			expect(rows.map((row) => row.id)).toEqual(["memory-traversal-owner"]);
+		} finally {
+			accessor.withReadDb = originalWithReadDb;
+			accessor.withReadDbAsync = originalWithReadDbAsync;
+		}
+	});
+
 	test("routes the candidate pool through the DB owner, not the parent DB seams", async () => {
 		insertMemory("memory-owner", "agent-a", 0.9);
 		const accessor = getDbAccessor() as unknown as {
