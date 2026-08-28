@@ -1964,63 +1964,56 @@
     },
     {
       "path": "memory-candidates.ts",
-      "line": 152,
-      "api": "withReadDb",
-      "source": "const batchRows: ScoredMemory[] = getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
-      "category": "hot-path"
-    },
-    {
-      "path": "memory-candidates.ts",
-      "line": 214,
+      "line": 241,
       "api": "existsSync",
       "source": "if (!existsSync(memoryDbPath)) return [];",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 302,
+      "line": 329,
       "api": "existsSync",
       "source": "if (!existsSync(memoryDbPath)) return [];",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 310,
+      "line": 337,
       "api": "withReadDb",
       "source": "getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 372,
+      "line": 399,
       "api": "withReadDb",
       "source": "getDbAccessor().withReadDb(",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 434,
+      "line": 461,
       "api": "existsSync",
       "source": "if (!existsSync(memoryDbPath)) return [];",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 438,
+      "line": 465,
       "api": "withReadDb",
       "source": "const rows: SimpleMemory[] = getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 474,
+      "line": 501,
       "api": "existsSync",
       "source": "if (!existsSync(memoryDbPath)) return [];",
       "category": "hot-path"
     },
     {
       "path": "memory-candidates.ts",
-      "line": 479,
+      "line": 506,
       "api": "withReadDb",
       "source": "const rows: SimpleMemory[] = getDbAccessor().withReadDb((db: import(\"./db-accessor\").ReadDb) => {",
       "category": "hot-path"
