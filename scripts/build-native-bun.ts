@@ -389,7 +389,7 @@ if (process.env.SIGNET_INSPECTOR_PROXY_PUBLIC || process.env.SIGNET_INSPECTOR_PR
 		daemonUrl: "http://127.0.0.1:1",
 	});
 	try {
-		process.stdout.write(\`${readFileSync(config.path, "utf8")}\\n\`);
+		process.stdout.write(readFileSync(config.path, "utf8") + "\\n");
 	} finally {
 		config.dispose();
 	}
