@@ -550,7 +550,7 @@ export async function getAllScoredCandidates(
 	return memoryCandidates.getAllScoredCandidates(getMemoryDbPath(), project, limit, agentId, readPolicy, policyGroup);
 }
 
-function getPredictedContextMemories(
+async function getPredictedContextMemories(
 	project: string | undefined,
 	limit: number,
 	charBudget: number,
@@ -558,7 +558,7 @@ function getPredictedContextMemories(
 	agentId: string,
 	readPolicy: AgentRosterReadPolicy = "isolated",
 	policyGroup: string | null = null,
-): ScoredMemory[] {
+): Promise<ScoredMemory[]> {
 	return memoryCandidates.getPredictedContextMemories(
 		getMemoryDbPath(),
 		project,
@@ -1024,7 +1024,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	// would starve it to zero whenever recall fills to recallLimit (default 50),
 	// silently dropping the predicted-context feature entirely.
 	const existingIds = new Set(memories.map((m) => m.id));
-	const predictedMemories = getPredictedContextMemories(
+	const predictedMemories = await getPredictedContextMemories(
 		req.project,
 		10,
 		600,
