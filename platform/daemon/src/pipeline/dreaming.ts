@@ -113,7 +113,14 @@ export async function enqueueDreamingHygieneAttention(
 	agentId: string,
 	limit = 50,
 	caps?: GraphHygieneCaps,
+	ownerMaintenance?: DbOwnerMaintenance,
 ): Promise<number> {
+	if (ownerMaintenance) {
+		return await ownerMaintenance.dreamingHygieneAttention(
+			{ agentId, limit, caps },
+			{ deadlineMs: 60_000, estimatedWorkUnits: 100 },
+		);
+	}
 	return await writeTx(accessor, (db) => {
 		const candidates = getDreamingHygieneCandidatesInDb(db, { agentId, limit, caps });
 		for (const candidate of candidates) {
@@ -141,9 +148,16 @@ export async function enqueueDreamingSurprisalAttention(
 	accessor: DbAccessor,
 	agentId: string,
 	cfg: DreamingConfig,
+	ownerMaintenance?: DbOwnerMaintenance,
 ): Promise<DreamingSurprisalSelection | null> {
 	const surprisal = cfg.surprisal;
 	if (!surprisal?.enabled) return null;
+	if (ownerMaintenance) {
+		return await ownerMaintenance.dreamingSurprisalAttention(
+			{ agentId, config: surprisal },
+			{ deadlineMs: 60_000, estimatedWorkUnits: 500 },
+		);
+	}
 	// Do not pass the Dreaming cursor as a write frontier. A surprisal hint is a
 	// bounded exploration sample and must never mark evidence as processed.
 	const selection = await readDb(accessor, (db) => selectDreamingSurprisalInDb(db, agentId, surprisal, null));

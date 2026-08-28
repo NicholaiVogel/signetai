@@ -236,6 +236,8 @@ export type DbOwnerRequest =
 	| { readonly kind: "source_artifact_purge"; readonly input: DbOwnerSourceArtifactPurge }
 	| { readonly kind: "source_artifact_upsert"; readonly input: DbOwnerSourceArtifactUpsert }
 	| { readonly kind: "source_artifact_upsert_batch"; readonly input: readonly DbOwnerSourceArtifactUpsert[] }
+	| { readonly kind: "dreaming_hygiene_attention"; readonly input: DbOwnerDreamingHygieneAttention }
+	| { readonly kind: "dreaming_surprisal_attention"; readonly input: DbOwnerDreamingSurprisalAttention }
 	| {
 			readonly kind: "vector_backfill";
 			readonly expectedDimensions: number;
@@ -264,6 +266,28 @@ export interface DbOwnerVectorSearchPayload {
 		readonly type?: string;
 		readonly excludeAggregateRecall?: boolean;
 		readonly maxScanRows?: number;
+	};
+}
+
+export interface DbOwnerDreamingHygieneAttention {
+	readonly agentId: string;
+	readonly limit?: number;
+	readonly caps?: {
+		readonly maxAspectsPerEntity: number;
+		readonly maxAttributesPerAspect: number;
+	};
+}
+
+export interface DbOwnerDreamingSurprisalAttention {
+	readonly agentId: string;
+	readonly config: {
+		readonly enabled: boolean;
+		readonly sampleSize: number;
+		readonly minObservations: number;
+		readonly neighborCount: number;
+		readonly treeLeafSize: number;
+		readonly maxCandidates: number;
+		readonly minScore: number;
 	};
 }
 

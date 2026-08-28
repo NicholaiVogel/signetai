@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { DreamingConfig } from "@signet/core";
 import { runMigrations } from "../../../core/src/migrations";
 import type { DbAccessor } from "../db-accessor";
+import type { DbOwnerMaintenance } from "../db-owner-maintenance";
 import { reportEventLoopLag, resetPressureState } from "../system-pressure";
 import {
 	DREAMING_AGENT_PROMPT,
@@ -231,6 +232,28 @@ describe("dreaming worker agent scope", () => {
 				reason: "system_pressure",
 				checkedAt: expect.any(String),
 			});
+		} finally {
+			worker.stop();
+		}
+	});
+
+	it("routes the scheduled hygiene scan through the maintenance owner", async () => {
+		let hygieneCalls = 0;
+		const ownerMaintenance = {
+			queueIsHealthy: async () => true,
+			dreamingHygieneAttention: async () => {
+				hygieneCalls += 1;
+				return 0;
+			},
+			dreamingSurprisalAttention: async () => null,
+		} as unknown as DbOwnerMaintenance;
+		const worker = startDreamingWorker(accessor, defaultCfg(), agentsDir, "default", {
+			checkIntervalMs: 10,
+			ownerMaintenance,
+		});
+		try {
+			await waitFor(() => hygieneCalls === 1, 2_000);
+			expect(hygieneCalls).toBe(1);
 		} finally {
 			worker.stop();
 		}
