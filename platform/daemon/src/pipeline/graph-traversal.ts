@@ -279,23 +279,32 @@ function resolveByQueryTokens(db: ReadDb, agentId: string, queryTokens: Readonly
 		// FTS table doesn't exist — fall through to LIKE
 	}
 
-	// LIKE fallback for pre-migration databases
+	return resolveByQueryTokensLike(db, agentId, tokens);
+}
+
+function buildQueryTokenLikeStatement(tokens: ReadonlyArray<string>): {
+	readonly sql: string;
+	readonly params: string[];
+} {
 	const clauses = tokens.map(() => "(canonical_name LIKE ? OR name LIKE ?)").join(" OR ");
 	const args: string[] = [];
 	for (const token of tokens) {
 		const pattern = `%${token}%`;
 		args.push(pattern, pattern);
 	}
-
-	const rows = db
-		.prepare(
-			`SELECT id FROM entities
+	return {
+		sql: `SELECT id FROM entities
 			 WHERE agent_id = ?
 			   AND (${clauses})
 			 ORDER BY mentions DESC
 			 LIMIT 20`,
-		)
-		.all(agentId, ...args) as Array<{ id: string }>;
+		params: args,
+	};
+}
+
+function resolveByQueryTokensLike(db: ReadDb, agentId: string, tokens: ReadonlyArray<string>): string[] {
+	const query = buildQueryTokenLikeStatement(tokens);
+	const rows = db.prepare(query.sql).all(agentId, ...query.params) as Array<{ id: string }>;
 	return sanitizeEntityIds(rows.map((row) => row.id));
 }
 
@@ -441,6 +450,7 @@ export async function resolveFocalEntitiesViaOwner(
 		if (resolvedEntityIds.length === 0 && signals.queryTokens && signals.queryTokens.length > 0) {
 			const tokens = sanitizeQueryTokens(signals.queryTokens);
 			if (tokens.length > 0) {
+				let queryIds: string[] = [];
 				try {
 					const queryRows = await readAll<{ readonly id: string }>(
 						`SELECT e.id FROM entities_fts
@@ -453,26 +463,21 @@ export async function resolveFocalEntitiesViaOwner(
 						"session-start.graph-focal.query-fts",
 						20,
 					);
-					resolvedEntityIds = sanitizeEntityIds(queryRows.map((row) => row.id));
+					queryIds = sanitizeEntityIds(queryRows.map((row) => row.id));
 				} catch {
-					const clauses = tokens.map(() => "(canonical_name LIKE ? OR name LIKE ?)").join(" OR ");
-					const args: string[] = [];
-					for (const token of tokens) {
-						const pattern = `%${token}%`;
-						args.push(pattern, pattern);
-					}
-					const queryRows = await readAll<{ readonly id: string }>(
-						`SELECT id FROM entities
-						 WHERE agent_id = ?
-						   AND (${clauses})
-						 ORDER BY mentions DESC
-						 LIMIT 20`,
-						[agentId, ...args],
+					// FTS is optional on pre-migration databases.
+				}
+				if (queryIds.length === 0) {
+					const likeStatement = buildQueryTokenLikeStatement(tokens);
+					const likeRows = await readAll<{ readonly id: string }>(
+						likeStatement.sql,
+						[agentId, ...likeStatement.params],
 						"session-start.graph-focal.query-like",
 						20,
 					);
-					resolvedEntityIds = sanitizeEntityIds(queryRows.map((row) => row.id));
+					queryIds = sanitizeEntityIds(likeRows.map((row) => row.id));
 				}
+				resolvedEntityIds = queryIds;
 				if (resolvedEntityIds.length > 0) source = "query";
 			}
 		}
@@ -483,8 +488,10 @@ export async function resolveFocalEntitiesViaOwner(
 			entityIds.length === 0
 				? []
 				: await readAll<{ readonly id: string; readonly name: string }>(
-						`SELECT id, name FROM entities WHERE id IN (${entityIds.map(() => "?").join(", ")})`,
-						entityIds,
+						`SELECT id, name FROM entities
+						 WHERE agent_id = ?
+						   AND id IN (${entityIds.map(() => "?").join(", ")})`,
+						[agentId, ...entityIds],
 						"session-start.graph-focal.names",
 						entityIds.length,
 					);

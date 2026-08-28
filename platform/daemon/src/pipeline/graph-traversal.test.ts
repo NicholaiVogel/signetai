@@ -30,7 +30,7 @@ const CONFIG = {
 
 function seedGraph(db: Database): void {
 	db.exec(`
-		CREATE TABLE entities (id TEXT PRIMARY KEY, name TEXT, agent_id TEXT);
+	CREATE TABLE entities (id TEXT PRIMARY KEY, name TEXT, agent_id TEXT, canonical_name TEXT, mentions INTEGER DEFAULT 0);
 		CREATE TABLE entity_aspects (id TEXT PRIMARY KEY, entity_id TEXT, agent_id TEXT, weight REAL, canonical_name TEXT);
 		CREATE TABLE entity_attributes (aspect_id TEXT, memory_id TEXT, agent_id TEXT, status TEXT, kind TEXT, content TEXT, importance REAL);
 		CREATE TABLE entity_dependencies (id TEXT PRIMARY KEY, source_entity_id TEXT, target_entity_id TEXT, agent_id TEXT, confidence REAL, strength REAL);
@@ -41,7 +41,10 @@ function seedGraph(db: Database): void {
 		CREATE INDEX idx_entity_dependencies_source ON entity_dependencies (source_entity_id);
 	`);
 	db.exec(
-		`INSERT INTO entities VALUES ('e1', 'Alpha', 'default'), ('e2', 'Beta', 'default'), ('e3', 'Other', 'other')`,
+		`INSERT INTO entities (id, name, agent_id, canonical_name, mentions) VALUES
+			('e1', 'Alpha', 'default', 'alpha', 2),
+			('e2', 'Beta', 'default', 'beta', 1),
+			('e3', 'Other', 'other', 'other', 1)`,
 	);
 	db.exec(
 		`INSERT INTO entity_aspects VALUES
@@ -209,5 +212,34 @@ describe("traverseKnowledgeGraph event-loop yields (#1118)", () => {
 		expect(result.memoryIds.has("m1")).toBe(true);
 		expect(result.memoryIds.has("m3")).toBe(true);
 		expect(operations.every((operation) => operation.startsWith("session-start.graph-"))).toBe(true);
+	});
+
+	test("falls back to LIKE when the owner FTS index has no matching row", async () => {
+		db.exec("CREATE VIRTUAL TABLE entities_fts USING fts5(name)");
+		const owner = createTestOwner(db, []);
+
+		const focal = await resolveFocalEntitiesViaOwner(owner, "default", {
+			queryTokens: ["alpha"],
+			includePinned: false,
+		});
+
+		expect(focal).toEqual({
+			entityIds: ["e1"],
+			entityNames: ["Alpha"],
+			pinnedEntityIds: [],
+			source: "query",
+		});
+	});
+
+	test("does not disclose a cross-agent checkpoint entity name", async () => {
+		const owner = createTestOwner(db, []);
+
+		const focal = await resolveFocalEntitiesViaOwner(owner, "default", {
+			checkpointEntityIds: ["e3"],
+			includePinned: false,
+		});
+
+		expect(focal.entityIds).toEqual(["e3"]);
+		expect(focal.entityNames).toEqual([]);
 	});
 });
