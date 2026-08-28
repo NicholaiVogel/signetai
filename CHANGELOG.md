@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-28
+- Bug fixes: owner-route traversal candidate hydration.
+
 ### 2026-08-27
 - Bug fixes: correct owner-worker site tokens to actual call lines; report fallback scan completeness; refresh event-loop audit ledger; refresh async DB site attribution; harden sqlite-vec fallback contract; preserve semantic recall without sqlite-vec; refresh owner site token baseline; keep owner IPC protocol pure; update event loop ledger for owner backfill; refresh db accessor site tokens; route vector backfill through db owner; repair dreaming accessor site tokens; preserve reviewed evidence scope; close reviewed evidence loops; gate ACPX same-agent re-admission; reap ACPX workers before re-admission; handle SDK v0.3.x vault and field shapes; invalidate agent-scope cache on DB accessor close; clear lease tokens in owner recovery; fence prospective hint job leases; bound hints worker stop tick; bound hints worker shutdown drain; drain pending hints writes on stop; recover failed hints leases; classify hints write errors; retry hints writes after admission failure.
 - Refactoring: async agent-id + dreaming-worker DB admission with scope caching; migrate prospective-index hints writes to async admission.
@@ -28,12 +31,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: correct integrity page/byte accounting and park unverifiable FTS objects in named degraded state; park unchunkable FTS integrity frontier; real ownership isolation — all unbounded SQLite/source work behind the killable boundary (W3.1); classify vacuum conversion as durable; fence db-owner commit cancellation; fence aborted db-owner writes; repair PR 1702 migration and source sync paths; isolate native source sync work; isolate remaining recovery and source DB paths; pause source sync on provider outage; preserve paused source progress counts; report paused source syncs honestly; reserve interactive DB-owner capacity; repair DB owner review findings; reserve interactive db-owner capacity.
 - Docs: refresh event-loop inventory report; align owner deadline semantics.
 
-### 2026-08-19
-- Features: expose truthful event-loop health; prioritize owner foreground workloads.
-- Bug fixes: baseline event-loop monitor restarts; latch event-loop wedge state; expose truthful event-loop health; checkpoint integrity maintenance; bound integrity maintenance retries; harden incremental integrity maintenance; validate live PR body in readiness checklist; read PR checklist body live; close owner lane review findings; unblock DB-owner startup handshake; address db owner startup review findings; unblock db owner startup handshake; bound status and diagnostics projections; close phase d pollers deterministically; harden phase d acceptance harness; hard self-destruct timer in acceptance runner; seed real embedding vectors; fail loudly on shape drift; resolve core migrations via relative path; format count baseline with Biome-canonical tabs.
-- Docs: add documentation site guidance.
-
 ## Release Ledger
+
+## [0.214.20] - 2026-08-28
+
+Release summary: 1 bug fix.
+Tag range: `v0.214.19..v0.214.20`.
+
+### Bug Fixes
+
+- **daemon**: owner-route traversal candidate hydration
 
 ## [0.214.19] - 2026-08-27
 
