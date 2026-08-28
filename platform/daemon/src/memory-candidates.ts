@@ -351,7 +351,7 @@ export function getPredictedContextMemories(
 						content: row.transcript,
 					}),
 				);
-			}, "memory-candidates.ts:310");
+			}, "memory-candidates.ts:337");
 
 		if (transcriptRows.length === 0) return [];
 
@@ -432,7 +432,7 @@ export function getPredictedContextMemories(
 							content: row.content,
 						}),
 					),
-				"memory-candidates.ts:372",
+				"memory-candidates.ts:399",
 			);
 
 		const selected: ScoredMemory[] = [];
@@ -479,7 +479,7 @@ export function getRecentMemories(memoryDbPath: string, limit: number, recencyBi
 			return (db.prepare(query).all(limit) as unknown as Array<SimpleMemory>).filter(
 				(row) => scanMemoryContent(row.content).contextEligible,
 			);
-		}, "memory-candidates.ts:438");
+		}, "memory-candidates.ts:465");
 
 		return rows.map((r) => ({
 			id: r.id,
@@ -514,7 +514,7 @@ export function getMemoriesSince(memoryDbPath: string, sinceMs: number, limit: n
 			`)
 				.all(sinceIso, limit) as unknown as Array<SimpleMemory>;
 			return rows.filter((row) => scanMemoryContent(row.content).contextEligible);
-		}, "memory-candidates.ts:479");
+		}, "memory-candidates.ts:506");
 
 		return rows.map((r) => ({
 			id: r.id,
