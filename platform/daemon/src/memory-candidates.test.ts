@@ -27,6 +27,28 @@ function insertMemory(id: string, agentId: string, importance: number, isDeleted
 	});
 }
 
+function insertTranscript(sessionKey: string, project: string, agentId: string, content: string): void {
+	const now = new Date().toISOString();
+	getDbAccessor().withWriteTx((db) => {
+		db.prepare(
+			`INSERT INTO session_transcripts
+				(session_key, content, harness, project, agent_id, created_at, updated_at, completed_at)
+			 VALUES (?, ?, 'test', ?, ?, ?, ?, ?)`,
+		).run(sessionKey, content, project, agentId, now, now, now);
+	});
+}
+
+function insertProjectMemory(id: string, agentId: string, project: string, content: string): void {
+	const now = new Date().toISOString();
+	getDbAccessor().withWriteTx((db) => {
+		db.prepare(
+			`INSERT INTO memories
+				(id, content, type, importance, is_deleted, agent_id, visibility, project, created_at, updated_at, updated_by)
+			 VALUES (?, ?, 'fact', 0.9, 0, ?, 'global', ?, ?, ?, 'test')`,
+		).run(id, content, agentId, project, now, now);
+	});
+}
+
 function insertAttribute(id: string, memoryId: string, agentId: string, importance: number): void {
 	const now = new Date().toISOString();
 	getDbAccessor().withWriteTx((db) => {
@@ -162,7 +184,21 @@ describe("fetchTraversalCandidates (#1250)", () => {
 			accessor.withReadDbAsync = originalWithReadDbAsync;
 		}
 	});
-	test("routes predicted context through the DB owner, not the parent sync DB seam", async () => {
+	test("returns predicted context through the DB owner, not the parent sync DB seam", async () => {
+		insertTranscript(
+			"session-predicted-a",
+			"/repo",
+			"agent-a",
+			"The phoenix deployment uses a stable editor workflow.",
+		);
+		insertTranscript(
+			"session-predicted-b",
+			"/repo",
+			"agent-a",
+			"The phoenix deployment requires careful editor workflow.",
+		);
+		insertProjectMemory("memory-predicted", "agent-a", "/repo", "The phoenix deployment needs the editor workflow.");
+
 		const accessor = getDbAccessor() as unknown as {
 			withReadDb: (...args: never[]) => unknown;
 			withReadDbAsync: (...args: never[]) => Promise<unknown>;
@@ -176,7 +212,8 @@ describe("fetchTraversalCandidates (#1250)", () => {
 			throw new Error("predicted context crossed the parent async DB seam");
 		};
 		try {
-			expect(await getPredictedContextMemories(dbPath, "/repo", 10, 600, new Set(), "agent-a")).toEqual([]);
+			const rows = await getPredictedContextMemories(dbPath, "/repo", 10, 600, new Set(), "agent-a");
+			expect(rows.map((row) => row.id)).toEqual(["memory-predicted"]);
 		} finally {
 			accessor.withReadDb = originalWithReadDb;
 			accessor.withReadDbAsync = originalWithReadDbAsync;
