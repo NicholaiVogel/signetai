@@ -1,5 +1,6 @@
 import type { DbAccessor } from "./db-accessor";
-import { getStructuralDensity } from "./knowledge-graph";
+import { getDbOwner } from "./db-owner-runtime";
+import { ownerReadAll } from "./db-owner-sql";
 
 export const PREDICTOR_FEATURE_DIMENSIONS = 17;
 
@@ -26,6 +27,14 @@ interface StructuralAttributeRow {
 	readonly importance: number;
 	readonly created_at: string;
 }
+
+interface StructuralDensityRow {
+	readonly entity_id: string;
+	readonly aspect_count: number;
+	readonly attribute_count: number;
+}
+
+const OWNER_QUERY_BATCH_SIZE = 400;
 
 function buildPlaceholders(count: number): string {
 	return new Array(count).fill("?").join(", ");
@@ -62,11 +71,120 @@ function choosePrimaryRow(
 	return next.created_at < current.created_at ? next : current;
 }
 
+async function readStructuralAttributeRows(
+	owner: Awaited<ReturnType<typeof getDbOwner>>,
+	memoryIds: ReadonlyArray<string>,
+	agentId: string,
+): Promise<ReadonlyArray<StructuralAttributeRow>> {
+	const rows: StructuralAttributeRow[] = [];
+	for (let offset = 0; offset < memoryIds.length; offset += OWNER_QUERY_BATCH_SIZE) {
+		const batch = memoryIds.slice(offset, offset + OWNER_QUERY_BATCH_SIZE);
+		const placeholders = buildPlaceholders(batch.length);
+		const batchRows = await ownerReadAll<StructuralAttributeRow>(
+			owner,
+			`SELECT
+				ea.memory_id,
+				ea.kind,
+				ea.aspect_id,
+				ea.importance,
+				ea.created_at,
+				asp.entity_id
+			 FROM entity_attributes ea
+			 JOIN entity_aspects asp ON asp.id = ea.aspect_id
+			 WHERE ea.memory_id IN (${placeholders})
+			   AND ea.agent_id = ?
+			   AND ea.status = 'active'
+			 ORDER BY ea.memory_id ASC,
+			   CASE ea.kind WHEN 'constraint' THEN 0 ELSE 1 END,
+			   ea.importance DESC,
+			   ea.created_at ASC`,
+			[...batch, agentId],
+			{
+				operation: "session-start.structural-features.attributes",
+				lane: "read",
+				deadlineMs: 5_000,
+				estimatedWorkUnits: Math.max(1, Math.min(1_200, batch.length * 3)),
+			},
+		);
+		rows.push(...batchRows);
+	}
+	return rows;
+}
+
+async function readStructuralDensities(
+	owner: Awaited<ReturnType<typeof getDbOwner>>,
+	entityIds: ReadonlyArray<string>,
+	agentId: string,
+): Promise<ReadonlyMap<string, number>> {
+	const densities = new Map<string, number>();
+	for (let offset = 0; offset < entityIds.length; offset += OWNER_QUERY_BATCH_SIZE) {
+		const batch = entityIds.slice(offset, offset + OWNER_QUERY_BATCH_SIZE);
+		const placeholders = buildPlaceholders(batch.length);
+		const rows = await ownerReadAll<StructuralDensityRow>(
+			owner,
+			`SELECT entity_id, SUM(aspect_count) AS aspect_count, SUM(attribute_count) AS attribute_count
+			 FROM (
+				 SELECT entity_id, COUNT(*) AS aspect_count, 0 AS attribute_count
+				 FROM entity_aspects
+				 WHERE agent_id = ? AND entity_id IN (${placeholders})
+				 GROUP BY entity_id
+				 UNION ALL
+				 SELECT asp.entity_id, 0 AS aspect_count, COUNT(*) AS attribute_count
+				 FROM entity_attributes ea
+				 JOIN entity_aspects asp ON asp.id = ea.aspect_id
+				 WHERE asp.agent_id = ?
+				   AND ea.agent_id = ?
+				   AND ea.kind = 'attribute'
+				   AND ea.status = 'active'
+				   AND asp.entity_id IN (${placeholders})
+				 GROUP BY asp.entity_id
+			 )
+			 GROUP BY entity_id`,
+			[agentId, ...batch, agentId, agentId, ...batch],
+			{
+				operation: "session-start.structural-features.density",
+				lane: "read",
+				deadlineMs: 5_000,
+				estimatedWorkUnits: Math.max(1, Math.min(1_200, batch.length * 3)),
+			},
+		);
+		for (const row of rows) densities.set(row.entity_id, row.aspect_count + row.attribute_count);
+	}
+	return densities;
+}
+
+async function readEmbeddedMemoryIds(
+	owner: Awaited<ReturnType<typeof getDbOwner>>,
+	memoryIds: ReadonlyArray<string>,
+): Promise<ReadonlySet<string>> {
+	const embeddedIds = new Set<string>();
+	for (let offset = 0; offset < memoryIds.length; offset += OWNER_QUERY_BATCH_SIZE) {
+		const batch = memoryIds.slice(offset, offset + OWNER_QUERY_BATCH_SIZE);
+		const rows = await ownerReadAll<{ readonly source_id: string }>(
+			owner,
+			`SELECT DISTINCT source_id
+			 FROM embeddings
+			 WHERE source_type = 'memory'
+			   AND source_id IN (${buildPlaceholders(batch.length)})`,
+			batch,
+			{
+				operation: "session-start.structural-features.embeddings",
+				lane: "read",
+				deadlineMs: 5_000,
+				estimatedWorkUnits: Math.max(1, Math.min(1_200, batch.length * 2)),
+			},
+		);
+		for (const row of rows) embeddedIds.add(row.source_id);
+	}
+	return embeddedIds;
+}
+
 export async function getStructuralFeatures(
 	accessor: DbAccessor,
 	memoryIds: ReadonlyArray<string>,
 	agentId: string,
 	sourceById?: ReadonlyMap<string, StructuralCandidateSource>,
+	ownerOverride?: Awaited<ReturnType<typeof getDbOwner>>,
 ): Promise<Map<string, StructuralFeatures | null>> {
 	const featuresByMemoryId = new Map<string, StructuralFeatures | null>();
 	for (const memoryId of memoryIds) {
@@ -75,46 +193,17 @@ export async function getStructuralFeatures(
 
 	if (memoryIds.length === 0) return featuresByMemoryId;
 
-	const primaryRows = await accessor.withReadDbAsync(
-		async (db) => {
-			const rows = db
-				.prepare(
-					`SELECT
-					ea.memory_id,
-					ea.kind,
-					ea.aspect_id,
-					ea.importance,
-					ea.created_at,
-					asp.entity_id
-				 FROM entity_attributes ea
-				 JOIN entity_aspects asp ON asp.id = ea.aspect_id
-				 WHERE ea.memory_id IN (${buildPlaceholders(memoryIds.length)})
-				   AND ea.agent_id = ?
-				   AND ea.status = 'active'
-				 ORDER BY ea.memory_id ASC,
-				   CASE ea.kind WHEN 'constraint' THEN 0 ELSE 1 END,
-				   ea.importance DESC,
-				   ea.created_at ASC`,
-				)
-				.all(...memoryIds, agentId) as ReadonlyArray<StructuralAttributeRow>;
+	void accessor;
+	const owner = ownerOverride ?? (await getDbOwner());
+	const primaryRows = new Map<string, StructuralAttributeRow>();
+	for (const row of await readStructuralAttributeRows(owner, memoryIds, agentId)) {
+		primaryRows.set(row.memory_id, choosePrimaryRow(primaryRows.get(row.memory_id), row));
+	}
+	const entityIds = [...new Set([...primaryRows.values()].map((row) => row.entity_id))];
+	const densities = await readStructuralDensities(owner, entityIds, agentId);
 
-			const byMemoryId = new Map<string, StructuralAttributeRow>();
-			for (const row of rows) {
-				byMemoryId.set(row.memory_id, choosePrimaryRow(byMemoryId.get(row.memory_id), row));
-			}
-			return byMemoryId;
-		},
-		{ siteToken: "structural-features.ts:78" },
-	);
-
-	const densityCache = new Map<string, number>();
 	for (const [memoryId, row] of primaryRows) {
-		let density = densityCache.get(row.entity_id);
-		if (density === undefined) {
-			const structuralDensity = await getStructuralDensity(accessor, row.entity_id, agentId);
-			density = structuralDensity.aspectCount + structuralDensity.attributeCount;
-			densityCache.set(row.entity_id, density);
-		}
+		const density = densities.get(row.entity_id) ?? 0;
 
 		featuresByMemoryId.set(memoryId, {
 			entitySlot: hashSlot(row.entity_id),
@@ -160,21 +249,9 @@ export async function buildCandidateFeatures(
 			sourceById.set(candidate.id, candidate.source);
 		}
 	}
-	const structuralById = await getStructuralFeatures(accessor, candidateIds, agentId, sourceById);
-	const embeddedIds = await accessor.withReadDbAsync(
-		async (db) => {
-			const rows = db
-				.prepare(
-					`SELECT DISTINCT source_id
-				 FROM embeddings
-				 WHERE source_type = 'memory'
-				   AND source_id IN (${buildPlaceholders(candidateIds.length)})`,
-				)
-				.all(...candidateIds) as ReadonlyArray<{ source_id: string }>;
-			return new Set(rows.map((row) => row.source_id));
-		},
-		{ siteToken: "structural-features.ts:164" },
-	);
+	const owner = await getDbOwner();
+	const structuralById = await getStructuralFeatures(accessor, candidateIds, agentId, sourceById, owner);
+	const embeddedIds = await readEmbeddedMemoryIds(owner, candidateIds);
 
 	const nowMs = Date.now();
 	const todAngle = (2 * Math.PI * sessionContext.timeOfDay) / 24;
