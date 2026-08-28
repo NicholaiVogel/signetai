@@ -15,7 +15,7 @@ function ensureDir(path: string): void {
 	mkdirSync(path, { recursive: true });
 }
 
-function setupDb(): Database {
+async function setupDb(): Promise<Database> {
 	const dbPath = join(TEST_DIR, "memory", "memories.db");
 	ensureDir(join(TEST_DIR, "memory"));
 	if (existsSync(dbPath)) rmSync(dbPath);
@@ -74,22 +74,22 @@ function setupDb(): Database {
 		 VALUES (?, ?, ?, 3, 'memory', ?, ?, ?)`,
 	).run("emb-1", "hash-mem-1", new Uint8Array(12), "mem-1", "Auth uses WorkOS", now);
 
-	closeDbAccessor();
+	await closeDbAccessor();
 	initDbAccessor(dbPath);
 	return db;
 }
 
 let db: Database;
 
-beforeEach(() => {
+beforeEach(async () => {
 	if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
 	ensureDir(TEST_DIR);
-	db = setupDb();
+	db = await setupDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
+	await closeDbAccessor();
 	if (db) db.close();
-	closeDbAccessor();
 	if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
@@ -120,6 +120,47 @@ describe("getStructuralFeatures", () => {
 	it("returns null for unassigned memories", async () => {
 		const features = await getStructuralFeatures(getDbAccessor(), ["mem-3"], "default");
 		expect(features.get("mem-3")).toBeNull();
+	});
+
+	it("routes structural reads through the DB owner, not parent DB seams", async () => {
+		const accessor = getDbAccessor() as unknown as {
+			withReadDb: (...args: never[]) => unknown;
+			withReadDbAsync: (...args: never[]) => Promise<unknown>;
+		};
+		const originalWithReadDb = accessor.withReadDb;
+		const originalWithReadDbAsync = accessor.withReadDbAsync;
+		accessor.withReadDb = () => {
+			throw new Error("structural features crossed the parent sync DB seam");
+		};
+		accessor.withReadDbAsync = async () => {
+			throw new Error("structural features crossed the parent async DB seam");
+		};
+		try {
+			const features = await getStructuralFeatures(getDbAccessor(), ["mem-1", "mem-2"], "default");
+			expect(features.get("mem-1")?.structuralDensity).toBe(2);
+			expect(features.get("mem-2")?.structuralDensity).toBe(2);
+
+			const vectors = await buildCandidateFeatures(
+				getDbAccessor(),
+				[
+					{
+						id: "mem-1",
+						importance: 0.9,
+						createdAt: new Date().toISOString(),
+						accessCount: 0,
+						lastAccessed: null,
+						pinned: false,
+						isSuperseded: false,
+					},
+				],
+				"default",
+				{ projectSlot: 0, timeOfDay: 12, dayOfWeek: 3, monthOfYear: 2, sessionGapDays: 0 },
+			);
+			expect(vectors[0]?.[10]).toBe(1);
+		} finally {
+			accessor.withReadDb = originalWithReadDb;
+			accessor.withReadDbAsync = originalWithReadDbAsync;
+		}
 	});
 });
 

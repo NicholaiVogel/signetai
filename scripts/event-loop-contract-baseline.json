@@ -6296,20 +6296,6 @@
       "category": "hot-path"
     },
     {
-      "path": "structural-features.ts",
-      "line": 78,
-      "api": "withReadDbAsync",
-      "source": "const primaryRows = await accessor.withReadDbAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "structural-features.ts",
-      "line": 164,
-      "api": "withReadDbAsync",
-      "source": "const embeddedIds = await accessor.withReadDbAsync(",
-      "category": "hot-path"
-    },
-    {
       "path": "telemetry.ts",
       "line": 551,
       "api": "withWriteTx",
