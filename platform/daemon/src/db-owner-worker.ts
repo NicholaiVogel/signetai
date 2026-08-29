@@ -13,6 +13,9 @@ import { upsertMemoryArtifactInTx, type MemoryArtifactUpsertFields } from "./mem
 import { upsertMemoryContentSafetyInTx } from "./memory-content-safety";
 import { NATIVE_MEMORY_BRIDGE_SOURCE_NODE_ID } from "./native-memory-constants";
 import { applySourceSnapshotImportInTx } from "./source-snapshots";
+import { getDreamingHygieneCandidatesInDb } from "./knowledge-graph-hygiene";
+import { enqueueDreamingAttentionInTx } from "./pipeline/dreaming-attention";
+import { DREAMING_SURPRISAL_SELECTOR_VERSION, selectDreamingSurprisalInDb } from "./pipeline/dreaming-surprisal";
 import type {
 	DbOwnerCommand,
 	DbOwnerEvent,
@@ -353,6 +356,73 @@ export function runDbOwnerWorker(): void {
 				db.exec("ROLLBACK");
 			} catch {
 				// The original error is the actionable failure.
+			}
+			throw error;
+		}
+	}
+
+	function executeDreamingHygieneAttention(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "dreaming_hygiene_attention" }>,
+		context?: JobExecutionContext,
+	): number {
+		const candidates = getDreamingHygieneCandidatesInDb(db as never, request.input);
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			for (const candidate of candidates) {
+				enqueueDreamingAttentionInTx(db as never, {
+					agentId: request.input.agentId,
+					kind: "hygiene",
+					subjectRef: candidate.subjectRef,
+					details: candidate.details,
+					priority: candidate.priority,
+					reopen: false,
+				});
+			}
+			commit(context);
+			return candidates.length;
+		} catch (error) {
+			try {
+				db.exec("ROLLBACK");
+			} catch {
+				// Preserve the original owner failure.
+			}
+			throw error;
+		}
+	}
+
+	function executeDreamingSurprisalAttention(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "dreaming_surprisal_attention" }>,
+		context?: JobExecutionContext,
+	): unknown {
+		if (request.input.config.enabled === false) return null;
+		const selection = selectDreamingSurprisalInDb(db as never, request.input.agentId, request.input.config, null);
+		if (selection.candidates.length === 0) return selection;
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			for (const candidate of selection.candidates) {
+				enqueueDreamingAttentionInTx(db as never, {
+					agentId: request.input.agentId,
+					kind: "surprisal",
+					subjectRef: `memory:${candidate.id}`,
+					details: {
+						selector: DREAMING_SURPRISAL_SELECTOR_VERSION,
+						score: candidate.score.toFixed(6),
+						rank: String(candidate.rank),
+						sampleSize: String(candidate.sampleSize),
+						dimensions: String(candidate.dimensions),
+						capturedAt: candidate.capturedAt,
+					},
+					priority: Math.round(60 + candidate.score * 40),
+					reopen: false,
+				});
+			}
+			commit(context);
+			return selection;
+		} catch (error) {
+			try {
+				db.exec("ROLLBACK");
+			} catch {
+				// Preserve the original owner failure.
 			}
 			throw error;
 		}
@@ -719,7 +789,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:720" },
+			{ siteToken: "db-owner-worker.ts:790" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
@@ -752,7 +822,7 @@ export function runDbOwnerWorker(): void {
 		const { getDbAccessor } = await import("./db-accessor");
 		return await getDbAccessor().withReadDbAsync(
 			(db) => vectorSearchWithMetadata(db, new Float32Array(payload.queryEmbedding), payload.options),
-			{ siteToken: "db-owner-worker.ts:753" },
+			{ siteToken: "db-owner-worker.ts:823" },
 		);
 	}
 
@@ -785,6 +855,9 @@ export function runDbOwnerWorker(): void {
 		if (job.request.kind === "batch")
 			return executeBatch(job.request.statements, job.request.requireChanges === true, context);
 		if (job.request.kind === "source_snapshot_import") return executeSourceSnapshotImport(job.request, context);
+		if (job.request.kind === "dreaming_hygiene_attention") return executeDreamingHygieneAttention(job.request, context);
+		if (job.request.kind === "dreaming_surprisal_attention")
+			return executeDreamingSurprisalAttention(job.request, context);
 		if (job.request.kind === "source_artifact_upsert" || job.request.kind === "source_artifact_upsert_batch")
 			return executeSourceArtifactUpsert(job.request, context);
 		if (job.request.kind === "vector_search") return await executeVectorSearch(job.request.payload);

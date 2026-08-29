@@ -16,9 +16,16 @@ import {
 	type DbOwnerJobHandle,
 } from "./db-owner-client";
 import { createDbOwnerClient } from "./db-owner-client";
-import type { DbOwnerParameter, DbOwnerRequest, DbOwnerStatement } from "./db-owner-protocol";
+import type {
+	DbOwnerDreamingHygieneAttention,
+	DbOwnerDreamingSurprisalAttention,
+	DbOwnerParameter,
+	DbOwnerRequest,
+	DbOwnerStatement,
+} from "./db-owner-protocol";
 import { DB_OWNER_MAX_RESULT_BYTES, DB_OWNER_MAX_WORK_UNITS } from "./db-owner-protocol";
 import { setFtsIndexIncomplete } from "./fts-index-state";
+import type { DreamingSurprisalSelection } from "./pipeline/dreaming-surprisal";
 
 export interface DbOwnerMaintenanceOptions {
 	readonly deadlineMs?: number;
@@ -198,6 +205,32 @@ export function ownerChanges(result: unknown): number {
 	return typeof changes === "number" && Number.isFinite(changes) ? changes : 0;
 }
 
+export async function ownerDreamingHygieneAttention(
+	owner: DbOwnerClient,
+	input: DbOwnerDreamingHygieneAttention,
+	options: DbOwnerMaintenanceOptions = {},
+): Promise<number> {
+	return await runOwnerMaintenanceWithRetry<number>(
+		owner,
+		{ kind: "dreaming_hygiene_attention", input },
+		"maintenance.dreaming.hygiene-attention",
+		{ ...options, estimatedWorkUnits: options.estimatedWorkUnits ?? 100 },
+	);
+}
+
+export async function ownerDreamingSurprisalAttention(
+	owner: DbOwnerClient,
+	input: DbOwnerDreamingSurprisalAttention,
+	options: DbOwnerMaintenanceOptions = {},
+): Promise<DreamingSurprisalSelection | null> {
+	return await runOwnerMaintenanceWithRetry<DreamingSurprisalSelection | null>(
+		owner,
+		{ kind: "dreaming_surprisal_attention", input },
+		"maintenance.dreaming.surprisal-attention",
+		{ ...options, estimatedWorkUnits: options.estimatedWorkUnits ?? 500 },
+	);
+}
+
 const DEFAULT_FTS_CHUNK_SIZE = 100;
 const MAX_FTS_CHUNK_SIZE = 500;
 const DEFAULT_FTS_DEADLINE_MS = 10_000;
@@ -270,6 +303,14 @@ export interface DbOwnerMaintenance {
 	readonly backfillFts: (options?: FtsBackfillOptions) => Promise<FtsBackfillResult>;
 	readonly rebuildFts: (options?: FtsBackfillOptions) => Promise<FtsBackfillResult>;
 	readonly queueIsHealthy: () => Promise<boolean>;
+	readonly dreamingHygieneAttention: (
+		input: DbOwnerDreamingHygieneAttention,
+		options?: DbOwnerMaintenanceOptions,
+	) => Promise<number>;
+	readonly dreamingSurprisalAttention: (
+		input: DbOwnerDreamingSurprisalAttention,
+		options?: DbOwnerMaintenanceOptions,
+	) => Promise<DreamingSurprisalSelection | null>;
 	readonly health: () => DbOwnerHealth;
 	readonly close: () => Promise<void>;
 }
@@ -715,6 +756,14 @@ export function createDbOwnerMaintenance(options: CreateDbOwnerMaintenanceOption
 		const deadRate = row.total > 0 ? row.dead / row.total : 0;
 		return row.depth <= 50 && oldestAgeSec <= 300 && deadRate <= 0.01 && row.leaseAnomalies === 0;
 	};
+	const dreamingHygieneAttention = (
+		input: DbOwnerDreamingHygieneAttention,
+		maintenanceOptions?: DbOwnerMaintenanceOptions,
+	): Promise<number> => ownerDreamingHygieneAttention(owner, input, maintenanceOptions);
+	const dreamingSurprisalAttention = (
+		input: DbOwnerDreamingSurprisalAttention,
+		maintenanceOptions?: DbOwnerMaintenanceOptions,
+	): Promise<DreamingSurprisalSelection | null> => ownerDreamingSurprisalAttention(owner, input, maintenanceOptions);
 	const backfill = (backfillOptions?: FtsBackfillOptions): Promise<FtsBackfillResult> =>
 		backfillFts(owner, backfillOptions);
 	const rebuild = async (rebuildOptions: FtsBackfillOptions = {}): Promise<FtsBackfillResult> => {
@@ -796,6 +845,8 @@ export function createDbOwnerMaintenance(options: CreateDbOwnerMaintenanceOption
 		backfillFts: backfill,
 		rebuildFts: rebuild,
 		queueIsHealthy,
+		dreamingHygieneAttention,
+		dreamingSurprisalAttention,
 		health: () => owner.health(),
 		close: async () => {
 			if (ownsOwner) await owner.close();

@@ -385,8 +385,8 @@ export function startDreamingWorker(
 			// episodic backlog read on every sweep: skip straight past it.
 			if (await isDreamingHaltActive(accessor, scopeId)) continue;
 			try {
-				await enqueueDreamingHygieneAttention(accessor, scopeId, undefined, caps);
-				await enqueueDreamingSurprisalAttention(accessor, scopeId, cfg);
+				await enqueueDreamingHygieneAttention(accessor, scopeId, undefined, caps, options.ownerMaintenance);
+				await enqueueDreamingSurprisalAttention(accessor, scopeId, cfg, options.ownerMaintenance);
 				const episodicTokens = await getDreamingEpisodicTokenBacklog(accessor, scopeId);
 				if (!(await shouldTriggerDreaming(accessor, cfg, scopeId, Date.now(), episodicTokens))) continue;
 				triggered = true;
