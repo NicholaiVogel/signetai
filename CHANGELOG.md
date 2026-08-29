@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-29
+- Bug fixes: refresh event-loop source baseline; correct DB accessor audit site tokens; route scheduled Dreaming scans to owner.
+
 ### 2026-08-28
 - Bug fixes: escape dreaming smoke template interpolation (build break); embed GraphIQ installer in native runtime + npm files; route predictive context DB scans through owner; restore scoped focal query fallback; owner-route W5 contention paths; owner-route structural feature reads; owner-route traversal candidate hydration.
 
@@ -26,12 +29,18 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-08-21
 - Bug fixes: trim async DB attribution overhead; endpoint-neutral fingerprint + reachable building-state recovery + owner-bound resumable embedding migration; recover endpoint-only embedding builds; make embedding migration owner-bound and resumable; amputate parent-side native-memory indexing behind killable boundary with transactional resumable frontier; preserve provider retry frontiers; close native source frontier crash windows; type native embedding protocol; isolate native source embeddings; persist native source traversal frontier; move native memory indexing behind owner boundary; remove secondary parent sync paths + recovery child exit-0 protocol; remove secondary sync paths; parent sync attribution with in-flight latch naming + telemetry conversion; preserve in-flight sync DB attribution; lazily capture sync DB attribution; refresh event-loop source ledger; refresh sync access ledger for telemetry fallback; satisfy attribution boundary checks; move startup telemetry write behind owner; attribute transitional sync db stalls.
 
-### 2026-08-20
-- Features: pause native source sync when provider is down.
-- Bug fixes: correct integrity page/byte accounting and park unverifiable FTS objects in named degraded state; park unchunkable FTS integrity frontier; real ownership isolation — all unbounded SQLite/source work behind the killable boundary (W3.1); classify vacuum conversion as durable; fence db-owner commit cancellation; fence aborted db-owner writes; repair PR 1702 migration and source sync paths; isolate native source sync work; isolate remaining recovery and source DB paths; pause source sync on provider outage; preserve paused source progress counts; report paused source syncs honestly; reserve interactive DB-owner capacity; repair DB owner review findings; reserve interactive db-owner capacity.
-- Docs: refresh event-loop inventory report; align owner deadline semantics.
-
 ## Release Ledger
+
+## [0.214.25] - 2026-08-29
+
+Release summary: 3 bug fixes.
+Tag range: `v0.214.24..v0.214.25`.
+
+### Bug Fixes
+
+- **audit**: refresh event-loop source baseline
+- **daemon**: correct DB accessor audit site tokens
+- **daemon**: route scheduled Dreaming scans to owner
 
 ## [0.214.24] - 2026-08-28
 
