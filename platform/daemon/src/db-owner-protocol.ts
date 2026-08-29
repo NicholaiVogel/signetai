@@ -238,6 +238,7 @@ export type DbOwnerRequest =
 	| { readonly kind: "source_artifact_upsert_batch"; readonly input: readonly DbOwnerSourceArtifactUpsert[] }
 	| { readonly kind: "dreaming_hygiene_attention"; readonly input: DbOwnerDreamingHygieneAttention }
 	| { readonly kind: "dreaming_surprisal_attention"; readonly input: DbOwnerDreamingSurprisalAttention }
+	| { readonly kind: "dreaming_episodic_backlog"; readonly input: DbOwnerDreamingEpisodicBacklog }
 	| {
 			readonly kind: "vector_backfill";
 			readonly expectedDimensions: number;
@@ -289,6 +290,13 @@ export interface DbOwnerDreamingSurprisalAttention {
 		readonly maxCandidates: number;
 		readonly minScore: number;
 	};
+}
+
+/** Bounded episodic backlog probe used by the scheduled Dreaming gate. */
+export interface DbOwnerDreamingEpisodicBacklog {
+	readonly agentId: string;
+	/** Maximum number of source records to inspect before treating the backlog as reached. */
+	readonly maxSources: number;
 }
 
 export interface DbOwnerJob {

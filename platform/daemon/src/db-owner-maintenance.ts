@@ -17,6 +17,7 @@ import {
 } from "./db-owner-client";
 import { createDbOwnerClient } from "./db-owner-client";
 import type {
+	DbOwnerDreamingEpisodicBacklog,
 	DbOwnerDreamingHygieneAttention,
 	DbOwnerDreamingSurprisalAttention,
 	DbOwnerParameter,
@@ -231,6 +232,19 @@ export async function ownerDreamingSurprisalAttention(
 	);
 }
 
+export async function ownerDreamingEpisodicBacklog(
+	owner: DbOwnerClient,
+	input: DbOwnerDreamingEpisodicBacklog,
+	options: DbOwnerMaintenanceOptions = {},
+): Promise<number> {
+	return await runOwnerMaintenanceWithRetry<number>(
+		owner,
+		{ kind: "dreaming_episodic_backlog", input },
+		"maintenance.dreaming.episodic-backlog",
+		{ ...options, estimatedWorkUnits: options.estimatedWorkUnits ?? input.maxSources * 10 },
+	);
+}
+
 const DEFAULT_FTS_CHUNK_SIZE = 100;
 const MAX_FTS_CHUNK_SIZE = 500;
 const DEFAULT_FTS_DEADLINE_MS = 10_000;
@@ -311,6 +325,10 @@ export interface DbOwnerMaintenance {
 		input: DbOwnerDreamingSurprisalAttention,
 		options?: DbOwnerMaintenanceOptions,
 	) => Promise<DreamingSurprisalSelection | null>;
+	readonly dreamingEpisodicBacklog: (
+		input: DbOwnerDreamingEpisodicBacklog,
+		options?: DbOwnerMaintenanceOptions,
+	) => Promise<number>;
 	readonly health: () => DbOwnerHealth;
 	readonly close: () => Promise<void>;
 }
@@ -764,6 +782,10 @@ export function createDbOwnerMaintenance(options: CreateDbOwnerMaintenanceOption
 		input: DbOwnerDreamingSurprisalAttention,
 		maintenanceOptions?: DbOwnerMaintenanceOptions,
 	): Promise<DreamingSurprisalSelection | null> => ownerDreamingSurprisalAttention(owner, input, maintenanceOptions);
+	const dreamingEpisodicBacklog = (
+		input: DbOwnerDreamingEpisodicBacklog,
+		maintenanceOptions?: DbOwnerMaintenanceOptions,
+	): Promise<number> => ownerDreamingEpisodicBacklog(owner, input, maintenanceOptions);
 	const backfill = (backfillOptions?: FtsBackfillOptions): Promise<FtsBackfillResult> =>
 		backfillFts(owner, backfillOptions);
 	const rebuild = async (rebuildOptions: FtsBackfillOptions = {}): Promise<FtsBackfillResult> => {
@@ -847,6 +869,7 @@ export function createDbOwnerMaintenance(options: CreateDbOwnerMaintenanceOption
 		queueIsHealthy,
 		dreamingHygieneAttention,
 		dreamingSurprisalAttention,
+		dreamingEpisodicBacklog,
 		health: () => owner.health(),
 		close: async () => {
 			if (ownsOwner) await owner.close();

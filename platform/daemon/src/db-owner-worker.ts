@@ -428,6 +428,16 @@ export function runDbOwnerWorker(): void {
 		}
 	}
 
+	async function executeDreamingEpisodicBacklog(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "dreaming_episodic_backlog" }>,
+	): Promise<number> {
+		// Keep source selection, evidence rendering, and exact token counting out
+		// of the daemon process. The helper enforces the finite source cap before
+		// it materializes any result for the parent.
+		const { getDreamingEpisodicTokenBacklogInDb } = await import("./pipeline/dreaming");
+		return await getDreamingEpisodicTokenBacklogInDb(db as never, request.input.agentId, request.input.maxSources);
+	}
+
 	function executeSourceArtifactUpsert(
 		request: Extract<
 			DbOwnerJob["request"],
@@ -858,6 +868,7 @@ export function runDbOwnerWorker(): void {
 		if (job.request.kind === "dreaming_hygiene_attention") return executeDreamingHygieneAttention(job.request, context);
 		if (job.request.kind === "dreaming_surprisal_attention")
 			return executeDreamingSurprisalAttention(job.request, context);
+		if (job.request.kind === "dreaming_episodic_backlog") return await executeDreamingEpisodicBacklog(job.request);
 		if (job.request.kind === "source_artifact_upsert" || job.request.kind === "source_artifact_upsert_batch")
 			return executeSourceArtifactUpsert(job.request, context);
 		if (job.request.kind === "vector_search") return await executeVectorSearch(job.request.payload);
