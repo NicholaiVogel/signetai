@@ -100,9 +100,12 @@ function profileForStorage(cfg: EmbeddingConfig): PersistedEmbeddingProfile {
 	};
 }
 
-export function resolveActiveEmbeddingConfig(db: ReadDb, configured: EmbeddingConfig): EmbeddingConfig {
+export function resolveActiveEmbeddingConfigFromState(
+	configured: EmbeddingConfig,
+	state: EmbeddingIndexState | null,
+): EmbeddingConfig {
 	if (configured.profile) return configured;
-	const active = readEmbeddingIndexState(db)?.active;
+	const active = state?.active;
 	if (!active) return configured;
 	return {
 		...configured,
@@ -114,6 +117,10 @@ export function resolveActiveEmbeddingConfig(db: ReadDb, configured: EmbeddingCo
 		base_url: configured.base_url,
 		...(active.profile ? { profile: active.profile } : { profile: undefined }),
 	};
+}
+
+export function resolveActiveEmbeddingConfig(db: ReadDb, configured: EmbeddingConfig): EmbeddingConfig {
+	return resolveActiveEmbeddingConfigFromState(configured, readEmbeddingIndexState(db));
 }
 
 /** True only while `cfg` still describes the generation that owns active recall. */
