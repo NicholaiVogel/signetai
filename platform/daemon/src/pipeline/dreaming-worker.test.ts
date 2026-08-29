@@ -237,8 +237,10 @@ describe("dreaming worker agent scope", () => {
 		}
 	});
 
-	it("routes the scheduled hygiene scan through the maintenance owner", async () => {
+	it("routes the scheduled hygiene scan and backlog probe through the maintenance owner", async () => {
 		let hygieneCalls = 0;
+		let backlogCalls = 0;
+		let backlogMaxSources = 0;
 		const ownerMaintenance = {
 			queueIsHealthy: async () => true,
 			dreamingHygieneAttention: async () => {
@@ -246,14 +248,21 @@ describe("dreaming worker agent scope", () => {
 				return 0;
 			},
 			dreamingSurprisalAttention: async () => null,
+			dreamingEpisodicBacklog: async (input: { readonly agentId: string; readonly maxSources: number }) => {
+				backlogCalls += 1;
+				backlogMaxSources = input.maxSources;
+				return 0;
+			},
 		} as unknown as DbOwnerMaintenance;
 		const worker = startDreamingWorker(accessor, defaultCfg(), agentsDir, "default", {
 			checkIntervalMs: 10,
 			ownerMaintenance,
 		});
 		try {
-			await waitFor(() => hygieneCalls === 1, 2_000);
+			await waitFor(() => hygieneCalls === 1 && backlogCalls === 1, 2_000);
 			expect(hygieneCalls).toBe(1);
+			expect(backlogCalls).toBe(1);
+			expect(backlogMaxSources).toBe(50);
 		} finally {
 			worker.stop();
 		}

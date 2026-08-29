@@ -1525,7 +1525,9 @@ export async function runDreamingAgentPass(
 		]);
 		const backlogByScope = new Map(
 			await Promise.all(
-				scopes.map(async (scope) => [scope, await getDreamingEpisodicTokenBacklog(accessor, scope)] as const),
+				scopes.map(
+					async (scope) => [scope, await getDreamingEpisodicTokenBacklog(accessor, scope, ownerMaintenance)] as const,
+				),
 			),
 		);
 		const totalBacklog = [...backlogByScope.values()].reduce((total, backlog) => total + backlog, 0);
@@ -1975,6 +1977,7 @@ function writeDreamingTranscriptManifestInTx(
 // on the next forced or post-cooldown pass (#1059).
 export const DREAMING_FAILURE_HALT_THRESHOLD = 5;
 export const DREAMING_HALT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+export const DREAMING_SCHEDULE_BACKLOG_MAX_SOURCES = 50;
 const dreamingBacklogTokenCache = new DreamingBacklogTokenCache();
 
 export function isDreamingScopeHalted(state: DreamingState, nowMs = Date.now()): boolean {
@@ -1992,10 +1995,23 @@ export async function isDreamingHaltActive(
 	return isDreamingScopeHalted(await getDreamingState(accessor, agentId), nowMs);
 }
 
+interface DreamingBacklogRead {
+	readonly entries: readonly DreamingBacklogTokenEntry[];
+	readonly truncated: boolean;
+}
+
+function boundedDreamingBacklogSourceLimit(maxSources: number | undefined): number | null {
+	if (maxSources === undefined) return null;
+	if (!Number.isFinite(maxSources)) throw new RangeError("Dreaming backlog source limit must be finite");
+	return Math.max(1, Math.min(Math.floor(maxSources), DREAMING_SCHEDULE_BACKLOG_MAX_SOURCES));
+}
+
 function readDreamingEpisodicTokenBacklogEntriesInDb(
 	db: ReadDb,
 	agentId: string,
-): readonly DreamingBacklogTokenEntry[] {
+	maxSources?: number,
+): DreamingBacklogRead {
+	const sourceLimit = boundedDreamingBacklogSourceLimit(maxSources);
 	const hasConsumption =
 		db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dreaming_evidence_consumption'").get() !=
 		null;
@@ -2004,23 +2020,24 @@ function readDreamingEpisodicTokenBacklogEntriesInDb(
 			agentId,
 			query: "",
 			excludeDelivered: true,
-			// The trigger metric must include every pending revision. The ordinary
-			// search API is page-bounded, but backlog accounting cannot use a
-			// newest-50 slice without suppressing automatic Dreaming (#1559).
-			limit: null,
+			// Scheduled probes use the finite page; status and manual paths keep
+			// the exact aggregate by omitting maxSources.
+			limit: sourceLimit,
 		});
-		return queued.flatMap((source) => {
-			const remaining = renderDreamingEvidence(source).slice(deliveredOffsetForSource(db, agentId, source));
-			return remaining.length === 0
-				? []
-				: [{ key: `${source.kind}:${source.id}:${deliveredOffsetForSource(db, agentId, source)}`, text: remaining }];
-		});
+		return {
+			entries: queued.flatMap((source) => {
+				const offset = deliveredOffsetForSource(db, agentId, source);
+				const remaining = renderDreamingEvidence(source).slice(offset);
+				return remaining.length === 0 ? [] : [{ key: `${source.kind}:${source.id}:${offset}`, text: remaining }];
+			}),
+			truncated: sourceLimit !== null && queued.length >= sourceLimit,
+		};
 	}
 	const state = readDreamingState(db, agentId);
 	const queued = readRecentEpisodicSources(
 		db,
 		agentId,
-		500,
+		sourceLimit ?? 500,
 		DREAMING_EVIDENCE_KINDS,
 		state.evidenceCursor ? null : state.lastPassAt,
 		"newest",
@@ -2034,28 +2051,52 @@ function readDreamingEpisodicTokenBacklogEntriesInDb(
 		key: `${source.kind}:${source.id}:0`,
 		text: renderDreamingEvidence(source),
 	}));
-	if (resumed === null) return entries;
+	if (resumed === null) {
+		return { entries, truncated: sourceLimit !== null && queued.length >= sourceLimit };
+	}
 	const remaining = renderDreamingEvidence(resumed).slice(state.evidenceCursor?.fragmentOffset);
-	return remaining.length === 0
-		? entries
-		: [
-				...entries,
-				{ key: `${resumed.kind}:${resumed.id}:${state.evidenceCursor?.fragmentOffset ?? 0}`, text: remaining },
-			];
+	const includeResumed = sourceLimit === null || queued.length < sourceLimit;
+	return {
+		entries:
+			remaining.length === 0 || !includeResumed
+				? entries
+				: [
+						...entries,
+						{ key: `${resumed.kind}:${resumed.id}:${state.evidenceCursor?.fragmentOffset ?? 0}`, text: remaining },
+					],
+		truncated: sourceLimit !== null && queued.length >= sourceLimit,
+	};
 }
 
 /**
  * Refresh the exact BPE backlog count without encoding on the daemon thread.
- * Database reads and evidence rendering stay bounded on the caller; the
- * worker owns all cl100k encoding and memoizes unchanged source fragments.
+ * Scheduled probes keep database reads and evidence rendering to a finite
+ * source page; status and manual paths retain the exact aggregate by omitting
+ * the cap. The token worker owns all cl100k encoding and memoizes unchanged
+ * source fragments.
+ * A scheduled probe returns Number.MAX_SAFE_INTEGER when its finite page is
+ * full, preserving the threshold gate without scanning the remaining backlog.
  */
-export function getDreamingEpisodicTokenBacklogInDb(db: ReadDb, agentId: string): Promise<number> {
-	return dreamingBacklogTokenCache.refresh(agentId, readDreamingEpisodicTokenBacklogEntriesInDb(db, agentId));
+export function getDreamingEpisodicTokenBacklogInDb(db: ReadDb, agentId: string, maxSources?: number): Promise<number> {
+	const read = readDreamingEpisodicTokenBacklogEntriesInDb(db, agentId, maxSources);
+	return dreamingBacklogTokenCache
+		.refresh(agentId, read.entries)
+		.then((count) => (read.truncated ? Number.MAX_SAFE_INTEGER : count));
 }
 
-export async function getDreamingEpisodicTokenBacklog(accessor: DbAccessor, agentId: string): Promise<number> {
-	const entries = await readDb(accessor, (db) => readDreamingEpisodicTokenBacklogEntriesInDb(db, agentId));
-	return dreamingBacklogTokenCache.refresh(agentId, entries);
+export async function getDreamingEpisodicTokenBacklog(
+	accessor: DbAccessor,
+	agentId: string,
+	ownerMaintenance?: DbOwnerMaintenance,
+): Promise<number> {
+	if (ownerMaintenance) {
+		return await ownerMaintenance.dreamingEpisodicBacklog(
+			{ agentId, maxSources: DREAMING_SCHEDULE_BACKLOG_MAX_SOURCES },
+			{ deadlineMs: 60_000, estimatedWorkUnits: DREAMING_SCHEDULE_BACKLOG_MAX_SOURCES * 10 },
+		);
+	}
+	const read = await readDb(accessor, (db) => readDreamingEpisodicTokenBacklogEntriesInDb(db, agentId));
+	return await dreamingBacklogTokenCache.refresh(agentId, read.entries);
 }
 
 /** Read the last worker-computed value for synchronous dashboard metadata. */

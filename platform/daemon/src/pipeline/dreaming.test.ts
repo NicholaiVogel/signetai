@@ -16,6 +16,7 @@ import {
 	dreamingEarlyExitSummary,
 	enqueueDreamingHygieneAttention,
 	getDreamingEpisodicTokenBacklog,
+	getDreamingEpisodicTokenBacklogInDb,
 	getDreamingEvidenceExclusions,
 	getDreamingPasses,
 	getDreamingState,
@@ -1101,6 +1102,20 @@ describe("Dreaming", () => {
 		expect(
 			await shouldTriggerDreaming(accessor, defaultCfg({ tokenThreshold: expected, backfillOnFirstRun: false }), AGENT),
 		).toBe(true);
+	});
+
+	it("bounds the scheduled episodic backlog probe without suppressing a large backlog", async () => {
+		for (let index = 0; index < 51; index += 1) {
+			seedArtifact(
+				db,
+				`imports/bounded-${index}.md`,
+				`pending bounded source ${index}`,
+				`bounded-${index}`,
+				"2026-08-01T00:00:00.000Z",
+			);
+		}
+
+		expect(await getDreamingEpisodicTokenBacklogInDb(db as unknown as ReadDb, AGENT, 50)).toBe(Number.MAX_SAFE_INTEGER);
 	});
 
 	it("runs a pass when attention is pending and leaves it for the agent to consume", async () => {

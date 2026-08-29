@@ -206,12 +206,13 @@ export async function selectDreamingCheckMode(
 	accessor: DbAccessor,
 	scopes: readonly string[],
 	lastScheduled: DreamingPassFocus | null,
+	ownerMaintenance?: DbOwnerMaintenance,
 ): Promise<DreamingMode> {
 	const hasPendingHygieneAttention = (
 		await Promise.all(
 			scopes.map((scope) =>
 				accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, ["hygiene"]), {
-					siteToken: "pipeline/dreaming-worker.ts:213",
+					siteToken: "pipeline/dreaming-worker.ts:214",
 					operation: "dreaming.worker.hygiene-attention",
 				}),
 			),
@@ -221,13 +222,15 @@ export async function selectDreamingCheckMode(
 		await Promise.all(
 			scopes.map((scope) =>
 				accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS), {
-					siteToken: "pipeline/dreaming-worker.ts:223",
+					siteToken: "pipeline/dreaming-worker.ts:224",
 					operation: "dreaming.worker.content-attention",
 				}),
 			),
 		)
 	).some(Boolean);
-	const backlogs = await Promise.all(scopes.map((scope) => getDreamingEpisodicTokenBacklog(accessor, scope)));
+	const backlogs = await Promise.all(
+		scopes.map((scope) => getDreamingEpisodicTokenBacklog(accessor, scope, ownerMaintenance)),
+	);
 	const hasBacklog = backlogs.some((backlog) => backlog > 0);
 	return selectDreamingPassMode(lastScheduled, hasPendingHygieneAttention, hasBacklog, hasPendingContentAttention);
 }
@@ -387,7 +390,7 @@ export function startDreamingWorker(
 			try {
 				await enqueueDreamingHygieneAttention(accessor, scopeId, undefined, caps, options.ownerMaintenance);
 				await enqueueDreamingSurprisalAttention(accessor, scopeId, cfg, options.ownerMaintenance);
-				const episodicTokens = await getDreamingEpisodicTokenBacklog(accessor, scopeId);
+				const episodicTokens = await getDreamingEpisodicTokenBacklog(accessor, scopeId, options.ownerMaintenance);
 				if (!(await shouldTriggerDreaming(accessor, cfg, scopeId, Date.now(), episodicTokens))) continue;
 				triggered = true;
 				logger.info("dreaming-worker", "Episodic evidence threshold reached, starting dreaming pass", {
@@ -410,7 +413,7 @@ export function startDreamingWorker(
 		// content a guaranteed turn: alternate the runbook per check cycle
 		// when both kinds of work are pending; run the only-pending kind
 		// directly otherwise.
-		const mode = await selectDreamingCheckMode(accessor, scopes, nextScheduledFocus);
+		const mode = await selectDreamingCheckMode(accessor, scopes, nextScheduledFocus, options.ownerMaintenance);
 		nextScheduledFocus = dreamingFocusOfMode(mode) ?? nextScheduledFocus;
 		try {
 			await runPass(defaultAgentId, mode, undefined, scopes);
