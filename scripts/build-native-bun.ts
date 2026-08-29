@@ -414,7 +414,10 @@ if (process.env.SIGNET_INSPECTOR_PROXY_PUBLIC || process.env.SIGNET_INSPECTOR_PR
 	try {
 		const handle = client.submit<readonly { readonly value: number }[]>(
 			{ kind: "query", statement: { sql: "SELECT 1 AS value", result: "all" } },
-			{ operation: "native.client-smoke", lane: "read", deadlineMs: 5_000 },
+			// The compiled client launches a nested copy of this binary as its
+			// owner. Allow slow macOS Intel runners to finish startup before the
+			// query deadline expires.
+			{ operation: "native.client-smoke", lane: "read", deadlineMs: 30_000 },
 		);
 		const result = await handle.result;
 		process.stdout.write(\`\${JSON.stringify({ type: "client-result", result })}\\n\`);

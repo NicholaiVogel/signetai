@@ -14,6 +14,10 @@ const tempDirs: string[] = [];
 const children: ChildProcessWithoutNullStreams[] = [];
 const CHILD_KILL_REAP_MS = 2_000;
 const CHILD_TERM_GRACE_MS = 2_000;
+// A compiled client smoke starts a second copy of the native binary. Keep the
+// protocol and job budgets aligned so slow macOS Intel runners do not expire
+// the query while that nested owner is still loading its embedded runtime.
+const DB_OWNER_SMOKE_TIMEOUT_MS = 30_000;
 
 interface StoppableChild {
 	readonly exitCode: number | null;
@@ -89,7 +93,7 @@ async function waitForHealth(origin: string, child: ChildProcessWithoutNullStrea
 async function waitForJsonEvent(
 	output: () => string,
 	predicate: (event: Record<string, unknown>) => boolean,
-	timeoutMs = 5_000,
+	timeoutMs = DB_OWNER_SMOKE_TIMEOUT_MS,
 ): Promise<Record<string, unknown>> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
@@ -280,7 +284,7 @@ describe("compiled native embedding runtime", () => {
 						operation: "smoke.read",
 						lane: "read",
 						enqueuedAt: now,
-						deadlineAt: now + 5_000,
+						deadlineAt: now + DB_OWNER_SMOKE_TIMEOUT_MS,
 						estimatedWorkUnits: 1,
 						cancellation: "pending",
 						request: { kind: "query", statement: { sql: "SELECT 1 AS value", result: "all" } },
