@@ -741,6 +741,9 @@ export function renderReport(baselineSites: readonly AuditSite[], legacyDbAccess
 		baselineSites.length - (counts.get("withReadDb") ?? 0) - (counts.get("withWriteTx") ?? 0) - asyncDbCount;
 	const executionHomeSites = classifyExecutionHomes(baselineSites);
 	const executionHome = countExecutionHomes(executionHomeSites);
+	const asyncDbSites = executionHomeSites.filter((site) => !LEGACY_DB_APIS.includes(site.api as LegacyDbApi));
+	const asyncDbOnParent = asyncDbSites.filter((site) => site.executionHome === "on-parent").length;
+	const asyncDbOffParent = asyncDbSites.length - asyncDbOnParent;
 	const executionHomeList = (home: ExecutionHome): string => {
 		const sites = executionHomeSites.filter((site) => site.executionHome === home);
 		return sites.length === 0
@@ -756,13 +759,15 @@ This report is generated from the deterministic migration ledger in \`scripts/ev
 - Exact ledger inventory: ${baselineSites.length} sites
 - Synchronous \`withWriteTx()\` sites: ${counts.get("withWriteTx") ?? 0}
 - Synchronous \`withReadDb()\` sites: ${counts.get("withReadDb") ?? 0}
-- Async-named parent DB sites: ${asyncDbCount}
+- Async-named DB sites: ${asyncDbCount}
+- Async-named ON-PARENT DB sites: ${asyncDbOnParent}
+- Async-named OFF-PARENT DB sites: ${asyncDbOffParent}
 - Synchronous filesystem/process sites: ${filesystemProcessCount}
 - Compile-visible legacy DB sites remaining: ${legacyDbAccess.total}
   - \`withWriteTx\`: ${legacyDbAccess.withWriteTx}
   - \`withReadDb\`: ${legacyDbAccess.withReadDb}
 
-The ${baselineSites.length.toLocaleString("en-US")}-site inventory excludes test, benchmark, generated, and \`__tests__\` fixtures and includes every synchronous filesystem, process, and database call, including async-named parent DB callbacks. The ${counts.get("withWriteTx") ?? 0} synchronous writes, ${counts.get("withReadDb") ?? 0} synchronous reads, and ${asyncDbCount} async-named parent DB sites are the complete database-call inventory; ${legacyDbAccess.total} compatibility DB operations remain transitional callers for the later migration phase. Those compatibility calls are marked with \`@ts-expect-error LEGACY_SYNC_DB_ACCESS\`, so the compiler reports every remaining site without forcing this phase to migrate them.
+The ${baselineSites.length.toLocaleString("en-US")}-site inventory excludes test, benchmark, generated, and \`__tests__\` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The ${counts.get("withWriteTx") ?? 0} synchronous writes, ${counts.get("withReadDb") ?? 0} synchronous reads, and ${asyncDbCount} async-named DB sites are the complete database-call inventory; ${legacyDbAccess.total} compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the ${asyncDbOnParent} ON-PARENT callbacks from the ${asyncDbOffParent} OFF-PARENT callbacks. Those compatibility calls are marked with \`@ts-expect-error LEGACY_SYNC_DB_ACCESS\`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## Execution-home inventory
 
