@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-29
-- Bug fixes: refresh event-loop source baseline; correct DB accessor audit site tokens; route scheduled Dreaming scans to owner.
+- Bug fixes: extend native owner smoke startup budget; refresh event-loop source baseline; correct DB accessor audit site tokens; route scheduled Dreaming scans to owner.
 
 ### 2026-08-28
 - Bug fixes: escape dreaming smoke template interpolation (build break); embed GraphIQ installer in native runtime + npm files; route predictive context DB scans through owner; restore scoped focal query fallback; owner-route W5 contention paths; owner-route structural feature reads; owner-route traversal candidate hydration.
@@ -30,6 +30,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: trim async DB attribution overhead; endpoint-neutral fingerprint + reachable building-state recovery + owner-bound resumable embedding migration; recover endpoint-only embedding builds; make embedding migration owner-bound and resumable; amputate parent-side native-memory indexing behind killable boundary with transactional resumable frontier; preserve provider retry frontiers; close native source frontier crash windows; type native embedding protocol; isolate native source embeddings; persist native source traversal frontier; move native memory indexing behind owner boundary; remove secondary parent sync paths + recovery child exit-0 protocol; remove secondary sync paths; parent sync attribution with in-flight latch naming + telemetry conversion; preserve in-flight sync DB attribution; lazily capture sync DB attribution; refresh event-loop source ledger; refresh sync access ledger for telemetry fallback; satisfy attribution boundary checks; move startup telemetry write behind owner; attribute transitional sync db stalls.
 
 ## Release Ledger
+
+## [0.214.26] - 2026-08-29
+
+Release summary: 1 bug fix.
+Tag range: `v0.214.25..v0.214.26`.
+
+### Bug Fixes
+
+- **ci**: extend native owner smoke startup budget
 
 ## [0.214.25] - 2026-08-29
 
