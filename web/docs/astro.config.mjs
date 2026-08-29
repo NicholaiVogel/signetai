@@ -16,6 +16,9 @@ export default defineConfig({
 			description: "Install, use, operate, and extend Signet.",
 			favicon: "/favicon.svg",
 			customCss: ["./src/styles/custom.css"],
+			components: {
+				Head: "./src/components/Head.astro",
+			},
 			lastUpdated: true,
 			editLink: {
 				baseUrl: "https://github.com/Signet-AI/signetai/edit/main/web/docs/",
