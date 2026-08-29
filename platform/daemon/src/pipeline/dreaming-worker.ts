@@ -212,7 +212,7 @@ export async function selectDreamingCheckMode(
 		await Promise.all(
 			scopes.map((scope) =>
 				accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, ["hygiene"]), {
-					siteToken: "pipeline/dreaming-worker.ts:213",
+					siteToken: "pipeline/dreaming-worker.ts:214",
 					operation: "dreaming.worker.hygiene-attention",
 				}),
 			),
@@ -222,7 +222,7 @@ export async function selectDreamingCheckMode(
 		await Promise.all(
 			scopes.map((scope) =>
 				accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS), {
-					siteToken: "pipeline/dreaming-worker.ts:223",
+					siteToken: "pipeline/dreaming-worker.ts:224",
 					operation: "dreaming.worker.content-attention",
 				}),
 			),
