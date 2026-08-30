@@ -7,7 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-30
-- Bug fixes: route extraction retirement to owner; route startup DB work to owner.
+- Bug fixes: route telemetry identity through owner; route extraction retirement to owner; route startup DB work to owner.
+- Refactoring: route wave 2 reads and telemetry through owner.
 
 ### 2026-08-29
 - Bug fixes: distinguish async DB execution homes; classify database execution homes; bound scheduled Dreaming backlog probes; extend native owner smoke startup budget; refresh event-loop source baseline; correct DB accessor audit site tokens; route scheduled Dreaming scans to owner.
@@ -30,6 +31,19 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: let commands exit cleanly.
 
 ## Release Ledger
+
+## [0.214.30] - 2026-08-30
+
+Release summary: 1 bug fix and 1 refactor.
+Tag range: `v0.214.29..v0.214.30`.
+
+### Bug Fixes
+
+- **daemon**: route telemetry identity through owner
+
+### Refactoring
+
+- **daemon**: route wave 2 reads and telemetry through owner
 
 ## [0.214.29] - 2026-08-30
 
