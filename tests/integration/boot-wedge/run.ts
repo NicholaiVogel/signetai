@@ -9,7 +9,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { cpus, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -27,6 +27,7 @@ import {
 
 const repoRoot = resolve(import.meta.dir, "..", "..", "..");
 const daemonScript = join(repoRoot, "platform/daemon/src/daemon.ts");
+const CPU_COUNT = cpus().length;
 const outputDir = process.argv.includes("--out")
 	? resolve(process.argv[process.argv.indexOf("--out") + 1] ?? "boot-wedge-artifacts")
 	: null;
@@ -35,11 +36,19 @@ const outputPath = join(outputDir ?? tmpdir(), "boot-wedge.json");
 interface CpuSnapshot {
 	readonly processTicks: number;
 	readonly totalTicks: number;
+	readonly processCount: number;
+}
+
+interface ProcEntry {
+	readonly pid: number;
+	readonly parentPid: number;
+	readonly processTicks: number;
 }
 
 interface CpuSample {
 	readonly at: number;
 	readonly percent: number;
+	readonly processCount: number;
 }
 
 interface LiveMeasurement {
@@ -97,8 +106,7 @@ function reservePort(): Promise<number> {
 	});
 }
 
-function readCpuSnapshot(pid: number): CpuSnapshot | null {
-	if (process.platform !== "linux") return null;
+function readProcEntry(pid: number): ProcEntry | null {
 	try {
 		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
 		const closingParen = stat.lastIndexOf(")");
@@ -107,16 +115,67 @@ function readCpuSnapshot(pid: number): CpuSnapshot | null {
 			.slice(closingParen + 2)
 			.trim()
 			.split(/\s+/);
+		const parentPid = Number(fields[1]);
 		const userTicks = Number(fields[11]);
 		const systemTicks = Number(fields[12]);
+		if (![parentPid, userTicks, systemTicks].every(Number.isFinite)) return null;
+		return { pid, parentPid, processTicks: userTicks + systemTicks };
+	} catch {
+		return null;
+	}
+}
+
+function readProcEntries(): ProcEntry[] {
+	if (process.platform !== "linux") return [];
+	try {
+		return readdirSync("/proc")
+			.filter((name) => /^\d+$/.test(name))
+			.map((name) => readProcEntry(Number(name)))
+			.filter((entry): entry is ProcEntry => entry !== null);
+	} catch {
+		return [];
+	}
+}
+
+function processTree(rootPid: number, entries: readonly ProcEntry[]): Set<number> {
+	const childrenByParent = new Map<number, number[]>();
+	for (const entry of entries) {
+		const children = childrenByParent.get(entry.parentPid) ?? [];
+		children.push(entry.pid);
+		childrenByParent.set(entry.parentPid, children);
+	}
+	const tree = new Set<number>([rootPid]);
+	const pending = [rootPid];
+	while (pending.length > 0) {
+		const parentPid = pending.pop();
+		if (parentPid === undefined) continue;
+		for (const childPid of childrenByParent.get(parentPid) ?? []) {
+			if (tree.has(childPid)) continue;
+			tree.add(childPid);
+			pending.push(childPid);
+		}
+	}
+	return tree;
+}
+
+function readCpuSnapshot(pid: number): CpuSnapshot | null {
+	if (process.platform !== "linux") return null;
+	const entries = readProcEntries();
+	const root = entries.find((entry) => entry.pid === pid);
+	if (!root) return null;
+	const tree = processTree(pid, entries);
+	const processTicks = entries
+		.filter((entry) => tree.has(entry.pid))
+		.reduce((sum, entry) => sum + entry.processTicks, 0);
+	try {
 		const cpuLine = readFileSync("/proc/stat", "utf8").split("\n", 1)[0] ?? "";
 		const totalTicks = cpuLine
 			.trim()
 			.split(/\s+/)
 			.slice(1)
 			.reduce((sum, value) => sum + Number(value), 0);
-		if (![userTicks, systemTicks, totalTicks].every(Number.isFinite)) return null;
-		return { processTicks: userTicks + systemTicks, totalTicks };
+		if (!Number.isFinite(totalTicks)) return null;
+		return { processTicks, totalTicks, processCount: tree.size };
 	} catch {
 		return null;
 	}
@@ -126,11 +185,29 @@ function cpuPercent(previous: CpuSnapshot, current: CpuSnapshot): number | null 
 	const processDelta = current.processTicks - previous.processTicks;
 	const totalDelta = current.totalTicks - previous.totalTicks;
 	if (processDelta < 0 || totalDelta <= 0) return null;
-	return (processDelta / totalDelta) * cpus().length * 100;
+	return (processDelta / totalDelta) * CPU_COUNT * 100;
 }
 
 function childIsAlive(child: ChildProcess): boolean {
 	return child.exitCode === null && child.signalCode === null;
+}
+
+async function isLiveResponse(response: Response, expectedPid: number): Promise<boolean> {
+	const body = await response.text();
+	if (response.status !== 200) return false;
+	try {
+		const parsed: unknown = JSON.parse(body);
+		return (
+			typeof parsed === "object" &&
+			parsed !== null &&
+			"pid" in parsed &&
+			parsed.pid === expectedPid &&
+			"status" in parsed &&
+			parsed.status === "healthy"
+		);
+	} catch {
+		return false;
+	}
 }
 
 async function waitForLive(origin: string, child: ChildProcess): Promise<number> {
@@ -146,7 +223,7 @@ async function waitForLive(origin: string, child: ChildProcess): Promise<number>
 			const response = await fetch(`${origin}/health/live`, {
 				signal: AbortSignal.timeout(LIVE_REQUEST_TIMEOUT_MS),
 			});
-			if (response.status === 200) return Date.now() - startedAt;
+			if (await isLiveResponse(response, child.pid)) return Date.now() - startedAt;
 		} catch {
 			// Startup is expected to refuse connections until the listener binds.
 		}
@@ -156,10 +233,33 @@ async function waitForLive(origin: string, child: ChildProcess): Promise<number>
 }
 
 async function stopChild(child: ChildProcess | null): Promise<void> {
-	if (!child || !childIsAlive(child)) return;
+	if (!child) return;
+	const descendants =
+		process.platform === "linux"
+			? [...processTree(child.pid, readProcEntries())].filter((pid) => pid !== child.pid).reverse()
+			: [];
+	if (!childIsAlive(child)) {
+		for (const pid of descendants) {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {}
+		}
+		return;
+	}
+	for (const pid of descendants) {
+		try {
+			process.kill(pid, "SIGTERM");
+		} catch {}
+	}
 	child.kill("SIGTERM");
 	await new Promise<void>((resolveStop) => {
 		const timer = setTimeout(() => {
+			for (const pid of descendants) {
+				if (!existsSync(`/proc/${pid}`)) continue;
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {}
+			}
 			child.kill("SIGKILL");
 			resolveStop();
 		}, 5_000);
@@ -254,7 +354,7 @@ async function run(): Promise<BootWedgeReport> {
 				const response = await fetch(`${origin}/health/live`, {
 					signal: AbortSignal.timeout(LIVE_REQUEST_TIMEOUT_MS),
 				});
-				status = response.status;
+				status = (await isLiveResponse(response, child.pid)) ? 200 : 0;
 			} catch {
 				status = 0;
 			}
@@ -267,7 +367,7 @@ async function run(): Promise<BootWedgeReport> {
 				const currentCpu = readCpuSnapshot(child.pid);
 				if (previousCpu && currentCpu) {
 					const percent = cpuPercent(previousCpu, currentCpu);
-					if (percent !== null) cpuSamples.push({ at: Date.now(), percent });
+					if (percent !== null) cpuSamples.push({ at: Date.now(), percent, processCount: currentCpu.processCount });
 				}
 				if (currentCpu) previousCpu = currentCpu;
 				previousCpuAt = now;

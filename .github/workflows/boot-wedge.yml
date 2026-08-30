@@ -7,22 +7,32 @@ on:
   pull_request:
     paths:
       - "platform/daemon/src/**"
+      - "platform/daemon/build.ts"
+      - "platform/daemon/tsconfig.json"
       - "platform/daemon/package.json"
       - "platform/core/src/**"
+      - "platform/core/tsconfig.json"
       - "platform/core/package.json"
+      - "scripts/**"
       - "package.json"
       - "bun.lock"
+      - "bunfig.toml"
       - "tests/integration/boot-wedge/**"
       - ".github/workflows/boot-wedge.yml"
   push:
     branches: [main]
     paths:
       - "platform/daemon/src/**"
+      - "platform/daemon/build.ts"
+      - "platform/daemon/tsconfig.json"
       - "platform/daemon/package.json"
       - "platform/core/src/**"
+      - "platform/core/tsconfig.json"
       - "platform/core/package.json"
+      - "scripts/**"
       - "package.json"
       - "bun.lock"
+      - "bunfig.toml"
       - "tests/integration/boot-wedge/**"
       - ".github/workflows/boot-wedge.yml"
 

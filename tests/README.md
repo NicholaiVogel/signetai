@@ -110,9 +110,10 @@ nightly.
 `tests/integration/boot-wedge/run.ts` is the short L1 safety check for the
 source-run daemon boundary. It uses a fresh isolated workspace, waits for the
 real `/health/live` endpoint, then samples liveness and Linux `/proc` CPU usage
-for 10 seconds. The gate fails if startup takes more than 60 seconds, any
+for 30 seconds. The gate fails if startup takes more than 60 seconds, any
 liveness sample fails or exceeds 2 seconds, CPU sampling produces fewer than
-five samples, or the daemon reaches 95% of one CPU during the idle observation.
+five samples, or the daemon process tree reaches 95% of one CPU during the idle
+observation.
 
 ```bash
 bun tests/integration/boot-wedge/run.ts
