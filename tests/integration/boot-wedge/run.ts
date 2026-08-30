@@ -9,7 +9,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { cpus, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -28,6 +28,8 @@ import {
 const repoRoot = resolve(import.meta.dir, "..", "..", "..");
 const daemonScript = join(repoRoot, "platform/daemon/src/daemon.ts");
 const CPU_COUNT = cpus().length;
+const STOP_GRACE_MS = 5_000;
+const STOP_POLL_MS = 50;
 const outputDir = process.argv.includes("--out")
 	? resolve(process.argv[process.argv.indexOf("--out") + 1] ?? "boot-wedge-artifacts")
 	: null;
@@ -192,25 +194,23 @@ function childIsAlive(child: ChildProcess): boolean {
 	return child.exitCode === null && child.signalCode === null;
 }
 
-async function isLiveResponse(response: Response, expectedPid: number): Promise<boolean> {
-	const body = await response.text();
-	if (response.status !== 200) return false;
+export function isLivePayload(body: string, expectedPid: number, expectedPort: number): boolean {
 	try {
 		const parsed: unknown = JSON.parse(body);
-		return (
-			typeof parsed === "object" &&
-			parsed !== null &&
-			"pid" in parsed &&
-			parsed.pid === expectedPid &&
-			"status" in parsed &&
-			parsed.status === "healthy"
-		);
+		if (typeof parsed !== "object" || parsed === null) return false;
+		const record = parsed as Record<string, unknown>;
+		return record.pid === expectedPid && record.port === expectedPort && record.status === "healthy";
 	} catch {
 		return false;
 	}
 }
 
-async function waitForLive(origin: string, child: ChildProcess): Promise<number> {
+async function isLiveResponse(response: Response, expectedPid: number, expectedPort: number): Promise<boolean> {
+	if (response.status !== 200) return false;
+	return isLivePayload(await response.text(), expectedPid, expectedPort);
+}
+
+async function waitForLive(origin: string, port: number, child: ChildProcess): Promise<number> {
 	const startedAt = Date.now();
 	const deadline = startedAt + BOOT_TIMEOUT_MS;
 	while (Date.now() < deadline) {
@@ -223,7 +223,7 @@ async function waitForLive(origin: string, child: ChildProcess): Promise<number>
 			const response = await fetch(`${origin}/health/live`, {
 				signal: AbortSignal.timeout(LIVE_REQUEST_TIMEOUT_MS),
 			});
-			if (await isLiveResponse(response, child.pid)) return Date.now() - startedAt;
+			if (await isLiveResponse(response, child.pid, port)) return Date.now() - startedAt;
 		} catch {
 			// Startup is expected to refuse connections until the listener binds.
 		}
@@ -232,42 +232,66 @@ async function waitForLive(origin: string, child: ChildProcess): Promise<number>
 	throw new Error(`daemon did not become live within ${BOOT_TIMEOUT_MS}ms`);
 }
 
-async function stopChild(child: ChildProcess | null): Promise<void> {
-	if (!child) return;
+function processGroupAlive(pid: number): boolean {
+	if (process.platform === "win32") return false;
+	try {
+		process.kill(-pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function processTreeAlive(pid: number): boolean {
+	return process.platform === "linux" && processTree(pid, readProcEntries()).size > 1;
+}
+
+function signalProcessTree(child: ChildProcess, signal: "SIGTERM" | "SIGKILL"): void {
+	// The harness starts the daemon detached on POSIX, so its process group is
+	// the reliable cleanup boundary even after a child has been reparented.
+	if (process.platform !== "win32") {
+		try {
+			process.kill(-child.pid, signal);
+		} catch {}
+	}
+
+	// Keep an explicit tree walk as the Windows path and a fallback for a
+	// partially-created process group. Descendants are signalled before the
+	// parent so shutdown cannot orphan a DB-owner or worker process.
 	const descendants =
 		process.platform === "linux"
 			? [...processTree(child.pid, readProcEntries())].filter((pid) => pid !== child.pid).reverse()
 			: [];
-	if (!childIsAlive(child)) {
-		for (const pid of descendants) {
-			try {
-				process.kill(pid, "SIGKILL");
-			} catch {}
-		}
-		return;
-	}
 	for (const pid of descendants) {
 		try {
-			process.kill(pid, "SIGTERM");
+			process.kill(pid, signal);
 		} catch {}
 	}
-	child.kill("SIGTERM");
-	await new Promise<void>((resolveStop) => {
-		const timer = setTimeout(() => {
-			for (const pid of descendants) {
-				if (!existsSync(`/proc/${pid}`)) continue;
-				try {
-					process.kill(pid, "SIGKILL");
-				} catch {}
-			}
-			child.kill("SIGKILL");
-			resolveStop();
-		}, 5_000);
-		child.once("close", () => {
-			clearTimeout(timer);
-			resolveStop();
-		});
-	});
+	if (childIsAlive(child)) {
+		try {
+			child.kill(signal);
+		} catch {}
+	}
+}
+
+function stopPending(child: ChildProcess): boolean {
+	return childIsAlive(child) || processTreeAlive(child.pid) || processGroupAlive(child.pid);
+}
+
+async function waitForStopped(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (stopPending(child) && Date.now() < deadline) {
+		await Bun.sleep(STOP_POLL_MS);
+	}
+	return !stopPending(child);
+}
+
+async function stopChild(child: ChildProcess | null): Promise<boolean> {
+	if (!child || !stopPending(child)) return true;
+	signalProcessTree(child, "SIGTERM");
+	if (await waitForStopped(child, STOP_GRACE_MS)) return true;
+	signalProcessTree(child, "SIGKILL");
+	return waitForStopped(child, STOP_POLL_MS * 20);
 }
 
 function writeConfig(agentsDir: string): void {
@@ -320,6 +344,7 @@ async function run(): Promise<BootWedgeReport> {
 		mkdirSync(daemonHome, { recursive: true });
 		child = spawn(process.execPath, [daemonScript], {
 			cwd: repoRoot,
+			detached: process.platform !== "win32",
 			env: {
 				...process.env,
 				HOME: daemonHome,
@@ -343,7 +368,7 @@ async function run(): Promise<BootWedgeReport> {
 		child.stderr?.on("data", (chunk: Buffer) => appendBounded(stderr, chunk));
 
 		const origin = `http://127.0.0.1:${port}`;
-		startupMs = await waitForLive(origin, child);
+		startupMs = await waitForLive(origin, port, child);
 		const observationStartedAt = Date.now();
 		let previousCpu = readCpuSnapshot(child.pid);
 		let previousCpuAt = performance.now();
@@ -354,7 +379,7 @@ async function run(): Promise<BootWedgeReport> {
 				const response = await fetch(`${origin}/health/live`, {
 					signal: AbortSignal.timeout(LIVE_REQUEST_TIMEOUT_MS),
 				});
-				status = (await isLiveResponse(response, child.pid)) ? 200 : 0;
+				status = (await isLiveResponse(response, child.pid, port)) ? 200 : 0;
 			} catch {
 				status = 0;
 			}
@@ -387,7 +412,8 @@ async function run(): Promise<BootWedgeReport> {
 	} catch (caught) {
 		error = caught instanceof Error ? caught.message : String(caught);
 	} finally {
-		await stopChild(child);
+		const stopped = await stopChild(child);
+		if (!stopped && error === undefined) error = "daemon process tree did not stop after SIGKILL";
 		rmSync(workspace, { recursive: true, force: true });
 	}
 

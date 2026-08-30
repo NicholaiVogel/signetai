@@ -6,33 +6,29 @@ name: Boot Wedge Safety Gate
 on:
   pull_request:
     paths:
-      - "platform/daemon/src/**"
-      - "platform/daemon/build.ts"
-      - "platform/daemon/tsconfig.json"
-      - "platform/daemon/package.json"
-      - "platform/core/src/**"
-      - "platform/core/tsconfig.json"
-      - "platform/core/package.json"
+      - "platform/daemon/**"
+      - "platform/core/**"
+      - "platform/native/**"
+      - "libs/lifecycle-proof/**"
       - "scripts/**"
       - "package.json"
       - "bun.lock"
       - "bunfig.toml"
+      - "**/tsconfig*.json"
       - "tests/integration/boot-wedge/**"
       - ".github/workflows/boot-wedge.yml"
   push:
     branches: [main]
     paths:
-      - "platform/daemon/src/**"
-      - "platform/daemon/build.ts"
-      - "platform/daemon/tsconfig.json"
-      - "platform/daemon/package.json"
-      - "platform/core/src/**"
-      - "platform/core/tsconfig.json"
-      - "platform/core/package.json"
+      - "platform/daemon/**"
+      - "platform/core/**"
+      - "platform/native/**"
+      - "libs/lifecycle-proof/**"
       - "scripts/**"
       - "package.json"
       - "bun.lock"
       - "bunfig.toml"
+      - "**/tsconfig*.json"
       - "tests/integration/boot-wedge/**"
       - ".github/workflows/boot-wedge.yml"
 

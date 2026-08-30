@@ -7,6 +7,7 @@ import {
 	evaluateBootWedge,
 	type BootWedgeMeasurements,
 } from "./criteria";
+import { isLivePayload } from "./run";
 
 function measurements(overrides: Partial<BootWedgeMeasurements> = {}): BootWedgeMeasurements {
 	return {
@@ -34,6 +35,15 @@ describe("boot-wedge safety criteria", () => {
 		);
 		expect(result.pass).toBe(false);
 		expect(result.checks[1]?.pass).toBe(false);
+	});
+
+	test("accepts only the daemon's healthy liveness payload", () => {
+		const payload = JSON.stringify({ status: "healthy", pid: 123, port: 456 });
+		expect(isLivePayload(payload, 123, 456)).toBe(true);
+		expect(isLivePayload(payload, 999, 456)).toBe(false);
+		expect(isLivePayload(payload, 123, 999)).toBe(false);
+		expect(isLivePayload(JSON.stringify({ status: "healthy", pid: 123 }), 123, 456)).toBe(false);
+		expect(isLivePayload("not json", 123, 456)).toBe(false);
 	});
 
 	test("fails when idle CPU reaches the ceiling or sampling is incomplete", () => {
