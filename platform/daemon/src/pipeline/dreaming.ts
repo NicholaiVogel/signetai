@@ -2315,44 +2315,42 @@ async function shouldTriggerDreamingAfterBacklog(
 		[],
 		{ deadlineMs: 30_000, estimatedWorkUnits: 1 },
 	);
-	const reviewsTable =
-		consumptionTable === undefined
-			? undefined
-			: await ownerQueryOne<{ present: number }>(
-					await getDbOwnerForAccessor(accessor),
-					"dreaming.evidence.reviews-schema",
-					"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'dreaming_evidence_reviews' LIMIT 1",
-					[],
-					{ deadlineMs: 30_000, estimatedWorkUnits: 1 },
-				);
-	if (consumptionTable === undefined || state.lastPassId === null)
-		return hasAttention || episodicTokens >= cfg.tokenThreshold;
-	const reviewedPredicate =
-		reviewsTable === undefined
-			? ""
-			: `AND NOT EXISTS (
-				SELECT 1 FROM dreaming_evidence_reviews der
-				WHERE der.agent_id = dreaming_evidence_consumption.agent_id
-				  AND der.source_kind = dreaming_evidence_consumption.source_kind
-				  AND der.source_id = dreaming_evidence_consumption.source_id
-				  AND der.source_captured_at = dreaming_evidence_consumption.source_captured_at
-				  AND der.source_entry_id = dreaming_evidence_consumption.source_entry_id
-				  AND der.source_revision = dreaming_evidence_consumption.source_revision
-			)`;
-	const hasContinuation =
-		(await ownerQueryOne<{ present: number }>(
+	if (hasAttention || episodicTokens >= cfg.tokenThreshold) return true;
+	if (consumptionTable !== undefined && state.lastPassId !== null) {
+		const reviewsTable = await ownerQueryOne<{ present: number }>(
 			await getDbOwnerForAccessor(accessor),
-			"dreaming.evidence.continuation",
-			`SELECT 1 AS present
-				 FROM dreaming_evidence_consumption
-				 WHERE agent_id = ? AND pass_id = ?
-				   AND delivered_offset > 0 AND delivered_offset < source_length
-				   ${reviewedPredicate}
-				 LIMIT 1`,
-			[agentId, state.lastPassId],
+			"dreaming.evidence.reviews-schema",
+			"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'dreaming_evidence_reviews' LIMIT 1",
+			[],
 			{ deadlineMs: 30_000, estimatedWorkUnits: 1 },
-		)) !== undefined;
-	if (hasAttention || episodicTokens >= cfg.tokenThreshold || hasContinuation) return true;
+		);
+		const reviewedPredicate =
+			reviewsTable === undefined
+				? ""
+				: `AND NOT EXISTS (
+					SELECT 1 FROM dreaming_evidence_reviews der
+					WHERE der.agent_id = dreaming_evidence_consumption.agent_id
+					  AND der.source_kind = dreaming_evidence_consumption.source_kind
+					  AND der.source_id = dreaming_evidence_consumption.source_id
+					  AND der.source_captured_at = dreaming_evidence_consumption.source_captured_at
+					  AND der.source_entry_id = dreaming_evidence_consumption.source_entry_id
+					  AND der.source_revision = dreaming_evidence_consumption.source_revision
+				)`;
+		const hasContinuation =
+			(await ownerQueryOne<{ present: number }>(
+				await getDbOwnerForAccessor(accessor),
+				"dreaming.evidence.continuation",
+				`SELECT 1 AS present
+					 FROM dreaming_evidence_consumption
+					 WHERE agent_id = ? AND pass_id = ?
+					   AND delivered_offset > 0 AND delivered_offset < source_length
+					   ${reviewedPredicate}
+					 LIMIT 1`,
+				[agentId, state.lastPassId],
+				{ deadlineMs: 30_000, estimatedWorkUnits: 1 },
+			)) !== undefined;
+		if (hasContinuation) return true;
+	}
 
 	// A low-volume stream must not wait indefinitely for the batch ceiling.
 	// This is deliberately a maximum wait rather than an unconditional cron:
