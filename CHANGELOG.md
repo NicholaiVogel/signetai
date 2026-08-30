@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-30
+- Bug fixes: route extraction retirement to owner; route startup DB work to owner.
+
 ### 2026-08-29
 - Bug fixes: distinguish async DB execution homes; classify database execution homes; bound scheduled Dreaming backlog probes; extend native owner smoke startup budget; refresh event-loop source baseline; correct DB accessor audit site tokens; route scheduled Dreaming scans to owner.
 
@@ -26,10 +29,17 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-08-22
 - Bug fixes: let commands exit cleanly.
 
-### 2026-08-21
-- Bug fixes: trim async DB attribution overhead; endpoint-neutral fingerprint + reachable building-state recovery + owner-bound resumable embedding migration; recover endpoint-only embedding builds; make embedding migration owner-bound and resumable; amputate parent-side native-memory indexing behind killable boundary with transactional resumable frontier; preserve provider retry frontiers; close native source frontier crash windows; type native embedding protocol; isolate native source embeddings; persist native source traversal frontier; move native memory indexing behind owner boundary; remove secondary parent sync paths + recovery child exit-0 protocol; remove secondary sync paths; parent sync attribution with in-flight latch naming + telemetry conversion; preserve in-flight sync DB attribution; lazily capture sync DB attribution; refresh event-loop source ledger; refresh sync access ledger for telemetry fallback; satisfy attribution boundary checks; move startup telemetry write behind owner; attribute transitional sync db stalls.
-
 ## Release Ledger
+
+## [0.214.29] - 2026-08-30
+
+Release summary: 2 bug fixes.
+Tag range: `v0.214.28..v0.214.29`.
+
+### Bug Fixes
+
+- **daemon**: route extraction retirement to owner
+- **daemon**: route startup DB work to owner
 
 ## [0.214.28] - 2026-08-29
 
