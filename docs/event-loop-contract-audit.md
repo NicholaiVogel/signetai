@@ -4,23 +4,23 @@ This report is generated from the deterministic migration ledger in `scripts/eve
 
 ## Current inventory
 
-- Exact ledger inventory: 969 sites
+- Exact ledger inventory: 954 sites
 - Synchronous `withWriteTx()` sites: 65
 - Synchronous `withReadDb()` sites: 104
-- Async-named DB sites: 284
-- Async-named ON-PARENT DB sites: 282
+- Async-named DB sites: 269
+- Async-named ON-PARENT DB sites: 267
 - Async-named OFF-PARENT DB sites: 2
 - Synchronous filesystem/process sites: 516
 - Compile-visible legacy DB sites remaining: 169
   - `withWriteTx`: 65
   - `withReadDb`: 104
 
-The 969-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 104 synchronous reads, and 284 async-named DB sites are the complete database-call inventory; 169 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 282 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
+The 954-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 104 synchronous reads, and 269 async-named DB sites are the complete database-call inventory; 169 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 267 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## Execution-home inventory
 
-- Database accessor sites classified: 453
-- ON-PARENT callback execution: 451
+- Database accessor sites classified: 438
+- ON-PARENT callback execution: 436
 - OFF-PARENT callback execution: 2
 - Ratchet: new ON-PARENT async-named sites fail the audit; the campaign target is ON-PARENT → 0
 
@@ -94,36 +94,33 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `github-source-provider.ts:460` (withReadDbAsync)
 - `github-source-provider.ts:482` (withWriteTxAsync)
 - `github-source-provider.ts:502` (withWriteTxAsync)
-- `hooks.ts:606` (withReadDbAsync)
-- `hooks.ts:817` (withReadDbAsync)
+- `hooks.ts:830` (withReadDbAsync)
 - `imported-source-lifecycle.ts:36` (withWriteTx)
 - `imported-source-outcome.ts:16` (withWriteTx)
 - `imported-source-outcome.ts:62` (withReadDb)
 - `knowledge-graph-hygiene.ts:428` (withReadDb)
-- `knowledge-graph.ts:191` (withReadDbAsync)
-- `knowledge-graph.ts:216` (withReadDbAsync)
-- `knowledge-graph.ts:241` (withReadDbAsync)
-- `knowledge-graph.ts:269` (withReadDbAsync)
-- `knowledge-graph.ts:285` (withReadDbAsync)
-- `knowledge-graph.ts:310` (withReadDbAsync)
-- `knowledge-graph.ts:338` (withReadDbAsync)
-- `knowledge-graph.ts:420` (withReadDbAsync)
-- `knowledge-graph.ts:603` (withReadDbAsync)
-- `knowledge-graph.ts:781` (withReadDbAsync)
-- `knowledge-graph.ts:812` (withReadDbAsync)
-- `knowledge-graph.ts:839` (withReadDbAsync)
-- `knowledge-graph.ts:992` (withReadDbAsync)
-- `knowledge-graph.ts:1056` (withReadDbAsync)
-- `knowledge-graph.ts:1138` (withReadDbAsync)
-- `knowledge-graph.ts:1202` (withReadDbAsync)
-- `knowledge-graph.ts:1289` (withReadDbAsync)
-- `knowledge-graph.ts:1399` (withReadDbAsync)
-- `knowledge-graph.ts:1416` (withReadDbAsync)
-- `knowledge-graph.ts:1461` (withReadDbAsync)
-- `knowledge-graph.ts:1512` (withReadDbAsync)
-- `knowledge-graph.ts:1642` (withReadDbAsync)
-- `knowledge-graph.ts:2024` (withReadDbAsync)
-- `knowledge-graph.ts:2276` (withReadDbAsync)
+- `knowledge-graph.ts:193` (withReadDbAsync)
+- `knowledge-graph.ts:218` (withReadDbAsync)
+- `knowledge-graph.ts:243` (withReadDbAsync)
+- `knowledge-graph.ts:271` (withReadDbAsync)
+- `knowledge-graph.ts:287` (withReadDbAsync)
+- `knowledge-graph.ts:312` (withReadDbAsync)
+- `knowledge-graph.ts:340` (withReadDbAsync)
+- `knowledge-graph.ts:422` (withReadDbAsync)
+- `knowledge-graph.ts:605` (withReadDbAsync)
+- `knowledge-graph.ts:783` (withReadDbAsync)
+- `knowledge-graph.ts:814` (withReadDbAsync)
+- `knowledge-graph.ts:841` (withReadDbAsync)
+- `knowledge-graph.ts:994` (withReadDbAsync)
+- `knowledge-graph.ts:1058` (withReadDbAsync)
+- `knowledge-graph.ts:1140` (withReadDbAsync)
+- `knowledge-graph.ts:1204` (withReadDbAsync)
+- `knowledge-graph.ts:1291` (withReadDbAsync)
+- `knowledge-graph.ts:1401` (withReadDbAsync)
+- `knowledge-graph.ts:1418` (withReadDbAsync)
+- `knowledge-graph.ts:1463` (withReadDbAsync)
+- `knowledge-graph.ts:1602` (withReadDbAsync)
+- `knowledge-graph.ts:1984` (withReadDbAsync)
 - `memory-candidates.ts:470` (withReadDb)
 - `memory-candidates.ts:511` (withReadDb)
 - `memory-head-curation.ts:31` (withReadDbAsync)
@@ -444,20 +441,8 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `startup-recovery.ts:78` (withWriteTxAsync)
 - `startup-recovery.ts:100` (withReadDbAsync)
 - `startup-recovery.ts:521` (withReadDbAsync)
-- `telemetry.ts:551` (withWriteTx)
-- `telemetry.ts:558` (withWriteTx)
-- `telemetry.ts:827` (withReadDbAsync)
-- `telemetry.ts:864` (withReadDbAsync)
-- `telemetry.ts:953` (withWriteTxAsync)
-- `telemetry.ts:1001` (withWriteTxAsync)
-- `telemetry.ts:1058` (withWriteTxAsync)
-- `telemetry.ts:1091` (withWriteTxAsync)
-- `telemetry.ts:1124` (withWriteTxAsync)
-- `telemetry.ts:1155` (withWriteTxAsync)
-- `telemetry.ts:1189` (withWriteTxAsync)
-- `telemetry.ts:1238` (withWriteTxAsync)
-- `telemetry.ts:1590` (withWriteTxAsync)
-- `telemetry.ts:1601` (withReadDbAsync)
+- `telemetry.ts:555` (withWriteTx)
+- `telemetry.ts:562` (withWriteTx)
 - `temporal-expand.ts:178` (withReadDb)
 - `temporal-fallback.ts:36` (withReadDb)
 - `temporal-fallback.ts:153` (withReadDb)
