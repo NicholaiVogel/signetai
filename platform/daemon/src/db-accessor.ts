@@ -59,6 +59,7 @@ import {
 	type DbRuntimeMetrics,
 } from "./db-observability";
 import type { DbOwnerHealth } from "./db-owner-client";
+import { closeDbOwner } from "./db-owner-runtime";
 import { observeDbLatency } from "./runtime-pressure";
 import { resetFtsIndexState, setFtsIndexIncomplete } from "./fts-index-state";
 import {
@@ -3058,10 +3059,7 @@ export async function closeDbAccessor(): Promise<void> {
 	databaseIntegrityWritesBlocked = false;
 	pendingVecBackfillDimensions = null;
 	dbOwnerHealthProvider = null;
-	// The agent-scope cache may hold policies read from the closing database;
-	// a reinitialized accessor (same process, different DB) must never serve them.
-	const { invalidateAgentScopeCache } = await import("./agent-id");
-	invalidateAgentScopeCache();
+	const closingDbPath = dbPath;
 	if (accessor) {
 		accessor.close();
 		accessor = null;
@@ -3074,6 +3072,9 @@ export async function closeDbAccessor(): Promise<void> {
 	vecLoadError = null;
 	vecExtPath = undefined;
 	resetDbObservability();
-	const { closeDbOwner } = await import("./db-owner-runtime");
-	await closeDbOwner();
+	await closeDbOwner(closingDbPath ?? undefined);
+	// The agent-scope cache may hold policies read from the closing database;
+	// a reinitialized accessor (same process, different DB) must never serve them.
+	const { invalidateAgentScopeCache } = await import("./agent-id");
+	invalidateAgentScopeCache();
 }

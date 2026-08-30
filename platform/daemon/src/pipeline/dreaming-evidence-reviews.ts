@@ -1,3 +1,5 @@
+import { getDbOwnerForAccessor } from "../db-owner-runtime";
+import { ownerReadAll, ownerReadOne } from "../db-owner-sql";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { runWriteTxAsync } from "../db-accessor";
 import { type EpisodicSourceKind, readEpisodicSource } from "../episodic-sources";
@@ -184,22 +186,25 @@ export async function getDreamingReviewedEvidence(
 	accessor: DbAccessor,
 	agentId: string,
 ): Promise<readonly DreamingReviewedEvidence[]> {
-	return await accessor.withReadDbAsync(
-		(db) => {
-			if (!tableExists(db)) return [];
-			return db
-				.prepare(
-					`SELECT agent_id AS agentId, source_kind AS sourceKind, source_id AS sourceId,
-					        source_captured_at AS sourceCapturedAt, source_entry_id AS sourceEntryId,
-					        source_revision AS sourceRevision, reason, pass_id AS passId,
-					        reviewed_at AS reviewedAt
-					 FROM dreaming_evidence_reviews
-					 WHERE agent_id = ?
-					 ORDER BY reviewed_at DESC, source_kind ASC, source_id ASC`,
-				)
-				.all(agentId) as DreamingReviewedEvidence[];
-		},
-		{ siteToken: "pipeline/dreaming-evidence-reviews.ts:187" },
+	const owner = await getDbOwnerForAccessor(accessor);
+	const exists = await ownerReadOne<{ readonly present: number }>(
+		owner,
+		"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?",
+		["dreaming_evidence_reviews"],
+		{ operation: "dreaming.evidence-reviews-table", workloadClass: "foreground" },
+	);
+	if (exists === null) return [];
+	return await ownerReadAll<DreamingReviewedEvidence>(
+		owner,
+		`SELECT agent_id AS agentId, source_kind AS sourceKind, source_id AS sourceId,
+		        source_captured_at AS sourceCapturedAt, source_entry_id AS sourceEntryId,
+		        source_revision AS sourceRevision, reason, pass_id AS passId,
+		        reviewed_at AS reviewedAt
+		 FROM dreaming_evidence_reviews
+		 WHERE agent_id = ?
+		 ORDER BY reviewed_at DESC, source_kind ASC, source_id ASC`,
+		[agentId],
+		{ operation: "dreaming.evidence-reviews-read", workloadClass: "foreground" },
 	);
 }
 

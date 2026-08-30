@@ -9,6 +9,13 @@
  */
 import { type Entity, type EntityAttribute, MEMORY_CONTENT_WITHHELD_NOTICE, scanMemoryContent } from "@signet/core";
 import { z } from "zod";
+import { getDbOwnerForAccessor } from "../db-owner-runtime";
+import { ownerReadAll, ownerReadOne } from "../db-owner-sql";
+import type {
+	DbOwnerDreamingEvidenceSearch,
+	DbOwnerDreamingEvidenceSource,
+	DbOwnerDreamingReviewDue,
+} from "../db-owner-protocol";
 import type { DbAccessor, ReadDb } from "../db-accessor";
 import { classifyEntityQuality } from "../entity-quality";
 import type { EpisodicSourceRecord } from "../episodic-sources";
@@ -20,7 +27,7 @@ import {
 	getKnowledgeEntityDetail,
 	listKnowledgeEntities,
 } from "../knowledge-graph";
-import { isMemoryContentContextEligible } from "../memory-content-safety";
+
 import { getOntologyClaimEvidence } from "../ontology-claim-evidence";
 import { listOntologyContradictions } from "../ontology-contradictions";
 import { getOntologyLinkEvidence } from "../ontology-link-evidence";
@@ -59,35 +66,73 @@ async function filterDreamingAttributes(
 	agentId: string,
 	attributes: readonly EntityAttribute[],
 ): Promise<readonly EntityAttribute[]> {
-	return await accessor.withReadDbAsync(
-		async (db) =>
-			attributes.filter((attribute) => {
-				if (attribute.memoryId) {
-					return isMemoryContentContextEligible(db, {
-						agentId,
-						sourceKind: "memory",
-						sourceId: attribute.memoryId,
-						content: attribute.content,
-					});
-				}
-				if (attribute.sourcePath || attribute.sourceId) {
-					const sourceKind = attribute.sourceKind?.toLowerCase() ?? "";
-					const kind = sourceKind.includes("transcript")
-						? "transcript"
-						: sourceKind.includes("summary")
-							? "summary"
-							: "artifact";
-					return isMemoryContentContextEligible(db, {
-						agentId,
-						sourceKind: kind,
-						sourceId: attribute.sourcePath ?? attribute.sourceId ?? attribute.id,
-						content: attribute.content,
-					});
-				}
-				return scanMemoryContent(attribute.content).contextEligible;
-			}),
-		{ siteToken: "pipeline/dreaming-capabilities.ts:62" },
+	const owner = await getDbOwnerForAccessor(accessor);
+	const table = await ownerReadOne<{ readonly present: number }>(
+		owner,
+		"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'memory_content_safety' LIMIT 1",
+		[],
+		{
+			operation: "dreaming.capabilities.safety-schema",
+			workloadClass: "foreground",
+			estimatedWorkUnits: 1,
+			deadlineMs: 5_000,
+		},
 	);
+	if (table === null) return attributes.filter((attribute) => scanMemoryContent(attribute.content).contextEligible);
+	const refs = attributes.flatMap((attribute) => {
+		if (attribute.memoryId) return [{ kind: "memory", id: attribute.memoryId }];
+		if (attribute.sourcePath || attribute.sourceId) {
+			const sourceKind = attribute.sourceKind?.toLowerCase() ?? "";
+			const kind = sourceKind.includes("transcript")
+				? "transcript"
+				: sourceKind.includes("summary")
+					? "summary"
+					: "artifact";
+			return [{ kind, id: attribute.sourcePath ?? attribute.sourceId ?? attribute.id }];
+		}
+		return [];
+	});
+	const predicates = refs.map(() => "(source_kind = ? AND source_id = ?)").join(" OR ");
+	const safetyRows =
+		predicates.length === 0
+			? []
+			: await ownerReadAll<{
+					readonly source_kind: string;
+					readonly source_id: string;
+					readonly status: string;
+					readonly context_eligible: number;
+				}>(
+					owner,
+					`SELECT source_kind, source_id, status, context_eligible
+					 FROM memory_content_safety
+					 WHERE agent_id = ? AND (${predicates})`,
+					[agentId, ...refs.flatMap((ref) => [ref.kind, ref.id])],
+					{
+						operation: "dreaming.capabilities.safety-read",
+						workloadClass: "foreground",
+						estimatedWorkUnits: Math.min(200, refs.length),
+						deadlineMs: 5_000,
+					},
+				);
+	const safety = new Map(safetyRows.map((row) => [`${row.source_kind}:${row.source_id}`, row]));
+	return attributes.filter((attribute) => {
+		if (!scanMemoryContent(attribute.content).contextEligible) return false;
+		const ref = attribute.memoryId
+			? { kind: "memory", id: attribute.memoryId }
+			: attribute.sourcePath || attribute.sourceId
+				? {
+						kind: (attribute.sourceKind?.toLowerCase().includes("transcript")
+							? "transcript"
+							: attribute.sourceKind?.toLowerCase().includes("summary")
+								? "summary"
+								: "artifact") as string,
+						id: attribute.sourcePath ?? attribute.sourceId ?? attribute.id,
+					}
+				: null;
+		if (ref === null) return true;
+		const row = safety.get(`${ref.kind}:${ref.id}`);
+		return row === undefined || (row.status === "clean" && row.context_eligible === 1);
+	});
 }
 
 /**
@@ -326,6 +371,73 @@ function capability<T extends z.ZodType>(
 }
 
 /** The one scope-bound handler registry used by Pi, daemon HTTP, MCP, and CLI. */
+export function searchDreamingEvidenceInDb(db: ReadDb, input: DbOwnerDreamingEvidenceSearch): DreamingCapabilityOutput {
+	const scopeId = input.agentId;
+	if (input.sourceRef !== undefined) {
+		const source = readEpisodicSource(db, { agentId: scopeId, from: input.sourceRef });
+		if (source === null) return { ok: false, error: "Evidence source not found" };
+		if (source.kind === "transcript" && !source.completed)
+			return { ok: false, error: "Transcript is still in progress" };
+		const fragment = projectEvidenceFragment(
+			source,
+			Math.max(0, Math.floor(input.offset ?? 0)),
+			Math.min(Math.max(Math.floor(input.chunkSize ?? MAX_EVIDENCE_EXCERPT_CHARS), 1), MAX_EVIDENCE_EXCERPT_CHARS),
+		);
+		return fragment === null
+			? { ok: false, error: "Evidence fragment offset is outside the source" }
+			: { ok: true, items: [fragment] };
+	}
+	const scanFirst = input.query === undefined && input.since === undefined && input.before === undefined;
+	const watermark = (() => {
+		if (scanFirst) return undefined;
+		return readEvidenceWatermark(db, scopeId) ?? undefined;
+	})();
+	const continuations = scanFirst
+		? pendingDreamingEvidenceContinuations(db, scopeId, input.limit ?? 20, input.kind)
+		: [];
+	const sources =
+		continuations.length > 0
+			? continuations
+			: searchEpisodicSources(db, {
+					agentId: scopeId,
+					query: input.query ?? "",
+					since: input.since ?? watermark,
+					before: input.before,
+					kind: input.kind,
+					excludeDelivered: scanFirst,
+					limit: input.limit,
+				});
+	const items = scanFirst
+		? sources.flatMap((source) => {
+				const fragment = projectEvidenceFragment(
+					source,
+					deliveredOffsetForSource(db, scopeId, source),
+					MAX_EVIDENCE_EXCERPT_CHARS,
+				);
+				return fragment === null ? [] : [fragment];
+			})
+		: projectEvidence(sources, input.query ?? "");
+	return { ok: true, items };
+}
+
+export function readDreamingEvidenceSourceInDb(
+	db: ReadDb,
+	input: DbOwnerDreamingEvidenceSource,
+): EpisodicSourceRecord | null {
+	return readEpisodicSource(db, { agentId: input.agentId, from: input.sourceRef });
+}
+
+export function collectDreamingReviewDueInDb(
+	db: ReadDb,
+	input: DbOwnerDreamingReviewDue,
+): ReturnType<typeof collectReviewDueClaims> {
+	return collectReviewDueClaims(
+		{ all: <T>(sql: string, ...params: unknown[]) => db.prepare(sql).all(...params) as T[] },
+		new Date(input.nowMs),
+		{ agentId: input.agentId, limit: input.limit },
+	);
+}
+
 export function createDreamingCapabilities(params: CreateDreamingCapabilitiesParams): readonly DreamingCapability[] {
 	const { accessor, agentId, actor } = params;
 	return [
@@ -562,56 +674,33 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 				offset: z.number().finite().optional(),
 				chunkSize: z.number().finite().optional(),
 			}),
-			async ({ agentId: scopeId, query, since, before, kind, limit, sourceRef, offset, chunkSize }) =>
-				await accessor.withReadDbAsync(
-					async (db) => {
-						if (sourceRef !== undefined) {
-							const source = readEpisodicSource(db, { agentId: scopeId, from: sourceRef });
-							if (source === null) return { ok: false, error: "Evidence source not found" };
-							if (source.kind === "transcript" && !source.completed) {
-								return { ok: false, error: "Transcript is still in progress" };
-							}
-							const fragment = projectEvidenceFragment(
-								source,
-								Math.max(0, Math.floor(offset ?? 0)),
-								Math.min(Math.max(Math.floor(chunkSize ?? MAX_EVIDENCE_EXCERPT_CHARS), 1), MAX_EVIDENCE_EXCERPT_CHARS),
-							);
-							return fragment === null
-								? { ok: false, error: "Evidence fragment offset is outside the source" }
-								: { ok: true, items: [fragment] };
-						}
-						// A scan-first call is the delivery queue. It ignores the time
-						// watermark for selection, drains only incomplete evidence revisions,
-						// and resumes each source at its persisted delivered offset.
-						const scanFirst = query === undefined && since === undefined && before === undefined;
-						const effectiveSince = scanFirst ? undefined : (since ?? readEvidenceWatermark(db, scopeId) ?? undefined);
-						const continuations = scanFirst ? pendingDreamingEvidenceContinuations(db, scopeId, limit ?? 20, kind) : [];
-						const sources =
-							continuations.length > 0
-								? continuations
-								: searchEpisodicSources(db, {
-										agentId: scopeId,
-										query: query ?? "",
-										since: effectiveSince,
-										before,
-										kind,
-										excludeDelivered: scanFirst,
-										limit,
-									});
-						const items = scanFirst
-							? sources.flatMap((source) => {
-									const fragment = projectEvidenceFragment(
-										source,
-										deliveredOffsetForSource(db, scopeId, source),
-										MAX_EVIDENCE_EXCERPT_CHARS,
-									);
-									return fragment === null ? [] : [fragment];
-								})
-							: projectEvidence(sources, query ?? "");
-						return { ok: true, items };
+			async ({ agentId: scopeId, query, since, before, kind, limit, sourceRef, offset, chunkSize }) => {
+				const owner = await getDbOwnerForAccessor(accessor);
+				const handle = owner.submit<DreamingCapabilityOutput>(
+					{
+						kind: "dreaming_evidence_search",
+						input: {
+							agentId: scopeId,
+							...(query === undefined ? {} : { query }),
+							...(since === undefined ? {} : { since }),
+							...(before === undefined ? {} : { before }),
+							...(kind === undefined ? {} : { kind }),
+							...(limit === undefined ? {} : { limit }),
+							...(sourceRef === undefined ? {} : { sourceRef }),
+							...(offset === undefined ? {} : { offset }),
+							...(chunkSize === undefined ? {} : { chunkSize }),
+						},
 					},
-					{ siteToken: "pipeline/dreaming-capabilities.ts:566" },
-				),
+					{
+						operation: "dreaming.capabilities.search-evidence",
+						lane: "read",
+						workloadClass: "foreground",
+						deadlineMs: 30_000,
+						estimatedWorkUnits: 200,
+					},
+				);
+				return await handle.result;
+			},
 		),
 		capability(
 			"validate_proposal",
@@ -748,15 +837,25 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 			async ({ agentId: scopeId, kind, status, limit }) => {
 				if (kind === "review_due") {
 					if (status === "resolved") return { ok: true, items: [] };
-					const due = await accessor.withReadDbAsync(
-						async (db) =>
-							collectReviewDueClaims(
-								{ all: <T>(sql: string, ...params: unknown[]) => db.prepare(sql).all(...params) as T[] },
-								new Date(),
-								{ agentId: scopeId, limit: bounded(limit, scopeId ? 50 : 100, scopeId ? 100 : 200) },
-							),
-						{ siteToken: "pipeline/dreaming-capabilities.ts:751" },
+					const owner = await getDbOwnerForAccessor(accessor);
+					const handle = owner.submit<ReturnType<typeof collectReviewDueClaims>>(
+						{
+							kind: "dreaming_review_due",
+							input: {
+								agentId: scopeId,
+								nowMs: Date.now(),
+								limit: bounded(limit, scopeId ? 50 : 100, scopeId ? 100 : 200),
+							},
+						},
+						{
+							operation: "dreaming.capabilities.review-due",
+							lane: "read",
+							workloadClass: "foreground",
+							deadlineMs: 30_000,
+							estimatedWorkUnits: 100,
+						},
 					);
+					const due = await handle.result;
 					return {
 						ok: true,
 						items: [

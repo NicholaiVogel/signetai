@@ -1,6 +1,8 @@
 /** Deterministic, local quality measurements for the semantic layer Dreaming creates. */
 import { SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES } from "@signet/core";
 import type { DbAccessor } from "../db-accessor";
+import { getDbOwnerForAccessor } from "../db-owner-runtime";
+import { ownerReadAll, ownerReadOne } from "../db-owner-sql";
 import { classifyEntityQuality, normalizeEntityName } from "../entity-quality";
 import { getOntologyClaimEvidence } from "../ontology-claim-evidence";
 
@@ -92,92 +94,88 @@ function qualityIssues(rows: readonly EntityRow[]): readonly DreamingQualityIssu
  * users inspect, while source-native topology is excluded from quality counts.
  */
 export async function getDreamingQualityReport(accessor: DbAccessor, agentId: string): Promise<DreamingQualityReport> {
-	const { claimPaths, entities, totalClaimValues, unaddressableClaimValues, structureQuality } =
-		await accessor.withReadDbAsync(
-			async (db) => {
-				const topologyPlaceholders = SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES.map(() => "?").join(", ");
-				const semanticFilter = `NOT (e.entity_type IN (${topologyPlaceholders}) OR (e.entity_type = 'source' AND e.source_root IS NOT NULL))`;
-				const claimPaths = db
-					.prepare(
-						`SELECT DISTINCT e.name AS entity, asp.canonical_name AS aspect,
-				        COALESCE(ea.group_key, 'general') AS groupKey, ea.claim_key AS claimKey
-				 FROM entity_attributes ea
-				 JOIN entity_aspects asp ON asp.id = ea.aspect_id AND asp.agent_id = ea.agent_id
-				 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = ea.agent_id
-				 WHERE ea.agent_id = ? AND ea.status = 'active'
-				   AND TRIM(COALESCE(ea.claim_key, '')) <> ''
-				   AND ${semanticFilter}`,
-					)
-					.all(agentId, ...SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES) as ClaimPathRow[];
-				const claimCounts = db
-					.prepare(
-						`SELECT COUNT(*) AS totalClaimValues,
-				        SUM(CASE WHEN TRIM(COALESCE(ea.claim_key, '')) = '' THEN 1 ELSE 0 END) AS unaddressableClaimValues
-				 FROM entity_attributes ea
-				 JOIN entity_aspects asp ON asp.id = ea.aspect_id AND asp.agent_id = ea.agent_id
-				 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = ea.agent_id
-				 WHERE ea.agent_id = ? AND ea.status = 'active' AND ${semanticFilter}`,
-					)
-					.get(agentId, ...SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES) as {
-					totalClaimValues: number;
-					unaddressableClaimValues: number | null;
-				};
-				const entities = db
-					.prepare(
-						`SELECT id, name, canonical_name AS canonicalName, entity_type AS entityType
-				 FROM entities e
-				 WHERE e.agent_id = ? AND COALESCE(e.status, 'active') = 'active' AND ${semanticFilter}`,
-					)
-					.all(agentId, ...SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES) as EntityRow[];
-				const structure = db
-					.prepare(
-						`SELECT COUNT(DISTINCT e.id) AS totalEntities,
-				        COUNT(DISTINCT CASE WHEN LOWER(TRIM(e.entity_type)) IN ('', 'unknown') THEN e.id END) AS unknownEntityTypes,
-				        COUNT(asp.id) AS totalAspects,
-				        SUM(CASE WHEN LOWER(TRIM(asp.canonical_name)) = 'profile' THEN 1 ELSE 0 END) AS profileAspects,
-				        SUM(CASE WHEN LOWER(TRIM(asp.canonical_name)) IN (${GENERIC_ASPECT_NAMES.map(() => "?").join(", ")}) THEN 1 ELSE 0 END) AS genericAspects
-				 FROM entities e
-				 LEFT JOIN entity_aspects asp
-				   ON asp.entity_id = e.id
-				  AND asp.agent_id = e.agent_id
-				  AND COALESCE(asp.status, 'active') = 'active'
-				 WHERE e.agent_id = ? AND COALESCE(e.status, 'active') = 'active' AND ${semanticFilter}`,
-					)
-					.get(...GENERIC_ASPECT_NAMES, agentId, ...SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES) as {
-					totalEntities: number;
-					unknownEntityTypes: number | null;
-					totalAspects: number;
-					profileAspects: number | null;
-					genericAspects: number | null;
-				};
-				return {
-					claimPaths,
-					entities,
-					totalClaimValues: Number(claimCounts.totalClaimValues),
-					unaddressableClaimValues: Number(claimCounts.unaddressableClaimValues ?? 0),
-					structureQuality: {
-						totalEntities: Number(structure.totalEntities),
-						unknownEntityTypes: Number(structure.unknownEntityTypes ?? 0),
-						unknownEntityTypeRate:
-							Number(structure.totalEntities) === 0
-								? null
-								: Number(structure.unknownEntityTypes ?? 0) / Number(structure.totalEntities),
-						totalAspects: Number(structure.totalAspects),
-						profileAspects: Number(structure.profileAspects ?? 0),
-						profileAspectRate:
-							Number(structure.totalAspects) === 0
-								? null
-								: Number(structure.profileAspects ?? 0) / Number(structure.totalAspects),
-						genericAspects: Number(structure.genericAspects ?? 0),
-						genericAspectRate:
-							Number(structure.totalAspects) === 0
-								? null
-								: Number(structure.genericAspects ?? 0) / Number(structure.totalAspects),
-					},
-				};
-			},
-			{ siteToken: "pipeline/dreaming-quality.ts:96" },
-		);
+	const owner = await getDbOwnerForAccessor(accessor);
+	const topologyPlaceholders = SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES.map(() => "?").join(", ");
+	const semanticFilter = `NOT (e.entity_type IN (${topologyPlaceholders}) OR (e.entity_type = 'source' AND e.source_root IS NOT NULL))`;
+	const claimPaths = await ownerReadAll<ClaimPathRow>(
+		owner,
+		`SELECT DISTINCT e.name AS entity, asp.canonical_name AS aspect,
+		        COALESCE(ea.group_key, 'general') AS groupKey, ea.claim_key AS claimKey
+		 FROM entity_attributes ea
+		 JOIN entity_aspects asp ON asp.id = ea.aspect_id AND asp.agent_id = ea.agent_id
+		 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = ea.agent_id
+		 WHERE ea.agent_id = ? AND ea.status = 'active'
+		   AND TRIM(COALESCE(ea.claim_key, '')) <> ''
+		   AND ${semanticFilter}`,
+		[agentId, ...SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES],
+		{ operation: "dreaming.quality-claim-paths", workloadClass: "foreground" },
+	);
+	const claimCounts = await ownerReadOne<{
+		readonly totalClaimValues: number;
+		readonly unaddressableClaimValues: number | null;
+	}>(
+		owner,
+		`SELECT COUNT(*) AS totalClaimValues,
+		        SUM(CASE WHEN TRIM(COALESCE(ea.claim_key, '')) = '' THEN 1 ELSE 0 END) AS unaddressableClaimValues
+		 FROM entity_attributes ea
+		 JOIN entity_aspects asp ON asp.id = ea.aspect_id AND asp.agent_id = ea.agent_id
+		 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = ea.agent_id
+		 WHERE ea.agent_id = ? AND ea.status = 'active' AND ${semanticFilter}`,
+		[agentId, ...SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES],
+		{ operation: "dreaming.quality-claim-counts", workloadClass: "foreground" },
+	);
+	const entities = await ownerReadAll<EntityRow>(
+		owner,
+		`SELECT id, name, canonical_name AS canonicalName, entity_type AS entityType
+		 FROM entities e
+		 WHERE e.agent_id = ? AND COALESCE(e.status, 'active') = 'active' AND ${semanticFilter}`,
+		[agentId, ...SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES],
+		{ operation: "dreaming.quality-entities", workloadClass: "foreground" },
+	);
+	const structure = await ownerReadOne<{
+		readonly totalEntities: number;
+		readonly unknownEntityTypes: number | null;
+		readonly totalAspects: number;
+		readonly profileAspects: number | null;
+		readonly genericAspects: number | null;
+	}>(
+		owner,
+		`SELECT COUNT(DISTINCT e.id) AS totalEntities,
+		        COUNT(DISTINCT CASE WHEN LOWER(TRIM(e.entity_type)) IN ('', 'unknown') THEN e.id END) AS unknownEntityTypes,
+		        COUNT(asp.id) AS totalAspects,
+		        SUM(CASE WHEN LOWER(TRIM(asp.canonical_name)) = 'profile' THEN 1 ELSE 0 END) AS profileAspects,
+		        SUM(CASE WHEN LOWER(TRIM(asp.canonical_name)) IN (${GENERIC_ASPECT_NAMES.map(() => "?").join(", ")}) THEN 1 ELSE 0 END) AS genericAspects
+		 FROM entities e
+		 LEFT JOIN entity_aspects asp
+		   ON asp.entity_id = e.id
+		  AND asp.agent_id = e.agent_id
+		  AND COALESCE(asp.status, 'active') = 'active'
+		 WHERE e.agent_id = ? AND COALESCE(e.status, 'active') = 'active' AND ${semanticFilter}`,
+		[...GENERIC_ASPECT_NAMES, agentId, ...SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES],
+		{ operation: "dreaming.quality-structure", workloadClass: "foreground" },
+	);
+	if (claimCounts === null || structure === null) throw new Error("Dreaming quality query returned no aggregate row");
+	const totalClaimValues = Number(claimCounts.totalClaimValues);
+	const unaddressableClaimValues = Number(claimCounts.unaddressableClaimValues ?? 0);
+	const structureQuality = {
+		totalEntities: Number(structure.totalEntities),
+		unknownEntityTypes: Number(structure.unknownEntityTypes ?? 0),
+		unknownEntityTypeRate:
+			Number(structure.totalEntities) === 0
+				? null
+				: Number(structure.unknownEntityTypes ?? 0) / Number(structure.totalEntities),
+		totalAspects: Number(structure.totalAspects),
+		profileAspects: Number(structure.profileAspects ?? 0),
+		profileAspectRate:
+			Number(structure.totalAspects) === 0
+				? null
+				: Number(structure.profileAspects ?? 0) / Number(structure.totalAspects),
+		genericAspects: Number(structure.genericAspects ?? 0),
+		genericAspectRate:
+			Number(structure.totalAspects) === 0
+				? null
+				: Number(structure.genericAspects ?? 0) / Number(structure.totalAspects),
+	};
 
 	let valuesWithResolvedEpisodicQuote = 0;
 	let unresolvedClaimPaths = 0;

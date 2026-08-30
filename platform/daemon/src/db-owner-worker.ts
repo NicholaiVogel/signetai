@@ -438,6 +438,70 @@ export function runDbOwnerWorker(): void {
 		return await getDreamingEpisodicTokenBacklogInDb(db as never, request.input.agentId, request.input.maxSources);
 	}
 
+	async function executeDreamingEvidenceSearch(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "dreaming_evidence_search" }>,
+	): Promise<unknown> {
+		const { searchDreamingEvidenceInDb } = await import("./pipeline/dreaming-capabilities");
+		return searchDreamingEvidenceInDb(db as never, request.input);
+	}
+
+	async function executeDreamingEvidenceSource(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "dreaming_evidence_source" }>,
+	): Promise<unknown> {
+		const { readDreamingEvidenceSourceInDb } = await import("./pipeline/dreaming-capabilities");
+		return readDreamingEvidenceSourceInDb(db as never, request.input);
+	}
+
+	function executeDreamingPassFinalize(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "dreaming_pass_finalize" }>,
+		context: JobExecutionContext,
+	): unknown {
+		const { finalizeDreamingPassInDb } = require("./pipeline/dreaming");
+		return withBusyRetry(() => {
+			finalizeDreamingPassInDb(db as never, request.input);
+			return null;
+		}, context);
+	}
+
+	async function executeDreamingReviewDue(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "dreaming_review_due" }>,
+	): Promise<unknown> {
+		const { collectDreamingReviewDueInDb } = await import("./pipeline/dreaming-capabilities");
+		return collectDreamingReviewDueInDb(db as never, request.input);
+	}
+
+	async function executeDreamingEvidenceClassify(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "dreaming_evidence_classify" }>,
+	): Promise<unknown> {
+		const { collectRejectedDreamingEvidenceInDb } = await import("./pipeline/dreaming-evidence-retry");
+		return collectRejectedDreamingEvidenceInDb(
+			db as never,
+			request.input.agentId,
+			request.input.result as never,
+			request.input.operations as never,
+		);
+	}
+
+	async function executeDreamingEvidenceRequeue(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "dreaming_evidence_requeue" }>,
+		context: JobExecutionContext,
+	): Promise<number> {
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			const { autoRequeueRepairedDreamingEvidenceInDb } = await import("./pipeline/dreaming-evidence-retry");
+			const affected = autoRequeueRepairedDreamingEvidenceInDb(db as never, request.input.policy, request.input.nowMs);
+			commit(context);
+			return affected;
+		} catch (error) {
+			try {
+				db.exec("ROLLBACK");
+			} catch {
+				// Preserve the original owner failure.
+			}
+			throw error;
+		}
+	}
+
 	function executeSourceArtifactUpsert(
 		request: Extract<
 			DbOwnerJob["request"],
@@ -799,7 +863,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:800" },
+			{ siteToken: "db-owner-worker.ts:864" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
@@ -832,7 +896,7 @@ export function runDbOwnerWorker(): void {
 		const { getDbAccessor } = await import("./db-accessor");
 		return await getDbAccessor().withReadDbAsync(
 			(db) => vectorSearchWithMetadata(db, new Float32Array(payload.queryEmbedding), payload.options),
-			{ siteToken: "db-owner-worker.ts:833" },
+			{ siteToken: "db-owner-worker.ts:897" },
 		);
 	}
 
@@ -869,6 +933,13 @@ export function runDbOwnerWorker(): void {
 		if (job.request.kind === "dreaming_surprisal_attention")
 			return executeDreamingSurprisalAttention(job.request, context);
 		if (job.request.kind === "dreaming_episodic_backlog") return await executeDreamingEpisodicBacklog(job.request);
+		if (job.request.kind === "dreaming_evidence_search") return await executeDreamingEvidenceSearch(job.request);
+		if (job.request.kind === "dreaming_evidence_source") return await executeDreamingEvidenceSource(job.request);
+		if (job.request.kind === "dreaming_pass_finalize") return executeDreamingPassFinalize(job.request, context);
+		if (job.request.kind === "dreaming_review_due") return await executeDreamingReviewDue(job.request);
+		if (job.request.kind === "dreaming_evidence_classify") return await executeDreamingEvidenceClassify(job.request);
+		if (job.request.kind === "dreaming_evidence_requeue")
+			return await executeDreamingEvidenceRequeue(job.request, context);
 		if (job.request.kind === "embedding_migration_progress") {
 			const { readEmbeddingIndexMigrationProgress } = await import("./embedding-index-state");
 			return readEmbeddingIndexMigrationProgress(
