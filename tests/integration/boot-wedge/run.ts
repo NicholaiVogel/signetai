@@ -41,10 +41,16 @@ interface CpuSnapshot {
 	readonly processCount: number;
 }
 
-interface ProcEntry {
+export interface ProcEntry {
 	readonly pid: number;
 	readonly parentPid: number;
+	readonly processGroupId: number;
 	readonly processTicks: number;
+}
+
+export interface ProcessTargets {
+	readonly pids: readonly number[];
+	readonly processGroups: readonly number[];
 }
 
 interface CpuSample {
@@ -118,10 +124,11 @@ function readProcEntry(pid: number): ProcEntry | null {
 			.trim()
 			.split(/\s+/);
 		const parentPid = Number(fields[1]);
+		const processGroupId = Number(fields[2]);
 		const userTicks = Number(fields[11]);
 		const systemTicks = Number(fields[12]);
-		if (![parentPid, userTicks, systemTicks].every(Number.isFinite)) return null;
-		return { pid, parentPid, processTicks: userTicks + systemTicks };
+		if (![parentPid, processGroupId, userTicks, systemTicks].every(Number.isFinite)) return null;
+		return { pid, parentPid, processGroupId, processTicks: userTicks + systemTicks };
 	} catch {
 		return null;
 	}
@@ -158,6 +165,27 @@ function processTree(rootPid: number, entries: readonly ProcEntry[]): Set<number
 		}
 	}
 	return tree;
+}
+
+export function snapshotProcessTargets(rootPid: number, entries: readonly ProcEntry[]): ProcessTargets {
+	if (!entries.some((entry) => entry.pid === rootPid)) return { pids: [], processGroups: [] };
+	const tree = processTree(rootPid, entries);
+	const processGroups = new Set<number>();
+	for (const entry of entries) {
+		if (tree.has(entry.pid) && entry.processGroupId > 0) processGroups.add(entry.processGroupId);
+	}
+	return {
+		pids: [...tree].filter((pid) => pid !== rootPid),
+		processGroups: [...processGroups],
+	};
+}
+
+export function hasLiveProcessTarget(
+	targets: ProcessTargets,
+	isPidAlive: (pid: number) => boolean,
+	isProcessGroupAlive: (processGroupId: number) => boolean,
+): boolean {
+	return targets.pids.some(isPidAlive) || targets.processGroups.some(isProcessGroupAlive);
 }
 
 function readCpuSnapshot(pid: number): CpuSnapshot | null {
@@ -205,9 +233,10 @@ export function isLivePayload(body: string, expectedPid: number, expectedPort: n
 	}
 }
 
-async function isLiveResponse(response: Response, expectedPid: number, expectedPort: number): Promise<boolean> {
+export async function isLiveResponse(response: Response, expectedPid: number, expectedPort: number): Promise<boolean> {
+	const body = await response.text();
 	if (response.status !== 200) return false;
-	return isLivePayload(await response.text(), expectedPid, expectedPort);
+	return isLivePayload(body, expectedPid, expectedPort);
 }
 
 async function waitForLive(origin: string, port: number, child: ChildProcess): Promise<number> {
@@ -232,37 +261,41 @@ async function waitForLive(origin: string, port: number, child: ChildProcess): P
 	throw new Error(`daemon did not become live within ${BOOT_TIMEOUT_MS}ms`);
 }
 
-function processGroupAlive(pid: number): boolean {
-	if (process.platform === "win32") return false;
+function processAlive(pid: number): boolean {
 	try {
-		process.kill(-pid, 0);
+		process.kill(pid, 0);
 		return true;
 	} catch {
 		return false;
 	}
 }
 
-function processTreeAlive(pid: number): boolean {
-	return process.platform === "linux" && processTree(pid, readProcEntries()).size > 1;
+function processGroupAlive(processGroupId: number): boolean {
+	if (process.platform === "win32") return false;
+	try {
+		process.kill(-processGroupId, 0);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
-function signalProcessTree(child: ChildProcess, signal: "SIGTERM" | "SIGKILL"): void {
-	// The harness starts the daemon detached on POSIX, so its process group is
-	// the reliable cleanup boundary even after a child has been reparented.
+function signalProcessTree(child: ChildProcess, signal: "SIGTERM" | "SIGKILL", targets: ProcessTargets): void {
+	// Snapshot process groups before signalling. Detached descendants have their
+	// own groups and can be reparented as soon as the daemon exits.
 	if (process.platform !== "win32") {
-		try {
-			process.kill(-child.pid, signal);
-		} catch {}
+		for (const processGroupId of targets.processGroups) {
+			if (processGroupId <= 1) continue;
+			try {
+				process.kill(-processGroupId, signal);
+			} catch {}
+		}
 	}
 
-	// Keep an explicit tree walk as the Windows path and a fallback for a
-	// partially-created process group. Descendants are signalled before the
-	// parent so shutdown cannot orphan a DB-owner or worker process.
-	const descendants =
-		process.platform === "linux"
-			? [...processTree(child.pid, readProcEntries())].filter((pid) => pid !== child.pid).reverse()
-			: [];
-	for (const pid of descendants) {
+	// Direct PID signals cover partially-created groups and the Windows path.
+	// Descendants are signalled before the parent so shutdown cannot orphan a
+	// DB-owner or worker process.
+	for (const pid of [...targets.pids].reverse()) {
 		try {
 			process.kill(pid, signal);
 		} catch {}
@@ -274,24 +307,49 @@ function signalProcessTree(child: ChildProcess, signal: "SIGTERM" | "SIGKILL"): 
 	}
 }
 
-function stopPending(child: ChildProcess): boolean {
-	return childIsAlive(child) || processTreeAlive(child.pid) || processGroupAlive(child.pid);
+function stopPending(child: ChildProcess, targets: ProcessTargets): boolean {
+	return childIsAlive(child) || hasLiveProcessTarget(targets, processAlive, processGroupAlive);
 }
 
-async function waitForStopped(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+function mergeProcessTargets(current: ProcessTargets, next: ProcessTargets): ProcessTargets {
+	return {
+		pids: [...new Set([...current.pids, ...next.pids])],
+		processGroups: [...new Set([...current.processGroups, ...next.processGroups])],
+	};
+}
+
+async function waitForStopped(
+	child: ChildProcess,
+	timeoutMs: number,
+	targets: ProcessTargets,
+): Promise<{ readonly stopped: boolean; readonly targets: ProcessTargets }> {
 	const deadline = Date.now() + timeoutMs;
-	while (stopPending(child) && Date.now() < deadline) {
+	let currentTargets = targets;
+	while (Date.now() < deadline) {
+		// Re-scan while the root is present, then retain every discovered target
+		// after it exits so detached descendants cannot disappear from tracking.
+		if (childIsAlive(child) && process.platform === "linux") {
+			currentTargets = mergeProcessTargets(currentTargets, snapshotProcessTargets(child.pid, readProcEntries()));
+		}
+		if (!stopPending(child, currentTargets)) return { stopped: true, targets: currentTargets };
 		await Bun.sleep(STOP_POLL_MS);
 	}
-	return !stopPending(child);
+	return { stopped: !stopPending(child, currentTargets), targets: currentTargets };
 }
 
 async function stopChild(child: ChildProcess | null): Promise<boolean> {
-	if (!child || !stopPending(child)) return true;
-	signalProcessTree(child, "SIGTERM");
-	if (await waitForStopped(child, STOP_GRACE_MS)) return true;
-	signalProcessTree(child, "SIGKILL");
-	return waitForStopped(child, STOP_POLL_MS * 20);
+	if (!child) return true;
+	let targets =
+		process.platform === "linux"
+			? snapshotProcessTargets(child.pid, readProcEntries())
+			: { pids: [], processGroups: [] };
+	if (!stopPending(child, targets)) return true;
+	signalProcessTree(child, "SIGTERM", targets);
+	const grace = await waitForStopped(child, STOP_GRACE_MS, targets);
+	if (grace.stopped) return true;
+	targets = grace.targets;
+	signalProcessTree(child, "SIGKILL", targets);
+	return (await waitForStopped(child, STOP_POLL_MS * 20, targets)).stopped;
 }
 
 function writeConfig(agentsDir: string): void {

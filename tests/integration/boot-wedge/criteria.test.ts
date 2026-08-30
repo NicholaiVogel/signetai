@@ -7,7 +7,7 @@ import {
 	evaluateBootWedge,
 	type BootWedgeMeasurements,
 } from "./criteria";
-import { isLivePayload } from "./run";
+import { hasLiveProcessTarget, isLivePayload, isLiveResponse, snapshotProcessTargets } from "./run";
 
 function measurements(overrides: Partial<BootWedgeMeasurements> = {}): BootWedgeMeasurements {
 	return {
@@ -44,6 +44,27 @@ describe("boot-wedge safety criteria", () => {
 		expect(isLivePayload(payload, 123, 999)).toBe(false);
 		expect(isLivePayload(JSON.stringify({ status: "healthy", pid: 123 }), 123, 456)).toBe(false);
 		expect(isLivePayload("not json", 123, 456)).toBe(false);
+	});
+
+	test("consumes non-200 liveness response bodies before retrying", async () => {
+		const response = new Response("daemon unavailable", { status: 503 });
+		expect(await isLiveResponse(response, 123, 456)).toBe(false);
+		expect(response.bodyUsed).toBe(true);
+	});
+
+	test("keeps a detached descendant process group pending after the root exits", () => {
+		const targets = snapshotProcessTargets(100, [
+			{ pid: 100, parentPid: 1, processGroupId: 100, processTicks: 0 },
+			{ pid: 101, parentPid: 100, processGroupId: 200, processTicks: 0 },
+		]);
+		const liveAfterRootExit = hasLiveProcessTarget(
+			targets,
+			() => false,
+			(processGroupId) => processGroupId === 200,
+		);
+		expect(targets.pids).toEqual([101]);
+		expect(targets.processGroups).toEqual([100, 200]);
+		expect(liveAfterRootExit).toBe(true);
 	});
 
 	test("fails when idle CPU reaches the ceiling or sampling is incomplete", () => {
