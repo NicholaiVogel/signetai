@@ -46,7 +46,6 @@ import {
 	migrateRetiredMemoryPipelineRoutingV9,
 	migrateSessionSynthesisRoute,
 } from "./config-migration";
-import { listConnectorsAsync } from "./connectors/registry";
 import { findSqliteVecExtension } from "@signet/core";
 import { clearAllPresence, reconcileAcpDeliveries } from "./cross-agent";
 import {
@@ -80,16 +79,28 @@ import {
 	resolveSqliteRuntimeConfig,
 	registerDbOwnerHealthProvider,
 	setDatabaseIntegrityWritesBlocked,
-	type WriteDb,
 } from "./db-accessor";
 import { type VacuumConversionHandle, startVacuumConversionWorker } from "./db-vacuum";
 import { createDbOwnerClient, type DbOwnerClient, type DbOwnerClientOptions } from "./db-owner-client";
-import { type DbOwnerMaintenance, createDbOwnerMaintenance, registerDbOwnerMaintenance } from "./db-owner-maintenance";
+import {
+	type DbOwnerMaintenance,
+	createDbOwnerMaintenance,
+	ownerQueryAll,
+	ownerQueryOne,
+	ownerRunStatement,
+	ownerTransaction,
+	registerDbOwnerMaintenance,
+} from "./db-owner-maintenance";
 import { createDeferredRuntimeGate, createDeferredRuntimeScheduler } from "./deferred-runtime-gate";
-import { getQueuePressureSnapshot } from "./diagnostics-queue";
+import { dbOwnerBatch, dbOwnerQuery, ownerStatement } from "./db-owner-runtime";
+import type { QueuePressureSnapshot } from "./diagnostics-queue";
 import { fetchEmbedding } from "./embedding-fetch";
 import { type EmbeddingIndexMigrationHandle, startEmbeddingIndexMigration } from "./embedding-index-migration";
-import { resolveActiveEmbeddingConfig } from "./embedding-index-state";
+import {
+	type EmbeddingIndexStateRow,
+	parseEmbeddingIndexStateRow,
+	resolveActiveEmbeddingConfigFromState,
+} from "./embedding-index-state";
 import { completeFtsStartupRecovery } from "./fts-startup-recovery";
 import { type EmbeddingTrackerHandle, startEmbeddingTracker } from "./embedding-tracker";
 import { initFeatureFlags } from "./feature-flags";
@@ -343,6 +354,74 @@ function deferMigrationWriters(): void {
 	setDatabaseIntegrityWritesBlocked(true);
 	dbOwnerClient?.setWriteBlocked(true);
 	recallDbOwner?.setWriteBlocked(true);
+}
+
+async function ownerQueuePressure(
+	owner: DbOwnerClient,
+	source: "memory" | "summary",
+): Promise<{ readonly depth: number; readonly oldestAt: string | null } | undefined> {
+	const table = source === "memory" ? "memory_jobs" : "summary_jobs";
+	const statusIndex = source === "memory" ? "idx_memory_jobs_pressure_status" : "idx_summary_jobs_pressure_status";
+	const createdIndex =
+		source === "memory" ? "idx_memory_jobs_pressure_created_at" : "idx_summary_jobs_pressure_created_at";
+	const predicate = source === "memory" ? " AND job_type <> 'extract'" : "";
+	try {
+		const exists = await ownerQueryOne<{ readonly present: number }>(
+			owner,
+			`heartbeat.queue-pressure.${source}.schema`,
+			"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+			[table],
+			{ deadlineMs: 5_000 },
+		);
+		if (exists === undefined) return undefined;
+		const rows = await ownerQueryAll<{ readonly present: number }>(
+			owner,
+			`heartbeat.queue-pressure.${source}.depth`,
+			`SELECT 1 AS present
+			 FROM ${table} INDEXED BY ${statusIndex}
+			 WHERE status IN ('pending', 'leased')${predicate}
+			 LIMIT 1001`,
+			[],
+			{ deadlineMs: 5_000 },
+		);
+		const oldest = await ownerQueryOne<{ readonly oldestAt?: string | null }>(
+			owner,
+			`heartbeat.queue-pressure.${source}.oldest`,
+			`SELECT created_at AS oldestAt
+			 FROM ${table} INDEXED BY ${createdIndex}
+			 WHERE status IN ('pending', 'leased')${predicate}
+			 ORDER BY created_at ASC
+			 LIMIT 1`,
+			[],
+			{ deadlineMs: 5_000 },
+		);
+		return { depth: rows.length, oldestAt: oldest?.oldestAt ?? null };
+	} catch {
+		return undefined;
+	}
+}
+
+function queuePressureAgeSec(value: string | null): number {
+	if (!value) return 0;
+	const timestamp = new Date(value).getTime();
+	if (!Number.isFinite(timestamp)) return 0;
+	return Math.max(0, (Date.now() - timestamp) / 1000);
+}
+
+async function ownerQueuePressureSnapshot(owner: DbOwnerClient): Promise<QueuePressureSnapshot> {
+	const [memory, summary] = await Promise.all([
+		ownerQueuePressure(owner, "memory"),
+		ownerQueuePressure(owner, "summary"),
+	]);
+	const oldestAt = [memory?.oldestAt, summary?.oldestAt].filter(
+		(value): value is string => value !== undefined && value !== null,
+	);
+	const ages = oldestAt.map(queuePressureAgeSec);
+	return {
+		memoryQueueDepth: memory?.depth,
+		summaryQueueDepth: summary?.depth,
+		oldestJobAgeSec: ages.length === 0 ? undefined : Math.max(...ages),
+	};
 }
 
 async function ownerHasPendingVecBackfill(owner: DbOwnerClient, expectedDimensions: number): Promise<boolean> {
@@ -845,10 +924,25 @@ interface LegacyMarkdownFileState {
 	readonly size: number;
 }
 
-async function withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
-	const accessor = getDbAccessor();
-	if (!accessor.withWriteTxAsync) throw new Error("Async database writer is unavailable");
-	return accessor.withWriteTxAsync(fn, { siteToken: "daemon.ts:851" });
+function daemonDbOwner(): DbOwnerClient {
+	if (dbOwnerClient === null) throw new Error("DB owner is unavailable");
+	return dbOwnerClient;
+}
+
+async function resolveActiveEmbeddingConfigThroughOwner(
+	owner: DbOwnerClient,
+	configured: ResolvedMemoryConfig["embedding"],
+	operation: string,
+): Promise<ResolvedMemoryConfig["embedding"]> {
+	if (configured.profile) return configured;
+	const row = await ownerQueryOne<EmbeddingIndexStateRow>(
+		owner,
+		operation,
+		"SELECT active_profile_json, staging_profile_json, state, last_error FROM embedding_index_state WHERE id = 1",
+		[],
+		{ deadlineMs: 5_000 },
+	);
+	return resolveActiveEmbeddingConfigFromState(configured, parseEmbeddingIndexStateRow(row ?? null));
 }
 
 async function legacyMarkdownFileState(filePath: string): Promise<LegacyMarkdownFileState | null> {
@@ -870,29 +964,24 @@ async function readLegacyMarkdownImportState(filePath: string): Promise<{
 	readonly status: string;
 } | null> {
 	try {
-		return await getDbAccessor().withReadDbAsync(
-			async (db) => {
-				const row = db
-					.prepare(
-						`SELECT mtime_ms, ctime_ms, size, content_hash, importer_version, chunk_count, status
-					 FROM legacy_markdown_imports
-					 WHERE path = ?`,
-					)
-					.get(filePath) as
-					| {
-							mtime_ms: number;
-							ctime_ms: number;
-							size: number;
-							content_hash: string;
-							importer_version: number;
-							chunk_count: number;
-							status: string;
-					  }
-					| undefined;
-				return row ?? null;
-			},
-			{ siteToken: "daemon.ts:873" },
+		const row = await ownerQueryOne<{
+			readonly mtime_ms: number;
+			readonly ctime_ms: number;
+			readonly size: number;
+			readonly content_hash: string;
+			readonly importer_version: number;
+			readonly chunk_count: number;
+			readonly status: string;
+		}>(
+			daemonDbOwner(),
+			"startup.legacy-markdown-import-state",
+			`SELECT mtime_ms, ctime_ms, size, content_hash, importer_version, chunk_count, status
+			 FROM legacy_markdown_imports
+			 WHERE path = ?`,
+			[filePath],
+			{ deadlineMs: 5_000 },
 		);
+		return row ?? null;
 	} catch {
 		// Older/unmigrated DBs fall back to the legacy importer behavior.
 		return null;
@@ -923,37 +1012,43 @@ async function writeLegacyMarkdownImportState(args: {
 }): Promise<void> {
 	try {
 		const now = new Date().toISOString();
-		await withWriteTxAsync((db) => {
-			db.prepare(
-				`INSERT INTO legacy_markdown_imports
-				 (path, mtime_ms, ctime_ms, size, content_hash, importer_version, chunk_count,
-				  last_imported_at, last_seen_at, status, error)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-				 ON CONFLICT(path) DO UPDATE SET
-				   mtime_ms = excluded.mtime_ms,
-				   ctime_ms = excluded.ctime_ms,
-				   size = excluded.size,
-				   content_hash = excluded.content_hash,
-				   importer_version = excluded.importer_version,
-				   chunk_count = excluded.chunk_count,
-				   last_imported_at = excluded.last_imported_at,
-				   last_seen_at = excluded.last_seen_at,
-				   status = excluded.status,
-				   error = excluded.error`,
-			).run(
-				args.filePath,
-				args.state.mtimeMs,
-				args.state.ctimeMs,
-				args.state.size,
-				args.contentHash,
-				LEGACY_MARKDOWN_IMPORTER_VERSION,
-				args.chunkCount,
-				now,
-				now,
-				args.status,
-				args.error ?? null,
-			);
-		});
+		await ownerTransaction(
+			daemonDbOwner(),
+			"startup.legacy-markdown-import-state-write",
+			[
+				ownerRunStatement(
+					`INSERT INTO legacy_markdown_imports
+					 (path, mtime_ms, ctime_ms, size, content_hash, importer_version, chunk_count,
+					  last_imported_at, last_seen_at, status, error)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					 ON CONFLICT(path) DO UPDATE SET
+					   mtime_ms = excluded.mtime_ms,
+					   ctime_ms = excluded.ctime_ms,
+					   size = excluded.size,
+					   content_hash = excluded.content_hash,
+					   importer_version = excluded.importer_version,
+					   chunk_count = excluded.chunk_count,
+					   last_imported_at = excluded.last_imported_at,
+					   last_seen_at = excluded.last_seen_at,
+					   status = excluded.status,
+					   error = excluded.error`,
+					[
+						args.filePath,
+						args.state.mtimeMs,
+						args.state.ctimeMs,
+						args.state.size,
+						args.contentHash,
+						LEGACY_MARKDOWN_IMPORTER_VERSION,
+						args.chunkCount,
+						now,
+						now,
+						args.status,
+						args.error ?? null,
+					],
+				),
+			],
+			{ deadlineMs: 5_000 },
+		);
 	} catch {
 		// Non-fatal: importer correctness still falls back to idempotency/source dedupe.
 	}
@@ -961,15 +1056,14 @@ async function writeLegacyMarkdownImportState(args: {
 
 async function legacyMarkdownChunkKnown(filePath: string, chunkHash: string): Promise<boolean> {
 	try {
-		return await getDbAccessor().withReadDbAsync(
-			async (db) => {
-				const row = db
-					.prepare("SELECT 1 FROM legacy_markdown_chunks WHERE file_path = ? AND chunk_hash = ?")
-					.get(filePath, chunkHash);
-				return row != null;
-			},
-			{ siteToken: "daemon.ts:964" },
+		const row = await ownerQueryOne<{ readonly present: number }>(
+			daemonDbOwner(),
+			"startup.legacy-markdown-chunk-known",
+			"SELECT 1 AS present FROM legacy_markdown_chunks WHERE file_path = ? AND chunk_hash = ?",
+			[filePath, chunkHash],
+			{ deadlineMs: 5_000 },
 		);
+		return row !== undefined;
 	} catch {
 		return false;
 	}
@@ -983,17 +1077,23 @@ async function recordLegacyMarkdownChunk(args: {
 	readonly sourceId: string;
 }): Promise<void> {
 	try {
-		await withWriteTxAsync((db) => {
-			db.prepare(
-				`INSERT INTO legacy_markdown_chunks
-				 (file_path, chunk_hash, chunk_index, memory_id, source_id, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?)
-				 ON CONFLICT(file_path, chunk_hash) DO UPDATE SET
-				   chunk_index = excluded.chunk_index,
-				   memory_id = COALESCE(excluded.memory_id, legacy_markdown_chunks.memory_id),
-				   source_id = excluded.source_id`,
-			).run(args.filePath, args.chunkHash, args.chunkIndex, args.memoryId, args.sourceId, new Date().toISOString());
-		});
+		await ownerTransaction(
+			daemonDbOwner(),
+			"startup.legacy-markdown-chunk-write",
+			[
+				ownerRunStatement(
+					`INSERT INTO legacy_markdown_chunks
+					 (file_path, chunk_hash, chunk_index, memory_id, source_id, created_at)
+					 VALUES (?, ?, ?, ?, ?, ?)
+					 ON CONFLICT(file_path, chunk_hash) DO UPDATE SET
+					   chunk_index = excluded.chunk_index,
+					   memory_id = COALESCE(excluded.memory_id, legacy_markdown_chunks.memory_id),
+					   source_id = excluded.source_id`,
+					[args.filePath, args.chunkHash, args.chunkIndex, args.memoryId, args.sourceId, new Date().toISOString()],
+				),
+			],
+			{ deadlineMs: 5_000 },
+		);
 	} catch {
 		// Non-fatal.
 	}
@@ -1573,11 +1673,12 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 	}
 	if (roster.length === 0) return;
 
-	const db = getDbAccessor();
 	const now = new Date().toISOString();
-	await db.withWriteTxAsync(
-		(w) => {
-			const stmt = w.prepare(
+	const statements = roster.flatMap((entry) => {
+		const normalized = normalizeAgentRosterEntry(entry);
+		if (!normalized) return [];
+		return [
+			ownerStatement(
 				`INSERT INTO agents (id, name, read_policy, policy_group, created_at, updated_at)
 				 VALUES (?, ?, ?, ?, ?, ?)
 				 ON CONFLICT(id) DO UPDATE SET
@@ -1585,15 +1686,18 @@ async function syncAgentRoster(agentsDir: string): Promise<void> {
 				   read_policy = excluded.read_policy,
 				   policy_group = excluded.policy_group,
 				   updated_at = excluded.updated_at`,
-			);
-			for (const entry of roster) {
-				const normalized = normalizeAgentRosterEntry(entry);
-				if (!normalized) continue;
-				stmt.run(normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now);
-			}
-		},
-		{ siteToken: "daemon.ts:1578", operation: "startup.sync-agent-roster", estimatedWorkUnits: roster.length },
-	);
+				[normalized.name, normalized.name, normalized.readPolicy, normalized.policyGroup, now, now],
+			),
+		];
+	});
+	if (statements.length > 0) {
+		await dbOwnerBatch(statements, {
+			operation: "startup.sync-agent-roster",
+			lane: "write",
+			deadlineMs: 5_000,
+			estimatedWorkUnits: statements.length,
+		});
+	}
 	logger.info("daemon", "Agent roster synced", { count: roster.length });
 }
 
@@ -1648,7 +1752,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 	// Leased rows are terminalized too because no legacy worker remains. Runs on
 	// cold boot and live-reload config transitions (#913).
 	if (!pipelinePaused) {
-		const deadLettered = await retireLegacyExtractionJobsAsync(getDbAccessor(), {
+		const deadLettered = await retireLegacyExtractionJobsAsync({
 			reason: "Dreaming cutover: legacy extraction worker not started",
 		});
 		if (deadLettered > 0) {
@@ -1658,9 +1762,10 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 		}
 	}
 
-	const activeEmbeddingCfg = await getDbAccessor().withReadDbAsync(
-		(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-		{ siteToken: "daemon.ts:1661", operation: "startup.resolve-active-embedding" },
+	const activeEmbeddingCfg = await resolveActiveEmbeddingConfigThroughOwner(
+		daemonDbOwner(),
+		memoryCfg.embedding,
+		"startup.resolve-active-embedding",
 	);
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
 	logger.info("config", "Resolved embedding config", {
@@ -2450,23 +2555,23 @@ async function main() {
 					if (!telemetryRef) return;
 					try {
 						const liveCfg = loadMemoryConfig(AGENTS_DIR);
-						const accessor = getDbAccessor();
-						const [memoryCount, connectors, queue] = await Promise.all([
-							accessor.withReadDbAsync(
-								(db) => {
-									const row = db
-										.prepare("SELECT COUNT(*) as cnt FROM memories WHERE is_deleted = 0 OR is_deleted IS NULL")
-										.get() as { cnt: number } | undefined;
-									return row?.cnt ?? 0;
-								},
-								{ siteToken: "daemon.ts:2455", operation: "heartbeat.memory-count" },
+						const owner = daemonDbOwner();
+						const [memoryRow, connectors, queue] = await Promise.all([
+							dbOwnerQuery<{ readonly cnt?: number } | null>(
+								ownerStatement(
+									"SELECT COUNT(*) as cnt FROM memories WHERE is_deleted = 0 OR is_deleted IS NULL",
+									[],
+									"get",
+								),
+								{ operation: "heartbeat.memory-count", lane: "read", deadlineMs: 5_000 },
 							),
-							listConnectorsAsync(accessor),
-							accessor.withReadDbAsync((db) => getQueuePressureSnapshot(db), {
-								siteToken: "daemon.ts:2465",
-								operation: "heartbeat.queue-pressure",
-							}),
+							dbOwnerQuery<readonly { readonly status: string }[]>(
+								ownerStatement("SELECT * FROM connectors ORDER BY created_at DESC", [], "all"),
+								{ operation: "heartbeat.list-connectors", lane: "read", deadlineMs: 5_000 },
+							),
+							ownerQueuePressureSnapshot(owner),
 						]);
+						const memoryCount = memoryRow?.cnt ?? 0;
 						let runtimePressure: ReturnType<typeof buildRuntimePressureEnvelope> | undefined;
 						let resourceTelemetry: ReturnType<typeof buildResourceUtilizationTelemetry> | undefined;
 						try {
@@ -2556,9 +2661,10 @@ async function main() {
 	let vecBackfillScheduled = false;
 	const probePendingVecBackfill = async (): Promise<boolean> => {
 		if (migrationIntegrityWritesBlocked) return false;
-		const activeEmbedding = await getDbAccessor().withReadDbAsync(
-			(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-			{ siteToken: "daemon.ts:2559", operation: "maintenance.vec-backfill-config" },
+		const activeEmbedding = await resolveActiveEmbeddingConfigThroughOwner(
+			daemonDbOwner(),
+			memoryCfg.embedding,
+			"maintenance.vec-backfill-config",
 		);
 		return await ownerHasPendingVecBackfill(owner, activeEmbedding.dimensions);
 	};
@@ -2588,9 +2694,10 @@ async function main() {
 				deferredRuntimeScheduler.scheduleMaintenance(async (): Promise<void> => {
 					let budgetExpired = false;
 					try {
-						const activeEmbedding = await getDbAccessor().withReadDbAsync(
-							(db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding),
-							{ siteToken: "daemon.ts:2591", operation: "maintenance.vec-backfill-config" },
+						const activeEmbedding = await resolveActiveEmbeddingConfigThroughOwner(
+							daemonDbOwner(),
+							memoryCfg.embedding,
+							"maintenance.vec-backfill-config",
 						);
 						if (migrationIntegrityWritesBlocked) return;
 						if (!isVectorRuntimeUsable()) {

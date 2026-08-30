@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Hono } from "hono";
 import { cleanupTestTempDir, createTestTempDir } from "./test-temp-dir";
@@ -377,6 +377,18 @@ describe("daemon status contract", () => {
 		});
 
 		expect(getLlmConcurrencyStatus().limit).toBe(1);
+	});
+
+	it("routes daemon boot, heartbeat, and maintenance DB work through the owner", () => {
+		const source = readFileSync(new URL("./daemon.ts", import.meta.url), "utf-8");
+		const extractionFallback = readFileSync(new URL("./pipeline/extraction-fallback.ts", import.meta.url), "utf-8");
+		expect(source).not.toContain("withReadDbAsync");
+		expect(source).not.toContain("withWriteTxAsync");
+		expect(source).toContain("startup.sync-agent-roster");
+		expect(source).toContain("heartbeat.queue-pressure");
+		expect(source).toContain("resolveActiveEmbeddingConfigThroughOwner");
+		expect(extractionFallback).not.toContain("withWriteTxAsync");
+		expect(extractionFallback).toContain("dbOwnerTransaction");
 	});
 
 	it("counts non-errored connectors as active for heartbeat telemetry", () => {
