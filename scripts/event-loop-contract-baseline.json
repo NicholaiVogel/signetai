@@ -3195,13 +3195,6 @@
       "category": "hot-path"
     },
     {
-      "path": "pipeline/extraction-fallback.ts",
-      "line": 19,
-      "api": "withWriteTxAsync",
-      "source": "return await accessor.withWriteTxAsync(",
-      "category": "hot-path"
-    },
-    {
       "path": "pipeline/graph-traversal.ts",
       "line": 92,
       "api": "withReadDbAsync",

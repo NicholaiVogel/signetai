@@ -1752,7 +1752,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 	// Leased rows are terminalized too because no legacy worker remains. Runs on
 	// cold boot and live-reload config transitions (#913).
 	if (!pipelinePaused) {
-		const deadLettered = await retireLegacyExtractionJobsAsync(getDbAccessor(), {
+		const deadLettered = await retireLegacyExtractionJobsAsync({
 			reason: "Dreaming cutover: legacy extraction worker not started",
 		});
 		if (deadLettered > 0) {

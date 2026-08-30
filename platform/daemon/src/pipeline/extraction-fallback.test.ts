@@ -1,25 +1,26 @@
 import Database from "bun:sqlite";
 import { beforeEach, describe, expect, it } from "bun:test";
-import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
-import { retireLegacyExtractionJobsAsync } from "./extraction-fallback";
+import type { DbOwnerSqlOptions } from "../db-owner-runtime";
+import type { DbOwnerStatement } from "../db-owner-protocol";
+import { retireLegacyExtractionJobsAsync, type LegacyExtractionRetirementTransaction } from "./extraction-fallback";
 
-function makeAccessor(db: Database): DbAccessor {
-	return {
-		withWriteTxAsync<T>(fn: (wdb: WriteDb) => T): Promise<T> {
-			return Promise.resolve(fn(db as unknown as WriteDb));
-		},
-		withReadDbAsync<T>(fn: (rdb: ReadDb) => T | Promise<T>): Promise<T> {
-			return Promise.resolve(fn(db as unknown as ReadDb));
-		},
-		close() {
-			db.close();
-		},
+function makeTransaction(db: Database): LegacyExtractionRetirementTransaction {
+	return async (statements: readonly DbOwnerStatement[], _options: DbOwnerSqlOptions): Promise<readonly unknown[]> => {
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			const results = statements.map((statement) => db.prepare(statement.sql).run(...(statement.params ?? [])));
+			db.exec("COMMIT");
+			return results;
+		} catch (error) {
+			db.exec("ROLLBACK");
+			throw error;
+		}
 	};
 }
 
 describe("legacy extraction retirement", () => {
 	let db: Database;
-	let accessor: DbAccessor;
+	let transaction: LegacyExtractionRetirementTransaction;
 
 	beforeEach(() => {
 		db = new Database(":memory:");
@@ -36,7 +37,7 @@ describe("legacy extraction retirement", () => {
 				status TEXT NOT NULL, error TEXT, failed_at TEXT, updated_at TEXT NOT NULL
 			);
 		`);
-		accessor = makeAccessor(db);
+		transaction = makeTransaction(db);
 	});
 
 	it("terminalizes every unfinished retired extraction job without creating replacement work", async () => {
@@ -112,7 +113,7 @@ describe("legacy extraction retirement", () => {
 			);
 		}
 
-		expect(await retireLegacyExtractionJobsAsync(accessor, { reason: "Dreaming owns semantic writes" })).toBe(8);
+		expect(await retireLegacyExtractionJobsAsync({ reason: "Dreaming owns semantic writes" }, transaction)).toBe(8);
 
 		const jobs = db.prepare("SELECT id, status FROM memory_jobs ORDER BY id").all();
 		expect(jobs).toEqual([

@@ -1,4 +1,7 @@
-import type { DbAccessor } from "../db-accessor";
+import { ownerChanges } from "../db-owner-maintenance";
+import { dbOwnerTransaction, ownerStatement } from "../db-owner-runtime";
+
+export type LegacyExtractionRetirementTransaction = typeof dbOwnerTransaction;
 
 export interface LegacyExtractionRetirementOptions {
 	readonly reason: string;
@@ -12,37 +15,37 @@ export interface LegacyExtractionRetirementOptions {
  * intentionally terminal because retention/forgetting already withdrew them.
  */
 export async function retireLegacyExtractionJobsAsync(
-	accessor: DbAccessor,
 	options: LegacyExtractionRetirementOptions,
+	transaction: LegacyExtractionRetirementTransaction = dbOwnerTransaction,
 ): Promise<number> {
 	const now = new Date().toISOString();
-	return await accessor.withWriteTxAsync(
-		(db) => {
-			const sources = db
-				.prepare(
-					`SELECT DISTINCT m.id
+	const results = await transaction(
+		[
+			ownerStatement(
+				`UPDATE memories
+				 SET extraction_status = 'retired'
+				 WHERE id IN (
+					 SELECT DISTINCT m.id
 					 FROM memory_jobs j
 					 JOIN memories m ON m.id = j.memory_id
 					 WHERE j.job_type = 'extract'
-					   AND j.status IN ('pending', 'leased')`,
-				)
-				.all() as Array<{ id: string }>;
-			const result = db
-				.prepare(
-					`UPDATE memory_jobs
-					 SET status = 'dead', error = ?, failed_at = ?, updated_at = ?
-					 WHERE job_type = 'extract'
-					   AND status IN ('pending', 'leased')`,
-				)
-				.run(options.reason, now, now);
-			for (const source of sources)
-				db.prepare("UPDATE memories SET extraction_status = 'retired' WHERE id = ?").run(source.id);
-			return result.changes;
-		},
+					   AND j.status IN ('pending', 'leased')
+				 )`,
+			),
+			ownerStatement(
+				`UPDATE memory_jobs
+				 SET status = 'dead', error = ?, failed_at = ?, updated_at = ?
+				 WHERE job_type = 'extract'
+				   AND status IN ('pending', 'leased')`,
+				[options.reason, now, now],
+			),
+		],
 		{
-			siteToken: "pipeline/extraction-fallback.ts:19",
 			operation: "startup.retire-legacy-extraction",
-			estimatedWorkUnits: 1,
+			lane: "write",
+			deadlineMs: 5_000,
+			estimatedWorkUnits: 2,
 		},
 	);
+	return ownerChanges(results[1]);
 }
