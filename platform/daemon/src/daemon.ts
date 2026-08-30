@@ -2498,6 +2498,8 @@ async function main() {
 		telemetryCollector = createTelemetryCollector(getDbAccessor(), resolvedTelemetryCfg, CURRENT_VERSION, {
 			telemetryLogPath: defaultTelemetryLogPath(AGENTS_DIR),
 			configSnapshot: buildTelemetryConfigSnapshot(AGENTS_DIR, memoryCfg),
+			owner: daemonDbOwner(),
+			dbPath: MEMORY_DB,
 		});
 		telemetryCollector.start();
 		telemetryRef = telemetryCollector;

@@ -190,7 +190,7 @@ export async function ownerTransaction(
 ): Promise<readonly unknown[]> {
 	return await runOwnerMaintenanceWithRetry<readonly unknown[]>(
 		owner,
-		{ kind: "batch", statements },
+		{ kind: "transaction", transaction: { statements } },
 		operation,
 		options,
 	);
