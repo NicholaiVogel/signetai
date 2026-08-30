@@ -7,6 +7,7 @@
 import type { DreamingConfig } from "@signet/core";
 import type { DbAccessor } from "../db-accessor";
 import type { DbOwnerMaintenance } from "../db-owner-maintenance";
+import { ownerQueryAll, ownerQueryOne } from "../db-owner-maintenance";
 import { getQueueHealth } from "../diagnostics";
 import { getOrCreateInferenceRouter } from "../inference-router";
 import type { GraphHygieneCaps } from "../knowledge-graph-hygiene";
@@ -95,9 +96,13 @@ const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 min
 const AGENT_SCOPE_SNAPSHOT_REFRESH_MS = 30 * 60 * 1000; // 30 min
 
 /** Dreaming is deferrable work. Yield an entire sweep while live queues are under pressure. */
-export async function shouldDeferDreamingSweep(accessor: DbAccessor): Promise<boolean> {
+export async function shouldDeferDreamingSweep(
+	accessor: DbAccessor,
+	ownerMaintenance?: DbOwnerMaintenance,
+): Promise<boolean> {
+	if (ownerMaintenance) return !(await ownerMaintenance.queueIsHealthy());
 	return await accessor.withReadDbAsync((db) => getQueueHealth(db).status !== "healthy", {
-		siteToken: "pipeline/dreaming-worker.ts:99",
+		siteToken: "pipeline/dreaming-worker.ts:104",
 		operation: "dreaming.worker.queue-health",
 	});
 }
@@ -106,8 +111,7 @@ export async function shouldDeferDreamingSweepAsync(
 	accessor: DbAccessor,
 	ownerMaintenance?: DbOwnerMaintenance,
 ): Promise<boolean> {
-	if (ownerMaintenance) return !(await ownerMaintenance.queueIsHealthy());
-	return await shouldDeferDreamingSweep(accessor);
+	return await shouldDeferDreamingSweep(accessor, ownerMaintenance);
 }
 
 function normalizeAgentId(agentId: string | undefined, fallback: string): string {
@@ -118,47 +122,47 @@ function normalizeAgentId(agentId: string | undefined, fallback: string): string
 export async function getDreamingWorkerAgentIds(
 	accessor: DbAccessor,
 	defaultAgentId: string,
+	ownerMaintenance?: DbOwnerMaintenance,
 ): Promise<readonly string[]> {
-	return await accessor.withReadDbAsync(
-		(db) => {
-			// UNION ALL + app-side dedup instead of UNION: the caller collapses
-			// rows into a Set, so the cross-branch sort/merge UNION performs is
-			// pure waste. UNION ALL concatenates the per-table index scans
-			// (every branch resolves through an agent_id-prefix or covering
-			// index), bounding the query by index size rather than table
-			// content (#1094).
-			const rows = db
-				.prepare(
-					`SELECT id AS id FROM agents
-				 UNION ALL
-				 SELECT DISTINCT agent_id AS id FROM dreaming_state
-				 UNION ALL
-				 SELECT DISTINCT agent_id AS id FROM dreaming_passes
-				 UNION ALL
-				 SELECT DISTINCT agent_id AS id FROM memories WHERE is_deleted = 0
-				 UNION ALL
-				 SELECT DISTINCT agent_id AS id FROM session_summaries
-				 UNION ALL
-				 SELECT DISTINCT agent_id AS id FROM memory_artifacts WHERE is_deleted = 0
-				 UNION ALL
-				 SELECT DISTINCT agent_id AS id FROM session_transcripts
-				 UNION ALL
-				 SELECT DISTINCT agent_id AS id FROM dreaming_attention WHERE resolved_at IS NULL
-				 UNION ALL
-				 SELECT DISTINCT agent_id AS id FROM dreaming_evidence_exclusions WHERE resolved_at IS NULL
-				 UNION ALL
-				 SELECT DISTINCT agent_id AS id FROM entities`,
-				)
-				.all() as Array<{ id: string | null }>;
-			const ids = new Set<string>([defaultAgentId]);
-			for (const row of rows) {
-				const id = normalizeAgentId(row.id ?? undefined, "");
-				if (id) ids.add(id);
-			}
-			return [...ids].sort();
-		},
-		{ siteToken: "pipeline/dreaming-worker.ts:122", operation: "dreaming.worker.agent-scopes" },
-	);
+	const sql = `SELECT id AS id FROM agents
+	 UNION ALL
+	 SELECT DISTINCT agent_id AS id FROM dreaming_state
+	 UNION ALL
+	 SELECT DISTINCT agent_id AS id FROM dreaming_passes
+	 UNION ALL
+	 SELECT DISTINCT agent_id AS id FROM memories WHERE is_deleted = 0
+	 UNION ALL
+	 SELECT DISTINCT agent_id AS id FROM session_summaries
+	 UNION ALL
+	 SELECT DISTINCT agent_id AS id FROM memory_artifacts WHERE is_deleted = 0
+	 UNION ALL
+	 SELECT DISTINCT agent_id AS id FROM session_transcripts
+	 UNION ALL
+	 SELECT DISTINCT agent_id AS id FROM dreaming_attention WHERE resolved_at IS NULL
+	 UNION ALL
+	 SELECT DISTINCT agent_id AS id FROM dreaming_evidence_exclusions WHERE resolved_at IS NULL
+	 UNION ALL
+	 SELECT DISTINCT agent_id AS id FROM entities`;
+	const rows = ownerMaintenance?.owner
+		? await ownerQueryAll<{ id: string | null }>(ownerMaintenance.owner, "pipeline/dreaming-worker.agent-scopes", sql)
+		: await accessor.withReadDbAsync(
+				(db) => {
+					// UNION ALL + app-side dedup instead of UNION: the caller collapses
+					// rows into a Set, so the cross-branch sort/merge UNION performs is
+					// pure waste. UNION ALL concatenates the per-table index scans
+					// (every branch resolves through an agent_id-prefix or covering
+					// index), bounding the query by index size rather than table
+					// content (#1094).
+					return db.prepare(sql).all() as Array<{ id: string | null }>;
+				},
+				{ siteToken: "pipeline/dreaming-worker.ts:148", operation: "dreaming.worker.agent-scopes" },
+			);
+	const ids = new Set<string>([defaultAgentId]);
+	for (const row of rows) {
+		const id = normalizeAgentId(row.id ?? undefined, "");
+		if (id) ids.add(id);
+	}
+	return [...ids].sort();
 }
 
 /**
@@ -211,20 +215,42 @@ export async function selectDreamingCheckMode(
 	const hasPendingHygieneAttention = (
 		await Promise.all(
 			scopes.map((scope) =>
-				accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, ["hygiene"]), {
-					siteToken: "pipeline/dreaming-worker.ts:214",
-					operation: "dreaming.worker.hygiene-attention",
-				}),
+				ownerMaintenance?.owner
+					? ownerQueryOne<{ present: number }>(
+							ownerMaintenance.owner,
+							"pipeline/dreaming-worker.hygiene-attention",
+							`SELECT 1 AS present FROM dreaming_attention
+							 WHERE agent_id = ? AND resolved_at IS NULL AND kind IN (?)
+							 LIMIT 1`,
+							[scope, "hygiene"],
+						).then((row) => row != null)
+					: accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, ["hygiene"]), {
+							siteToken: "pipeline/dreaming-worker.ts:227",
+							operation: "dreaming.worker.hygiene-attention",
+						}),
 			),
 		)
 	).some(Boolean);
 	const hasPendingContentAttention = (
 		await Promise.all(
 			scopes.map((scope) =>
-				accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS), {
-					siteToken: "pipeline/dreaming-worker.ts:224",
-					operation: "dreaming.worker.content-attention",
-				}),
+				ownerMaintenance?.owner
+					? ownerQueryOne<{ present: number }>(
+							ownerMaintenance.owner,
+							"pipeline/dreaming-worker.content-attention",
+							`SELECT 1 AS present FROM dreaming_attention
+							 WHERE agent_id = ? AND resolved_at IS NULL
+							 AND kind IN (${DREAMING_CONTENT_ATTENTION_KINDS.map(() => "?").join(", ")})
+							 LIMIT 1`,
+							[scope, ...DREAMING_CONTENT_ATTENTION_KINDS],
+						).then((row) => row != null)
+					: accessor.withReadDbAsync(
+							(db) => hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS),
+							{
+								siteToken: "pipeline/dreaming-worker.ts:247",
+								operation: "dreaming.worker.content-attention",
+							},
+						),
 			),
 		)
 	).some(Boolean);
@@ -254,7 +280,7 @@ export function startDreamingWorker(
 	// pending (#1098). Explicit triggers do not touch it.
 	let nextScheduledFocus: DreamingPassFocus | null = null;
 	const getAgentScopes = createAgentScopeSnapshot(AGENT_SCOPE_SNAPSHOT_REFRESH_MS, () =>
-		getDreamingWorkerAgentIds(accessor, defaultAgentId),
+		getDreamingWorkerAgentIds(accessor, defaultAgentId, options.ownerMaintenance),
 	);
 	const evidenceRetry: DreamingEvidenceRetryPolicy = options.evidenceRetry ?? {
 		cooldownMs: 60_000,
@@ -328,7 +354,8 @@ export function startDreamingWorker(
 		try {
 			// Periodic sweeps pass their snapshot through; explicit triggers and
 			// CLI passes resolve fresh so operator intent is never stale.
-			const passScopes = scopes ?? (await getDreamingWorkerAgentIds(accessor, defaultAgentId));
+			const passScopes =
+				scopes ?? (await getDreamingWorkerAgentIds(accessor, defaultAgentId, options.ownerMaintenance));
 			const p = runDreamingAgentPass(
 				accessor,
 				executorForAgent(runAgentId),
@@ -504,7 +531,7 @@ export function startDreamingWorker(
 				cfg,
 				agentsDir,
 				runAgentId,
-				await getDreamingWorkerAgentIds(accessor, defaultAgentId),
+				await getDreamingWorkerAgentIds(accessor, defaultAgentId, options.ownerMaintenance),
 				mode,
 				passId,
 				caps,

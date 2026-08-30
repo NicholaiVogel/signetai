@@ -26,6 +26,8 @@ import type {
 } from "./db-owner-protocol";
 import { DB_OWNER_MAX_RESULT_BYTES, DB_OWNER_MAX_WORK_UNITS } from "./db-owner-protocol";
 import { setFtsIndexIncomplete } from "./fts-index-state";
+import type { EmbeddingIndexMigrationProgress } from "./embedding-index-state";
+import type { DiagnosticsReport, ProviderTracker, QueueHealth } from "./diagnostics";
 import type { DreamingSurprisalSelection } from "./pipeline/dreaming-surprisal";
 
 export interface DbOwnerMaintenanceOptions {
@@ -329,6 +331,17 @@ export interface DbOwnerMaintenance {
 		input: DbOwnerDreamingEpisodicBacklog,
 		options?: DbOwnerMaintenanceOptions,
 	) => Promise<number>;
+	readonly embeddingMigrationProgress: (
+		configuredBaseUrl?: string,
+		options?: DbOwnerMaintenanceOptions,
+	) => Promise<EmbeddingIndexMigrationProgress | null>;
+	readonly healthReady: (
+		options?: DbOwnerMaintenanceOptions,
+	) => Promise<{ readonly migrationsOk: boolean; readonly queueHealth: QueueHealth }>;
+	readonly diagnostics: (
+		stats: ProviderTracker["stats"],
+		options?: DbOwnerMaintenanceOptions,
+	) => Promise<DiagnosticsReport>;
 	readonly health: () => DbOwnerHealth;
 	readonly close: () => Promise<void>;
 }
@@ -786,6 +799,33 @@ export function createDbOwnerMaintenance(options: CreateDbOwnerMaintenanceOption
 		input: DbOwnerDreamingEpisodicBacklog,
 		maintenanceOptions?: DbOwnerMaintenanceOptions,
 	): Promise<number> => ownerDreamingEpisodicBacklog(owner, input, maintenanceOptions);
+	const embeddingMigrationProgress = (
+		configuredBaseUrl?: string,
+		maintenanceOptions?: DbOwnerMaintenanceOptions,
+	): Promise<EmbeddingIndexMigrationProgress | null> =>
+		runOwnerMaintenanceWithRetry<EmbeddingIndexMigrationProgress | null>(
+			owner,
+			{
+				kind: "embedding_migration_progress",
+				...(configuredBaseUrl === undefined ? {} : { configuredBaseUrl }),
+			},
+			"maintenance.embedding.migration-progress",
+			maintenanceOptions,
+		);
+	const healthReady = (
+		maintenanceOptions?: DbOwnerMaintenanceOptions,
+	): Promise<{ readonly migrationsOk: boolean; readonly queueHealth: QueueHealth }> =>
+		runOwnerMaintenanceWithRetry(owner, { kind: "health_ready" }, "maintenance.health.ready", maintenanceOptions);
+	const diagnostics = (
+		stats: ProviderTracker["stats"],
+		maintenanceOptions?: DbOwnerMaintenanceOptions,
+	): Promise<DiagnosticsReport> =>
+		runOwnerMaintenanceWithRetry(
+			owner,
+			{ kind: "diagnostics", trackerStats: stats },
+			"maintenance.diagnostics",
+			maintenanceOptions,
+		);
 	const backfill = (backfillOptions?: FtsBackfillOptions): Promise<FtsBackfillResult> =>
 		backfillFts(owner, backfillOptions);
 	const rebuild = async (rebuildOptions: FtsBackfillOptions = {}): Promise<FtsBackfillResult> => {
@@ -870,6 +910,9 @@ export function createDbOwnerMaintenance(options: CreateDbOwnerMaintenanceOption
 		dreamingHygieneAttention,
 		dreamingSurprisalAttention,
 		dreamingEpisodicBacklog,
+		embeddingMigrationProgress,
+		healthReady,
+		diagnostics,
 		health: () => owner.health(),
 		close: async () => {
 			if (ownsOwner) await owner.close();

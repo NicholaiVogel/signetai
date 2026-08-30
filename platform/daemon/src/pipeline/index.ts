@@ -220,6 +220,7 @@ export function startPipeline(
 			embeddingCfg,
 			fetchEmbedding,
 			pipelineCfg,
+			ownerMaintenance,
 		});
 	}
 

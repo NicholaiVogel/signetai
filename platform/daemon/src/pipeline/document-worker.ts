@@ -13,6 +13,8 @@ import { type ConcurrencyAdmission, createConcurrencyAdmission } from "../concur
 import { normalizeAndHashContent } from "../content-normalization";
 import type { DbAccessor, WriteDb } from "../db-accessor";
 import { syncVecInsert, vectorToBlob } from "../db-helpers";
+import type { DbOwnerMaintenance } from "../db-owner-maintenance";
+import { ownerQueryOne } from "../db-owner-maintenance";
 import type { EmbeddingFetchOptions } from "../embedding-fetch";
 import { isActiveEmbeddingConfig } from "../embedding-index-state";
 import type { EmbeddingRole } from "../embedding-profile";
@@ -58,6 +60,8 @@ export interface DocumentWorkerDeps {
 		opts?: EmbeddingFetchOptions,
 	) => Promise<number[] | null>;
 	readonly pipelineCfg: PipelineV2Config;
+	/** All production reads use the registered database owner when present. */
+	readonly ownerMaintenance?: DbOwnerMaintenance;
 }
 
 interface DocumentJobRow {
@@ -261,12 +265,19 @@ async function processDocument(
 		throw new Error("document_ingest job missing document_id");
 	}
 
-	const doc = await accessor.withReadDbAsync(
-		async (db) => {
-			return db.prepare("SELECT * FROM documents WHERE id = ?").get(docId) as DocumentRow | undefined;
-		},
-		{ siteToken: "pipeline/document-worker.ts:264" },
-	);
+	const doc = deps.ownerMaintenance
+		? await ownerQueryOne<DocumentRow>(
+				deps.ownerMaintenance.owner,
+				"pipeline.document-worker.document-read",
+				"SELECT * FROM documents WHERE id = ?",
+				[docId],
+			)
+		: await accessor.withReadDbAsync(
+				async (db) => {
+					return db.prepare("SELECT * FROM documents WHERE id = ?").get(docId) as DocumentRow | undefined;
+				},
+				{ siteToken: "pipeline/document-worker.ts:275" },
+			);
 
 	if (!doc) {
 		throw new Error(`Document ${docId} not found`);
@@ -577,6 +588,15 @@ export function startDocumentWorker(deps: DocumentWorkerDeps): DocumentWorkerHan
 	>();
 
 	async function terminalStatus(jobId: string): Promise<string | null> {
+		if (deps.ownerMaintenance) {
+			const row = await ownerQueryOne<{ status?: string }>(
+				deps.ownerMaintenance.owner,
+				"pipeline.document-worker.terminal-status",
+				"SELECT status FROM memory_jobs WHERE id = ?",
+				[jobId],
+			);
+			return row?.status ?? null;
+		}
 		return deps.accessor.withReadDbAsync(
 			async (db) => {
 				const row = db.prepare("SELECT status FROM memory_jobs WHERE id = ?").get(jobId) as
@@ -584,7 +604,7 @@ export function startDocumentWorker(deps: DocumentWorkerDeps): DocumentWorkerHan
 					| undefined;
 				return row?.status ?? null;
 			},
-			{ siteToken: "pipeline/document-worker.ts:580" },
+			{ siteToken: "pipeline/document-worker.ts:600" },
 		);
 	}
 
@@ -598,20 +618,34 @@ export function startDocumentWorker(deps: DocumentWorkerDeps): DocumentWorkerHan
 	): Promise<void> {
 		const { state } = operation;
 		if (job.document_id) {
-			const durable = await deps.accessor.withReadDbAsync(
-				async (db) =>
-					db.prepare("SELECT chunk_count, memory_count FROM documents WHERE id = ?").get(job.document_id) as
-						| { chunk_count?: number | null; memory_count?: number | null }
-						| undefined,
-				{ siteToken: "pipeline/document-worker.ts:601" },
-			);
-			const durableLinks = await deps.accessor.withReadDbAsync(
-				async (db) =>
-					db.prepare("SELECT COUNT(*) AS count FROM document_memories WHERE document_id = ?").get(job.document_id) as
-						| { count?: number | null }
-						| undefined,
-				{ siteToken: "pipeline/document-worker.ts:608" },
-			);
+			const durable = deps.ownerMaintenance
+				? await ownerQueryOne<{ chunk_count?: number | null; memory_count?: number | null }>(
+						deps.ownerMaintenance.owner,
+						"pipeline.document-worker.document-progress",
+						"SELECT chunk_count, memory_count FROM documents WHERE id = ?",
+						[job.document_id],
+					)
+				: await deps.accessor.withReadDbAsync(
+						async (db) =>
+							db.prepare("SELECT chunk_count, memory_count FROM documents WHERE id = ?").get(job.document_id) as
+								| { chunk_count?: number | null; memory_count?: number | null }
+								| undefined,
+						{ siteToken: "pipeline/document-worker.ts:628" },
+					);
+			const durableLinks = deps.ownerMaintenance
+				? await ownerQueryOne<{ count?: number | null }>(
+						deps.ownerMaintenance.owner,
+						"pipeline.document-worker.document-links",
+						"SELECT COUNT(*) AS count FROM document_memories WHERE document_id = ?",
+						[job.document_id],
+					)
+				: await deps.accessor.withReadDbAsync(
+						async (db) =>
+							db
+								.prepare("SELECT COUNT(*) AS count FROM document_memories WHERE document_id = ?")
+								.get(job.document_id) as { count?: number | null } | undefined,
+						{ siteToken: "pipeline/document-worker.ts:642" },
+					);
 			if (durable) {
 				const accepted =
 					typeof durableLinks?.count === "number"

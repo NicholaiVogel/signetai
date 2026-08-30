@@ -239,6 +239,9 @@ export type DbOwnerRequest =
 	| { readonly kind: "dreaming_hygiene_attention"; readonly input: DbOwnerDreamingHygieneAttention }
 	| { readonly kind: "dreaming_surprisal_attention"; readonly input: DbOwnerDreamingSurprisalAttention }
 	| { readonly kind: "dreaming_episodic_backlog"; readonly input: DbOwnerDreamingEpisodicBacklog }
+	| { readonly kind: "embedding_migration_progress"; readonly configuredBaseUrl?: string }
+	| { readonly kind: "health_ready" }
+	| { readonly kind: "diagnostics"; readonly trackerStats: DbOwnerProviderTrackerStats }
 	| {
 			readonly kind: "vector_backfill";
 			readonly expectedDimensions: number;
@@ -297,6 +300,13 @@ export interface DbOwnerDreamingEpisodicBacklog {
 	readonly agentId: string;
 	/** Maximum number of source records to inspect before treating the backlog as reached. */
 	readonly maxSources: number;
+}
+
+export interface DbOwnerProviderTrackerStats {
+	readonly total: number;
+	readonly successes: number;
+	readonly failures: number;
+	readonly timeouts: number;
 }
 
 export interface DbOwnerJob {
