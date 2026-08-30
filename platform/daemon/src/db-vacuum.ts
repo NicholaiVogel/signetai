@@ -80,7 +80,10 @@ function measureDbSpace(dbPath: string, deps: DbSpaceDeps): DbSpaceMetrics | nul
 		const dbBytes = deps.statSync(dbPath).size;
 		const directory = dirname(dbPath);
 		const stats = deps.statfsSync(directory);
-		const freeBytes = stats.bavail * stats.bsize;
+		const freeBytes =
+			Number.isFinite(stats.bavail) && stats.bavail >= 0 && Number.isFinite(stats.bsize) && stats.bsize > 0
+				? stats.bavail * stats.bsize
+				: null;
 		// SQLite's VACUUM documentation says that as much as twice the original
 		// database size may be required while the rebuilt file is in progress.
 		return { dbBytes, freeBytes, requiredBytes: dbBytes * 2 };
@@ -97,7 +100,7 @@ function assertDbSpace(operation: DbSpaceOperation, dbPath: string, deps: DbSpac
 	return metrics;
 }
 
-const UNKNOWN_DB_SPACE_METRICS: DbSpaceMetrics = { dbBytes: 0, freeBytes: 0, requiredBytes: 0 };
+const UNKNOWN_DB_SPACE_METRICS: DbSpaceMetrics = { dbBytes: 0, freeBytes: null, requiredBytes: 0 };
 
 /** Read-only pragma surface. */
 export interface PragmaReadDb {
@@ -336,14 +339,14 @@ export function getVacuumConversionStatus(accessor: DbAccessor): VacuumConversio
 	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
 	return accessor.withReadDb(
 		(db: import("./db-accessor").ReadDb) => readStatusFromDb(toPragmaReadDb(db)),
-		"db-vacuum.ts:337",
+		"db-vacuum.ts:340",
 	);
 }
 
 /** Async durable conversion-state lookup for background workers. */
 export async function getVacuumConversionStatusAsync(accessor: DbAccessor): Promise<VacuumConversionStatus> {
 	return await accessor.withReadDbAsync((db) => readStatusFromDb(toPragmaReadDb(db)), {
-		siteToken: "db-vacuum.ts:345",
+		siteToken: "db-vacuum.ts:348",
 		operation: "maintenance.vacuum.status",
 	});
 }
@@ -371,6 +374,9 @@ export function convertToIncrementalVacuum(db: PragmaDb, options: VacuumConversi
 	if (hasTable(db, VACUUM_CONVERSION_TABLE)) return false;
 
 	const preflightMetrics = options.dbPath ? assertDbSpace("vacuum", options.dbPath, options.deps ?? dbSpaceDeps) : null;
+	if (preflightMetrics?.freeBytes === null) {
+		writeLog("VACUUM scratch free space is unknown; proceeding without the space preflight");
+	}
 
 	// Set the desired mode BEFORE VACUUM so the rebuilt file uses it.
 	db.exec("PRAGMA auto_vacuum = INCREMENTAL");
@@ -451,7 +457,7 @@ export async function reclaimIncrementalVacuum(
 		if (opts.owner) remaining = await dbOwnerIncrementalVacuum(opts.owner, batchPages);
 		else {
 			if (!accessor.incrementalVacuumAsync) throw new Error("incremental vacuum operation is unavailable");
-			remaining = await accessor.incrementalVacuumAsync({ siteToken: "db-vacuum.ts:454" });
+			remaining = await accessor.incrementalVacuumAsync({ siteToken: "db-vacuum.ts:460" });
 		}
 		const progressed = before === null ? Math.max(0, batchPages) : Math.max(0, before - remaining);
 		reclaimed += progressed;
@@ -504,7 +510,7 @@ export function startVacuumConversionWorker(
 						lastError: null,
 					});
 				},
-				{ siteToken: "db-vacuum.ts:492", operation: "maintenance.vacuum.mark-running" },
+				{ siteToken: "db-vacuum.ts:498", operation: "maintenance.vacuum.mark-running" },
 			);
 
 			const running = await getVacuumConversionStatusAsync(accessor);
@@ -519,7 +525,7 @@ export function startVacuumConversionWorker(
 					await dbOwnerVacuumConversion(opts.owner);
 				} else {
 					if (!accessor.vacuumConversionAsync) throw new Error("VACUUM conversion operation is unavailable");
-					await accessor.vacuumConversionAsync({ siteToken: "db-vacuum.ts:522" });
+					await accessor.vacuumConversionAsync({ siteToken: "db-vacuum.ts:528" });
 				}
 				await accessor.withWriteTxAsync(
 					(db) => {
@@ -534,7 +540,7 @@ export function startVacuumConversionWorker(
 							lastError: null,
 						});
 					},
-					{ siteToken: "db-vacuum.ts:524", operation: "maintenance.vacuum.mark-completed" },
+					{ siteToken: "db-vacuum.ts:530", operation: "maintenance.vacuum.mark-completed" },
 				);
 				logger.info("db-vacuum", "Post-ready conversion worker completed");
 			} catch (error) {
@@ -552,7 +558,7 @@ export function startVacuumConversionWorker(
 							lastError: message.slice(0, 500),
 						});
 					},
-					{ siteToken: "db-vacuum.ts:542", operation: "maintenance.vacuum.mark-failed" },
+					{ siteToken: "db-vacuum.ts:548", operation: "maintenance.vacuum.mark-failed" },
 				);
 				logger.error(
 					"db-vacuum",

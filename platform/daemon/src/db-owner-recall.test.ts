@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { createDbOwnerClient } from "./db-owner-client";
 import { vectorSearchThroughDbOwner, hybridRecallThroughDbOwner } from "./db-owner-recall";
+import { getDbRecallOwner } from "./db-owner-runtime";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "./memory-config";
 import { hybridRecall, type RecallResponse } from "./memory-search";
 
@@ -128,6 +129,36 @@ describe("DB owner recall lane", () => {
 			expect(["complete", "recent-window"]).toContain(result.completeness);
 		} finally {
 			await client.close();
+		}
+	});
+
+	test("nested recall-owner vector search does not reject its own isolated request", async () => {
+		directory = mkdtempSync(join(tmpdir(), "signet-db-owner-nested-vector-search-"));
+		previousSignetPath = process.env.SIGNET_PATH;
+		mkdirSync(join(directory, "memory"), { recursive: true });
+		writeFileSync(join(directory, "agent.yaml"), "name: DbOwnerNestedVectorSearchTest\n");
+		process.env.SIGNET_PATH = directory;
+		const databasePath = join(directory, "memory", "memories.db");
+		initDbAccessor(databasePath);
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memories (id, content, type, agent_id, visibility, created_at, updated_at, updated_by)
+				 VALUES (?, ?, 'fact', 'agent-a', 'global', datetime('now'), datetime('now'), 'test')`,
+			).run("nested-owner-vector-fact", "nested owner vector fixture");
+			db.prepare(
+				"INSERT INTO embeddings (content_hash, source_id, source_type, vector, dimensions, chunk_text, created_at) VALUES (?, ?, 'memory', ?, ?, '', datetime('now'))",
+			).run("nested-owner-vector-hash", "nested-owner-vector-fact", new Float32Array([1, 0, 0]), 3);
+		});
+
+		const previousOwnerWorker = process.env.SIGNET_DB_OWNER_WORKER;
+		process.env.SIGNET_DB_OWNER_WORKER = "1";
+		try {
+			const owner = await getDbRecallOwner(databasePath);
+			const result = await vectorSearchThroughDbOwner(owner, [1, 0, 0], { limit: 1, maxScanRows: 10 });
+			expect(result.results).toEqual([{ id: "nested-owner-vector-fact", score: 1 }]);
+		} finally {
+			if (previousOwnerWorker === undefined) delete process.env.SIGNET_DB_OWNER_WORKER;
+			else process.env.SIGNET_DB_OWNER_WORKER = previousOwnerWorker;
 		}
 	});
 

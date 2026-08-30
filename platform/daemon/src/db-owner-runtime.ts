@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
+import { vectorSearchWithMetadata } from "@signet/core";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { getDbAccessorPath, hasDbAccessor, resolveSqliteAgentsDir } from "./db-accessor";
 import {
@@ -173,6 +174,11 @@ async function inlineRequest(accessor: DbAccessor, request: DbOwnerRequest): Pro
 	if (request.kind === "dreaming_pass_finalize") {
 		const { finalizeDreamingPassInDb } = await import("./pipeline/dreaming");
 		return invokeAccessor(accessor, "withWriteTx", (db) => finalizeDreamingPassInDb(db as never, request.input));
+	}
+	if (request.kind === "vector_search") {
+		return invokeAccessor(accessor, "withReadDb", (db) =>
+			vectorSearchWithMetadata(db as never, new Float32Array(request.payload.queryEmbedding), request.payload.options),
+		);
 	}
 	throw new Error(`Unsupported isolated owner request: ${request.kind}`);
 }

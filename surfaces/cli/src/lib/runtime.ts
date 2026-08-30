@@ -16,14 +16,55 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import chalk from "chalk";
-import { buildLaunchdEnvironment, buildLaunchdPlist, resolveLaunchdExecutable } from "@signet/core";
+import {
+	buildLaunchdEnvironment,
+	buildLaunchdPlist,
+	parseSimpleYaml,
+	resolveLaunchdExecutable,
+	resolveSignetDaemonUrl,
+} from "@signet/core";
 import { formatInspectorEndpoint, parseInspectorEndpoint } from "./inspector-proxy.js";
 import { resolveDaemonNetwork } from "./network.js";
 import { resolveAgentsDir } from "./workspace.js";
 
 export const AGENTS_DIR = resolveAgentsDir().path;
 export const DEFAULT_PORT = 3850;
-const DAEMON_BASE_URLS = [`http://127.0.0.1:${DEFAULT_PORT}`, `http://[::1]:${DEFAULT_PORT}`] as const;
+
+function readConfiguredDaemonUrl(agentsDir: string): string | undefined {
+	const file = join(agentsDir, "agent.yaml");
+	if (!existsSync(file)) return undefined;
+	try {
+		const config = parseSimpleYaml(readFileSync(file, "utf-8")) as Record<string, unknown>;
+		const daemon = config.daemon;
+		if (typeof daemon !== "object" || daemon === null || Array.isArray(daemon)) return undefined;
+		const url = Reflect.get(daemon, "url");
+		return typeof url === "string" && url.trim().length > 0 ? url.trim() : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+export function resolveDaemonProbeUrls(
+	agentsDir = AGENTS_DIR,
+	env: Record<string, string | undefined> = process.env,
+): string[] {
+	let primary: string;
+	try {
+		primary = resolveSignetDaemonUrl({
+			env,
+			defaultHost: "127.0.0.1",
+			defaultPort: DEFAULT_PORT,
+			configUrl: readConfiguredDaemonUrl(agentsDir),
+		});
+	} catch {
+		primary = `http://127.0.0.1:${DEFAULT_PORT}`;
+	}
+	const parsed = new URL(primary);
+	if (parsed.hostname !== "127.0.0.1") return [primary];
+	const ipv6 = new URL(primary);
+	ipv6.hostname = "[::1]";
+	return [primary, ipv6.toString().replace(/\/$/, "")];
+}
 
 export interface DaemonHealthProbe {
 	readonly status: "healthy" | "degraded" | "listener-unhealthy" | "process-unhealthy" | "stale-artifact" | "absent";
@@ -243,7 +284,7 @@ function probeDaemonLiveness(): Promise<boolean> {
 	if (daemonLivenessFlight !== null) return daemonLivenessFlight;
 
 	const flight = (async (): Promise<boolean> => {
-		const checks = await Promise.all(DAEMON_BASE_URLS.map((baseUrl) => isDaemonAliveAt(baseUrl)));
+		const checks = await Promise.all(resolveDaemonProbeUrls().map((baseUrl) => isDaemonAliveAt(baseUrl)));
 		return checks.some((reachable) => reachable);
 	})();
 	daemonLivenessFlight = flight;
@@ -369,8 +410,14 @@ async function buildUnreachableDaemonProbe(agentsDir: string): Promise<DaemonHea
 	const artifact = readPidArtifact(agentsDir);
 	const managedPid = readManagedDaemonPid(agentsDir);
 	const processPid = managedPid ?? findMarkedDaemonProcessPids()[0] ?? null;
-	const listenerPresent = await canConnect("127.0.0.1", DEFAULT_PORT);
-	const url = `http://127.0.0.1:${DEFAULT_PORT}`;
+	const url = resolveDaemonProbeUrls(agentsDir)[0] ?? `http://127.0.0.1:${DEFAULT_PORT}`;
+	const parsedUrl = new URL(url);
+	const listenerPort = parsedUrl.port
+		? Number.parseInt(parsedUrl.port, 10)
+		: parsedUrl.protocol === "https:"
+			? 443
+			: 80;
+	const listenerPresent = await canConnect(parsedUrl.hostname, listenerPort);
 	const lastExit = readDaemonLifecycleRecord(agentsDir);
 
 	if (listenerPresent) {
@@ -434,7 +481,7 @@ export function getReachableDaemonUrls(): Promise<string[]> {
 
 	const flight = (async (): Promise<string[]> => {
 		const checks = await Promise.all(
-			DAEMON_BASE_URLS.map(async (baseUrl) => ((await isDaemonHealthyAt(baseUrl)) ? baseUrl : null)),
+			resolveDaemonProbeUrls().map(async (baseUrl) => ((await isDaemonHealthyAt(baseUrl)) ? baseUrl : null)),
 		);
 		return checks.flatMap((url) => (url === null ? [] : [url]));
 	})();

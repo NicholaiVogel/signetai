@@ -145,6 +145,21 @@ describe("db-vacuum (#1139)", () => {
 		expect(operations).toEqual([]);
 	});
 
+	it("proceeds when Bun reports a degenerate filesystem block size on macOS", () => {
+		const logs: string[] = [];
+		expect(
+			convertToIncrementalVacuum(toPragmaDb(db), {
+				dbPath: "/tmp/test.db",
+				deps: {
+					statSync: () => ({ size: 8 }),
+					statfsSync: () => ({ bavail: 244_199_454, bsize: 0 }),
+				},
+				log: (message) => logs.push(message),
+			}),
+		).toBe(true);
+		expect(logs.some((message) => message.includes("free space is unknown"))).toBe(true);
+	});
+
 	it("normalizes SQLite FULL errors from VACUUM", () => {
 		const operations: string[] = [];
 		const error = Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL" });

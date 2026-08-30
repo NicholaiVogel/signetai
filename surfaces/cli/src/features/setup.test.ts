@@ -407,6 +407,28 @@ describe("setupWizard non-interactive harness hooks", () => {
 		expect(existsSync(join(basePath, "SOUL.md"))).toBe(false);
 	});
 
+	it("persists disabled embeddings so a fresh install does not silently load the native model", async () => {
+		root = mkdtempSync(join(tmpdir(), "setup-ni-no-embeddings-"));
+		const basePath = join(root, "agents");
+		const templatesPath = join(root, "templates");
+		writeIdentityTemplates(templatesPath);
+		const deps = stubDeps({
+			AGENTS_DIR: basePath,
+			getTemplatesDir: mock(() => templatesPath),
+			normalizeAgentPath: mock((p: string) => p),
+			detectExistingSetup: mock(() => ({
+				...fakeDetection(basePath),
+				agentsDir: false,
+				memoryDb: false,
+			})),
+		});
+
+		await setupWizard({ nonInteractive: true, embeddingProvider: "none", skipGit: true }, deps);
+
+		const agentYaml = readFileSync(join(basePath, "agent.yaml"), "utf-8");
+		expect(agentYaml).toContain("embedding:\n  provider: none");
+	});
+
 	it("keeps telemetry enabled in non-interactive setup (issue #1026 Phase 2)", async () => {
 		root = mkdtempSync(join(tmpdir(), "setup-ni-telemetry-"));
 		const basePath = join(root, "agents");
