@@ -16,6 +16,7 @@ import { applySourceSnapshotImportInTx } from "./source-snapshots";
 import { getDreamingHygieneCandidatesInDb } from "./knowledge-graph-hygiene";
 import { enqueueDreamingAttentionInTx } from "./pipeline/dreaming-attention";
 import { DREAMING_SURPRISAL_SELECTOR_VERSION, selectDreamingSurprisalInDb } from "./pipeline/dreaming-surprisal";
+import { sourceHasEligibleUnconsumedEvidence } from "./pipeline/dreaming-evidence-consumption";
 import type {
 	DbOwnerCommand,
 	DbOwnerEvent,
@@ -530,6 +531,17 @@ export function runDbOwnerWorker(): void {
 		}
 	}
 
+	function executeSourceEvidenceEligibility(
+		request: Extract<DbOwnerJob["request"], { readonly kind: "source_evidence_eligibility" }>,
+	): boolean {
+		return sourceHasEligibleUnconsumedEvidence(
+			db as unknown as import("./db-accessor").ReadDb,
+			request.input.agentId,
+			request.input.sourceEntryId,
+			request.input.legacyObsidianRoot,
+		);
+	}
+
 	function executeSourceGraph(
 		request: Extract<
 			DbOwnerJob["request"],
@@ -863,7 +875,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:864" },
+			{ siteToken: "db-owner-worker.ts:876" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
@@ -896,7 +908,7 @@ export function runDbOwnerWorker(): void {
 		const { getDbAccessor } = await import("./db-accessor");
 		return await getDbAccessor().withReadDbAsync(
 			(db) => vectorSearchWithMetadata(db, new Float32Array(payload.queryEmbedding), payload.options),
-			{ siteToken: "db-owner-worker.ts:897" },
+			{ siteToken: "db-owner-worker.ts:909" },
 		);
 	}
 
@@ -966,6 +978,7 @@ export function runDbOwnerWorker(): void {
 		}
 		if (job.request.kind === "source_artifact_upsert" || job.request.kind === "source_artifact_upsert_batch")
 			return executeSourceArtifactUpsert(job.request, context);
+		if (job.request.kind === "source_evidence_eligibility") return executeSourceEvidenceEligibility(job.request);
 		if (job.request.kind === "vector_search") return await executeVectorSearch(job.request.payload);
 		if (
 			job.request.kind === "source_graph_index" ||
