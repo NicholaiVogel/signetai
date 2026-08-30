@@ -6080,14 +6080,14 @@
     },
     {
       "path": "telemetry.ts",
-      "line": 555,
+      "line": 616,
       "api": "withWriteTx",
       "source": "return db.withWriteTx(",
       "category": "hot-path"
     },
     {
       "path": "telemetry.ts",
-      "line": 562,
+      "line": 623,
       "api": "withWriteTx",
       "source": "return db.withWriteTx(",
       "category": "hot-path"

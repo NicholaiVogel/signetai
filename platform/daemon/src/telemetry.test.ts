@@ -246,6 +246,34 @@ describe("telemetry collector", () => {
 		expect(installRowCount()).toBe(1);
 	});
 
+	it("keeps owner-supplied install identity off the parent async DB accessor", async () => {
+		let directWrites = 0;
+		const base = getDbAccessor();
+		const guardedDb: DbAccessor = {
+			...base,
+			async withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+				directWrites++;
+				return await base.withWriteTxAsync(fn);
+			},
+		};
+		const owner = await getDbOwner(join(dir, "memory", "memories.db"));
+		const first = createTelemetryCollector(guardedDb, TELEMETRY_CONFIG, "0.0.0-test", { owner });
+		first.record("daemon.heartbeat", { uptimeMs: 1 });
+		await first.flush();
+		const firstId = lastBatchDistinctId();
+
+		expect(directWrites).toBe(0);
+		expect(captured[0]?.body.batch[0]?.event).toBe("install.activated");
+		expect(installRowCount()).toBe(1);
+
+		const second = createTelemetryCollector(guardedDb, TELEMETRY_CONFIG, "0.0.0-test", { owner });
+		second.record("daemon.heartbeat", { uptimeMs: 2 });
+		await second.flush();
+		expect(lastBatchDistinctId()).toBe(firstId);
+		expect(captured.at(-1)?.body.batch.map((event) => event.event)).toEqual(["daemon.heartbeat"]);
+		expect(directWrites).toBe(0);
+	});
+
 	it("posts batches with the install id and marks events sent", async () => {
 		const collector = makeCollector();
 		collector.record("session.start", { harness: "hermes-agent" });

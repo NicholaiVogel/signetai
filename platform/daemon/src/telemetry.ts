@@ -489,6 +489,7 @@ export function telemetryReportedVersion(version: string, deployment: TelemetryD
  */
 type InstallIdentity = { readonly id: string; readonly created: boolean; readonly previousVersion?: string };
 type DeferredInstallIdentity = InstallIdentity & { readonly ready?: Promise<InstallIdentity> };
+type InstallIdentityRow = { readonly id: string; readonly last_seen_version?: string | null };
 
 function resolveInstallIdentity(w: import("./db-accessor").WriteDb, daemonVersion: string): InstallIdentity {
 	const existing = w
@@ -539,8 +540,68 @@ function resolveLegacyInstallIdentity(w: import("./db-accessor").WriteDb): Insta
 	return inserted?.id ? { id: inserted.id, created: false } : { id, created: false };
 }
 
-function getOrCreateInstallId(db: DbAccessor, daemonVersion: string): DeferredInstallIdentity {
+function ownerInstallIdentity(results: readonly unknown[]): InstallIdentity {
+	const before = results[0] as InstallIdentityRow | null | undefined;
+	const row = results[3] as InstallIdentityRow | null | undefined;
+	if (!row?.id) throw new Error("DB owner did not return an install identity");
+	return {
+		id: row.id,
+		created: ownerChanges(results[1]) > 0,
+		...(before?.last_seen_version ? { previousVersion: before.last_seen_version } : {}),
+	};
+}
+
+async function resolveInstallIdentityOnOwner(owner: DbOwnerClient, daemonVersion: string): Promise<InstallIdentity> {
+	const id = crypto.randomUUID();
+	const createdAt = new Date().toISOString();
+	const results = await ownerTransaction(
+		owner,
+		"telemetry.install-identity.resolve",
+		[
+			ownerStatement("SELECT id, last_seen_version FROM telemetry_install ORDER BY created_at ASC LIMIT 1", [], "get"),
+			ownerStatement(
+				"INSERT INTO telemetry_install (id, created_at, last_seen_version) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM telemetry_install)",
+				[id, createdAt, daemonVersion],
+			),
+			ownerStatement(
+				"UPDATE telemetry_install SET last_seen_version = COALESCE(last_seen_version, ?) WHERE id = (SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1)",
+				[daemonVersion],
+			),
+			ownerStatement("SELECT id, last_seen_version FROM telemetry_install ORDER BY created_at ASC LIMIT 1", [], "get"),
+		],
+		{ deadlineMs: 5_000, estimatedWorkUnits: 1 },
+	);
+	return ownerInstallIdentity(results);
+}
+
+async function resolveLegacyInstallIdentityOnOwner(owner: DbOwnerClient): Promise<InstallIdentity> {
+	const id = crypto.randomUUID();
+	const results = await ownerTransaction(
+		owner,
+		"telemetry.install-identity.resolve-legacy",
+		[
+			ownerStatement("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1", [], "get"),
+			ownerStatement(
+				"INSERT INTO telemetry_install (id, created_at) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM telemetry_install)",
+				[id, new Date().toISOString()],
+			),
+			ownerStatement("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1", [], "get"),
+		],
+		{ deadlineMs: 5_000, estimatedWorkUnits: 1 },
+	);
+	const row = results[2] as { readonly id: string } | null | undefined;
+	if (!row?.id) throw new Error("DB owner did not return a legacy install identity");
+	return { id: row.id, created: ownerChanges(results[1]) > 0 };
+}
+
+function getOrCreateInstallId(db: DbAccessor, daemonVersion: string, owner?: DbOwnerClient): DeferredInstallIdentity {
 	const fallback = { id: crypto.randomUUID(), created: false } as const;
+	if (owner !== undefined) {
+		const ready = resolveInstallIdentityOnOwner(owner, daemonVersion)
+			.catch(() => resolveLegacyInstallIdentityOnOwner(owner))
+			.catch(() => fallback);
+		return { ...fallback, ready };
+	}
 	const withWriteTxAsync = db.withWriteTxAsync;
 	if (withWriteTxAsync) {
 		const runAsync = <T>(fn: (w: import("./db-accessor").WriteDb) => T): Promise<T> =>
@@ -554,14 +615,14 @@ function getOrCreateInstallId(db: DbAccessor, daemonVersion: string): DeferredIn
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
 		return db.withWriteTx(
 			(w: import("./db-accessor").WriteDb) => resolveInstallIdentity(w, daemonVersion),
-			"telemetry.ts:555",
+			"telemetry.ts:616",
 		);
 	} catch {
 		try {
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
 			return db.withWriteTx(
 				(w: import("./db-accessor").WriteDb) => resolveLegacyInstallIdentity(w),
-				"telemetry.ts:562",
+				"telemetry.ts:623",
 			);
 		} catch {
 			return fallback;
@@ -828,7 +889,7 @@ export function createTelemetryCollector(
 	let persistedQueueCount = 0;
 	let persistedOldestTimestamp: string | null = null;
 	let lastDaemonEventTimestamp: string | null = null;
-	const installIdentity = getOrCreateInstallId(db, daemonVersion);
+	const installIdentity = getOrCreateInstallId(db, daemonVersion, opts.owner);
 	let installId = installIdentity.id;
 	let installActivated = installIdentity.created;
 	let previousVersion = installIdentity.previousVersion;
