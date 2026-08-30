@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-30
-- Bug fixes: route telemetry identity through owner; route extraction retirement to owner; route startup DB work to owner.
+- Bug fixes: track detached boot descendants; close boot-wedge gate review gaps; route pipeline reads through owner; harden boot wedge measurements; route telemetry identity through owner; route extraction retirement to owner; route startup DB work to owner.
 - Refactoring: route wave 2 reads and telemetry through owner.
 
 ### 2026-08-29
@@ -31,6 +31,18 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: let commands exit cleanly.
 
 ## Release Ledger
+
+## [0.214.31] - 2026-08-30
+
+Release summary: 4 bug fixes.
+Tag range: `v0.214.30..v0.214.31`.
+
+### Bug Fixes
+
+- **ci**: track detached boot descendants
+- **ci**: close boot-wedge gate review gaps
+- **daemon**: route pipeline reads through owner
+- **ci**: harden boot wedge measurements
 
 ## [0.214.30] - 2026-08-30
 
