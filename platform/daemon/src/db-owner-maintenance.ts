@@ -243,7 +243,12 @@ export async function ownerDreamingEpisodicBacklog(
 		owner,
 		{ kind: "dreaming_episodic_backlog", input },
 		"maintenance.dreaming.episodic-backlog",
-		{ ...options, estimatedWorkUnits: options.estimatedWorkUnits ?? input.maxSources * 10 },
+		{
+			...options,
+			estimatedWorkUnits:
+				options.estimatedWorkUnits ??
+				(input.maxSources === undefined ? DB_OWNER_MAX_WORK_UNITS : input.maxSources * 10),
+		},
 	);
 }
 

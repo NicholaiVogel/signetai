@@ -239,6 +239,12 @@ export type DbOwnerRequest =
 	| { readonly kind: "dreaming_hygiene_attention"; readonly input: DbOwnerDreamingHygieneAttention }
 	| { readonly kind: "dreaming_surprisal_attention"; readonly input: DbOwnerDreamingSurprisalAttention }
 	| { readonly kind: "dreaming_episodic_backlog"; readonly input: DbOwnerDreamingEpisodicBacklog }
+	| { readonly kind: "dreaming_evidence_search"; readonly input: DbOwnerDreamingEvidenceSearch }
+	| { readonly kind: "dreaming_evidence_source"; readonly input: DbOwnerDreamingEvidenceSource }
+	| { readonly kind: "dreaming_pass_finalize"; readonly input: DbOwnerDreamingPassFinalize }
+	| { readonly kind: "dreaming_review_due"; readonly input: DbOwnerDreamingReviewDue }
+	| { readonly kind: "dreaming_evidence_classify"; readonly input: DbOwnerDreamingEvidenceClassify }
+	| { readonly kind: "dreaming_evidence_requeue"; readonly input: DbOwnerDreamingEvidenceRequeue }
 	| { readonly kind: "embedding_migration_progress"; readonly configuredBaseUrl?: string }
 	| { readonly kind: "health_ready" }
 	| { readonly kind: "diagnostics"; readonly trackerStats: DbOwnerProviderTrackerStats }
@@ -299,7 +305,70 @@ export interface DbOwnerDreamingSurprisalAttention {
 export interface DbOwnerDreamingEpisodicBacklog {
 	readonly agentId: string;
 	/** Maximum number of source records to inspect before treating the backlog as reached. */
-	readonly maxSources: number;
+	readonly maxSources?: number;
+}
+
+export interface DbOwnerDreamingEvidenceSearch {
+	readonly agentId: string;
+	readonly query?: string;
+	readonly since?: string;
+	readonly before?: string;
+	readonly kind?: "memory" | "artifact" | "transcript" | "summary";
+	readonly limit?: number;
+	readonly sourceRef?: string;
+	readonly offset?: number;
+	readonly chunkSize?: number;
+}
+
+export interface DbOwnerDreamingEvidenceSource {
+	readonly agentId: string;
+	readonly sourceRef: string;
+}
+
+export interface DbOwnerDreamingPassFinalize {
+	readonly passId: string;
+	readonly mode: string;
+	readonly agentId: string;
+	readonly scopes: readonly string[];
+	readonly transcriptManifestEntries: readonly unknown[];
+	readonly tokensConsumed: number;
+	readonly inputTokens: number | null;
+	readonly outputTokens: number | null;
+	readonly cacheReadTokens: number | null;
+	readonly cacheCreationTokens: number | null;
+	readonly totalCost: number | null;
+	readonly applied: number;
+	readonly failed: number;
+	readonly summary: string;
+	readonly rejectedEvidence: readonly unknown[];
+	readonly memoryHeadResult: Record<string, unknown> | null;
+	readonly backlogByScope: readonly { readonly scope: string; readonly backlog: number }[];
+	readonly nextWatermarkByScope: readonly { readonly scope: string; readonly watermark: string | null }[];
+}
+
+export interface DbOwnerDreamingReviewDue {
+	readonly agentId?: string;
+	readonly nowMs: number;
+	readonly limit: number;
+}
+
+export interface DbOwnerDreamingEvidenceOperation {
+	readonly evidence?: readonly unknown[];
+}
+
+export interface DbOwnerDreamingEvidenceClassify {
+	readonly agentId: string;
+	readonly result: unknown;
+	readonly operations: readonly DbOwnerDreamingEvidenceOperation[];
+}
+
+export interface DbOwnerDreamingEvidenceRequeue {
+	readonly nowMs: number;
+	readonly policy: {
+		readonly cooldownMs: number;
+		readonly hourlyBudget: number;
+		readonly maxAttempts: number;
+	};
 }
 
 export interface DbOwnerProviderTrackerStats {

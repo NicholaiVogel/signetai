@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type DbAccessor, type ReadDb, type WriteDb, getDbAccessor, hasDbAccessor } from "./db-accessor";
+import { getDbOwnerForAccessor } from "./db-owner-runtime";
+import { ownerRun } from "./db-owner-sql";
 export { relayMessageViaAcp, type AcpRelayRequest, type AcpRelayResult } from "./cross-agent-acp";
 
 export type AgentMessageType = "assist_request" | "decision_update" | "info" | "question";
@@ -686,7 +688,7 @@ export function createAgentMessage(input: CreateAgentMessageInput): AgentMessage
 			row.created_at,
 			row.expires_at,
 		);
-	}, "cross-agent.ts:645");
+	}, "cross-agent.ts:647");
 
 	const out = rowToAgentMessage(row);
 	emit({ type: "message", message: out, timestamp: now });
@@ -789,7 +791,7 @@ export function claimAcpMessageDelivery(input: {
 		if (row == null) throw new AgentMessageNotFoundError(messageId);
 		if (agentId && row.from_agent_id !== agentId) throw new AgentMessageNotFoundError(messageId);
 		attempt = buildAcpAttempt(row);
-	}, "cross-agent.ts:768");
+	}, "cross-agent.ts:770");
 	if (attempt == null) throw new AgentMessageNotFoundError(messageId);
 	return attempt;
 }
@@ -832,7 +834,7 @@ export function completeAcpMessageDelivery(
 		const row = readMessageRow(db, normalizedId);
 		if (row == null) throw new AgentMessageNotFoundError(normalizedId);
 		updated = rowToAgentMessage(row);
-	}, "cross-agent.ts:813");
+	}, "cross-agent.ts:815");
 	if (updated == null) throw new AgentMessageNotFoundError(normalizedId);
 	emit({ type: "message", message: updated, timestamp: now });
 	return updated;
@@ -871,7 +873,7 @@ export function updateAgentMessageDelivery(
 		const row = readMessageRow(db, normalizedId);
 		if (row == null) throw new AgentMessageNotFoundError(normalizedId);
 		updated = rowToAgentMessage(row);
-	}, "cross-agent.ts:856");
+	}, "cross-agent.ts:858");
 	if (updated == null) throw new AgentMessageNotFoundError(normalizedId);
 	emit({ type: "message", message: updated, timestamp: now });
 	return updated;
@@ -883,27 +885,30 @@ export async function reconcileAcpDeliveries(
 ): Promise<number> {
 	const now = new Date(nowMs).toISOString();
 	const pendingCutoff = new Date(nowMs - ACP_PENDING_GRACE_MS).toISOString();
-	return await accessor.withWriteTxAsync(
-		(db: import("./db-accessor").WriteDb) => {
-			const result = db
-				.prepare(
-					`UPDATE cross_agent_messages
-				 SET delivery_state = 'indeterminate', delivery_status = 'queued',
-				     delivery_error = CASE
-				       WHEN delivery_state = 'in_flight' THEN 'ACP relay interrupted; remote outcome is unknown'
-				       ELSE 'ACP relay was queued but never started'
-				     END,
-				     delivery_lease_token = NULL, delivery_lease_expires_at = NULL,
-				     delivery_updated_at = ?
-				 WHERE delivery_path = 'acp'
-				   AND ((delivery_state = 'in_flight' AND delivery_lease_expires_at <= ?)
-				     OR (delivery_state = 'pending' AND delivery_updated_at <= ?))`,
-				)
-				.run(now, now, pendingCutoff);
-			return result.changes;
+	const owner = await getDbOwnerForAccessor(accessor);
+	const result = await ownerRun(
+		owner,
+		`UPDATE cross_agent_messages
+		 SET delivery_state = 'indeterminate', delivery_status = 'queued',
+		     delivery_error = CASE
+		       WHEN delivery_state = 'in_flight' THEN 'ACP relay interrupted; remote outcome is unknown'
+		       ELSE 'ACP relay was queued but never started'
+		     END,
+		     delivery_lease_token = NULL, delivery_lease_expires_at = NULL,
+		     delivery_updated_at = ?
+		 WHERE delivery_path = 'acp'
+		   AND ((delivery_state = 'in_flight' AND delivery_lease_expires_at <= ?)
+		     OR (delivery_state = 'pending' AND delivery_updated_at <= ?))`,
+		[now, now, pendingCutoff],
+		{
+			operation: "cross-agent.reconcile-acp-deliveries",
+			lane: "write",
+			workloadClass: "foreground",
+			deadlineMs: 30_000,
+			estimatedWorkUnits: 20,
 		},
-		{ siteToken: "cross-agent.ts:886", operation: "cross-agent.reconcile-acp-deliveries" },
 	);
+	return result.changes;
 }
 
 export function listAgentMessagePage(options: ListAgentMessageOptions = {}): AgentMessagePage {
@@ -940,7 +945,7 @@ export function listAgentMessagePage(options: ListAgentMessageOptions = {}): Age
 			offset,
 			hasMore: offset + items.length < total,
 		};
-	}, "cross-agent.ts:919");
+	}, "cross-agent.ts:924");
 }
 
 export function listAgentMessages(options: ListAgentMessageOptions = {}): AgentMessage[] {
@@ -997,7 +1002,7 @@ export function acknowledgeAgentMessage(input: AcknowledgeAgentMessageInput): Ac
 		const acknowledgedAt = receipt?.acknowledged_at;
 		if (!acknowledgedAt) throw new Error("Failed to persist cross-agent acknowledgement");
 		return { messageId, agentId, acknowledgedAt, alreadyAcknowledged: false };
-	}, "cross-agent.ts:958");
+	}, "cross-agent.ts:963");
 }
 
 export function subscribeCrossAgentEvents(subscriber: (event: CrossAgentEvent) => void): () => void {
@@ -1033,5 +1038,5 @@ export function resetCrossAgentStateForTest(): void {
 	getDbAccessor().withWriteTx((db: import("./db-accessor").WriteDb) => {
 		db.prepare("DELETE FROM cross_agent_message_receipts").run();
 		db.prepare("DELETE FROM cross_agent_messages").run();
-	}, "cross-agent.ts:1033");
+	}, "cross-agent.ts:1038");
 }
