@@ -914,7 +914,7 @@
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 906,
+      "line": 930,
       "api": "writeFileSync",
       "source": "if (activeFile) writeFileSync(activeFile, `${Date.now()}\\n`);",
       "category": "hot-path"
@@ -2930,30 +2930,30 @@
     },
     {
       "path": "pipeline/document-worker.ts",
-      "line": 264,
+      "line": 275,
       "api": "withReadDbAsync",
-      "source": "const doc = await accessor.withReadDbAsync(",
+      "source": ": await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/document-worker.ts",
-      "line": 580,
+      "line": 600,
       "api": "withReadDbAsync",
       "source": "return deps.accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/document-worker.ts",
-      "line": 601,
+      "line": 628,
       "api": "withReadDbAsync",
-      "source": "const durable = await deps.accessor.withReadDbAsync(",
+      "source": ": await deps.accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/document-worker.ts",
-      "line": 608,
+      "line": 642,
       "api": "withReadDbAsync",
-      "source": "const durableLinks = await deps.accessor.withReadDbAsync(",
+      "source": ": await deps.accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
@@ -3119,30 +3119,30 @@
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 99,
+      "line": 104,
       "api": "withReadDbAsync",
       "source": "return await accessor.withReadDbAsync((db) => getQueueHealth(db).status !== \"healthy\", {",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 122,
+      "line": 148,
       "api": "withReadDbAsync",
-      "source": "return await accessor.withReadDbAsync(",
+      "source": ": await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 214,
+      "line": 227,
       "api": "withReadDbAsync",
-      "source": "accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, [\"hygiene\"]), {",
+      "source": ": accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, [\"hygiene\"]), {",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming-worker.ts",
-      "line": 224,
+      "line": 247,
       "api": "withReadDbAsync",
-      "source": "accessor.withReadDbAsync((db) => hasDreamingAttentionKindInDb(db, scope, DREAMING_CONTENT_ATTENTION_KINDS), {",
+      "source": ": accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
@@ -3182,51 +3182,30 @@
     },
     {
       "path": "pipeline/maintenance-worker.ts",
-      "line": 133,
+      "line": 148,
       "api": "withReadDbAsync",
-      "source": "return await accessor.withReadDbAsync(",
+      "source": ": await accessor.withReadDbAsync((db) => db.prepare(sql).all() as Array<{ agent_id: string | null }>, {",
       "category": "hot-path"
     },
     {
       "path": "pipeline/maintenance-worker.ts",
-      "line": 338,
+      "line": 346,
       "api": "withReadDbAsync",
-      "source": "const report = await accessor.withReadDbAsync(async (db) => getDiagnostics(db, tracker), {",
+      "source": "await accessor.withReadDbAsync(async (db) => getDiagnostics(db, tracker), { siteToken });",
       "category": "hot-path"
     },
     {
       "path": "pipeline/maintenance-worker.ts",
-      "line": 345,
+      "line": 485,
       "api": "withReadDbAsync",
-      "source": "const report = await accessor.withReadDbAsync(async (db) => getDiagnostics(db, tracker), {",
+      "source": ": await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "pipeline/maintenance-worker.ts",
-      "line": 350,
+      "line": 535,
       "api": "withReadDbAsync",
-      "source": "const report = await accessor.withReadDbAsync(async (db) => getDiagnostics(db, tracker), {",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/maintenance-worker.ts",
-      "line": 428,
-      "api": "withReadDbAsync",
-      "source": "const postReport = await accessor.withReadDbAsync(async (db) => getDiagnostics(db, tracker), {",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/maintenance-worker.ts",
-      "line": 472,
-      "api": "withReadDbAsync",
-      "source": "const count = await accessor.withReadDbAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/maintenance-worker.ts",
-      "line": 504,
-      "api": "withReadDbAsync",
-      "source": "const ratio = await accessor.withReadDbAsync(async (db) => getFreePageRatio(db), {",
+      "source": ": await accessor.withReadDbAsync(async (db) => getFreePageRatio(db), {",
       "category": "hot-path"
     },
     {
@@ -3973,23 +3952,23 @@
     },
     {
       "path": "routes/health.ts",
-      "line": 110,
+      "line": 114,
       "api": "withReadDbAsync",
-      "source": "migration = await getDbAccessor().withReadDbAsync((db) => readEmbeddingIndexMigrationProgress(db, cfg), {",
+      "source": ": await getDbAccessor().withReadDbAsync((db) => readEmbeddingIndexMigrationProgress(db, cfg), {",
       "category": "hot-path"
     },
     {
       "path": "routes/health.ts",
-      "line": 212,
+      "line": 221,
       "api": "withReadDbAsync",
       "source": "await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/health.ts",
-      "line": 283,
+      "line": 296,
       "api": "withReadDbAsync",
-      "source": "dbResult = await accessor.withReadDbAsync(",
+      "source": ": await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
@@ -4603,65 +4582,65 @@
     },
     {
       "path": "routes/pipeline-routes.ts",
-      "line": 120,
+      "line": 121,
       "api": "withReadDb",
       "source": "return accessor.withReadDb((db: import(\"../db-accessor\").ReadDb) => {",
       "category": "hot-path"
     },
     {
       "path": "routes/pipeline-routes.ts",
-      "line": 342,
+      "line": 346,
       "api": "withReadDbAsync",
-      "source": "embeddingMigration = await getDbAccessor().withReadDbAsync(",
+      "source": ": await getDbAccessor().withReadDbAsync((db) => readEmbeddingIndexMigrationProgress(db, config.embedding), {",
       "category": "hot-path"
     },
     {
       "path": "routes/pipeline-routes.ts",
-      "line": 353,
+      "line": 356,
       "api": "existsSync",
       "source": "if (existsSync(p)) {",
       "category": "hot-path"
     },
     {
       "path": "routes/pipeline-routes.ts",
-      "line": 354,
+      "line": 357,
       "api": "readFileSync",
       "source": "const yaml = parseSimpleYaml(readFileSync(p, \"utf-8\"));",
       "category": "hot-path"
     },
     {
       "path": "routes/pipeline-routes.ts",
-      "line": 398,
+      "line": 401,
       "api": "existsSync",
       "source": "memoryDb: existsSync(MEMORY_DB),",
       "category": "hot-path"
     },
     {
       "path": "routes/pipeline-routes.ts",
-      "line": 453,
+      "line": 456,
       "api": "readFileSync",
       "source": "soulContent = readFileSync(soulPath, \"utf-8\").slice(0, 500);",
       "category": "hot-path"
     },
     {
       "path": "routes/pipeline-routes.ts",
-      "line": 517,
+      "line": 520,
       "api": "withReadDb",
       "source": "const report: ReturnType<typeof listMemoryContentSafety> = getDbAccessor().withReadDb(",
       "category": "hot-path"
     },
     {
       "path": "routes/pipeline-routes.ts",
-      "line": 616,
+      "line": 636,
       "api": "withReadDbAsync",
-      "source": "const dbData = await accessor.withReadDbAsync(",
+      "source": ": await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "routes/pipeline-routes.ts",
-      "line": 971,
+      "line": 984,
       "api": "withReadDbAsync",
-      "source": "const hasTransientSummaryExclusion = await accessor.withReadDbAsync(",
+      "source": ": await accessor.withReadDbAsync(",
       "category": "hot-path"
     },
     {

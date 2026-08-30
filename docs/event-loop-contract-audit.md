@@ -4,23 +4,23 @@ This report is generated from the deterministic migration ledger in `scripts/eve
 
 ## Current inventory
 
-- Exact ledger inventory: 954 sites
+- Exact ledger inventory: 951 sites
 - Synchronous `withWriteTx()` sites: 65
 - Synchronous `withReadDb()` sites: 104
-- Async-named DB sites: 269
-- Async-named ON-PARENT DB sites: 267
+- Async-named DB sites: 266
+- Async-named ON-PARENT DB sites: 264
 - Async-named OFF-PARENT DB sites: 2
 - Synchronous filesystem/process sites: 516
 - Compile-visible legacy DB sites remaining: 169
   - `withWriteTx`: 65
   - `withReadDb`: 104
 
-The 954-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 104 synchronous reads, and 269 async-named DB sites are the complete database-call inventory; 169 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 267 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
+The 951-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 104 synchronous reads, and 266 async-named DB sites are the complete database-call inventory; 169 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 264 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## Execution-home inventory
 
-- Database accessor sites classified: 438
-- ON-PARENT callback execution: 436
+- Database accessor sites classified: 435
+- ON-PARENT callback execution: 433
 - OFF-PARENT callback execution: 2
 - Ratchet: new ON-PARENT async-named sites fail the audit; the campaign target is ON-PARENT → 0
 
@@ -206,10 +206,10 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `path-feedback.ts:611` (withWriteTx)
 - `pipeline/aspect-feedback.ts:79` (withWriteTx)
 - `pipeline/aspect-feedback.ts:165` (withWriteTx)
-- `pipeline/document-worker.ts:264` (withReadDbAsync)
-- `pipeline/document-worker.ts:580` (withReadDbAsync)
-- `pipeline/document-worker.ts:601` (withReadDbAsync)
-- `pipeline/document-worker.ts:608` (withReadDbAsync)
+- `pipeline/document-worker.ts:275` (withReadDbAsync)
+- `pipeline/document-worker.ts:600` (withReadDbAsync)
+- `pipeline/document-worker.ts:628` (withReadDbAsync)
+- `pipeline/document-worker.ts:642` (withReadDbAsync)
 - `pipeline/dreaming-attention.ts:136` (withReadDb)
 - `pipeline/dreaming-attention.ts:148` (withReadDb)
 - `pipeline/dreaming-attention.ts:184` (withReadDb)
@@ -232,20 +232,17 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `pipeline/dreaming-quality.ts:96` (withReadDbAsync)
 - `pipeline/dreaming-runbook.ts:202` (withWriteTx)
 - `pipeline/dreaming-runbook.ts:244` (withReadDb)
-- `pipeline/dreaming-worker.ts:99` (withReadDbAsync)
-- `pipeline/dreaming-worker.ts:122` (withReadDbAsync)
-- `pipeline/dreaming-worker.ts:214` (withReadDbAsync)
-- `pipeline/dreaming-worker.ts:224` (withReadDbAsync)
+- `pipeline/dreaming-worker.ts:104` (withReadDbAsync)
+- `pipeline/dreaming-worker.ts:148` (withReadDbAsync)
+- `pipeline/dreaming-worker.ts:227` (withReadDbAsync)
+- `pipeline/dreaming-worker.ts:247` (withReadDbAsync)
 - `pipeline/dreaming.ts:84` (withWriteTxAsync)
 - `pipeline/dreaming.ts:88` (withReadDbAsync)
 - `pipeline/graph-traversal.ts:92` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:133` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:338` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:345` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:350` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:428` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:472` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:504` (withReadDbAsync)
+- `pipeline/maintenance-worker.ts:148` (withReadDbAsync)
+- `pipeline/maintenance-worker.ts:346` (withReadDbAsync)
+- `pipeline/maintenance-worker.ts:485` (withReadDbAsync)
+- `pipeline/maintenance-worker.ts:535` (withReadDbAsync)
 - `pipeline/prospective-index.ts:284` (withWriteDbAsync)
 - `pipeline/prospective-index.ts:300` (withWriteDbAsync)
 - `pipeline/prospective-index.ts:336` (withWriteTxAsync)
@@ -293,9 +290,9 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `routes/connectors-routes.ts:319` (withReadDb)
 - `routes/database-diagnostics.ts:267` (withReadDbAsync)
 - `routes/database-diagnostics.ts:306` (withReadDbAsync)
-- `routes/health.ts:110` (withReadDbAsync)
-- `routes/health.ts:212` (withReadDbAsync)
-- `routes/health.ts:283` (withReadDbAsync)
+- `routes/health.ts:114` (withReadDbAsync)
+- `routes/health.ts:221` (withReadDbAsync)
+- `routes/health.ts:296` (withReadDbAsync)
 - `routes/hooks-routes.ts:1180` (withReadDb)
 - `routes/hooks-routes.ts:1209` (withWriteTx)
 - `routes/hooks-routes.ts:1329` (withWriteTx)
@@ -357,11 +354,11 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `routes/misc-routes.ts:824` (withReadDbAsync)
 - `routes/misc-routes.ts:948` (withReadDbAsync)
 - `routes/misc-routes.ts:961` (withReadDbAsync)
-- `routes/pipeline-routes.ts:120` (withReadDb)
-- `routes/pipeline-routes.ts:342` (withReadDbAsync)
-- `routes/pipeline-routes.ts:517` (withReadDb)
-- `routes/pipeline-routes.ts:616` (withReadDbAsync)
-- `routes/pipeline-routes.ts:971` (withReadDbAsync)
+- `routes/pipeline-routes.ts:121` (withReadDb)
+- `routes/pipeline-routes.ts:346` (withReadDbAsync)
+- `routes/pipeline-routes.ts:520` (withReadDb)
+- `routes/pipeline-routes.ts:636` (withReadDbAsync)
+- `routes/pipeline-routes.ts:984` (withReadDbAsync)
 - `routes/queue-diagnostics.ts:169` (withReadDb)
 - `routes/reflection-routes.ts:98` (withReadDb)
 - `routes/reflection-routes.ts:118` (withReadDb)

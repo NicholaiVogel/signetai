@@ -6,7 +6,9 @@ import { join } from "node:path";
 import type { DreamingConfig } from "@signet/core";
 import { runMigrations } from "../../../core/src/migrations";
 import type { DbAccessor } from "../db-accessor";
+import type { DbOwnerClient } from "../db-owner-client";
 import type { DbOwnerMaintenance } from "../db-owner-maintenance";
+import type { DbOwnerRequest } from "../db-owner-protocol";
 import { reportEventLoopLag, resetPressureState } from "../system-pressure";
 import {
 	DREAMING_AGENT_PROMPT,
@@ -143,6 +145,34 @@ describe("dreaming worker agent scope", () => {
 			"summary-agent",
 			"transcript-agent",
 		]);
+	});
+
+	it("routes agent-scope discovery through the DB owner without a parent read", async () => {
+		const originalRead = accessor.withReadDbAsync;
+		const queries: string[] = [];
+		accessor.withReadDbAsync = async () => {
+			throw new Error("owner-routed scope discovery must not use the parent read accessor");
+		};
+		const owner = {
+			submit(request: DbOwnerRequest) {
+				if (request.kind !== "query") throw new Error(`unexpected owner request: ${request.kind}`);
+				queries.push(request.statement.sql);
+				return {
+					job: {} as never,
+					result: Promise.resolve([{ id: "owner-agent" }, { id: null }]),
+					cancel: (): void => {},
+				};
+			},
+		} as unknown as DbOwnerClient;
+		try {
+			expect(await getDreamingWorkerAgentIds(accessor, "default", { owner } as DbOwnerMaintenance)).toEqual([
+				"default",
+				"owner-agent",
+			]);
+			expect(queries).toHaveLength(1);
+		} finally {
+			accessor.withReadDbAsync = originalRead;
+		}
 	});
 
 	it("serves the agent-scope union from a snapshot refreshed on a cadence", async () => {

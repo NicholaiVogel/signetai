@@ -11,6 +11,7 @@
 
 import type { DbAccessor } from "../db-accessor";
 import type { DbOwnerMaintenance } from "../db-owner-maintenance";
+import { ownerQueryAll, ownerQueryOne } from "../db-owner-maintenance";
 import { getFreePageRatio, reclaimIncrementalVacuum } from "../db-vacuum";
 import type { DiagnosticsReport, ProviderTracker } from "../diagnostics";
 import { getDiagnostics } from "../diagnostics";
@@ -129,25 +130,28 @@ function buildRecommendations(
 	return recs;
 }
 
-async function getGraphAgentIds(accessor: DbAccessor): Promise<readonly string[]> {
-	return await accessor.withReadDbAsync(
-		async (db) => {
-			const rows = db
-				.prepare(
-					`SELECT agent_id FROM entity_aspects
-				 UNION
-				 SELECT agent_id FROM entity_attributes
-				 UNION
-				 SELECT agent_id FROM entities`,
-				)
-				.all() as Array<Record<string, unknown>>;
-			const ids = rows.flatMap((row) =>
-				typeof row.agent_id === "string" && row.agent_id.length > 0 ? [row.agent_id] : [],
-			);
-			return ids.length > 0 ? ids : ["default"];
-		},
-		{ siteToken: "pipeline/maintenance-worker.ts:133" },
+async function getGraphAgentIds(
+	accessor: DbAccessor,
+	ownerMaintenance?: DbOwnerMaintenance,
+): Promise<readonly string[]> {
+	const sql = `SELECT agent_id FROM entity_aspects
+	 UNION
+	 SELECT agent_id FROM entity_attributes
+	 UNION
+	 SELECT agent_id FROM entities`;
+	const rows = ownerMaintenance
+		? await ownerQueryAll<{ agent_id: string | null }>(
+				ownerMaintenance.owner,
+				"pipeline/maintenance-worker.graph-agent-scopes",
+				sql,
+			)
+		: await accessor.withReadDbAsync((db) => db.prepare(sql).all() as Array<{ agent_id: string | null }>, {
+				siteToken: "pipeline/maintenance-worker.ts:148",
+			});
+	const ids = rows.flatMap((row) =>
+		typeof row.agent_id === "string" && row.agent_id.length > 0 ? [row.agent_id] : [],
 	);
+	return ids.length > 0 ? ids : ["default"];
 }
 
 // ---------------------------------------------------------------------------
@@ -334,22 +338,22 @@ export function startMaintenanceWorker(
 	};
 
 	async function doTick(): Promise<MaintenanceCycleResult> {
+		const readDiagnostics = async (siteToken: string): Promise<DiagnosticsReport> =>
+			deps.ownerMaintenance
+				? await deps.ownerMaintenance.diagnostics(tracker.stats)
+				: // Each caller supplies the original static token for this compatibility fallback.
+					// DYNAMIC_SITE_TOKEN
+					await accessor.withReadDbAsync(async (db) => getDiagnostics(db, tracker), { siteToken });
 		if (deps.ownerMaintenance && !(await deps.ownerMaintenance.queueIsHealthy())) {
-			const report = await accessor.withReadDbAsync(async (db) => getDiagnostics(db, tracker), {
-				siteToken: "pipeline/maintenance-worker.ts:338",
-			});
+			const report = await readDiagnostics("pipeline/maintenance-worker.ts:338");
 			logger.info("maintenance", "Cycle deferred while the owner maintenance lane is unhealthy");
 			return { report, recommendations: [], executed: [], feedbackDecayedAspects: 0, feedbackPropagatedAttributes: 0 };
 		}
 		if (isSystemPressureHigh()) {
-			const report = await accessor.withReadDbAsync(async (db) => getDiagnostics(db, tracker), {
-				siteToken: "pipeline/maintenance-worker.ts:345",
-			});
+			const report = await readDiagnostics("pipeline/maintenance-worker.ts:345");
 			return { report, recommendations: [], executed: [], feedbackDecayedAspects: 0, feedbackPropagatedAttributes: 0 };
 		}
-		const report = await accessor.withReadDbAsync(async (db) => getDiagnostics(db, tracker), {
-			siteToken: "pipeline/maintenance-worker.ts:350",
-		});
+		const report = await readDiagnostics("pipeline/maintenance-worker.ts:350");
 
 		const embeddingStats = deps.embedding
 			? await getEmbeddingRepairStats(accessor, deps.embedding.cfg, deps.embedding.agentId)
@@ -362,7 +366,7 @@ export function startMaintenanceWorker(
 		if (recommendations.length === 0) {
 			haltTracker.reset();
 			if (cfg.graph.enabled && cfg.feedback?.enabled) {
-				for (const agentId of await getGraphAgentIds(accessor)) {
+				for (const agentId of await getGraphAgentIds(accessor, deps.ownerMaintenance ?? undefined)) {
 					if (cfg.feedback.decayEnabled) {
 						feedbackDecayedAspects += await decayAspectWeights(accessor, agentId, {
 							decayRate: cfg.feedback.decayRate,
@@ -425,9 +429,7 @@ export function startMaintenanceWorker(
 
 		// Re-check health to evaluate improvement
 		if (executed.length > 0) {
-			const postReport = await accessor.withReadDbAsync(async (db) => getDiagnostics(db, tracker), {
-				siteToken: "pipeline/maintenance-worker.ts:428",
-			});
+			const postReport = await readDiagnostics("pipeline/maintenance-worker.ts:428");
 			const improved = postReport.composite.score > preScore;
 
 			for (const exec of executed) {
@@ -443,7 +445,7 @@ export function startMaintenanceWorker(
 		}
 
 		if (cfg.graph.enabled && cfg.feedback?.enabled) {
-			for (const agentId of await getGraphAgentIds(accessor)) {
+			for (const agentId of await getGraphAgentIds(accessor, deps.ownerMaintenance ?? undefined)) {
 				if (cfg.feedback.decayEnabled) {
 					feedbackDecayedAspects += await decayAspectWeights(accessor, agentId, {
 						decayRate: cfg.feedback.decayRate,
@@ -469,25 +471,37 @@ export function startMaintenanceWorker(
 		// Dead memory hygiene: warn when stale/low-confidence memories accumulate.
 		// No auto-deletion — use GET /api/repair/dead-memories to review and act.
 		try {
-			const count = await accessor.withReadDbAsync(
-				async (db) =>
-					(
-						db
-							.prepare(
-								`SELECT COUNT(*) as n FROM memories
-								 WHERE is_deleted = 0 AND importance <= 0.8
-								 AND (confidence < ?
-								   OR (last_accessed IS NULL AND julianday('now') - julianday(created_at) > ?)
-								   OR (last_accessed IS NOT NULL AND julianday('now') - julianday(last_accessed) > ?))`,
-							)
-							.get(
-								DEAD_MEMORY_DEFAULT_CONFIDENCE,
-								DEAD_MEMORY_DEFAULT_ACCESS_DAYS,
-								DEAD_MEMORY_DEFAULT_ACCESS_DAYS,
-							) as { n: number }
-					).n,
-				{ siteToken: "pipeline/maintenance-worker.ts:472" },
-			);
+			const countRow = deps.ownerMaintenance
+				? await ownerQueryOne<{ n: number }>(
+						deps.ownerMaintenance.owner,
+						"pipeline/maintenance-worker.dead-memory-count",
+						`SELECT COUNT(*) as n FROM memories
+						 WHERE is_deleted = 0 AND importance <= 0.8
+						 AND (confidence < ?
+						   OR (last_accessed IS NULL AND julianday('now') - julianday(created_at) > ?)
+						   OR (last_accessed IS NOT NULL AND julianday('now') - julianday(last_accessed) > ?))`,
+						[DEAD_MEMORY_DEFAULT_CONFIDENCE, DEAD_MEMORY_DEFAULT_ACCESS_DAYS, DEAD_MEMORY_DEFAULT_ACCESS_DAYS],
+					)
+				: await accessor.withReadDbAsync(
+						async (db) =>
+							(
+								db
+									.prepare(
+										`SELECT COUNT(*) as n FROM memories
+										 WHERE is_deleted = 0 AND importance <= 0.8
+										 AND (confidence < ?
+										   OR (last_accessed IS NULL AND julianday('now') - julianday(created_at) > ?)
+										   OR (last_accessed IS NOT NULL AND julianday('now') - julianday(last_accessed) > ?))`,
+									)
+									.get(
+										DEAD_MEMORY_DEFAULT_CONFIDENCE,
+										DEAD_MEMORY_DEFAULT_ACCESS_DAYS,
+										DEAD_MEMORY_DEFAULT_ACCESS_DAYS,
+									) as { n: number }
+							).n,
+						{ siteToken: "pipeline/maintenance-worker.ts:485" },
+					);
+			const count = typeof countRow === "number" ? countRow : (countRow?.n ?? 0);
 			if (count > 100) {
 				logger.warn("maintenance", "Dead memory count exceeds threshold", {
 					count,
@@ -501,9 +515,26 @@ export function startMaintenanceWorker(
 		// Reclaim free pages from DROP/DELETE/promotion operations (#1139).
 		// Only run when the free-page ratio is high and the system is not under pressure.
 		try {
-			const ratio = await accessor.withReadDbAsync(async (db) => getFreePageRatio(db), {
-				siteToken: "pipeline/maintenance-worker.ts:504",
-			});
+			const owner = deps.ownerMaintenance;
+			const ratio = owner
+				? await (async (): Promise<number> => {
+						const freelist = await ownerQueryOne<{ freelist_count: number }>(
+							owner.owner,
+							"pipeline/maintenance-worker.freelist-count",
+							"PRAGMA freelist_count",
+						);
+						const pages = await ownerQueryOne<{ page_count: number }>(
+							owner.owner,
+							"pipeline/maintenance-worker.page-count",
+							"PRAGMA page_count",
+						);
+						const free = freelist?.freelist_count ?? 0;
+						const total = pages?.page_count ?? 0;
+						return total > 0 ? free / total : 0;
+					})()
+				: await accessor.withReadDbAsync(async (db) => getFreePageRatio(db), {
+						siteToken: "pipeline/maintenance-worker.ts:535",
+					});
 			if (ratio >= 0.2) {
 				await reclaimIncrementalVacuum(accessor, { owner: deps.ownerMaintenance?.owner });
 			}

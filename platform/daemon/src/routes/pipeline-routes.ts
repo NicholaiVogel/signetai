@@ -5,6 +5,7 @@ import type { Context, Hono } from "hono";
 import { resolveAgentId, resolveDaemonAgentId } from "../agent-id.js";
 import { requirePermission, requireRateLimit } from "../auth";
 import { getDbAccessor } from "../db-accessor.js";
+import { getDbOwnerMaintenance, ownerQueryAll, ownerQueryOne } from "../db-owner-maintenance.js";
 import { getVacuumConversionStatusAsync } from "../db-vacuum.js";
 import { type QueueCounts, getQueueDiagnosticsSnapshot } from "../diagnostics-queue.js";
 import { readEmbeddingUsageSummary } from "../embedding-usage";
@@ -124,7 +125,7 @@ export function pipelineQueueBlock(options: { readonly allowSynchronousRead?: bo
 				summary: snapshot.summary,
 				oldestDeadSummaryJob: snapshot.oldestDeadSummaryJob,
 			};
-		}, "routes/pipeline-routes.ts:120");
+		}, "routes/pipeline-routes.ts:121");
 	} catch {
 		return {
 			memory: { ...UNKNOWN_QUEUE_COUNTS_SHAPE },
@@ -339,10 +340,12 @@ export function registerPipelineRoutes(app: Hono): void {
 		const us = getUpdateState();
 		let embeddingMigration = null;
 		try {
-			embeddingMigration = await getDbAccessor().withReadDbAsync(
-				(db) => readEmbeddingIndexMigrationProgress(db, config.embedding),
-				{ siteToken: "routes/pipeline-routes.ts:342" },
-			);
+			const ownerMaintenance = getDbOwnerMaintenance();
+			embeddingMigration = ownerMaintenance
+				? await ownerMaintenance.embeddingMigrationProgress(config.embedding.base_url)
+				: await getDbAccessor().withReadDbAsync((db) => readEmbeddingIndexMigrationProgress(db, config.embedding), {
+						siteToken: "routes/pipeline-routes.ts:346",
+					});
 		} catch {
 			// Database may still be initializing; omit migration visibility.
 		}
@@ -523,7 +526,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					limit,
 					offset,
 				}),
-			"routes/pipeline-routes.ts:517",
+			"routes/pipeline-routes.ts:520",
 		);
 		return c.json({
 			agentId: resolveAgentId({ agentId: scopedAgent.agentId }),
@@ -612,36 +615,38 @@ export function registerPipelineRoutes(app: Hono): void {
 	app.get("/api/pipeline/status", async (c) => {
 		const cfg = loadMemoryConfig(AGENTS_DIR);
 		const accessor = getDbAccessor();
-
-		const dbData = await accessor.withReadDbAsync(
-			(db) => {
-				const memoryRows = db
-					.prepare("SELECT status, COUNT(*) as count FROM memory_jobs GROUP BY status")
-					.all() as Array<{
-					status: string;
-					count: number;
-				}>;
-				const toCountMap = (rows: Array<{ status: string; count: number }>): Record<string, number> => {
-					const out: Record<string, number> = {
-						pending: 0,
-						leased: 0,
-						completed: 0,
-						failed: 0,
-						dead: 0,
-					};
-					for (const r of rows) out[r.status] = r.count;
-					return out;
-				};
-
-				return {
-					queues: {
-						memory: toCountMap(memoryRows),
-						summary: toCountMap([]),
-					},
-				};
+		const toCountMap = (rows: readonly { status: string; count: number }[]): Record<string, number> => {
+			const out: Record<string, number> = {
+				pending: 0,
+				leased: 0,
+				completed: 0,
+				failed: 0,
+				dead: 0,
+			};
+			for (const r of rows) out[r.status] = r.count;
+			return out;
+		};
+		const ownerMaintenance = getDbOwnerMaintenance();
+		const memoryRows = ownerMaintenance
+			? await ownerQueryAll<{ status: string; count: number }>(
+					ownerMaintenance.owner,
+					"routes/pipeline-routes.ts:616",
+					"SELECT status, COUNT(*) as count FROM memory_jobs GROUP BY status",
+				)
+			: await accessor.withReadDbAsync(
+					(db) =>
+						db.prepare("SELECT status, COUNT(*) as count FROM memory_jobs GROUP BY status").all() as Array<{
+							status: string;
+							count: number;
+						}>,
+					{ siteToken: "routes/pipeline-routes.ts:636", operation: "pipeline.status" },
+				);
+		const dbData = {
+			queues: {
+				memory: toCountMap(memoryRows),
+				summary: toCountMap([]),
 			},
-			{ siteToken: "routes/pipeline-routes.ts:616", operation: "pipeline.status" },
-		);
+		};
 		const diagnostics = getCachedDiagnosticsReport();
 
 		const pipelineV2 = cfg.pipelineV2;
@@ -968,15 +973,23 @@ export function registerPipelineRoutes(app: Hono): void {
 		const agentId = scopedAgent.agentId;
 		if (sourceKind === "summary") {
 			const accessor = getDbAccessor();
-			const hasTransientSummaryExclusion = await accessor.withReadDbAsync(
-				(db) =>
-					db
-						.prepare(
-							"SELECT 1 FROM dreaming_evidence_exclusions WHERE agent_id = ? AND source_kind = 'summary' AND source_id = ? AND resolved_at IS NULL",
-						)
-						.get(agentId, sourceId) != null,
-				{ siteToken: "routes/pipeline-routes.ts:971" },
-			);
+			const ownerMaintenance = getDbOwnerMaintenance();
+			const hasTransientSummaryExclusion = ownerMaintenance
+				? (await ownerQueryOne<{ present: number }>(
+						ownerMaintenance.owner,
+						"routes/pipeline-routes.ts:971",
+						"SELECT 1 AS present FROM dreaming_evidence_exclusions WHERE agent_id = ? AND source_kind = 'summary' AND source_id = ? AND resolved_at IS NULL",
+						[agentId, sourceId],
+					)) != null
+				: await accessor.withReadDbAsync(
+						(db) =>
+							db
+								.prepare(
+									"SELECT 1 FROM dreaming_evidence_exclusions WHERE agent_id = ? AND source_kind = 'summary' AND source_id = ? AND resolved_at IS NULL",
+								)
+								.get(agentId, sourceId) != null,
+						{ siteToken: "routes/pipeline-routes.ts:984" },
+					);
 			if (hasTransientSummaryExclusion) {
 				return c.json({ error: "Summary evidence requeue is retired; requeue the completed transcript instead" }, 410);
 			}

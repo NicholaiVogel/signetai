@@ -869,6 +869,30 @@ export function runDbOwnerWorker(): void {
 		if (job.request.kind === "dreaming_surprisal_attention")
 			return executeDreamingSurprisalAttention(job.request, context);
 		if (job.request.kind === "dreaming_episodic_backlog") return await executeDreamingEpisodicBacklog(job.request);
+		if (job.request.kind === "embedding_migration_progress") {
+			const { readEmbeddingIndexMigrationProgress } = await import("./embedding-index-state");
+			return readEmbeddingIndexMigrationProgress(
+				db as never,
+				job.request.configuredBaseUrl === undefined
+					? undefined
+					: ({ base_url: job.request.configuredBaseUrl } as never),
+			);
+		}
+		if (job.request.kind === "health_ready") {
+			const { hasPendingMigrations } = await import("@signet/core");
+			const { getQueueHealth } = await import("./diagnostics");
+			return {
+				migrationsOk: !hasPendingMigrations(db as never),
+				queueHealth: getQueueHealth(db as never),
+			};
+		}
+		if (job.request.kind === "diagnostics") {
+			const { getDiagnostics } = await import("./diagnostics");
+			return getDiagnostics(db as never, {
+				record: () => {},
+				stats: job.request.trackerStats,
+			});
+		}
 		if (job.request.kind === "source_artifact_upsert" || job.request.kind === "source_artifact_upsert_batch")
 			return executeSourceArtifactUpsert(job.request, context);
 		if (job.request.kind === "vector_search") return await executeVectorSearch(job.request.payload);

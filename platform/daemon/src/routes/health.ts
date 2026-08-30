@@ -4,6 +4,7 @@ import type { Hono } from "hono";
 import { getDatabaseIntegrityStatus } from "../database-integrity";
 import { type ReadDb, type ReadPressure, type WritePressure, getDbAccessor } from "../db-accessor";
 import type { DbOwnerHealth } from "../db-owner-client";
+import { getDbOwnerMaintenance, ownerQueryOne } from "../db-owner-maintenance";
 import { getDbRuntimeMetrics, getEventLoopLiveness } from "../db-observability";
 import {
 	QUEUE_MAX_DEAD_RATE,
@@ -107,9 +108,12 @@ async function checkEmbedding(): Promise<{ ok: boolean; detail: EmbeddingCheck; 
 	}
 	let migration: ReturnType<typeof readEmbeddingIndexMigrationProgress> = null;
 	try {
-		migration = await getDbAccessor().withReadDbAsync((db) => readEmbeddingIndexMigrationProgress(db, cfg), {
-			siteToken: "routes/health.ts:110",
-		});
+		const ownerMaintenance = getDbOwnerMaintenance();
+		migration = ownerMaintenance
+			? await ownerMaintenance.embeddingMigrationProgress(cfg.base_url)
+			: await getDbAccessor().withReadDbAsync((db) => readEmbeddingIndexMigrationProgress(db, cfg), {
+					siteToken: "routes/health.ts:114",
+				});
 	} catch {
 		// The provider probe remains useful while the database is initializing.
 	}
@@ -209,16 +213,22 @@ export function mountHealthRoutes(app: Hono): void {
 		try {
 			const accessor = getDbAccessor();
 			try {
-				await accessor.withReadDbAsync(
-					(db: ReadDb) => {
-						db.prepare("SELECT 1").get();
-						dbOk = true;
-					},
-					// /health is a liveness-adjacent probe. Do not let a queued
-					// database-owner/read lease turn a transient DB stall into an
-					// HTTP stall. The structured response below reports db: false.
-					{ siteToken: "routes/health.ts:212", operation: "health", timeoutMs: 500 },
-				);
+				const owner = getDbOwnerMaintenance()?.owner;
+				if (owner) {
+					await ownerQueryOne(owner, "routes/health.ts:212", "SELECT 1", [], { deadlineMs: 500 });
+					dbOk = true;
+				} else {
+					await accessor.withReadDbAsync(
+						(db: ReadDb) => {
+							db.prepare("SELECT 1").get();
+							dbOk = true;
+						},
+						// /health is a liveness-adjacent probe. Do not let a queued
+						// database-owner/read lease turn a transient DB stall into an
+						// HTTP stall. The structured response below reports db: false.
+						{ siteToken: "routes/health.ts:221", operation: "health", timeoutMs: 500 },
+					);
+				}
 			} catch {
 				// Keep the structured admission outcome visible below.
 			}
@@ -280,16 +290,19 @@ export function mountHealthRoutes(app: Hono): void {
 		let dbRuntime = getDbRuntimeMetrics();
 		try {
 			const accessor = getDbAccessor();
-			dbResult = await accessor.withReadDbAsync(
-				(db: ReadDb) => {
-					db.prepare("SELECT 1").get();
-					return {
-						migrationsOk: !hasPendingMigrations(readDbAsMigrationDb(db)),
-						queueHealth: getQueueHealth(db),
-					};
-				},
-				{ siteToken: "routes/health.ts:283", operation: "health.ready" },
-			);
+			const ownerMaintenance = getDbOwnerMaintenance();
+			dbResult = ownerMaintenance
+				? await ownerMaintenance.healthReady()
+				: await accessor.withReadDbAsync(
+						(db: ReadDb) => {
+							db.prepare("SELECT 1").get();
+							return {
+								migrationsOk: !hasPendingMigrations(readDbAsMigrationDb(db)),
+								queueHealth: getQueueHealth(db),
+							};
+						},
+						{ siteToken: "routes/health.ts:296", operation: "health.ready" },
+					);
 			dbReader = accessor.getReadPressure?.() ?? null;
 			dbRuntime = accessor.getDbRuntimePressure?.().runtime ?? dbRuntime;
 		} catch (err) {
