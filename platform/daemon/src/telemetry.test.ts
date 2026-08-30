@@ -23,14 +23,9 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { parseRoutingConfig } from "@signet/core";
-import {
-	type DbAccessor,
-	type ReadDb,
-	type WriteDb,
-	closeDbAccessor,
-	getDbAccessor,
-	initDbAccessor,
-} from "./db-accessor";
+import { type DbAccessor, type WriteDb, closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
+import { getDbOwner } from "./db-owner-runtime";
+import type { DbOwnerClient } from "./db-owner-client";
 import { createRoutingProvider } from "./inference-provider-factory";
 import { generateWithTracking } from "./pipeline/provider";
 import {
@@ -95,8 +90,8 @@ function installFetchMock(): void {
 	}) as typeof fetch;
 }
 
-function resetWorkspace(): void {
-	closeDbAccessor();
+async function resetWorkspace(): Promise<void> {
+	await closeDbAccessor();
 	rmSync(join(dir, "memory"), { recursive: true, force: true });
 	rmSync(join(dir, ".daemon"), { recursive: true, force: true });
 	mkdirSync(join(dir, "memory"), { recursive: true });
@@ -104,23 +99,37 @@ function resetWorkspace(): void {
 }
 
 function makeCollector(configSnapshot?: TelemetryConfigSnapshot): TelemetryCollector {
-	return createTelemetryCollector(getDbAccessor(), TELEMETRY_CONFIG, "0.0.0-test", { configSnapshot });
+	return createTelemetryCollector(getDbAccessor(), TELEMETRY_CONFIG, "0.0.0-test", {
+		configSnapshot,
+		dbPath: join(dir, "memory", "memories.db"),
+	});
 }
 
-function delayAsyncReads(gate: Promise<void>, started: () => void): DbAccessor {
-	const base = getDbAccessor();
+function delayOwnerReads(base: DbOwnerClient, gate: Promise<void>, started: () => void): DbOwnerClient {
 	let firstRead = true;
-	return {
-		...base,
-		async withReadDbAsync<T>(fn: (db: ReadDb) => Promise<T>): Promise<T> {
-			if (firstRead) {
-				firstRead = false;
-				started();
-				await gate;
-			}
-			return base.withReadDbAsync(fn);
+	return new Proxy(base, {
+		get(target, property, receiver) {
+			if (property !== "submit") return Reflect.get(target, property, receiver);
+			return <Result>(
+				request: Parameters<DbOwnerClient["submit"]>[0],
+				options: Parameters<DbOwnerClient["submit"]>[1],
+			) => {
+				const handle = target.submit<Result>(request, options);
+				if (firstRead && request.kind === "query") {
+					firstRead = false;
+					started();
+					return {
+						...handle,
+						result: handle.result.then(async (result) => {
+							await gate;
+							return result;
+						}),
+					};
+				}
+				return handle;
+			};
 		},
-	};
+	});
 }
 
 function delayAsyncWrites(gate: Promise<void>, started: () => void): DbAccessor {
@@ -180,23 +189,23 @@ function installRowCount(): number {
 
 // Shared harness for both suites below: fresh workspace per test, including
 // a clean .daemon dir so the JSONL log cannot leak between tests.
-beforeAll(() => {
+beforeAll(async () => {
 	dir = createTestTempDir("signet-telemetry-");
 	installFetchMock();
-	resetWorkspace();
+	await resetWorkspace();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
 	captured = [];
 	pendingFetch = null;
 	fetchStatus = 200;
 	logPath = defaultTelemetryLogPath(dir);
-	resetWorkspace();
+	await resetWorkspace();
 });
 
-afterAll(() => {
+afterAll(async () => {
 	globalThis.fetch = originalFetch;
-	closeDbAccessor();
+	await closeDbAccessor();
 	cleanupTestTempDir(dir);
 });
 
@@ -210,16 +219,16 @@ describe("telemetry collector", () => {
 
 		const dirB = createTestTempDir("signet-telemetry-b-");
 		try {
-			closeDbAccessor();
+			await closeDbAccessor();
 			initDbAccessor(join(dirB, "memory", "memories.db"), { agentsDir: dirB });
 			const collectorB = makeCollector();
 			collectorB.record("daemon.heartbeat", { uptimeMs: 1 });
 			await collectorB.flush();
 			expect(lastBatchDistinctId()).not.toBe(idA);
 		} finally {
-			closeDbAccessor();
+			await closeDbAccessor();
 			cleanupTestTempDir(dirB);
-			resetWorkspace();
+			await resetWorkspace();
 		}
 	});
 
@@ -235,6 +244,34 @@ describe("telemetry collector", () => {
 		await second.flush();
 		expect(lastBatchDistinctId()).toBe(idA);
 		expect(installRowCount()).toBe(1);
+	});
+
+	it("keeps owner-supplied install identity off the parent async DB accessor", async () => {
+		let directWrites = 0;
+		const base = getDbAccessor();
+		const guardedDb: DbAccessor = {
+			...base,
+			async withWriteTxAsync<T>(fn: (db: WriteDb) => T): Promise<T> {
+				directWrites++;
+				return await base.withWriteTxAsync(fn);
+			},
+		};
+		const owner = await getDbOwner(join(dir, "memory", "memories.db"));
+		const first = createTelemetryCollector(guardedDb, TELEMETRY_CONFIG, "0.0.0-test", { owner });
+		first.record("daemon.heartbeat", { uptimeMs: 1 });
+		await first.flush();
+		const firstId = lastBatchDistinctId();
+
+		expect(directWrites).toBe(0);
+		expect(captured[0]?.body.batch[0]?.event).toBe("install.activated");
+		expect(installRowCount()).toBe(1);
+
+		const second = createTelemetryCollector(guardedDb, TELEMETRY_CONFIG, "0.0.0-test", { owner });
+		second.record("daemon.heartbeat", { uptimeMs: 2 });
+		await second.flush();
+		expect(lastBatchDistinctId()).toBe(firstId);
+		expect(captured.at(-1)?.body.batch.map((event) => event.event)).toEqual(["daemon.heartbeat"]);
+		expect(directWrites).toBe(0);
 	});
 
 	it("posts batches with the install id and marks events sent", async () => {
@@ -364,7 +401,7 @@ describe("telemetry collector", () => {
 		const { cleanupTestTempDir, createTestTempDir } = await import("./test-temp-dir");
 		const dir = createTestTempDir("signet-anon-");
 		try {
-			closeDbAccessor();
+			await closeDbAccessor();
 			initDbAccessor(join(dir, "memory", "memories.db"), { agentsDir: dir });
 			const collector = createTelemetryCollector(
 				getDbAccessor(),
@@ -385,7 +422,7 @@ describe("telemetry collector", () => {
 			expect(a).toMatch(/^[0-9a-f]{16}$/);
 			expect(collector.anonymizeAgentId("agent-a")).not.toBe(collector.anonymizeAgentId("agent-b"));
 		} finally {
-			closeDbAccessor();
+			await closeDbAccessor();
 			cleanupTestTempDir(dir);
 		}
 	});
@@ -395,7 +432,7 @@ describe("telemetry collector", () => {
 		const dirA = createTestTempDir("signet-anon-a-");
 		const dirB = createTestTempDir("signet-anon-b-");
 		try {
-			closeDbAccessor();
+			await closeDbAccessor();
 			initDbAccessor(join(dirA, "memory", "memories.db"), { agentsDir: dirA });
 			const ca = createTelemetryCollector(
 				getDbAccessor(),
@@ -410,7 +447,7 @@ describe("telemetry collector", () => {
 				"0.0.0-test",
 			);
 			const ha = ca.anonymizeAgentId("default");
-			closeDbAccessor();
+			await closeDbAccessor();
 			initDbAccessor(join(dirB, "memory", "memories.db"), { agentsDir: dirB });
 			const cb = createTelemetryCollector(
 				getDbAccessor(),
@@ -427,7 +464,7 @@ describe("telemetry collector", () => {
 			const hb = cb.anonymizeAgentId("default");
 			expect(ha).not.toBe(hb); // same agent id hashes differently per install
 		} finally {
-			closeDbAccessor();
+			await closeDbAccessor();
 			cleanupTestTempDir(dirA);
 			cleanupTestTempDir(dirB);
 		}
@@ -511,7 +548,7 @@ describe("telemetry collector", () => {
 		// Simulate a process crash: the in-memory buffer (including the
 		// activation event) disappears, but the atomically persisted
 		// first-use rows survive and are recoverable by the next daemon.
-		closeDbAccessor();
+		await closeDbAccessor();
 		initDbAccessor(join(dir, "memory", "memories.db"), { agentsDir: dir });
 		const restarted = makeCollector();
 		restarted.recordFirstUse("remember");
@@ -829,10 +866,14 @@ describe("telemetry collector", () => {
 			);
 		});
 
+		const owner = delayOwnerReads(await getDbOwner(join(dir, "memory", "memories.db")), readsReleased, () =>
+			signalReadStarted?.(),
+		);
 		const collector = createTelemetryCollector(
-			delayAsyncReads(readsReleased, () => signalReadStarted?.()),
+			getDbAccessor(),
 			{ ...TELEMETRY_CONFIG, flushIntervalMs: 10 },
 			"0.0.0-test",
+			{ owner },
 		);
 		collector.record("daemon.heartbeat", { uptimeMs: 1 });
 		collector.start();

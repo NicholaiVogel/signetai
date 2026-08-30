@@ -18,7 +18,11 @@ import {
 	type TelemetryInstallChannel,
 	summarizeAccountingProvenance,
 } from "@signet/core";
-import type { DbAccessor } from "./db-accessor";
+import { getDbAccessorPath, type DbAccessor } from "./db-accessor";
+import type { DbOwnerClient } from "./db-owner-client";
+import { getDbOwner, ownerStatement } from "./db-owner-runtime";
+import { ownerChanges, ownerTransaction } from "./db-owner-maintenance";
+import { ownerReadAll, ownerReadOne } from "./db-owner-sql";
 import { logger } from "./logger";
 
 // ---------------------------------------------------------------------------
@@ -485,6 +489,7 @@ export function telemetryReportedVersion(version: string, deployment: TelemetryD
  */
 type InstallIdentity = { readonly id: string; readonly created: boolean; readonly previousVersion?: string };
 type DeferredInstallIdentity = InstallIdentity & { readonly ready?: Promise<InstallIdentity> };
+type InstallIdentityRow = { readonly id: string; readonly last_seen_version?: string | null };
 
 function resolveInstallIdentity(w: import("./db-accessor").WriteDb, daemonVersion: string): InstallIdentity {
 	const existing = w
@@ -535,8 +540,68 @@ function resolveLegacyInstallIdentity(w: import("./db-accessor").WriteDb): Insta
 	return inserted?.id ? { id: inserted.id, created: false } : { id, created: false };
 }
 
-function getOrCreateInstallId(db: DbAccessor, daemonVersion: string): DeferredInstallIdentity {
+function ownerInstallIdentity(results: readonly unknown[]): InstallIdentity {
+	const before = results[0] as InstallIdentityRow | null | undefined;
+	const row = results[3] as InstallIdentityRow | null | undefined;
+	if (!row?.id) throw new Error("DB owner did not return an install identity");
+	return {
+		id: row.id,
+		created: ownerChanges(results[1]) > 0,
+		...(before?.last_seen_version ? { previousVersion: before.last_seen_version } : {}),
+	};
+}
+
+async function resolveInstallIdentityOnOwner(owner: DbOwnerClient, daemonVersion: string): Promise<InstallIdentity> {
+	const id = crypto.randomUUID();
+	const createdAt = new Date().toISOString();
+	const results = await ownerTransaction(
+		owner,
+		"telemetry.install-identity.resolve",
+		[
+			ownerStatement("SELECT id, last_seen_version FROM telemetry_install ORDER BY created_at ASC LIMIT 1", [], "get"),
+			ownerStatement(
+				"INSERT INTO telemetry_install (id, created_at, last_seen_version) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM telemetry_install)",
+				[id, createdAt, daemonVersion],
+			),
+			ownerStatement(
+				"UPDATE telemetry_install SET last_seen_version = COALESCE(last_seen_version, ?) WHERE id = (SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1)",
+				[daemonVersion],
+			),
+			ownerStatement("SELECT id, last_seen_version FROM telemetry_install ORDER BY created_at ASC LIMIT 1", [], "get"),
+		],
+		{ deadlineMs: 5_000, estimatedWorkUnits: 1 },
+	);
+	return ownerInstallIdentity(results);
+}
+
+async function resolveLegacyInstallIdentityOnOwner(owner: DbOwnerClient): Promise<InstallIdentity> {
+	const id = crypto.randomUUID();
+	const results = await ownerTransaction(
+		owner,
+		"telemetry.install-identity.resolve-legacy",
+		[
+			ownerStatement("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1", [], "get"),
+			ownerStatement(
+				"INSERT INTO telemetry_install (id, created_at) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM telemetry_install)",
+				[id, new Date().toISOString()],
+			),
+			ownerStatement("SELECT id FROM telemetry_install ORDER BY created_at ASC LIMIT 1", [], "get"),
+		],
+		{ deadlineMs: 5_000, estimatedWorkUnits: 1 },
+	);
+	const row = results[2] as { readonly id: string } | null | undefined;
+	if (!row?.id) throw new Error("DB owner did not return a legacy install identity");
+	return { id: row.id, created: ownerChanges(results[1]) > 0 };
+}
+
+function getOrCreateInstallId(db: DbAccessor, daemonVersion: string, owner?: DbOwnerClient): DeferredInstallIdentity {
 	const fallback = { id: crypto.randomUUID(), created: false } as const;
+	if (owner !== undefined) {
+		const ready = resolveInstallIdentityOnOwner(owner, daemonVersion)
+			.catch(() => resolveLegacyInstallIdentityOnOwner(owner))
+			.catch(() => fallback);
+		return { ...fallback, ready };
+	}
 	const withWriteTxAsync = db.withWriteTxAsync;
 	if (withWriteTxAsync) {
 		const runAsync = <T>(fn: (w: import("./db-accessor").WriteDb) => T): Promise<T> =>
@@ -550,14 +615,14 @@ function getOrCreateInstallId(db: DbAccessor, daemonVersion: string): DeferredIn
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
 		return db.withWriteTx(
 			(w: import("./db-accessor").WriteDb) => resolveInstallIdentity(w, daemonVersion),
-			"telemetry.ts:551",
+			"telemetry.ts:616",
 		);
 	} catch {
 		try {
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
 			return db.withWriteTx(
 				(w: import("./db-accessor").WriteDb) => resolveLegacyInstallIdentity(w),
-				"telemetry.ts:558",
+				"telemetry.ts:623",
 			);
 		} catch {
 			return fallback;
@@ -747,9 +812,18 @@ export function createTelemetryCollector(
 		readonly telemetryLogRetentionDays?: number;
 		readonly configSnapshot?: TelemetryConfigSnapshot;
 		readonly env?: NodeJS.ProcessEnv;
+		/** Explicit DB owner used for all durable telemetry reads and writes. */
+		readonly owner?: DbOwnerClient;
+		/** Database path for tests or isolated collectors without a registered owner. */
+		readonly dbPath?: string;
 	} = {},
 ): TelemetryCollector {
 	const buffer: TelemetryEvent[] = [];
+	async function owner(): Promise<DbOwnerClient> {
+		if (opts.owner !== undefined) return opts.owner;
+		if (opts.dbPath !== undefined) return await getDbOwner(opts.dbPath);
+		return await getDbOwner(getDbAccessorPath());
+	}
 	const logPath = opts.telemetryLogPath ?? null;
 	const logOptions: TelemetryLogOptions = {
 		maxBytes: opts.telemetryLogMaxBytes ?? TELEMETRY_LOG_MAX_BYTES,
@@ -815,7 +889,7 @@ export function createTelemetryCollector(
 	let persistedQueueCount = 0;
 	let persistedOldestTimestamp: string | null = null;
 	let lastDaemonEventTimestamp: string | null = null;
-	const installIdentity = getOrCreateInstallId(db, daemonVersion);
+	const installIdentity = getOrCreateInstallId(db, daemonVersion, opts.owner);
 	let installId = installIdentity.id;
 	let installActivated = installIdentity.created;
 	let previousVersion = installIdentity.previousVersion;
@@ -824,22 +898,19 @@ export function createTelemetryCollector(
 
 	async function readDeliveryState(): Promise<TelemetryDeliveryState> {
 		try {
-			const row = await db.withReadDbAsync(
-				async (r) =>
-					r
-						.prepare(
-							`SELECT window_started_at AS windowStartedAt,
-							success_count AS successCount, failure_count AS failureCount,
-							consecutive_failures AS consecutiveFailures,
-							last_attempt_at AS lastAttemptAt, last_success_at AS lastSuccessAt,
-							last_failure_code AS lastFailureCode,
-							dropped_event_count AS droppedEventCount
-					 FROM telemetry_delivery_state WHERE id = 1`,
-						)
-						.get() as TelemetryDeliveryState | undefined,
-				{ siteToken: "telemetry.ts:827" },
+			const row = await ownerReadOne<TelemetryDeliveryState>(
+				await owner(),
+				`SELECT window_started_at AS windowStartedAt,
+				        success_count AS successCount, failure_count AS failureCount,
+				        consecutive_failures AS consecutiveFailures,
+				        last_attempt_at AS lastAttemptAt, last_success_at AS lastSuccessAt,
+				        last_failure_code AS lastFailureCode,
+				        dropped_event_count AS droppedEventCount
+				 FROM telemetry_delivery_state WHERE id = 1`,
+				[],
+				{ operation: "telemetry.delivery-state.read", deadlineMs: 5_000, estimatedWorkUnits: 1 },
 			);
-			if (row) {
+			if (row !== null) {
 				droppedEventCount = Math.max(droppedEventCount, row.droppedEventCount ?? 0);
 				return row;
 			}
@@ -861,30 +932,26 @@ export function createTelemetryCollector(
 
 	async function refreshPersistedQueue(): Promise<void> {
 		try {
-			const queue = await db.withReadDbAsync(
-				async (r) => {
-					const pending = r
-						.prepare(
-							`SELECT COUNT(*) AS count, MIN(timestamp) AS oldestTimestamp
-						 FROM telemetry_events WHERE source = 'daemon' AND sent_to_posthog = 0`,
-						)
-						.get() as { count?: number; oldestTimestamp?: string | null } | undefined;
-					const latest = r
-						.prepare(
-							"SELECT MAX(timestamp) AS timestamp FROM telemetry_events WHERE source = 'daemon' AND event <> 'telemetry.health'",
-						)
-						.get() as { timestamp?: string | null } | undefined;
-					return {
-						count: pending?.count ?? 0,
-						oldestTimestamp: pending?.oldestTimestamp ?? null,
-						lastTimestamp: latest?.timestamp ?? null,
-					};
-				},
-				{ siteToken: "telemetry.ts:864" },
+			const queue = await ownerReadOne<{
+				readonly count: number;
+				readonly oldestTimestamp: string | null;
+				readonly lastTimestamp: string | null;
+			}>(
+				await owner(),
+				`SELECT
+					(SELECT COUNT(*) FROM telemetry_events
+					 WHERE source = 'daemon' AND sent_to_posthog = 0) AS count,
+					(SELECT MIN(timestamp) FROM telemetry_events
+					 WHERE source = 'daemon' AND sent_to_posthog = 0) AS oldestTimestamp,
+					(SELECT MAX(timestamp) FROM telemetry_events
+					 WHERE source = 'daemon' AND event <> 'telemetry.health') AS lastTimestamp`,
+				[],
+				{ operation: "telemetry.queue.refresh", deadlineMs: 5_000, estimatedWorkUnits: 3 },
 			);
-			persistedQueueCount = queue.count;
-			persistedOldestTimestamp = queue.oldestTimestamp;
-			lastDaemonEventTimestamp = queue.lastTimestamp;
+			if (queue === null) return;
+			persistedQueueCount = queue.count ?? 0;
+			persistedOldestTimestamp = queue.oldestTimestamp ?? null;
+			lastDaemonEventTimestamp = queue.lastTimestamp ?? null;
 		} catch {
 			// Keep local in-memory health available when SQLite is unavailable.
 		}
@@ -903,15 +970,6 @@ export function createTelemetryCollector(
 	function recordDroppedEvents(count: number): void {
 		droppedEventCount += count;
 		pendingDroppedEventCount += count;
-	}
-
-	function persistPendingDroppedEvents(w: { prepare(sql: string): { run(...args: unknown[]): unknown } }): void {
-		if (pendingDroppedEventCount === 0) return;
-		w.prepare(
-			`UPDATE telemetry_delivery_state
-			 SET dropped_event_count = dropped_event_count + ? WHERE id = 1`,
-		).run(pendingDroppedEventCount);
-		pendingDroppedEventCount = 0;
 	}
 
 	const deliveryStateReady = readDeliveryState().then((state) => {
@@ -946,27 +1004,25 @@ export function createTelemetryCollector(
 		};
 
 		try {
-			const withWriteTxAsync = db.withWriteTxAsync;
-			if (!withWriteTxAsync) return null;
 			const column = FIRST_USE_COLUMNS[kind];
-			let claimed = false;
-			await withWriteTxAsync((w) => {
-				const result = w
-					.prepare(
-						`UPDATE telemetry_install SET ${column} = ?
-						 WHERE id = ? AND ${column} IS NULL`,
-					)
-					.run(event.timestamp, installId);
-				if (result.changes === 0) return;
-
-				w.prepare(
-					`INSERT INTO telemetry_events
-					 (id, event, timestamp, properties, sent_to_posthog, created_at, source)
-					 VALUES (?, ?, ?, ?, 0, ?, 'daemon')`,
-				).run(event.id, event.event, event.timestamp, JSON.stringify(event.properties), event.timestamp);
-				claimed = true;
-			});
-			return claimed ? event : null;
+			const results = await ownerTransaction(
+				await owner(),
+				"telemetry.first-use.persist",
+				[
+					ownerStatement(`UPDATE telemetry_install SET ${column} = ? WHERE id = ? AND ${column} IS NULL`, [
+						event.timestamp,
+						installId,
+					]),
+					ownerStatement(
+						`INSERT INTO telemetry_events
+						 (id, event, timestamp, properties, sent_to_posthog, created_at, source)
+						 SELECT ?, ?, ?, ?, 0, ?, 'daemon' WHERE changes() > 0`,
+						[event.id, event.event, event.timestamp, JSON.stringify(event.properties), event.timestamp],
+					),
+				],
+				{ deadlineMs: 5_000, estimatedWorkUnits: 2 },
+			);
+			return ownerChanges(results[0]) > 0 ? event : null;
 		} catch {
 			// The transaction rolls back both the claim and event on any
 			// failure, allowing a later successful call to retry the milestone.
@@ -995,51 +1051,69 @@ export function createTelemetryCollector(
 
 	async function writeToDb(events: readonly TelemetryEvent[]): Promise<boolean> {
 		if (events.length === 0) return true;
-		const withWriteTxAsync = db.withWriteTxAsync;
-		if (!withWriteTxAsync) return false;
 		try {
-			await withWriteTxAsync((w) => {
-				const stmt = w.prepare(
+			const now = new Date().toISOString();
+			const params = events.flatMap((event) => [
+				event.id,
+				event.event,
+				event.timestamp,
+				JSON.stringify(event.properties),
+				now,
+			]);
+			const statements = [
+				ownerStatement(
 					`INSERT OR IGNORE INTO telemetry_events
 					 (id, event, timestamp, properties, sent_to_posthog, created_at, source)
-					 VALUES (?, ?, ?, ?, 0, ?, 'daemon')`,
+					 VALUES ${events.map(() => "(?, ?, ?, ?, 0, ?, 'daemon')").join(", ")}`,
+					params,
+				),
+			];
+			if (events.some((event) => event.event === "version.observed")) {
+				statements.push(
+					ownerStatement("UPDATE telemetry_install SET last_seen_version = ? WHERE id = ?", [daemonVersion, installId]),
 				);
-				const now = new Date().toISOString();
-				for (const e of events) {
-					stmt.run(e.id, e.event, e.timestamp, JSON.stringify(e.properties), now);
-				}
-				// Advance the observation marker in the same transaction as the
-				// event. A crash before flush therefore repeats the observation
-				// instead of losing it permanently.
-				if (events.some((event) => event.event === "version.observed")) {
-					w.prepare("UPDATE telemetry_install SET last_seen_version = ? WHERE id = ?").run(daemonVersion, installId);
-				}
-				persistPendingDroppedEvents(w);
-				const overflow = w
-					.prepare(
-						`SELECT COUNT(*) AS count FROM telemetry_events
-						 WHERE source = 'daemon' AND sent_to_posthog = 0 AND claim_token IS NULL`,
-					)
-					.get() as { count?: number } | undefined;
-				const dropCount = Math.max(0, (overflow?.count ?? 0) - MAX_PERSISTED_QUEUE_EVENTS);
-				if (dropCount > 0) {
-					w.prepare(
-						`DELETE FROM telemetry_events WHERE id IN (
-						 SELECT id FROM telemetry_events
+			}
+			if (pendingDroppedEventCount > 0) {
+				statements.push(
+					ownerStatement(
+						`UPDATE telemetry_delivery_state
+						 SET dropped_event_count = dropped_event_count + ? WHERE id = 1`,
+						[pendingDroppedEventCount],
+					),
+				);
+			}
+			const pruneResultIndex = statements.length;
+			statements.push(
+				ownerStatement(
+					`DELETE FROM telemetry_events WHERE id IN (
+					 SELECT id FROM telemetry_events
+					 WHERE source = 'daemon' AND sent_to_posthog = 0 AND claim_token IS NULL
+					 ORDER BY timestamp ASC LIMIT (
+						 SELECT MAX(0, COUNT(*) - ?) FROM telemetry_events
 						 WHERE source = 'daemon' AND sent_to_posthog = 0 AND claim_token IS NULL
-						 ORDER BY timestamp ASC LIMIT ?
-					 )`,
-					).run(dropCount);
-					w.prepare(
-						"UPDATE telemetry_delivery_state SET dropped_event_count = dropped_event_count + ? WHERE id = 1",
-					).run(dropCount);
-					droppedEventCount += dropCount;
-					logger.warn("telemetry", "Persisted telemetry queue reached capacity", {
-						dropped: dropCount,
-						maxQueueEvents: MAX_PERSISTED_QUEUE_EVENTS,
-					});
-				}
+					 )
+					)`,
+					[MAX_PERSISTED_QUEUE_EVENTS],
+				),
+			);
+			statements.push(
+				ownerStatement(
+					"UPDATE telemetry_delivery_state SET dropped_event_count = dropped_event_count + changes() WHERE id = 1",
+				),
+			);
+			const results = await ownerTransaction(await owner(), "telemetry.events.persist", statements, {
+				deadlineMs: 5_000,
+				estimatedWorkUnits: Math.max(1, events.length),
 			});
+			const dropCount = ownerChanges(results[pruneResultIndex]);
+			if (dropCount > 0) {
+				droppedEventCount += dropCount;
+				logger.warn("telemetry", "Persisted telemetry queue reached capacity", {
+					dropped: dropCount,
+					maxQueueEvents: MAX_PERSISTED_QUEUE_EVENTS,
+				});
+			}
+			if (pendingDroppedEventCount > 0) pendingDroppedEventCount = 0;
 			return true;
 		} catch (err) {
 			logger.warn("telemetry", "Failed to write events to db", {
@@ -1053,46 +1127,52 @@ export function createTelemetryCollector(
 		const now = new Date().toISOString();
 		let stateUpdated = false;
 		try {
-			const withWriteTxAsync = db.withWriteTxAsync;
-			if (!withWriteTxAsync) throw new Error("async writer unavailable");
-			await withWriteTxAsync((w) => {
-				w.prepare(
-					"UPDATE telemetry_events SET sent_to_posthog = 1, sent_at = ?, claim_token = NULL, claimed_at = NULL WHERE claim_token = ?",
-				).run(now, token);
-				const row = w.prepare("SELECT id FROM telemetry_delivery_state WHERE id = 1").get();
-				if (row) {
-					w.prepare(
+			const results = await ownerTransaction(
+				await owner(),
+				"telemetry.delivery.mark-sent",
+				[
+					ownerStatement(
+						"UPDATE telemetry_events SET sent_to_posthog = 1, sent_at = ?, claim_token = NULL, claimed_at = NULL WHERE claim_token = ?",
+						[now, token],
+					),
+					ownerStatement(
 						`UPDATE telemetry_delivery_state
 						 SET success_count = CASE WHEN julianday(?) - julianday(window_started_at) >= ? / 86400000.0 THEN 1 ELSE success_count + 1 END,
 						     failure_count = CASE WHEN julianday(?) - julianday(window_started_at) >= ? / 86400000.0 THEN 0 ELSE failure_count END,
 						     window_started_at = CASE WHEN julianday(?) - julianday(window_started_at) >= ? / 86400000.0 THEN ? ELSE window_started_at END,
 						     consecutive_failures = 0, last_attempt_at = ?, last_success_at = ?, last_failure_code = NULL
 						 WHERE id = 1`,
-					).run(
-						now,
-						DELIVERY_HEALTH_WINDOW_MS,
-						now,
-						DELIVERY_HEALTH_WINDOW_MS,
-						now,
-						DELIVERY_HEALTH_WINDOW_MS,
-						now,
-						now,
-						now,
-					);
-					stateUpdated = true;
-				}
-			});
+						[
+							now,
+							DELIVERY_HEALTH_WINDOW_MS,
+							now,
+							DELIVERY_HEALTH_WINDOW_MS,
+							now,
+							DELIVERY_HEALTH_WINDOW_MS,
+							now,
+							now,
+							now,
+						],
+					),
+				],
+				{ deadlineMs: 5_000, estimatedWorkUnits: 2 },
+			);
+			stateUpdated = ownerChanges(results[1]) > 0;
 		} catch {
 			// Older/partially migrated workspaces still need the event marked sent
 			// after PostHog accepted it; otherwise the claim would be retried.
 			try {
-				const withWriteTxAsync = db.withWriteTxAsync;
-				if (!withWriteTxAsync) throw new Error("async writer unavailable");
-				await withWriteTxAsync((w) => {
-					w.prepare(
-						"UPDATE telemetry_events SET sent_to_posthog = 1, claim_token = NULL, claimed_at = NULL WHERE claim_token = ?",
-					).run(token);
-				});
+				await ownerTransaction(
+					await owner(),
+					"telemetry.delivery.mark-sent-fallback",
+					[
+						ownerStatement(
+							"UPDATE telemetry_events SET sent_to_posthog = 1, claim_token = NULL, claimed_at = NULL WHERE claim_token = ?",
+							[token],
+						),
+					],
+					{ deadlineMs: 5_000, estimatedWorkUnits: 1 },
+				);
 			} catch {
 				// best effort
 			}
@@ -1119,44 +1199,50 @@ export function createTelemetryCollector(
 		const now = new Date().toISOString();
 		let stateUpdated = false;
 		try {
-			const withWriteTxAsync = db.withWriteTxAsync;
-			if (!withWriteTxAsync) throw new Error("async writer unavailable");
-			await withWriteTxAsync((w) => {
-				w.prepare(
-					"UPDATE telemetry_events SET last_attempt_at = ?, last_failure_code = ?, claim_token = NULL, claimed_at = NULL WHERE claim_token = ?",
-				).run(now, failureCode?.slice(0, MAX_HEALTH_FAILURE_CODE_LENGTH) ?? "unknown", token);
-				const row = w.prepare("SELECT id FROM telemetry_delivery_state WHERE id = 1").get();
-				if (row) {
-					w.prepare(
+			const code = failureCode?.slice(0, MAX_HEALTH_FAILURE_CODE_LENGTH) ?? "unknown";
+			const results = await ownerTransaction(
+				await owner(),
+				"telemetry.delivery.release-claim",
+				[
+					ownerStatement(
+						"UPDATE telemetry_events SET last_attempt_at = ?, last_failure_code = ?, claim_token = NULL, claimed_at = NULL WHERE claim_token = ?",
+						[now, code, token],
+					),
+					ownerStatement(
 						`UPDATE telemetry_delivery_state
 						 SET failure_count = CASE WHEN julianday(?) - julianday(window_started_at) >= ? / 86400000.0 THEN 1 ELSE failure_count + 1 END,
 						     success_count = CASE WHEN julianday(?) - julianday(window_started_at) >= ? / 86400000.0 THEN 0 ELSE success_count END,
 						     window_started_at = CASE WHEN julianday(?) - julianday(window_started_at) >= ? / 86400000.0 THEN ? ELSE window_started_at END,
 						     consecutive_failures = consecutive_failures + 1, last_attempt_at = ?, last_failure_code = ?
 						 WHERE id = 1`,
-					).run(
-						now,
-						DELIVERY_HEALTH_WINDOW_MS,
-						now,
-						DELIVERY_HEALTH_WINDOW_MS,
-						now,
-						DELIVERY_HEALTH_WINDOW_MS,
-						now,
-						now,
-						failureCode?.slice(0, MAX_HEALTH_FAILURE_CODE_LENGTH) ?? "unknown",
-					);
-					stateUpdated = true;
-				}
-			});
+						[
+							now,
+							DELIVERY_HEALTH_WINDOW_MS,
+							now,
+							DELIVERY_HEALTH_WINDOW_MS,
+							now,
+							DELIVERY_HEALTH_WINDOW_MS,
+							now,
+							now,
+							code,
+						],
+					),
+				],
+				{ deadlineMs: 5_000, estimatedWorkUnits: 2 },
+			);
+			stateUpdated = ownerChanges(results[1]) > 0;
 		} catch {
 			try {
-				const withWriteTxAsync = db.withWriteTxAsync;
-				if (!withWriteTxAsync) throw new Error("async writer unavailable");
-				await withWriteTxAsync((w) => {
-					w.prepare("UPDATE telemetry_events SET claim_token = NULL, claimed_at = NULL WHERE claim_token = ?").run(
-						token,
-					);
-				});
+				await ownerTransaction(
+					await owner(),
+					"telemetry.delivery.release-claim-fallback",
+					[
+						ownerStatement("UPDATE telemetry_events SET claim_token = NULL, claimed_at = NULL WHERE claim_token = ?", [
+							token,
+						]),
+					],
+					{ deadlineMs: 5_000, estimatedWorkUnits: 1 },
+				);
 			} catch {
 				// Stale claims remain recoverable on a later flush.
 			}
@@ -1184,46 +1270,51 @@ export function createTelemetryCollector(
 		const now = new Date();
 		const staleBefore = new Date(now.getTime() - TELEMETRY_CLAIM_TIMEOUT_MS).toISOString();
 		try {
-			const withWriteTxAsync = db.withWriteTxAsync;
-			if (!withWriteTxAsync) return null;
-			return await withWriteTxAsync((w) => {
-				w.prepare(
-					`UPDATE telemetry_events
-					 SET claim_token = ?, claimed_at = ?
-					     , delivery_attempts = delivery_attempts + 1, last_attempt_at = ?
-					 WHERE id IN (
-						 SELECT id FROM telemetry_events
-						 WHERE source = 'daemon' AND sent_to_posthog = 0
-							 AND (claim_token IS NULL OR claimed_at < ?)
-						 ORDER BY timestamp ASC
-						 LIMIT ?
-					 )`,
-				).run(token, now.toISOString(), now.toISOString(), staleBefore, limit);
-				const rows = w
-					.prepare(
+			const results = await ownerTransaction(
+				await owner(),
+				"telemetry.delivery.claim-unsent",
+				[
+					ownerStatement(
+						`UPDATE telemetry_events
+						 SET claim_token = ?, claimed_at = ?
+						     , delivery_attempts = delivery_attempts + 1, last_attempt_at = ?
+						 WHERE id IN (
+							 SELECT id FROM telemetry_events
+							 WHERE source = 'daemon' AND sent_to_posthog = 0
+								 AND (claim_token IS NULL OR claimed_at < ?)
+							 ORDER BY timestamp ASC
+							 LIMIT ?
+						 )`,
+						[token, now.toISOString(), now.toISOString(), staleBefore, limit],
+					),
+					ownerStatement(
 						`SELECT id, event, timestamp, properties
 						 FROM telemetry_events
 						 WHERE claim_token = ?
 						 ORDER BY timestamp ASC`,
-					)
-					.all(token) as unknown as readonly {
-					id: string;
-					event: string;
-					timestamp: string;
-					properties: string;
-				}[];
-				return rows.length > 0
-					? {
-							token,
-							events: rows.map((row) => ({
-								id: row.id,
-								event: row.event as TelemetryEventType,
-								timestamp: row.timestamp,
-								properties: JSON.parse(row.properties) as TelemetryProperties,
-							})),
-						}
-					: null;
-			});
+						[token],
+						"all",
+					),
+				],
+				{ deadlineMs: 5_000, estimatedWorkUnits: Math.max(1, limit * 2) },
+			);
+			const rows = (results[1] ?? []) as readonly {
+				readonly id: string;
+				readonly event: string;
+				readonly timestamp: string;
+				readonly properties: string;
+			}[];
+			return rows.length > 0
+				? {
+						token,
+						events: rows.map((row) => ({
+							id: row.id,
+							event: row.event as TelemetryEventType,
+							timestamp: row.timestamp,
+							properties: JSON.parse(row.properties) as TelemetryProperties,
+						})),
+					}
+				: null;
 		} catch {
 			return null;
 		}
@@ -1233,11 +1324,16 @@ export function createTelemetryCollector(
 		const cutoff = new Date();
 		cutoff.setDate(cutoff.getDate() - config.retentionDays);
 		try {
-			const withWriteTxAsync = db.withWriteTxAsync;
-			if (!withWriteTxAsync) return;
-			await withWriteTxAsync((w) => {
-				w.prepare("DELETE FROM telemetry_events WHERE timestamp < ? AND sent_to_posthog = 1").run(cutoff.toISOString());
-			});
+			await ownerTransaction(
+				await owner(),
+				"telemetry.events.prune-retention",
+				[
+					ownerStatement("DELETE FROM telemetry_events WHERE timestamp < ? AND sent_to_posthog = 1", [
+						cutoff.toISOString(),
+					]),
+				],
+				{ deadlineMs: 5_000, estimatedWorkUnits: 1 },
+			);
 		} catch {
 			// best effort
 		}
@@ -1515,7 +1611,8 @@ export function createTelemetryCollector(
 
 		recordFirstUse(kind): void {
 			if (recordingStopped) return;
-			const pending = persistFirstUse(kind)
+			const pending = installLifecycleReady
+				.then(() => persistFirstUse(kind))
 				.then((event) => {
 					if (!event) return;
 					// The database row is durable before the open log mirror is written.
@@ -1585,11 +1682,12 @@ export function createTelemetryCollector(
 			if (flushPromise) await flushPromise;
 			await awaitPendingAsyncWrites();
 			try {
-				const withWriteTxAsync = db.withWriteTxAsync;
-				if (!withWriteTxAsync) throw new Error("async writer unavailable");
-				await withWriteTxAsync((w) => {
-					w.prepare("DELETE FROM telemetry_events WHERE sent_to_posthog = 0").run();
-				});
+				await ownerTransaction(
+					await owner(),
+					"telemetry.events.discard-pending",
+					[ownerStatement("DELETE FROM telemetry_events WHERE sent_to_posthog = 0")],
+					{ deadlineMs: 5_000, estimatedWorkUnits: 1 },
+				);
 			} catch {
 				logger.warn("telemetry", "Failed to discard pending telemetry events");
 			}
@@ -1598,51 +1696,43 @@ export function createTelemetryCollector(
 
 		async query(opts): Promise<readonly TelemetryEvent[]> {
 			try {
-				return await db.withReadDbAsync(
-					async (r) => {
-						const conditions: string[] = [];
-						const params: unknown[] = [];
-
-						if (opts?.event) {
-							conditions.push("event = ?");
-							params.push(opts.event);
-						}
-						if (opts?.since) {
-							conditions.push("timestamp >= ?");
-							params.push(opts.since);
-						}
-						if (opts?.until) {
-							conditions.push("timestamp <= ?");
-							params.push(opts.until);
-						}
-
-						const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-						const limit = opts?.limit ?? 100;
-
-						const rows = r
-							.prepare(
-								`SELECT id, event, timestamp, properties
-							 FROM telemetry_events
-							 ${where}
-							 ORDER BY timestamp DESC
-							 LIMIT ?`,
-							)
-							.all(...params, limit) as unknown as readonly {
-							id: string;
-							event: string;
-							timestamp: string;
-							properties: string;
-						}[];
-
-						return rows.map((row) => ({
-							id: row.id,
-							event: row.event as TelemetryEventType,
-							timestamp: row.timestamp,
-							properties: JSON.parse(row.properties) as TelemetryProperties,
-						}));
-					},
-					{ siteToken: "telemetry.ts:1601" },
+				const conditions: string[] = [];
+				const params: (string | number)[] = [];
+				if (opts?.event) {
+					conditions.push("event = ?");
+					params.push(opts.event);
+				}
+				if (opts?.since) {
+					conditions.push("timestamp >= ?");
+					params.push(opts.since);
+				}
+				if (opts?.until) {
+					conditions.push("timestamp <= ?");
+					params.push(opts.until);
+				}
+				const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+				const limit = opts?.limit ?? 100;
+				const rows = await ownerReadAll<{
+					readonly id: string;
+					readonly event: string;
+					readonly timestamp: string;
+					readonly properties: string;
+				}>(
+					await owner(),
+					`SELECT id, event, timestamp, properties
+					 FROM telemetry_events
+					 ${where}
+					 ORDER BY timestamp DESC
+					 LIMIT ?`,
+					[...params, limit],
+					{ operation: "telemetry.events.query", deadlineMs: 5_000, estimatedWorkUnits: Math.max(1, limit) },
 				);
+				return rows.map((row) => ({
+					id: row.id,
+					event: row.event as TelemetryEventType,
+					timestamp: row.timestamp,
+					properties: JSON.parse(row.properties) as TelemetryProperties,
+				}));
 			} catch {
 				return [];
 			}

@@ -37,7 +37,7 @@ import {
 import { listAgentPresence } from "./cross-agent";
 import { getDbAccessor } from "./db-accessor";
 import { getDbOwner } from "./db-owner-runtime";
-import { ownerReadOne } from "./db-owner-sql";
+import { ownerReadAll, ownerReadOne } from "./db-owner-sql";
 import { fetchEmbedding } from "./embedding-fetch";
 import {
 	DEFAULT_SESSION_START_MAX_INJECT_TOKENS,
@@ -62,7 +62,7 @@ import * as memoryCandidates from "./memory-candidates";
 import { type ScoredMemory, buildActiveConstraintsSection } from "./memory-candidates";
 import { effectiveScore, inferType, isDuplicate } from "./memory-classification";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "./memory-config";
-import { isMemoryContentContextEligible } from "./memory-content-safety";
+
 import { type RecallResponse, type RecallResult, hybridRecall } from "./memory-search";
 import { recordMemorySearchTelemetry } from "./memory-search-telemetry";
 import {
@@ -603,16 +603,29 @@ async function getRecentMemories(
 	if (!existsSync(getMemoryDbPath())) return [];
 
 	try {
-		const rows = await getDbAccessor().withReadDbAsync(
-			async (db) => {
-				const scope = agentScope
-					? buildAgentScopeClause(agentScope.agentId, agentScope.readPolicy, agentScope.policyGroup)
-					: { sql: " AND m.visibility != 'archived'", args: [] };
-				const query = `
+		const owner = await getDbOwner(getMemoryDbPath());
+		const scopedAgentId = agentScope?.agentId ?? "default";
+		const safetyTable = await ownerReadOne<{ readonly present: number }>(
+			owner,
+			"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'memory_content_safety' LIMIT 1",
+			[],
+			{ operation: "session-start.recent-memories.safety-table", deadlineMs: 5_000, estimatedWorkUnits: 1 },
+		);
+		const scope = agentScope
+			? buildAgentScopeClause(agentScope.agentId, agentScope.readPolicy, agentScope.policyGroup)
+			: { sql: " AND m.visibility != 'archived'", args: [] };
+		const safetyProjection = safetyTable
+			? `, safety.status AS safety_status, safety.context_eligible AS safety_context_eligible`
+			: ", NULL AS safety_status, NULL AS safety_context_eligible";
+		const safetyJoin = safetyTable
+			? " LEFT JOIN memory_content_safety safety ON safety.agent_id = ? AND safety.source_kind = 'memory' AND safety.source_id = m.id"
+			: "";
+		const query = `
         SELECT
           m.id, m.content, m.type, m.importance, m.created_at,
-          (julianday('now') - julianday(m.created_at)) as age_days
+          (julianday('now') - julianday(m.created_at)) as age_days${safetyProjection}
         FROM memories m
+        ${safetyJoin}
         WHERE m.is_deleted = 0${scope.sql}
         ORDER BY
           (m.importance * ${1 - recencyBias}) +
@@ -620,27 +633,27 @@ async function getRecentMemories(
           DESC
         LIMIT ?
       `;
-
-				const rows = db.prepare(query).all(...scope.args, limit) as Array<{
-					id: string;
-					content: string;
-					type: string;
-					importance: number;
-					created_at: string;
-				}>;
-				return rows.filter((row) =>
-					isMemoryContentContextEligible(db, {
-						agentId: agentScope?.agentId ?? "default",
-						sourceKind: "memory",
-						sourceId: row.id,
-						content: row.content,
-					}),
-				);
-			},
-			{ siteToken: "hooks.ts:606" },
-		);
-
-		return rows.map((r) => ({
+		const rows = await ownerReadAll<{
+			readonly id: string;
+			readonly content: string;
+			readonly type: string;
+			readonly importance: number;
+			readonly created_at: string;
+			readonly safety_status: string | null;
+			readonly safety_context_eligible: number | null;
+		}>(owner, query, safetyTable ? [scopedAgentId, ...scope.args, limit] : [...scope.args, limit], {
+			operation: "session-start.recent-memories",
+			deadlineMs: 5_000,
+			estimatedWorkUnits: Math.max(1, limit * 3),
+		});
+		const eligibleRows = rows.filter((row) => {
+			const scanned = scanMemoryContent(row.content);
+			return (
+				scanned.contextEligible &&
+				(row.safety_status === null || (row.safety_status === "clean" && row.safety_context_eligible === 1))
+			);
+		});
+		return eligibleRows.map((r) => ({
 			id: r.id,
 			content: r.content,
 			type: r.type || "general",
@@ -656,7 +669,7 @@ async function getRecentMemories(
 /**
  * Get memories created after a given timestamp, ordered by recency.
  */
-function getMemoriesSince(
+function _getMemoriesSince(
 	sinceMs: number,
 	limit: number,
 ): Array<{
@@ -829,7 +842,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 					});
 					return parent ? assembleInheritedContextBlock(db, parent, subagentCfg) : null;
 				},
-				{ siteToken: "hooks.ts:817" },
+				{ siteToken: "hooks.ts:830" },
 			);
 			inheritedSection = block ?? "";
 		} catch (error) {

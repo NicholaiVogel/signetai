@@ -21,7 +21,9 @@ import type {
 	TaskStatus,
 } from "@signet/core";
 import { SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES } from "@signet/core";
-import type { DbAccessor, ReadDb } from "./db-accessor";
+import { getDbAccessorPath, type DbAccessor, type ReadDb } from "./db-accessor";
+import { getDbOwner } from "./db-owner-runtime";
+import { ownerReadOne } from "./db-owner-sql";
 import { runWriteTxAsync } from "./db-accessor";
 import { getDreamingEpisodicTokenBacklogCached } from "./pipeline/dreaming";
 
@@ -200,7 +202,7 @@ export async function getAspectsForEntity(
 				.all(entityId, agentId) as Array<Record<string, unknown>>;
 			return rows.map(rowToAspect);
 		},
-		{ siteToken: "knowledge-graph.ts:191" },
+		{ siteToken: "knowledge-graph.ts:193" },
 	);
 }
 
@@ -224,7 +226,7 @@ export async function getAttributesForAspect(
 				.all(aspectId, agentId) as Array<Record<string, unknown>>;
 			return rows.map(rowToAttribute);
 		},
-		{ siteToken: "knowledge-graph.ts:216" },
+		{ siteToken: "knowledge-graph.ts:218" },
 	);
 }
 
@@ -254,7 +256,7 @@ export async function getConstraintsForEntity(
 				.all(entityId, agentId, agentId) as Array<Record<string, unknown>>;
 			return rows.map(rowToAttribute);
 		},
-		{ siteToken: "knowledge-graph.ts:241" },
+		{ siteToken: "knowledge-graph.ts:243" },
 	);
 }
 
@@ -273,7 +275,7 @@ export async function getEntityDependencyById(
 				.get(params.id, params.agentId) as Record<string, unknown> | undefined;
 			return row === undefined ? null : rowToDependency(row);
 		},
-		{ siteToken: "knowledge-graph.ts:269" },
+		{ siteToken: "knowledge-graph.ts:271" },
 	);
 }
 
@@ -298,7 +300,7 @@ export async function getDependenciesFrom(
 				.all(entityId, agentId) as Array<Record<string, unknown>>;
 			return rows.map(rowToDependency);
 		},
-		{ siteToken: "knowledge-graph.ts:285" },
+		{ siteToken: "knowledge-graph.ts:287" },
 	);
 }
 
@@ -323,7 +325,7 @@ export async function getDependenciesTo(
 				.all(entityId, agentId) as Array<Record<string, unknown>>;
 			return rows.map(rowToDependency);
 		},
-		{ siteToken: "knowledge-graph.ts:310" },
+		{ siteToken: "knowledge-graph.ts:312" },
 	);
 }
 
@@ -360,7 +362,7 @@ export async function getPinnedEntities(
 				];
 			});
 		},
-		{ siteToken: "knowledge-graph.ts:338" },
+		{ siteToken: "knowledge-graph.ts:340" },
 	);
 }
 
@@ -424,7 +426,7 @@ export async function getTaskMeta(accessor: DbAccessor, entityId: string, agentI
 				| undefined;
 			return row ? rowToTaskMeta(row) : null;
 		},
-		{ siteToken: "knowledge-graph.ts:420" },
+		{ siteToken: "knowledge-graph.ts:422" },
 	);
 }
 
@@ -671,7 +673,7 @@ export async function resolveNamedEntity(
 				description: rows.description,
 			};
 		},
-		{ siteToken: "knowledge-graph.ts:603" },
+		{ siteToken: "knowledge-graph.ts:605" },
 	);
 }
 
@@ -798,7 +800,7 @@ export async function listEntityAliases(
 				.all(...args) as Array<Record<string, unknown>>;
 			return rows.map(rowToEntityAlias);
 		},
-		{ siteToken: "knowledge-graph.ts:781" },
+		{ siteToken: "knowledge-graph.ts:783" },
 	);
 }
 
@@ -821,7 +823,7 @@ export async function getEntityAspectsByName(
 				items: readEntityAspectsWithCounts(db, entity.id, params.agentId),
 			};
 		},
-		{ siteToken: "knowledge-graph.ts:812" },
+		{ siteToken: "knowledge-graph.ts:814" },
 	);
 }
 
@@ -973,7 +975,7 @@ export async function getEntityKnowledgeTree(
 				}),
 			};
 		},
-		{ siteToken: "knowledge-graph.ts:839" },
+		{ siteToken: "knowledge-graph.ts:841" },
 	);
 }
 
@@ -1036,7 +1038,7 @@ export async function listEntityGroups(
 				})),
 			};
 		},
-		{ siteToken: "knowledge-graph.ts:992" },
+		{ siteToken: "knowledge-graph.ts:994" },
 	);
 }
 
@@ -1113,7 +1115,7 @@ export async function listEntityClaims(
 				})),
 			};
 		},
-		{ siteToken: "knowledge-graph.ts:1056" },
+		{ siteToken: "knowledge-graph.ts:1058" },
 	);
 }
 
@@ -1185,7 +1187,7 @@ export async function listEntityAttributesByPath(
 				items: rows.map(rowToAttribute),
 			};
 		},
-		{ siteToken: "knowledge-graph.ts:1138" },
+		{ siteToken: "knowledge-graph.ts:1140" },
 	);
 }
 
@@ -1277,7 +1279,7 @@ export async function listKnowledgeEntities(
 				dependencyCount: Number(row.dependency_count ?? 0),
 			}));
 		},
-		{ siteToken: "knowledge-graph.ts:1202" },
+		{ siteToken: "knowledge-graph.ts:1204" },
 	);
 }
 
@@ -1343,7 +1345,7 @@ export async function getKnowledgeEntityDetail(
 				)
 				.get(entityId, agentId) as Record<string, unknown> | undefined;
 		},
-		{ siteToken: "knowledge-graph.ts:1289" },
+		{ siteToken: "knowledge-graph.ts:1291" },
 	);
 
 	if (!row) return null;
@@ -1397,7 +1399,7 @@ export async function getEntityAspectsWithCounts(
 	agentId: string,
 ): Promise<readonly AspectWithCounts[]> {
 	return await accessor.withReadDbAsync(async (db) => readEntityAspectsWithCounts(db, entityId, agentId), {
-		siteToken: "knowledge-graph.ts:1399",
+		siteToken: "knowledge-graph.ts:1401",
 	});
 }
 
@@ -1446,7 +1448,7 @@ export async function getAttributesForAspectFiltered(
 				.all(...args, params.limit, params.offset) as Array<Record<string, unknown>>;
 			return rows.map(rowToAttribute);
 		},
-		{ siteToken: "knowledge-graph.ts:1416" },
+		{ siteToken: "knowledge-graph.ts:1418" },
 	);
 }
 
@@ -1504,133 +1506,91 @@ export async function getEntityDependenciesDetailed(
 				updatedAt: row.updated_at as string,
 			}));
 		},
-		{ siteToken: "knowledge-graph.ts:1461" },
+		{ siteToken: "knowledge-graph.ts:1463" },
 	);
 }
 
-export async function getKnowledgeStats(accessor: DbAccessor, agentId: string): Promise<KnowledgeStats> {
-	return await accessor.withReadDbAsync(
-		async (db) => {
-			// Drive the join from the (narrower) agent-scoped entities side rather
-			// than scanning every memory with a correlated EXISTS. Same result,
-			// dramatically smaller search space on large corpora.
-			// See Signet-AI/signetai#515.
-			const scopedMemoryRows = db
-				.prepare(
-					`SELECT COUNT(DISTINCT mem.memory_id) as n
-				 FROM memory_entity_mentions mem
-				 JOIN entities e ON e.id = mem.entity_id AND e.agent_id = ?
-				 JOIN memories m ON m.id = mem.memory_id AND m.is_deleted = 0
-				 WHERE COALESCE(e.status, 'active') = 'active'`,
-				)
-				.get(agentId) as { n: number };
-			const entityCount = db
-				.prepare("SELECT COUNT(*) as n FROM entities WHERE agent_id = ? AND COALESCE(status, 'active') = 'active'")
-				.get(agentId) as { n: number };
-			const aspectCount = db
-				.prepare(
-					`SELECT COUNT(*) as n
-				 FROM entity_aspects asp
-				 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
-				 WHERE asp.agent_id = ?
-				   AND COALESCE(e.status, 'active') = 'active'
-				   AND COALESCE(asp.status, 'active') = 'active'`,
-				)
-				.get(agentId) as { n: number };
-			const attributeCount = db
-				.prepare(
-					`SELECT COUNT(*) as n
-				 FROM entity_attributes attr
-				 JOIN entity_aspects asp ON asp.id = attr.aspect_id AND asp.agent_id = attr.agent_id
-				 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
-				 WHERE attr.agent_id = ?
-				   AND attr.kind = 'attribute'
-				   AND attr.status = 'active'
-				   AND COALESCE(e.status, 'active') = 'active'
-				   AND COALESCE(asp.status, 'active') = 'active'`,
-				)
-				.get(agentId) as { n: number };
-			const constraintCount = db
-				.prepare(
-					`SELECT COUNT(*) as n
-				 FROM entity_attributes attr
-				 JOIN entity_aspects asp ON asp.id = attr.aspect_id AND asp.agent_id = attr.agent_id
-				 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
-				 WHERE attr.agent_id = ?
-				   AND attr.kind = 'constraint'
-				   AND attr.status = 'active'
-				   AND COALESCE(e.status, 'active') = 'active'
-				   AND COALESCE(asp.status, 'active') = 'active'`,
-				)
-				.get(agentId) as { n: number };
-			const dependencyCount = db
-				.prepare(
-					`SELECT COUNT(*) as n
-				 FROM entity_dependencies dep
-				 JOIN entities src ON src.id = dep.source_entity_id AND src.agent_id = dep.agent_id
-				 JOIN entities dst ON dst.id = dep.target_entity_id AND dst.agent_id = dep.agent_id
-				 WHERE dep.agent_id = ?
-				   AND COALESCE(dep.status, 'active') = 'active'
-				   AND COALESCE(src.status, 'active') = 'active'
-				   AND COALESCE(dst.status, 'active') = 'active'`,
-				)
-				.get(agentId) as { n: number };
-			const assignedMemoryCount = db
-				.prepare(
-					`SELECT COUNT(DISTINCT attr.memory_id) as n
-				 FROM entity_attributes attr
-				 JOIN entity_aspects asp ON asp.id = attr.aspect_id AND asp.agent_id = attr.agent_id
-				 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
-				 WHERE attr.agent_id = ?
-				   AND attr.status = 'active'
-				   AND attr.memory_id IS NOT NULL
-				   AND COALESCE(e.status, 'active') = 'active'
-				   AND COALESCE(asp.status, 'active') = 'active'`,
-				)
-				.get(agentId) as { n: number };
-			const feedbackStats = db
-				.prepare(
-					`SELECT
-					COUNT(*) AS aspect_count,
-					COALESCE(AVG(weight), 0) AS avg_weight,
-					COUNT(CASE WHEN weight >= 1.0 THEN 1 END) AS max_weight_count,
-					COUNT(CASE WHEN weight <= 0.1 THEN 1 END) AS min_weight_count,
-					COUNT(CASE
-						WHEN asp.updated_at >= datetime('now', '-7 days') THEN 1
-					END) AS updated_last_7_days
-				 FROM entity_aspects asp
-				 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
-				 WHERE asp.agent_id = ?
-				   AND COALESCE(e.status, 'active') = 'active'
-				   AND COALESCE(asp.status, 'active') = 'active'`,
-				)
-				.get(agentId) as {
-				aspect_count: number;
-				avg_weight: number;
-				max_weight_count: number;
-				min_weight_count: number;
-				updated_last_7_days: number;
-			};
-
-			const coveragePercent =
-				scopedMemoryRows.n > 0 ? Math.round((assignedMemoryCount.n / scopedMemoryRows.n) * 1000) / 10 : 0;
-
-			return {
-				entityCount: entityCount.n,
-				aspectCount: aspectCount.n,
-				attributeCount: attributeCount.n,
-				constraintCount: constraintCount.n,
-				dependencyCount: dependencyCount.n,
-				unassignedMemoryCount: Math.max(scopedMemoryRows.n - assignedMemoryCount.n, 0),
-				coveragePercent,
-				feedbackUpdatedAspectCount: Number(feedbackStats.updated_last_7_days ?? 0),
-				averageAspectWeight: Math.round(Number(feedbackStats.avg_weight ?? 0) * 1000) / 1000,
-				maxWeightAspectCount: Number(feedbackStats.max_weight_count ?? 0),
-				minWeightAspectCount: Number(feedbackStats.min_weight_count ?? 0),
-			};
-		},
-		{ siteToken: "knowledge-graph.ts:1512" },
+export async function getKnowledgeStats(_accessor: DbAccessor, agentId: string): Promise<KnowledgeStats> {
+	const row = await ownerReadOne<{
+		readonly scopedMemoryCount: number;
+		readonly entityCount: number;
+		readonly aspectCount: number;
+		readonly attributeCount: number;
+		readonly constraintCount: number;
+		readonly dependencyCount: number;
+		readonly assignedMemoryCount: number;
+		readonly feedbackUpdatedAspectCount: number;
+		readonly averageAspectWeight: number;
+		readonly maxWeightAspectCount: number;
+		readonly minWeightAspectCount: number;
+	}>(
+		await getDbOwner(getDbAccessorPath()),
+		`SELECT
+			(SELECT COUNT(DISTINCT mem.memory_id) FROM memory_entity_mentions mem
+			 JOIN entities e ON e.id = mem.entity_id AND e.agent_id = ?
+			 JOIN memories m ON m.id = mem.memory_id AND m.is_deleted = 0
+			 WHERE COALESCE(e.status, 'active') = 'active') AS scopedMemoryCount,
+			(SELECT COUNT(*) FROM entities WHERE agent_id = ? AND COALESCE(status, 'active') = 'active') AS entityCount,
+			(SELECT COUNT(*) FROM entity_aspects asp JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
+			 WHERE asp.agent_id = ? AND COALESCE(e.status, 'active') = 'active' AND COALESCE(asp.status, 'active') = 'active') AS aspectCount,
+			(SELECT COUNT(*) FROM entity_attributes attr JOIN entity_aspects asp ON asp.id = attr.aspect_id AND asp.agent_id = attr.agent_id
+			 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
+			 WHERE attr.agent_id = ? AND attr.kind = 'attribute' AND attr.status = 'active'
+			 AND COALESCE(e.status, 'active') = 'active' AND COALESCE(asp.status, 'active') = 'active') AS attributeCount,
+			(SELECT COUNT(*) FROM entity_attributes attr JOIN entity_aspects asp ON asp.id = attr.aspect_id AND asp.agent_id = attr.agent_id
+			 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
+			 WHERE attr.agent_id = ? AND attr.kind = 'constraint' AND attr.status = 'active'
+			 AND COALESCE(e.status, 'active') = 'active' AND COALESCE(asp.status, 'active') = 'active') AS constraintCount,
+			(SELECT COUNT(*) FROM entity_dependencies dep JOIN entities src ON src.id = dep.source_entity_id AND src.agent_id = dep.agent_id
+			 JOIN entities dst ON dst.id = dep.target_entity_id AND dst.agent_id = dep.agent_id
+			 WHERE dep.agent_id = ? AND COALESCE(dep.status, 'active') = 'active'
+			 AND COALESCE(src.status, 'active') = 'active' AND COALESCE(dst.status, 'active') = 'active') AS dependencyCount,
+			(SELECT COUNT(DISTINCT attr.memory_id) FROM entity_attributes attr JOIN entity_aspects asp ON asp.id = attr.aspect_id AND asp.agent_id = attr.agent_id
+			 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
+			 WHERE attr.agent_id = ? AND attr.status = 'active' AND attr.memory_id IS NOT NULL
+			 AND COALESCE(e.status, 'active') = 'active' AND COALESCE(asp.status, 'active') = 'active') AS assignedMemoryCount,
+			(SELECT COUNT(CASE WHEN asp.updated_at >= datetime('now', '-7 days') THEN 1 END) FROM entity_aspects asp
+			 JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
+			 WHERE asp.agent_id = ? AND COALESCE(e.status, 'active') = 'active' AND COALESCE(asp.status, 'active') = 'active') AS feedbackUpdatedAspectCount,
+			(SELECT COALESCE(AVG(weight), 0) FROM entity_aspects asp JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
+			 WHERE asp.agent_id = ? AND COALESCE(e.status, 'active') = 'active' AND COALESCE(asp.status, 'active') = 'active') AS averageAspectWeight,
+			(SELECT COUNT(CASE WHEN weight >= 1.0 THEN 1 END) FROM entity_aspects asp JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
+			 WHERE asp.agent_id = ? AND COALESCE(e.status, 'active') = 'active' AND COALESCE(asp.status, 'active') = 'active') AS maxWeightAspectCount,
+			(SELECT COUNT(CASE WHEN weight <= 0.1 THEN 1 END) FROM entity_aspects asp JOIN entities e ON e.id = asp.entity_id AND e.agent_id = asp.agent_id
+			 WHERE asp.agent_id = ? AND COALESCE(e.status, 'active') = 'active' AND COALESCE(asp.status, 'active') = 'active') AS minWeightAspectCount`,
+		Array(11).fill(agentId),
+		{ operation: "knowledge.stats", deadlineMs: 5_000, estimatedWorkUnits: 11 },
 	);
+	if (row === null) {
+		return {
+			entityCount: 0,
+			aspectCount: 0,
+			attributeCount: 0,
+			constraintCount: 0,
+			dependencyCount: 0,
+			unassignedMemoryCount: 0,
+			coveragePercent: 0,
+			feedbackUpdatedAspectCount: 0,
+			averageAspectWeight: 0,
+			maxWeightAspectCount: 0,
+			minWeightAspectCount: 0,
+		};
+	}
+	const scopedMemoryCount = Number(row.scopedMemoryCount ?? 0);
+	const assignedMemoryCount = Number(row.assignedMemoryCount ?? 0);
+	return {
+		entityCount: Number(row.entityCount ?? 0),
+		aspectCount: Number(row.aspectCount ?? 0),
+		attributeCount: Number(row.attributeCount ?? 0),
+		constraintCount: Number(row.constraintCount ?? 0),
+		dependencyCount: Number(row.dependencyCount ?? 0),
+		unassignedMemoryCount: Math.max(scopedMemoryCount - assignedMemoryCount, 0),
+		coveragePercent: scopedMemoryCount > 0 ? Math.round((assignedMemoryCount / scopedMemoryCount) * 1000) / 10 : 0,
+		feedbackUpdatedAspectCount: Number(row.feedbackUpdatedAspectCount ?? 0),
+		averageAspectWeight: Math.round(Number(row.averageAspectWeight ?? 0) * 1000) / 1000,
+		maxWeightAspectCount: Number(row.maxWeightAspectCount ?? 0),
+		minWeightAspectCount: Number(row.minWeightAspectCount ?? 0),
+	};
 }
 
 export async function getEntityHealth(
@@ -1722,7 +1682,7 @@ export async function getEntityHealth(
 			});
 			return health;
 		},
-		{ siteToken: "knowledge-graph.ts:1642" },
+		{ siteToken: "knowledge-graph.ts:1602" },
 	);
 }
 
@@ -2264,59 +2224,39 @@ export async function getKnowledgeGraphForConstellation(
 				},
 			};
 		},
-		{ siteToken: "knowledge-graph.ts:2024" },
+		{ siteToken: "knowledge-graph.ts:1984" },
 	);
 }
 
 export async function getStructuralDensity(
-	accessor: DbAccessor,
+	_accessor: DbAccessor,
 	entityId: string,
 	agentId: string,
 ): Promise<StructuralDensity> {
-	return await accessor.withReadDbAsync(
-		(db) => {
-			const aspects = db
-				.prepare(
-					`SELECT COUNT(*) as n FROM entity_aspects
-				 WHERE entity_id = ? AND agent_id = ?`,
-				)
-				.get(entityId, agentId) as { n: number };
-
-			const attributes = db
-				.prepare(
-					`SELECT COUNT(*) as n FROM entity_attributes ea
-				 JOIN entity_aspects asp ON asp.id = ea.aspect_id
-				 WHERE asp.entity_id = ? AND asp.agent_id = ?
-				   AND ea.agent_id = ?
-				   AND ea.kind = 'attribute' AND ea.status = 'active'`,
-				)
-				.get(entityId, agentId, agentId) as { n: number };
-
-			const constraints = db
-				.prepare(
-					`SELECT COUNT(*) as n FROM entity_attributes ea
-				 JOIN entity_aspects asp ON asp.id = ea.aspect_id
-				 WHERE asp.entity_id = ? AND asp.agent_id = ?
-				   AND ea.agent_id = ?
-				   AND ea.kind = 'constraint' AND ea.status = 'active'`,
-				)
-				.get(entityId, agentId, agentId) as { n: number };
-
-			const dependencies = db
-				.prepare(
-					`SELECT COUNT(*) as n FROM entity_dependencies
-				 WHERE (source_entity_id = ? OR target_entity_id = ?)
-				   AND agent_id = ?`,
-				)
-				.get(entityId, entityId, agentId) as { n: number };
-
-			return {
-				aspectCount: aspects.n,
-				attributeCount: attributes.n,
-				constraintCount: constraints.n,
-				dependencyCount: dependencies.n,
-			};
-		},
-		{ siteToken: "knowledge-graph.ts:2276" },
+	const row = await ownerReadOne<{
+		readonly aspectCount: number;
+		readonly attributeCount: number;
+		readonly constraintCount: number;
+		readonly dependencyCount: number;
+	}>(
+		await getDbOwner(getDbAccessorPath()),
+		`SELECT
+			(SELECT COUNT(*) FROM entity_aspects WHERE entity_id = ? AND agent_id = ?) AS aspectCount,
+			(SELECT COUNT(*) FROM entity_attributes ea JOIN entity_aspects asp ON asp.id = ea.aspect_id
+			 WHERE asp.entity_id = ? AND asp.agent_id = ? AND ea.agent_id = ?
+			 AND ea.kind = 'attribute' AND ea.status = 'active') AS attributeCount,
+			(SELECT COUNT(*) FROM entity_attributes ea JOIN entity_aspects asp ON asp.id = ea.aspect_id
+			 WHERE asp.entity_id = ? AND asp.agent_id = ? AND ea.agent_id = ?
+			 AND ea.kind = 'constraint' AND ea.status = 'active') AS constraintCount,
+			(SELECT COUNT(*) FROM entity_dependencies
+			 WHERE (source_entity_id = ? OR target_entity_id = ?) AND agent_id = ?) AS dependencyCount`,
+		[entityId, agentId, entityId, agentId, agentId, entityId, agentId, agentId, entityId, entityId, agentId],
+		{ operation: "knowledge.structural-density", deadlineMs: 5_000, estimatedWorkUnits: 4 },
 	);
+	return {
+		aspectCount: Number(row?.aspectCount ?? 0),
+		attributeCount: Number(row?.attributeCount ?? 0),
+		constraintCount: Number(row?.constraintCount ?? 0),
+		dependencyCount: Number(row?.dependencyCount ?? 0),
+	};
 }
