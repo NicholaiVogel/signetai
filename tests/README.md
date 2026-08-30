@@ -104,3 +104,20 @@ Output: a human summary on stderr plus a machine-readable JSON artifact
 probe samples, and the daemon log path. CI runs the smoke variant on
 PRs/main (`.github/workflows/phase-d-acceptance.yml`) and the full variant
 nightly.
+
+## Boot Wedge Safety Gate
+
+`tests/integration/boot-wedge/run.ts` is the short L1 safety check for the
+source-run daemon boundary. It uses a fresh isolated workspace, waits for the
+real `/health/live` endpoint, then samples liveness and Linux `/proc` CPU usage
+for 10 seconds. The gate fails if startup takes more than 60 seconds, any
+liveness sample fails or exceeds 2 seconds, CPU sampling produces fewer than
+five samples, or the daemon reaches 95% of one CPU during the idle observation.
+
+```bash
+bun tests/integration/boot-wedge/run.ts
+bun tests/integration/boot-wedge/run.ts --out /path/to/artifacts
+```
+
+The CI workflow (`.github/workflows/boot-wedge.yml`) runs this source boundary
+on daemon/core changes and uploads `boot-wedge.json` even when the gate fails.
