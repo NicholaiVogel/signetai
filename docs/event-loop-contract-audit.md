@@ -1,26 +1,26 @@
 # Event-loop synchronous contract audit
 
-This report is generated from the deterministic migration ledger in `scripts/event-loop-contract-baseline.json`. Phase A enforces the type boundary structurally: production code receives an async-only `DbAccessor`, while the synchronous compatibility module lives outside the daemon production `src/` tree and is rejected by the production TypeScript project's `rootDir`. The AST import and call checks remain belt-and-suspenders diagnostics, and new synchronous DB call sites fail closed through exact ledger matching.
+This report is generated from the deterministic migration ledger in `scripts/event-loop-contract-baseline.json`. Phase A enforces the type boundary structurally: production code receives an async-only `DbAccessor`, while the synchronous compatibility module lives outside the daemon production `src/` tree and is rejected by the production TypeScript project's `rootDir`. The AST import and call checks remain belt-and-suspenders diagnostics, and new synchronous DB call sites fail closed through exact ledger matching. Migrated DB sites use unique `db:domain.operation.action` IDs as their durable identity; file and line remain diagnostic metadata.
 
 ## Current inventory
 
-- Exact ledger inventory: 899 sites
+- Exact ledger inventory: 879 sites
 - Synchronous `withWriteTx()` sites: 65
 - Synchronous `withReadDb()` sites: 99
-- Async-named DB sites: 219
-- Async-named ON-PARENT DB sites: 217
+- Async-named DB sites: 199
+- Async-named ON-PARENT DB sites: 197
 - Async-named OFF-PARENT DB sites: 2
 - Synchronous filesystem/process sites: 516
 - Compile-visible legacy DB sites remaining: 164
   - `withWriteTx`: 65
   - `withReadDb`: 99
 
-The 899-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 99 synchronous reads, and 219 async-named DB sites are the complete database-call inventory; 164 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 217 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
+The 879-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 99 synchronous reads, and 199 async-named DB sites are the complete database-call inventory; 164 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 197 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## Execution-home inventory
 
-- Database accessor sites classified: 383
-- ON-PARENT callback execution: 381
+- Database accessor sites classified: 363
+- ON-PARENT callback execution: 361
 - OFF-PARENT callback execution: 2
 - Ratchet: new ON-PARENT async-named sites fail the audit; the campaign target is ON-PARENT → 0
 
@@ -96,28 +96,8 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `imported-source-outcome.ts:16` (withWriteTx)
 - `imported-source-outcome.ts:62` (withReadDb)
 - `knowledge-graph-hygiene.ts:428` (withReadDb)
-- `knowledge-graph.ts:193` (withReadDbAsync)
-- `knowledge-graph.ts:218` (withReadDbAsync)
-- `knowledge-graph.ts:243` (withReadDbAsync)
-- `knowledge-graph.ts:271` (withReadDbAsync)
-- `knowledge-graph.ts:287` (withReadDbAsync)
-- `knowledge-graph.ts:312` (withReadDbAsync)
-- `knowledge-graph.ts:340` (withReadDbAsync)
-- `knowledge-graph.ts:422` (withReadDbAsync)
-- `knowledge-graph.ts:605` (withReadDbAsync)
-- `knowledge-graph.ts:783` (withReadDbAsync)
-- `knowledge-graph.ts:814` (withReadDbAsync)
-- `knowledge-graph.ts:841` (withReadDbAsync)
-- `knowledge-graph.ts:994` (withReadDbAsync)
-- `knowledge-graph.ts:1058` (withReadDbAsync)
-- `knowledge-graph.ts:1140` (withReadDbAsync)
-- `knowledge-graph.ts:1204` (withReadDbAsync)
-- `knowledge-graph.ts:1291` (withReadDbAsync)
-- `knowledge-graph.ts:1401` (withReadDbAsync)
-- `knowledge-graph.ts:1418` (withReadDbAsync)
-- `knowledge-graph.ts:1463` (withReadDbAsync)
-- `knowledge-graph.ts:1602` (withReadDbAsync)
-- `knowledge-graph.ts:1984` (withReadDbAsync)
+- `db:knowledge.entity-knowledge-tree.read` (withReadDbAsync)
+- `db:knowledge.graph-constellation.read` (withReadDbAsync)
 - `memory-candidates.ts:470` (withReadDb)
 - `memory-candidates.ts:511` (withReadDb)
 - `memory-head-curation.ts:31` (withReadDbAsync)
@@ -217,9 +197,9 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `pipeline/dreaming-worker.ts:227` (withReadDbAsync)
 - `pipeline/dreaming-worker.ts:247` (withReadDbAsync)
 - `pipeline/graph-traversal.ts:92` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:148` (withReadDbAsync)
+- `db:maintenance.graph-agent-scopes.read` (withReadDbAsync)
 - `pipeline/maintenance-worker.ts:346` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:485` (withReadDbAsync)
+- `db:maintenance.dead-memory-count.read` (withReadDbAsync)
 - `pipeline/prospective-index.ts:284` (withWriteDbAsync)
 - `pipeline/prospective-index.ts:300` (withWriteDbAsync)
 - `pipeline/prospective-index.ts:336` (withWriteTxAsync)
