@@ -16,6 +16,7 @@ import type {
 	DbOwnerJob,
 	DbOwnerParameter,
 	DbOwnerRequest,
+	DbOwnerSourceEvidenceEligibility,
 	DbOwnerSourceGraphFilePurge,
 	DbOwnerSourceGraphIndex,
 	DbOwnerSourceGraphPurge,
@@ -156,6 +157,7 @@ async function executeInlineOwnerRequest(accessor: DbAccessor, request: DbOwnerR
 		case "vector_backfill":
 		case "vacuum_conversion":
 		case "incremental_vacuum":
+		case "source_evidence_eligibility":
 		case "sleep":
 			throw new Error(`Unsupported inline owner request: ${request.kind}`);
 		default:
@@ -577,3 +579,15 @@ registerDbAccessorCloseParticipant({
 	order: 100,
 	close: closeDbOwner,
 });
+
+export async function dbOwnerSourceEvidenceEligibility(
+	input: DbOwnerSourceEvidenceEligibility,
+	options: DbOwnerSqlOptions,
+): Promise<boolean> {
+	const owner = await getDbOwner();
+	return await submitWithAdmission<boolean>(
+		owner,
+		{ kind: "source_evidence_eligibility", input },
+		{ ...options, lane: "read" },
+	);
+}
