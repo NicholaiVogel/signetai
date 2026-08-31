@@ -344,6 +344,23 @@ describe("preflightWorkspace", () => {
 		}
 	});
 
+	it("classifies malformed persisted configuration as incomplete", () => {
+		const home = mkdtempSync(join(tmpdir(), "signet-core-ws-preflight-config-"));
+		try {
+			const env = makeEnv({ XDG_CONFIG_HOME: join(home, "config") });
+			const configPath = getWorkspaceConfigPath(env, home);
+			mkdirSync(join(home, "config", "signet"), { recursive: true });
+			writeFileSync(configPath, "{ malformed");
+
+			const result = preflightWorkspace({ env, home });
+			expect(result.status).toBe("incomplete");
+			expect(result.reasons[0]).toContain("Invalid Signet workspace config");
+			expect(existsSync(join(home, ".agents"))).toBe(false);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
 	it("classifies fresh and established workspaces", () => {
 		const home = mkdtempSync(join(tmpdir(), "signet-core-ws-preflight-state-"));
 		try {

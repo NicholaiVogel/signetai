@@ -292,7 +292,24 @@ export function resolveWorkspacePath(options: ResolveWorkspacePathOptions = {}):
  * bootstrap-compatible for explicit first-run setup.
  */
 export function preflightWorkspace(options: ResolveWorkspacePathOptions = {}): WorkspaceStartupPreflight {
-	const resolution = resolveWorkspacePath(options);
+	const env = options.env ?? process.env;
+	const home = options.home ?? homedir();
+	let resolution: WorkspaceResolution;
+	try {
+		// A malformed persisted pointer is itself an incomplete configured
+		// workspace. Never fall through to the default and bootstrap there.
+		resolution = resolveWorkspacePath({ ...options, strict: true });
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		return {
+			path: join(home, DEFAULT_AGENTS_DIRNAME),
+			source: "default",
+			configPath: getWorkspaceConfigPath(env, home),
+			configuredPath: null,
+			status: "incomplete",
+			reasons: [detail],
+		};
+	}
 	const reasons: string[] = [];
 	const hasExplicitConfiguration = resolution.source === "env" || resolution.configuredPath !== null;
 
