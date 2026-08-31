@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /**
  * Add prospective indexing: memory_hints table + FTS5 virtual table.

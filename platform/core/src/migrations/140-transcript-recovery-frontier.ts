@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Durable traversal cursor for the killable transcript recovery worker. */
 export function up(db: MigrationDb): void {

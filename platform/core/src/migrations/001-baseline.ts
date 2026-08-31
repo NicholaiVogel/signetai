@@ -7,7 +7,7 @@
  */
 
 import { createMemoriesFts } from "../fts-schema";
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	db.exec(`

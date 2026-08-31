@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /**
  * Add FTS5 full-text search index for entities.

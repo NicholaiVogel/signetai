@@ -7,7 +7,7 @@
  * unique index. Dedup any collisions then create the index.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	// Only run if embeddings table exists (baseline creates it)

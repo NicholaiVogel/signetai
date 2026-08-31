@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Persist the timestamp used for Dreaming's restart-safe retry backoff. */
 export function up(db: MigrationDb): void {

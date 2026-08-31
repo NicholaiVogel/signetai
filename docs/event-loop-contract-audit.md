@@ -4,23 +4,23 @@ This report is generated from the deterministic migration ledger in `scripts/eve
 
 ## Current inventory
 
-- Exact ledger inventory: 928 sites
+- Exact ledger inventory: 899 sites
 - Synchronous `withWriteTx()` sites: 65
-- Synchronous `withReadDb()` sites: 104
-- Async-named DB sites: 243
-- Async-named ON-PARENT DB sites: 241
+- Synchronous `withReadDb()` sites: 99
+- Async-named DB sites: 219
+- Async-named ON-PARENT DB sites: 217
 - Async-named OFF-PARENT DB sites: 2
 - Synchronous filesystem/process sites: 516
-- Compile-visible legacy DB sites remaining: 169
+- Compile-visible legacy DB sites remaining: 164
   - `withWriteTx`: 65
-  - `withReadDb`: 104
+  - `withReadDb`: 99
 
-The 928-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 104 synchronous reads, and 243 async-named DB sites are the complete database-call inventory; 169 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 241 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
+The 899-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 99 synchronous reads, and 219 async-named DB sites are the complete database-call inventory; 164 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 217 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## Execution-home inventory
 
-- Database accessor sites classified: 412
-- ON-PARENT callback execution: 410
+- Database accessor sites classified: 383
+- ON-PARENT callback execution: 381
 - OFF-PARENT callback execution: 2
 - Ratchet: new ON-PARENT async-named sites fail the audit; the campaign target is ON-PARENT → 0
 
@@ -284,53 +284,29 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `routes/marketplace.ts:1128` (withWriteTx)
 - `routes/mcp-analytics.ts:89` (withReadDb)
 - `routes/mcp-analytics.ts:171` (withReadDb)
-- `routes/memory-routes.ts:120` (withReadDbAsync)
-- `routes/memory-routes.ts:628` (withReadDbAsync)
-- `routes/memory-routes.ts:981` (withReadDbAsync)
-- `routes/memory-routes.ts:1025` (withReadDbAsync)
-- `routes/memory-routes.ts:1105` (withReadDbAsync)
-- `routes/memory-routes.ts:1160` (withReadDbAsync)
-- `routes/memory-routes.ts:1261` (withReadDbAsync)
-- `routes/memory-routes.ts:1308` (withReadDbAsync)
-- `routes/memory-routes.ts:1346` (withReadDbAsync)
-- `routes/memory-routes.ts:1377` (withReadDbAsync)
-- `routes/memory-routes.ts:1679` (withReadDbAsync)
-- `routes/memory-routes.ts:1687` (withReadDbAsync)
-- `routes/memory-routes.ts:1721` (withReadDbAsync)
-- `routes/memory-routes.ts:1928` (withReadDbAsync)
-- `routes/memory-routes.ts:2053` (withReadDbAsync)
-- `routes/memory-routes.ts:2272` (withReadDbAsync)
-- `routes/memory-routes.ts:2342` (withReadDbAsync)
-- `routes/memory-routes.ts:2352` (withReadDbAsync)
-- `routes/memory-routes.ts:2453` (withReadDbAsync)
-- `routes/memory-routes.ts:2528` (withReadDbAsync)
-- `routes/memory-routes.ts:3654` (withReadDbAsync)
-- `routes/memory-routes.ts:3688` (withReadDbAsync)
-- `routes/memory-routes.ts:3706` (withReadDbAsync)
-- `routes/memory-routes.ts:3787` (withReadDbAsync)
-- `routes/memory-routes.ts:3872` (withReadDbAsync)
-- `routes/memory-routes.ts:3890` (withReadDbAsync)
-- `routes/memory-routes.ts:3953` (withReadDbAsync)
-- `routes/memory-routes.ts:3993` (withReadDbAsync)
-- `routes/memory-routes.ts:4034` (withReadDbAsync)
-- `routes/memory-routes.ts:4037` (withReadDbAsync)
-- `routes/memory-routes.ts:4191` (withReadDbAsync)
-- `routes/memory-routes.ts:4232` (withReadDbAsync)
-- `routes/memory-routes.ts:4267` (withReadDbAsync)
-- `routes/memory-routes.ts:4302` (withReadDbAsync)
-- `routes/misc-routes.ts:291` (withReadDbAsync)
-- `routes/misc-routes.ts:306` (withReadDbAsync)
-- `routes/misc-routes.ts:340` (withReadDbAsync)
-- `routes/misc-routes.ts:354` (withReadDbAsync)
-- `routes/misc-routes.ts:518` (withReadDbAsync)
-- `routes/misc-routes.ts:615` (withReadDbAsync)
-- `routes/misc-routes.ts:711` (withReadDbAsync)
-- `routes/misc-routes.ts:720` (withReadDbAsync)
-- `routes/misc-routes.ts:740` (withReadDbAsync)
-- `routes/misc-routes.ts:815` (withReadDbAsync)
-- `routes/misc-routes.ts:824` (withReadDbAsync)
-- `routes/misc-routes.ts:948` (withReadDbAsync)
-- `routes/misc-routes.ts:961` (withReadDbAsync)
+- `routes/memory-routes.ts:121` (withReadDbAsync)
+- `routes/memory-routes.ts:1022` (withReadDbAsync)
+- `routes/memory-routes.ts:1102` (withReadDbAsync)
+- `routes/memory-routes.ts:1157` (withReadDbAsync)
+- `routes/memory-routes.ts:1258` (withReadDbAsync)
+- `routes/memory-routes.ts:1368` (withReadDbAsync)
+- `routes/memory-routes.ts:1670` (withReadDbAsync)
+- `routes/memory-routes.ts:1678` (withReadDbAsync)
+- `routes/memory-routes.ts:1712` (withReadDbAsync)
+- `routes/memory-routes.ts:1919` (withReadDbAsync)
+- `routes/memory-routes.ts:2044` (withReadDbAsync)
+- `routes/memory-routes.ts:2263` (withReadDbAsync)
+- `routes/memory-routes.ts:2442` (withReadDbAsync)
+- `routes/memory-routes.ts:3641` (withReadDbAsync)
+- `routes/memory-routes.ts:3675` (withReadDbAsync)
+- `routes/memory-routes.ts:3693` (withReadDbAsync)
+- `routes/memory-routes.ts:3774` (withReadDbAsync)
+- `routes/memory-routes.ts:3859` (withReadDbAsync)
+- `routes/memory-routes.ts:3877` (withReadDbAsync)
+- `routes/memory-routes.ts:3940` (withReadDbAsync)
+- `routes/memory-routes.ts:3980` (withReadDbAsync)
+- `routes/memory-routes.ts:4021` (withReadDbAsync)
+- `routes/memory-routes.ts:4024` (withReadDbAsync)
 - `routes/pipeline-routes.ts:121` (withReadDb)
 - `routes/pipeline-routes.ts:346` (withReadDbAsync)
 - `routes/pipeline-routes.ts:520` (withReadDb)
@@ -356,11 +332,6 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `routes/session-routes.ts:349` (withReadDb)
 - `routes/session-routes.ts:359` (withReadDb)
 - `routes/skill-analytics.ts:121` (withReadDb)
-- `routes/sources-routes.ts:906` (withReadDb)
-- `routes/sources-routes.ts:1045` (withReadDb)
-- `routes/sources-routes.ts:1157` (withReadDb)
-- `routes/sources-routes.ts:1220` (withReadDb)
-- `routes/sources-routes.ts:1259` (withReadDb)
 - `routes/state.ts:457` (withReadDb)
 - `routes/telemetry-routes.ts:200` (withReadDb)
 - `routes/telemetry-routes.ts:221` (withReadDb)
@@ -441,8 +412,8 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 
 ### OFF-PARENT sites
 
-- `db-owner-worker.ts:864` (withReadDbAsync)
-- `db-owner-worker.ts:897` (withReadDbAsync)
+- `db-owner-worker.ts:876` (withReadDbAsync)
+- `db-owner-worker.ts:909` (withReadDbAsync)
 
 ## A3 Slice 2 migration notes
 
@@ -459,4 +430,4 @@ The converted async sites are distributed as follows: document-worker (18), drea
 
 The structural boundary makes statically-resolved imports from the production source tree impossible: TypeScript reports TS6059 before aliases or computed member calls can use the compatibility type. The production bundle also only starts from source entrypoints, so this compatibility module is not a shipped production artifact.
 
-A runtime-computed require() or import() can still reach a source-tree file when a development process deliberately constructs the path. TypeScript cannot prove an unresolved runtime string, and the AST audit remains the supplementary guard for that source-execution residual. This Phase A boundary intentionally leaves the synchronous methods on the runtime accessor so the 169 transitional callers keep working. The deferred final cleanup is explicit: first land the six A3 caller-migration slices that convert all 65 write and 104 read markers to async, then remove the runtime synchronous methods and compatibility module in a follow-up.
+A runtime-computed require() or import() can still reach a source-tree file when a development process deliberately constructs the path. TypeScript cannot prove an unresolved runtime string, and the AST audit remains the supplementary guard for that source-execution residual. This Phase A boundary intentionally leaves the synchronous methods on the runtime accessor so the 164 transitional callers keep working. The deferred final cleanup is explicit: first land the six A3 caller-migration slices that convert all 65 write and 99 read markers to async, then remove the runtime synchronous methods and compatibility module in a follow-up.

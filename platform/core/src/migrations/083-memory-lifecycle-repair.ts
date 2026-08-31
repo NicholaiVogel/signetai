@@ -1,7 +1,7 @@
 import { up as transcriptCaptureJobs } from "./079-transcript-capture-jobs";
 import { up as documentScopeColumns } from "./080-document-scope-columns";
 import { up as aggregateEvidenceSources } from "./081-aggregate-evidence-sources";
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 const DEPENDENCY_TYPES = new Set([
 	"uses",

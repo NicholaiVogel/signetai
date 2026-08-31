@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 function addColumnIfMissing(db: MigrationDb, table: string, column: string, definition: string): void {
 	const cols = db.prepare(`PRAGMA table_info(${table})`).all() as ReadonlyArray<Record<string, unknown>>;

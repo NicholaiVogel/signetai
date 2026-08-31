@@ -7,7 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-08-31
-- Bug fixes: repair compiled first-use path.
+- Bug fixes: realign contract test assertions to wave-5 inventory (902/220/384); L1 wave 5 — routes clusters owner-routed (memory/sources/misc + imported-source-outcome); repair compiled first-use path.
+- Refactoring: isolate migration contract.
 
 ### 2026-08-30
 - Bug fixes: preserve low-volume scheduling fallback; realign memory-search site tokens after wave-4 relocation; L1 wave 4 owner-routing + audit realignment; track detached boot descendants; close boot-wedge gate review gaps; route pipeline reads through owner; harden boot wedge measurements; route telemetry identity through owner; route extraction retirement to owner; route startup DB work to owner.
@@ -31,6 +32,20 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: rebase site tokens after vacuum space-guard edit; allow unknown migration backup space; harden vector backfill and migration cursors; validate backup cursors and quarantine only malformed vectors; legacy backup classification and quarantined backfill; verifiable bridge state and equipped backfill; ordered verdicts, blocked children, yielding backfill; process-wide corruption block and recoverable verification; progress-capable backfill and corruption-safe maintenance; pre-init corruption gate and owner-spanning backfill; fail-close corrupt writes and defer heavy backfill; gate runtime writers and vacuum on verification outcome; preserve unverified rollback points and bound backfill; admissible scan budgets and regular-file backup inventory; uncapped size budgets, staged startup fencing, safe destinations; unblock runtime on scheduled verify and test production deadline; honest scan exclusion and crash-safe backup resume; monotonic corruption latch and verified backup resume; serialize verify maintenance and keep backup lifecycle honest; keep corruption verdicts and startup budgets honest; scope verify outcomes honestly and confirm prune results; severity-merge integrity states and retry verify gate setup; bind migration budgets to owner deadline and surface verify failures; harden migration backup recovery status; close migration startup races; upgrade checkpoint attempt_count column before first reference; preserve unverified rollback point and scope verify checkpoint per generation; lint-clean probe handles; no non-null assertions; complete r6 bounded-verify and absolute-deadline fixes; make post-migration verification full-equivalent and resume admission-closed; scope artifact verification and close probe write gap; close admission gaps flagged in review of #1709; bound startup migration work behind admission guarantees.
 
 ## Release Ledger
+
+## [0.214.34] - 2026-08-31
+
+Release summary: 2 bug fixes and 1 refactor.
+Tag range: `v0.214.33..v0.214.34`.
+
+### Bug Fixes
+
+- **audit**: realign contract test assertions to wave-5 inventory (902/220/384)
+- **daemon**: L1 wave 5 — routes clusters owner-routed (memory/sources/misc + imported-source-outcome)
+
+### Refactoring
+
+- **core**: isolate migration contract
 
 ## [0.214.33] - 2026-08-31
 

@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /**
  * Migration 128: indexes for bounded queue diagnostics.

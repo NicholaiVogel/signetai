@@ -6,7 +6,7 @@
  * for how the skill content is integrated into the prompt.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	const cols = db.prepare("PRAGMA table_info(scheduled_tasks)").all() as ReadonlyArray<Record<string, unknown>>;

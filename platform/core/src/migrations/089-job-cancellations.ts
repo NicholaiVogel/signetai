@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /**
  * Migration 089: Add `job_cancellations` audit table for issue #901.

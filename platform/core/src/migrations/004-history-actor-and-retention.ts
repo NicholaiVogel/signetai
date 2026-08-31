@@ -6,7 +6,7 @@
  * queries on soft-deleted memories, expired history, and completed jobs.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 function hasColumn(db: MigrationDb, table: string, column: string): boolean {
 	const rows = db.prepare(`PRAGMA table_info(${table})`).all() as ReadonlyArray<Record<string, unknown>>;

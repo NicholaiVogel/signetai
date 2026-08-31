@@ -12,7 +12,7 @@
  * source_entity_id, target_entity_id, dependency_type, agent_id via the
  * idx_entity_deps_unique index).
  */
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	const tables = db

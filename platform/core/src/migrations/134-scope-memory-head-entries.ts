@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Repair migration 134: scope legacy memory-head entry identity by agent. */
 export function up(db: MigrationDb): void {

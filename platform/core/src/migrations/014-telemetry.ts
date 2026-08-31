@@ -7,7 +7,7 @@
  * optionally be batched to a self-hosted PostHog instance.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	db.exec(`

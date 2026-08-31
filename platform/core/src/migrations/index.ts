@@ -6,6 +6,8 @@
  * records execution in `schema_migrations_audit`.
  */
 
+import type { Migration, MigrationDb } from "./contract";
+
 import { up as baseline } from "./001-baseline";
 import { up as pipelineV2 } from "./002-pipeline-v2";
 import { up as uniqueContentHash } from "./003-unique-content-hash";
@@ -152,33 +154,7 @@ import { up as embeddingIndexProgress } from "./143-embedding-index-progress";
 import { up as memoryJobLeaseToken } from "./144-memory-job-lease-token";
 import { up as dreamingEvidenceReviews } from "./145-dreaming-evidence-reviews";
 
-// -- Public interface consumed by Database.init() --
-
-export interface MigrationDb {
-	exec(sql: string): void;
-	prepare(sql: string): {
-		run(...args: unknown[]): void;
-		get(...args: unknown[]): Record<string, unknown> | undefined;
-		all(...args: unknown[]): Record<string, unknown>[];
-	};
-}
-
-export interface MigrationArtifacts {
-	readonly tables?: readonly string[];
-	readonly columns?: readonly {
-		readonly table: string;
-		readonly column: string;
-		/** Skip verification when the table itself doesn't exist (conditional/repair migrations). */
-		readonly optional?: boolean;
-	}[];
-}
-
-export interface Migration {
-	readonly version: number;
-	readonly name: string;
-	readonly up: (db: MigrationDb) => void;
-	readonly artifacts?: MigrationArtifacts;
-}
+export type { Migration, MigrationArtifacts, MigrationDb } from "./contract";
 
 /** Ordered list of all migrations. New migrations go at the end. */
 export const MIGRATIONS: readonly Migration[] = [

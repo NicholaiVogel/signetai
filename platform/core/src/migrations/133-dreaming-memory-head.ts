@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Migration 133: immutable, scoped Dreaming-curated MEMORY.md revisions. */
 export function up(db: MigrationDb): void {

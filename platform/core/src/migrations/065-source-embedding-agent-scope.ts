@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 function hasTable(db: MigrationDb, table: string): boolean {
 	const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(table) as

@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Durable source-level pause and frontier for provider-gated native sync. */
 export function up(db: MigrationDb): void {

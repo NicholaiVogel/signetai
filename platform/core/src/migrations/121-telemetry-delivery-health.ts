@@ -7,7 +7,7 @@
  * collector that is waiting to retry.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 function hasColumn(db: MigrationDb, table: string, column: string): boolean {
 	return db

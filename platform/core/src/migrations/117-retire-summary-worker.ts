@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 function hasTable(db: MigrationDb, table: string): boolean {
 	return db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) != null;

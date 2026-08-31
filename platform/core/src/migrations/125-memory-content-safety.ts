@@ -6,7 +6,7 @@
  * this table records only the policy decision used by prompt-facing readers.
  */
 import { MEMORY_CONTENT_SAFETY_POLICY_VERSION, scanMemoryContent } from "../memory-content-safety";
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 type SafetyRow = {
 	readonly agent_id: string | null;

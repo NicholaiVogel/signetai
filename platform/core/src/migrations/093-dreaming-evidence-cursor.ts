@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Persist the composite episodic cursor used by the Dreaming worker. */
 export function up(db: MigrationDb): void {

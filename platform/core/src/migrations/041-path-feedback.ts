@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 function addColumnIfMissing(db: MigrationDb, table: string, column: string, definition: string): void {
 	// SQLite PRAGMA/ALTER identifiers are not parameterizable.

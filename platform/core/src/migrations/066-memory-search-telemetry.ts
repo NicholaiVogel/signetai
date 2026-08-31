@@ -6,7 +6,7 @@
  * result snapshots, so it must never be forwarded to external telemetry sinks.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	db.exec(`

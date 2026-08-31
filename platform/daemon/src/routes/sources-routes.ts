@@ -18,7 +18,7 @@ import {
 import type { Context, Hono } from "hono";
 import { resolveDaemonAgentId } from "../agent-id";
 import { getPeerAddress } from "../auth/middleware";
-import { type ReadDb, getDbAccessor } from "../db-accessor";
+import { dbOwnerQuery, dbOwnerSourceEvidenceEligibility } from "../db-owner-runtime";
 import { fetchEmbedding } from "../embedding-fetch";
 import { type ImportExtractionOutcome, readImportedSourceOutcome } from "../imported-source-outcome";
 import { logger } from "../logger";
@@ -30,7 +30,7 @@ import {
 	resolveEmbeddingBridgeOptions,
 	startNativeMemoryBridge,
 } from "../native-memory-sources";
-import { sourceHasEligibleUnconsumedEvidence } from "../pipeline/dreaming-evidence-consumption";
+
 import { getActiveTelemetry } from "../telemetry";
 import {
 	type SourceIndexJob,
@@ -181,27 +181,30 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 	const recordIndexOperation = deps.recordIndexOperation ?? recordSourceIndexOperation;
 	const pickerExecFile = deps.pickerExecFile ?? execFileAsync;
 	const pickerPlatform = deps.pickerPlatform ?? process.platform;
-	app.get("/api/sources", (c) => {
+	app.get("/api/sources", async (c) => {
 		const config = loadSourcesConfig(agentsDir);
 		const agentId = resolveDaemonAgentId();
 		const tombstonedSourceGenerations = loadTombstonedSourceGenerations(agentsDir, agentId);
-		return c.json({
-			version: config.version,
-			sources: config.sources
+		const sources = await Promise.all(
+			config.sources
 				.filter(
 					(source) =>
 						isSourceVisibleToAgent(source, agentId) &&
 						!isSourceGenerationTombstoned(source, tombstonedSourceGenerations),
 				)
-				.map((source) => {
-					const stats = sourceStats(source, agentId);
+				.map(async (source) => {
+					const stats = await sourceStats(source, agentId);
 					return {
 						...source,
 						stats,
-						health: sourceHealth(source, agentId, stats),
+						health: await sourceHealth(source, agentId, stats),
 						indexJob: getSourceIndexJob(source.id),
 					};
 				}),
+		);
+		return c.json({
+			version: config.version,
+			sources,
 		});
 	});
 
@@ -337,13 +340,13 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 		);
 	});
 
-	app.get("/api/sources/:sourceId/health", (c) => {
+	app.get("/api/sources/:sourceId/health", async (c) => {
 		const sourceId = c.req.param("sourceId");
 		const source = findConfiguredSource(sourceId, agentsDir, resolveDaemonAgentId());
 		if (!source) return c.json({ error: "Source not found" }, 404);
 		const agentId = resolveDaemonAgentId();
-		const stats = sourceStats(source, agentId);
-		return c.json({ source, stats, health: sourceHealth(source, agentId, stats) });
+		const stats = await sourceStats(source, agentId);
+		return c.json({ source, stats, health: await sourceHealth(source, agentId, stats) });
 	});
 
 	app.post("/api/sources/:sourceId/snapshot/import", async (c) => {
@@ -898,77 +901,52 @@ interface SourceHealth {
 	};
 }
 
-function sourceStats(source: SignetSourceEntry, agentId: string): SourceStats {
+async function sourceStats(source: SignetSourceEntry, agentId: string): Promise<SourceStats> {
 	const rootPrefix = `${source.root.replace(/\\/g, "/").replace(/\/$/, "")}/`;
 	const chunkPrefix = `${source.id}:`;
 	try {
-		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-		return getDbAccessor().withReadDb((db: import("../db-accessor").ReadDb) => {
-			const artifacts =
-				source.kind === "obsidian"
-					? countRow(
-							db
-								.prepare(
-									`SELECT COUNT(*) AS n FROM memory_artifacts
-									 WHERE agent_id = ?
-									   AND (
-										   source_id = ?
-										   OR (
-											   harness = 'obsidian'
-											   AND source_id IS NULL
-											   AND source_path >= ?
-											   AND source_path < ?
-										   )
-									   )
-									   AND COALESCE(is_deleted, 0) = 0`,
-								)
-								.get(agentId, source.id, rootPrefix, `${rootPrefix}\uffff`),
-						)
-					: countRow(
-							db
-								.prepare(
-									`SELECT COUNT(*) AS n FROM memory_artifacts
-									 WHERE agent_id = ?
-									   AND source_id = ?
-									   AND COALESCE(is_deleted, 0) = 0`,
-								)
-								.get(agentId, source.id),
-						);
-			const chunks = countRow(
-				db
-					.prepare(
-						`SELECT COUNT(*) AS n FROM embeddings
-						 WHERE agent_id = ?
-						   AND source_type IN (?, ?)
-						   AND source_id >= ?
-						   AND source_id < ?`,
-					)
-					.get(
+		const artifactSql =
+			source.kind === "obsidian"
+				? `SELECT COUNT(*) AS n FROM memory_artifacts
+				 WHERE agent_id = ? AND (source_id = ? OR (harness = 'obsidian' AND source_id IS NULL AND source_path >= ? AND source_path < ?))
+				   AND COALESCE(is_deleted, 0) = 0`
+				: `SELECT COUNT(*) AS n FROM memory_artifacts
+				 WHERE agent_id = ? AND source_id = ? AND COALESCE(is_deleted, 0) = 0`;
+		const artifactParams =
+			source.kind === "obsidian" ? [agentId, source.id, rootPrefix, `${rootPrefix}\uffff`] : [agentId, source.id];
+		const [artifactRow, chunkRow, hasEligibleUnconsumedEvidence] = await Promise.all([
+			dbOwnerQuery<{ n: number }>(
+				{ sql: artifactSql, params: artifactParams, result: "get" },
+				{ operation: "sources.stats_artifacts", lane: "read", deadlineMs: 3_000 },
+			),
+			dbOwnerQuery<{ n: number }>(
+				{
+					sql: `SELECT COUNT(*) AS n FROM embeddings WHERE agent_id = ? AND source_type IN (?, ?) AND source_id >= ? AND source_id < ?`,
+					params: [
 						agentId,
 						SOURCE_CHUNK_SOURCE_TYPE,
 						LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE,
 						chunkPrefix,
 						`${chunkPrefix}\uffff`,
-					),
-			);
-			return {
-				artifacts,
-				chunks,
-				indexed: artifacts,
-				hasEligibleUnconsumedEvidence: sourceHasEligibleUnconsumedEvidence(
-					db,
-					agentId,
-					source.id,
-					source.kind === "obsidian" ? source.root : undefined,
-				),
-			};
-		}, "routes/sources-routes.ts:906");
+					],
+					result: "get",
+				},
+				{ operation: "sources.stats_chunks", lane: "read", deadlineMs: 3_000 },
+			),
+			dbOwnerSourceEvidenceEligibility(
+				{ agentId, sourceEntryId: source.id, legacyObsidianRoot: source.kind === "obsidian" ? source.root : undefined },
+				{ operation: "sources.stats_evidence", deadlineMs: 3_000 },
+			),
+		]);
+		const artifacts = Number(artifactRow?.n ?? 0);
+		const chunks = Number(chunkRow?.n ?? 0);
+		return { artifacts, chunks, indexed: artifacts, hasEligibleUnconsumedEvidence };
 	} catch {
 		return { artifacts: 0, chunks: 0, indexed: 0, hasEligibleUnconsumedEvidence: false };
 	}
 }
 
-function sourceHealth(source: SignetSourceEntry, agentId: string, stats: SourceStats): SourceHealth {
+async function sourceHealth(source: SignetSourceEntry, agentId: string, stats: SourceStats): Promise<SourceHealth> {
 	const generatedAt = new Date().toISOString();
 	try {
 		const permission =
@@ -978,11 +956,13 @@ function sourceHealth(source: SignetSourceEntry, agentId: string, stats: SourceS
 						agentId,
 					)
 				: { status: "clear" as const, issues: [] };
-		const artifactSummary = artifactHealthSummary(source, agentId);
-		const discordSummary = discordHealthSummary(source, agentId);
-		const semantic = semanticHealthSummary(source, agentId);
+		const [artifactSummary, discordSummary, semantic, orphanChunks] = await Promise.all([
+			artifactHealthSummary(source, agentId),
+			discordHealthSummary(source, agentId),
+			semanticHealthSummary(source, agentId),
+			sourceOrphanChunks(source, agentId),
+		]);
 		const importExtraction = source.kind === "import" ? readImportedSourceOutcome(source.id, agentId) : undefined;
-		const orphanChunks = sourceOrphanChunks(source, agentId);
 		const hasDegradation =
 			permission.status === "denied" ||
 			discordSummary.failures.total > 0 ||
@@ -1039,62 +1019,53 @@ function sourceHealth(source: SignetSourceEntry, agentId: string, stats: SourceS
 	}
 }
 
-function sourceOrphanChunks(source: SignetSourceEntry, agentId: string): number {
+async function sourceOrphanChunks(source: SignetSourceEntry, agentId: string): Promise<number> {
 	const chunkPrefix = `${source.id}:`;
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return getDbAccessor().withReadDb((db: import("../db-accessor").ReadDb) => {
-		const livePaths = liveSourceArtifactPaths(db, source, agentId);
-		const chunks = db
-			.prepare(
-				`SELECT source_id, chunk_text
-				   FROM embeddings
-				  WHERE agent_id = ?
-				    AND source_type IN (?, ?)
-				    AND source_id >= ?
-				    AND source_id < ?`,
-			)
-			.all(
-				agentId,
-				SOURCE_CHUNK_SOURCE_TYPE,
-				LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE,
-				chunkPrefix,
-				`${chunkPrefix}\uffff`,
-			) as SourceChunkHealthRow[];
-		return chunks.filter((chunk) => !sourceChunkMatchesLiveArtifact(source, chunk, livePaths)).length;
-	}, "routes/sources-routes.ts:1045");
+	const [livePaths, chunks] = await Promise.all([
+		liveSourceArtifactPaths(source, agentId),
+		dbOwnerQuery<SourceChunkHealthRow[]>(
+			{
+				sql: `SELECT source_id, chunk_text FROM embeddings
+				 WHERE agent_id = ? AND source_type IN (?, ?) AND source_id >= ? AND source_id < ?`,
+				params: [
+					agentId,
+					SOURCE_CHUNK_SOURCE_TYPE,
+					LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE,
+					chunkPrefix,
+					`${chunkPrefix}\uffff`,
+				],
+				result: "all",
+			},
+			{ operation: "sources.health_orphan_chunks", lane: "read", deadlineMs: 5_000 },
+		),
+	]);
+	return chunks.filter((chunk) => !sourceChunkMatchesLiveArtifact(source, chunk, livePaths)).length;
 }
 
-function liveSourceArtifactPaths(db: ReadDb, source: SignetSourceEntry, agentId: string): ReadonlySet<string> {
+async function liveSourceArtifactPaths(source: SignetSourceEntry, agentId: string): Promise<ReadonlySet<string>> {
 	if (source.kind === "obsidian") {
 		const rootPrefix = `${source.root.replace(/\\/g, "/").replace(/\/$/, "")}/`;
-		const rows = db
-			.prepare(
-				`SELECT source_path
-				   FROM memory_artifacts
-				  WHERE agent_id = ?
-				    AND COALESCE(is_deleted, 0) = 0
-				    AND (
-					    source_id = ?
-					    OR (
-						    harness = 'obsidian'
-						    AND source_id IS NULL
-						    AND source_path >= ?
-						    AND source_path < ?
-					    )
-				    )`,
-			)
-			.all(agentId, source.id, rootPrefix, `${rootPrefix}\uffff`) as SourcePathHealthRow[];
+		const rows = await dbOwnerQuery<SourcePathHealthRow[]>(
+			{
+				sql: `SELECT source_path FROM memory_artifacts
+				 WHERE agent_id = ? AND COALESCE(is_deleted, 0) = 0
+				   AND (source_id = ? OR (harness = 'obsidian' AND source_id IS NULL AND source_path >= ? AND source_path < ?))`,
+				params: [agentId, source.id, rootPrefix, `${rootPrefix}\uffff`],
+				result: "all",
+			},
+			{ operation: "sources.health_live_paths", lane: "read", deadlineMs: 5_000 },
+		);
 		return new Set(rows.map((row) => normalizeSourcePath(row.source_path)));
 	}
-	const rows = db
-		.prepare(
-			`SELECT source_path
-			   FROM memory_artifacts
-			  WHERE agent_id = ?
-			    AND source_id = ?
-			    AND COALESCE(is_deleted, 0) = 0`,
-		)
-		.all(agentId, source.id) as SourcePathHealthRow[];
+	const rows = await dbOwnerQuery<SourcePathHealthRow[]>(
+		{
+			sql: `SELECT source_path FROM memory_artifacts
+			 WHERE agent_id = ? AND source_id = ? AND COALESCE(is_deleted, 0) = 0`,
+			params: [agentId, source.id],
+			result: "all",
+		},
+		{ operation: "sources.health_live_paths", lane: "read", deadlineMs: 5_000 },
+	);
 	return new Set(rows.map((row) => normalizeSourcePath(row.source_path)));
 }
 
@@ -1146,53 +1117,33 @@ function normalizeSourcePath(value: string): string {
 	return value.replace(/\\/g, "/").replace(/([^:])\/{2,}/g, "$1/");
 }
 
-function artifactHealthSummary(
+async function artifactHealthSummary(
 	source: SignetSourceEntry,
 	agentId: string,
-): {
+): Promise<{
 	readonly latestArtifactAt: string | null;
 	readonly deletedArtifacts: number;
-} {
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return getDbAccessor().withReadDb((db: import("../db-accessor").ReadDb) => {
-		if (source.kind === "obsidian") {
-			const rootPrefix = `${source.root.replace(/\\/g, "/").replace(/\/$/, "")}/`;
-			const row = db
-				.prepare(
-					`SELECT MAX(updated_at) AS latestArtifactAt,
-					        SUM(CASE WHEN COALESCE(is_deleted, 0) = 1 THEN 1 ELSE 0 END) AS deletedArtifacts
-					   FROM memory_artifacts
-					  WHERE agent_id = ?
-					    AND (
-						    source_id = ?
-						    OR (
-							    harness = 'obsidian'
-							    AND source_id IS NULL
-							    AND source_path >= ?
-							    AND source_path < ?
-						    )
-					    )`,
-				)
-				.get(agentId, source.id, rootPrefix, `${rootPrefix}\uffff`) as HealthAggregateRow | null;
-			return {
-				latestArtifactAt: stringOrNull(row?.latestArtifactAt),
-				deletedArtifacts: numberOrZero(row?.deletedArtifacts),
-			};
-		}
-		const row = db
-			.prepare(
-				`SELECT MAX(updated_at) AS latestArtifactAt,
-				        SUM(CASE WHEN COALESCE(is_deleted, 0) = 1 THEN 1 ELSE 0 END) AS deletedArtifacts
-				   FROM memory_artifacts
-				  WHERE agent_id = ?
-				    AND source_id = ?`,
-			)
-			.get(agentId, source.id) as HealthAggregateRow | null;
-		return {
-			latestArtifactAt: stringOrNull(row?.latestArtifactAt),
-			deletedArtifacts: numberOrZero(row?.deletedArtifacts),
-		};
-	}, "routes/sources-routes.ts:1157");
+}> {
+	const rootPrefix = `${source.root.replace(/\\/g, "/").replace(/\/$/, "")}/`;
+	const sql =
+		source.kind === "obsidian"
+			? `SELECT MAX(updated_at) AS latestArtifactAt,
+			        SUM(CASE WHEN COALESCE(is_deleted, 0) = 1 THEN 1 ELSE 0 END) AS deletedArtifacts
+			   FROM memory_artifacts WHERE agent_id = ?
+			     AND (source_id = ? OR (harness = 'obsidian' AND source_id IS NULL AND source_path >= ? AND source_path < ?))`
+			: `SELECT MAX(updated_at) AS latestArtifactAt,
+			        SUM(CASE WHEN COALESCE(is_deleted, 0) = 1 THEN 1 ELSE 0 END) AS deletedArtifacts
+			   FROM memory_artifacts WHERE agent_id = ? AND source_id = ?`;
+	const params =
+		source.kind === "obsidian" ? [agentId, source.id, rootPrefix, `${rootPrefix}\uffff`] : [agentId, source.id];
+	const row = await dbOwnerQuery<HealthAggregateRow | undefined>(
+		{ sql, params, result: "get" },
+		{ operation: "sources.health_artifacts", lane: "read", deadlineMs: 3_000 },
+	);
+	return {
+		latestArtifactAt: stringOrNull(row?.latestArtifactAt),
+		deletedArtifacts: numberOrZero(row?.deletedArtifacts),
+	};
 }
 
 interface DiscordHealthSummary {
@@ -1208,7 +1159,7 @@ interface DiscordHealthSummary {
 	};
 }
 
-function discordHealthSummary(source: SignetSourceEntry, agentId: string): DiscordHealthSummary {
+async function discordHealthSummary(source: SignetSourceEntry, agentId: string): Promise<DiscordHealthSummary> {
 	if (source.kind !== "discord") {
 		return {
 			latestCheckpointAt: null,
@@ -1216,91 +1167,104 @@ function discordHealthSummary(source: SignetSourceEntry, agentId: string): Disco
 			checkpoints: { total: 0, partial: 0, stale: 0 },
 		};
 	}
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return getDbAccessor().withReadDb((db: import("../db-accessor").ReadDb) => {
-		const rows = db
-			.prepare(
-				`SELECT source_kind, source_meta_json, updated_at
-				   FROM memory_artifacts
-				  WHERE agent_id = ?
-				    AND source_id = ?
-				    AND source_kind IN ('source_discord_failure', 'source_discord_checkpoint')
-				    AND COALESCE(is_deleted, 0) = 0`,
-			)
-			.all(agentId, source.id) as DiscordHealthRow[];
-		let failures = 0;
-		let recoverable = 0;
-		let checkpoints = 0;
-		let partial = 0;
-		let stale = 0;
-		let latestCheckpointAt: string | null = null;
-		for (const row of rows) {
-			const meta = parseJsonObject(row.source_meta_json);
-			if (row.source_kind === "source_discord_failure") {
-				failures++;
-				if (meta?.recoverable === true) recoverable++;
-				continue;
-			}
-			checkpoints++;
-			if (meta?.status === "partial") partial++;
-			if (isStaleCheckpoint(row.updated_at, source.lastIndexedAt)) stale++;
-			latestCheckpointAt = maxIsoTimestamp(latestCheckpointAt, stringOrNull(row.updated_at));
-		}
-		return {
-			latestCheckpointAt,
-			failures: { total: failures, recoverable },
-			checkpoints: { total: checkpoints, partial, stale },
-		};
-	}, "routes/sources-routes.ts:1220");
-}
-
-function semanticHealthSummary(source: SignetSourceEntry, agentId: string): SourceHealth["semantic"] {
-	// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
-	return getDbAccessor().withReadDb((db: import("../db-accessor").ReadDb) => {
-		const entities = countSourceRows(db, "entities", agentId, source.id);
-		const documentEntity = db
-			.prepare(
-				`SELECT id
-				   FROM entities
-				  WHERE agent_id = ? AND source_id = ? AND entity_type = 'source_document'
-				  ORDER BY updated_at DESC
-				  LIMIT 1`,
-			)
-			.get(agentId, source.id) as { id: string } | null | undefined;
-		const aspects = countRow(
-			db
-				.prepare(
-					`SELECT COUNT(*) AS n
-					   FROM entity_aspects AS a
-					   JOIN entities AS e ON e.id = a.entity_id AND e.agent_id = a.agent_id
-					  WHERE a.agent_id = ? AND e.source_id = ?`,
-				)
-				.get(agentId, source.id),
-		);
-		const attributes = countSourceRows(db, "entity_attributes", agentId, source.id);
-		const dependencies = countSourceRows(db, "entity_dependencies", agentId, source.id);
-		const communities = countSourceRows(db, "entity_communities", agentId, source.id);
-		return {
-			entities,
-			aspects,
-			attributes,
-			dependencies,
-			communities,
-			total: entities + aspects + attributes + dependencies + communities,
-			documentEntityId: documentEntity?.id ?? null,
-		};
-	}, "routes/sources-routes.ts:1259");
-}
-
-function countSourceRows(
-	db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } },
-	table: string,
-	agentId: string,
-	sourceId: string,
-): number {
-	return countRow(
-		db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE agent_id = ? AND source_id = ?`).get(agentId, sourceId),
+	const rows = await dbOwnerQuery<DiscordHealthRow[]>(
+		{
+			sql: `SELECT source_kind, source_meta_json, updated_at FROM memory_artifacts WHERE agent_id = ? AND source_id = ? AND source_kind IN ('source_discord_failure', 'source_discord_checkpoint') AND COALESCE(is_deleted, 0) = 0`,
+			params: [agentId, source.id],
+			result: "all",
+		},
+		{ operation: "sources.health_discord", lane: "read", deadlineMs: 5_000 },
 	);
+	let failures = 0;
+	let recoverable = 0;
+	let checkpoints = 0;
+	let partial = 0;
+	let stale = 0;
+	let latestCheckpointAt: string | null = null;
+	for (const row of rows) {
+		const meta = parseJsonObject(row.source_meta_json);
+		if (row.source_kind === "source_discord_failure") {
+			failures++;
+			if (meta?.recoverable === true) recoverable++;
+			continue;
+		}
+		checkpoints++;
+		if (meta?.status === "partial") partial++;
+		if (isStaleCheckpoint(row.updated_at, source.lastIndexedAt)) stale++;
+		latestCheckpointAt = maxIsoTimestamp(latestCheckpointAt, stringOrNull(row.updated_at));
+	}
+	return {
+		latestCheckpointAt,
+		failures: { total: failures, recoverable },
+		checkpoints: { total: checkpoints, partial, stale },
+	};
+}
+
+async function semanticHealthSummary(source: SignetSourceEntry, agentId: string): Promise<SourceHealth["semantic"]> {
+	const [entityRow, documentEntity, aspectsRow, attributesRow, dependenciesRow, communitiesRow] = await Promise.all([
+		dbOwnerQuery<{ n: number }>(
+			{
+				sql: "SELECT COUNT(*) AS n FROM entities WHERE agent_id = ? AND source_id = ?",
+				params: [agentId, source.id],
+				result: "get",
+			},
+			{ operation: "sources.health_entities", lane: "read", deadlineMs: 3_000 },
+		),
+		dbOwnerQuery<{ id: string } | undefined>(
+			{
+				sql: "SELECT id FROM entities WHERE agent_id = ? AND source_id = ? AND entity_type = 'source_document' ORDER BY updated_at DESC LIMIT 1",
+				params: [agentId, source.id],
+				result: "get",
+			},
+			{ operation: "sources.health_document_entity", lane: "read", deadlineMs: 3_000 },
+		),
+		dbOwnerQuery<{ n: number }>(
+			{
+				sql: "SELECT COUNT(*) AS n FROM entity_aspects AS a JOIN entities AS e ON e.id = a.entity_id AND e.agent_id = a.agent_id WHERE a.agent_id = ? AND e.source_id = ?",
+				params: [agentId, source.id],
+				result: "get",
+			},
+			{ operation: "sources.health_aspects", lane: "read", deadlineMs: 3_000 },
+		),
+		dbOwnerQuery<{ n: number }>(
+			{
+				sql: "SELECT COUNT(*) AS n FROM entity_attributes WHERE agent_id = ? AND source_id = ?",
+				params: [agentId, source.id],
+				result: "get",
+			},
+			{ operation: "sources.health_attributes", lane: "read", deadlineMs: 3_000 },
+		),
+		dbOwnerQuery<{ n: number }>(
+			{
+				sql: "SELECT COUNT(*) AS n FROM entity_dependencies WHERE agent_id = ? AND source_id = ?",
+				params: [agentId, source.id],
+				result: "get",
+			},
+			{ operation: "sources.health_dependencies", lane: "read", deadlineMs: 3_000 },
+		),
+		dbOwnerQuery<{ n: number }>(
+			{
+				sql: "SELECT COUNT(*) AS n FROM entity_communities WHERE agent_id = ? AND source_id = ?",
+				params: [agentId, source.id],
+				result: "get",
+			},
+			{ operation: "sources.health_communities", lane: "read", deadlineMs: 3_000 },
+		),
+	]);
+	const entities = Number(entityRow?.n ?? 0);
+	const aspects = Number(aspectsRow?.n ?? 0);
+	const attributes = Number(attributesRow?.n ?? 0);
+	const dependencies = Number(dependenciesRow?.n ?? 0);
+	const communities = Number(communitiesRow?.n ?? 0);
+	return {
+		entities,
+		aspects,
+		attributes,
+		dependencies,
+		communities,
+		total: entities + aspects + attributes + dependencies + communities,
+		documentEntityId: documentEntity?.id ?? null,
+	};
 }
 
 interface HealthAggregateRow {
@@ -1346,12 +1310,6 @@ function stringOrNull(value: unknown): string | null {
 
 function numberOrZero(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function countRow(row: unknown): number {
-	return typeof row === "object" && row !== null && "n" in row && typeof (row as { n?: unknown }).n === "number"
-		? (row as { n: number }).n
-		: 0;
 }
 
 async function pickFiles(
