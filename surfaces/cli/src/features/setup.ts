@@ -85,7 +85,8 @@ function modelChoices(provider: ExtractionProviderChoice): Array<{ value: string
 
 /**
  * Pick a model from a list of pi-ai model options. Plain select for short
- * lists, searchable `search` prompt for large ones (e.g. openrouter's 253) so
+ * lists, searchable `search` prompt for large ones (e.g. OpenRouter's full
+ * provider catalog) so
  * the user can type to find what they want — all results are shown, not capped.
  */
 async function pickModel(
@@ -125,9 +126,9 @@ function connectUi(): ConnectUi {
 			console.log(chalk.cyan(`  Enter this code at ${verificationUri}:`));
 			console.log(chalk.bold(`    ${userCode}`));
 		},
-		promptText: (message) => input({ message }),
-		promptSelect: (message, options) =>
-			select({ message, choices: options.map((o) => ({ value: o.id, name: o.label })) }),
+		promptText: (message, signal) => input({ message }, { signal }),
+		promptSelect: (message, options, signal) =>
+			select({ message, choices: options.map((o) => ({ value: o.id, name: o.label })) }, { signal }),
 		onProgress: (m) => console.log(chalk.dim(`    ${m}`)),
 	};
 }

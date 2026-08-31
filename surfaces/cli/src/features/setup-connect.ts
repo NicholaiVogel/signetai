@@ -6,13 +6,20 @@
  * because a browser can't run node:http; the CLI calls the SDK directly during
  * the wizard, before listing models.
  */
-import type { AuthInteraction, OAuthCredentials } from "@earendil-works/pi-ai";
+import type { OAuthCredentials, ProviderAuthInteraction } from "@earendil-works/pi-ai";
 import type { OAuthLoginCallbacks } from "@earendil-works/pi-ai/oauth";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { oauthSecretName, providerKeySecretName } from "./setup-inference-connect.js";
 import { registerSignetOAuthFlows } from "../../../../platform/daemon/src/inference-oauth-runtime.js";
 
 registerSignetOAuthFlows();
+
+type OAuthPromptWithSignal = Parameters<OAuthLoginCallbacks["onPrompt"]>[0] & {
+	readonly signal?: AbortSignal;
+};
+type OAuthSelectPromptWithSignal = Parameters<OAuthLoginCallbacks["onSelect"]>[0] & {
+	readonly signal?: AbortSignal;
+};
 
 export interface ConnectHttp {
 	/** JSON POST to the daemon secrets store; returns { ok, data?, error? }. */
@@ -28,11 +35,12 @@ export interface ConnectUi {
 	/** Print a device code + verification URI (no browser needed). */
 	readonly showDeviceCode: (userCode: string, verificationUri: string) => void;
 	/** Free-text prompt (manual code / OAuth text prompt). */
-	readonly promptText: (message: string) => Promise<string>;
+	readonly promptText: (message: string, signal?: AbortSignal) => Promise<string>;
 	/** Multiple-choice prompt. */
 	readonly promptSelect: (
 		message: string,
 		options: ReadonlyArray<{ readonly id: string; readonly label: string }>,
+		signal?: AbortSignal,
 	) => Promise<string>;
 	readonly onProgress?: (message: string) => void;
 	readonly onError?: (message: string) => void;
@@ -49,8 +57,9 @@ function defaultLogin(providerId: string): OAuthLoginFn {
 		if (!oauth) throw new Error(`Unknown OAuth provider: ${providerId}`);
 		// pi-ai 0.83+ drives login through AuthInteraction (notify/prompt) instead
 		// of the legacy callback surface; the compat callbacks are mapped here.
-		const interaction: AuthInteraction = {
-			signal: callbacks.signal,
+		const signal = callbacks.signal ?? new AbortController().signal;
+		const interaction: ProviderAuthInteraction = {
+			signal,
 			notify: (event) => {
 				if (event.type === "auth_url") callbacks.onAuth({ url: event.url, instructions: event.instructions });
 				else if (event.type === "device_code")
@@ -63,9 +72,20 @@ function defaultLogin(providerId: string): OAuthLoginFn {
 				else callbacks.onProgress?.(event.message);
 			},
 			prompt: async (prompt) => {
+				const signal = prompt.signal;
 				if (prompt.type === "select")
-					return (await callbacks.onSelect({ message: prompt.message, options: [...prompt.options] })) ?? "";
-				return callbacks.onPrompt({ message: prompt.message, placeholder: prompt.placeholder });
+					return (
+						(await callbacks.onSelect({
+							message: prompt.message,
+							options: [...prompt.options],
+							signal,
+						} as OAuthSelectPromptWithSignal)) ?? ""
+					);
+				return callbacks.onPrompt({
+					message: prompt.message,
+					placeholder: prompt.placeholder,
+					signal,
+				} as OAuthPromptWithSignal);
 			},
 		};
 		return oauth.login(interaction);
@@ -90,20 +110,24 @@ export async function runOAuthLogin(
 	deps?: { readonly login: OAuthLoginFn },
 ): Promise<OAuthCredentials> {
 	const login = deps?.login ?? defaultLogin(providerId);
+	const loginController = new AbortController();
 	const callbacks: OAuthLoginCallbacks = {
+		signal: loginController.signal,
 		onAuth: (info) => ui.openUrl(info.url),
 		onDeviceCode: (info) => ui.showDeviceCode(info.userCode, info.verificationUri),
-		onPrompt: async (prompt) => ui.promptText(prompt.message),
+		onPrompt: async (prompt) => ui.promptText(prompt.message, (prompt as OAuthPromptWithSignal).signal),
 		onSelect: async (prompt) =>
 			ui.promptSelect(
 				prompt.message,
 				prompt.options.map((o) => ({ id: o.id, label: o.label })),
+				(prompt as OAuthSelectPromptWithSignal).signal,
 			),
 		onProgress: (message) => ui.onProgress?.(message),
 		onManualCodeInput: async () => ui.promptText("Paste the final redirect URL or authorization code"),
 	};
 	return new Promise<OAuthCredentials>((resolve, reject) => {
 		const cleanup = () => {
+			loginController.abort();
 			clearInterval(keepalive);
 			process.off("unhandledRejection", onUnhandled);
 		};
@@ -119,16 +143,18 @@ export async function runOAuthLogin(
 			reject(reason instanceof Error ? reason : new Error(msg));
 		};
 		process.on("unhandledRejection", onUnhandled);
-		login(callbacks).then(
-			(creds) => {
-				cleanup();
-				resolve(creds);
-			},
-			(err) => {
-				cleanup();
-				reject(err);
-			},
-		);
+		Promise.resolve()
+			.then(() => login(callbacks))
+			.then(
+				(creds) => {
+					cleanup();
+					resolve(creds);
+				},
+				(err) => {
+					cleanup();
+					reject(err);
+				},
+			);
 	});
 }
 
