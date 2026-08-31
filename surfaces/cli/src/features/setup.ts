@@ -126,9 +126,9 @@ function connectUi(): ConnectUi {
 			console.log(chalk.cyan(`  Enter this code at ${verificationUri}:`));
 			console.log(chalk.bold(`    ${userCode}`));
 		},
-		promptText: (message) => input({ message }),
-		promptSelect: (message, options) =>
-			select({ message, choices: options.map((o) => ({ value: o.id, name: o.label })) }),
+		promptText: (message, signal) => input({ message }, { signal }),
+		promptSelect: (message, options, signal) =>
+			select({ message, choices: options.map((o) => ({ value: o.id, name: o.label })) }, { signal }),
 		onProgress: (m) => console.log(chalk.dim(`    ${m}`)),
 	};
 }

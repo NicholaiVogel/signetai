@@ -91,6 +91,46 @@ describe("runOAuthLogin", () => {
 		expect(progress).toHaveBeenCalledWith("exchanging");
 	});
 
+	it("settles a provider prompt when the browser callback wins", async () => {
+		const promptController = new AbortController();
+		let promptPending = false;
+		const promptText = mock(async (_message: string, signal?: AbortSignal) => {
+			promptPending = true;
+			if (!signal) return new Promise<string>(() => {});
+			await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+			promptPending = false;
+			return "";
+		});
+		const login: OAuthLoginFn = async (callbacks) => {
+			const promptPromise = callbacks.onPrompt({
+				message: "Paste code",
+				signal: promptController.signal,
+			} as never);
+			promptController.abort();
+			await expect(
+				Promise.race([
+					promptPromise.then(() => "settled" as const),
+					new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 50)),
+				]),
+			).resolves.toBe("settled");
+			return { refresh: "r", access: "a", expires: 0 } as never;
+		};
+
+		await runOAuthLogin(mockUi({ promptText }), "anthropic", { login });
+		expect(promptText).toHaveBeenCalledWith("Paste code", promptController.signal);
+		expect(promptPending).toBe(false);
+	});
+
+	it("cleans up when login throws synchronously", async () => {
+		const listenersBefore = process.listenerCount("unhandledRejection");
+		const login: OAuthLoginFn = () => {
+			throw new Error("sync login failure");
+		};
+
+		await expect(runOAuthLogin(mockUi(), "anthropic", { login })).rejects.toThrow("sync login failure");
+		expect(process.listenerCount("unhandledRejection")).toBe(listenersBefore);
+	});
+
 	it("passes a real abort signal to the provider and aborts it on completion", async () => {
 		let signal: AbortSignal | undefined;
 		const login: OAuthLoginFn = async (callbacks) => {
