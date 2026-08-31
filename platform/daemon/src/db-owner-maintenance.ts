@@ -162,7 +162,7 @@ export async function ownerQueryAll<Row extends object>(
 ): Promise<readonly Row[]> {
 	return await runOwnerMaintenanceWithRetry<readonly Row[]>(
 		owner,
-		{ kind: "query", statement: { sql, params, result: "all" } },
+		{ kind: "query", statement: { sql, params, result: "all", readonly: true } },
 		operation,
 		options,
 	);
@@ -177,7 +177,24 @@ export async function ownerQueryOne<Row extends object>(
 ): Promise<Row | undefined> {
 	const result = await runOwnerMaintenanceWithRetry<Row | null | undefined>(
 		owner,
-		{ kind: "query", statement: { sql, params, result: "get" } },
+		{ kind: "query", statement: { sql, params, result: "get", readonly: true } },
+		operation,
+		options,
+	);
+	return result ?? undefined;
+}
+
+/** Run a returning statement on the owner's write connection. */
+export async function ownerWriteQueryOne<Row extends object>(
+	owner: DbOwnerClient,
+	operation: string,
+	sql: string,
+	params: readonly DbOwnerParameter[] = [],
+	options: DbOwnerMaintenanceOptions = {},
+): Promise<Row | undefined> {
+	const result = await runOwnerMaintenanceWithRetry<Row | null | undefined>(
+		owner,
+		{ kind: "query", statement: { sql, params, result: "get", readonly: false } },
 		operation,
 		options,
 	);
@@ -193,6 +210,38 @@ export async function ownerTransaction(
 	return await runOwnerMaintenanceWithRetry<readonly unknown[]>(
 		owner,
 		{ kind: "transaction", transaction: { statements } },
+		operation,
+		options,
+	);
+}
+
+/** Execute a bounded write batch with optional compare-and-set preconditions. */
+export async function ownerBatch(
+	owner: DbOwnerClient,
+	operation: string,
+	statements: readonly DbOwnerStatement[],
+	options: DbOwnerMaintenanceOptions = {},
+	requireChanges = false,
+): Promise<readonly unknown[]> {
+	return await runOwnerMaintenanceWithRetry<readonly unknown[]>(
+		owner,
+		{ kind: "batch", statements, requireChanges },
+		operation,
+		options,
+	);
+}
+
+/** Execute one autocommit write statement through the owner. */
+export async function ownerRun(
+	owner: DbOwnerClient,
+	operation: string,
+	sql: string,
+	params: readonly DbOwnerParameter[] = [],
+	options: DbOwnerMaintenanceOptions = {},
+): Promise<void> {
+	await runOwnerMaintenanceWithRetry(
+		owner,
+		{ kind: "query", statement: { sql, params, result: "run", transactional: false } },
 		operation,
 		options,
 	);

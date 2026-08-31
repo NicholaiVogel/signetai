@@ -269,8 +269,17 @@ export function runDbOwnerWorker(): void {
 	function executeStatement(statement: DbOwnerStatement, context?: JobExecutionContext): unknown {
 		const params = (statement.params ?? []).map(bindParameter);
 		const prepared = db.prepare(statement.sql);
-		if (statement.result === "all") return enforceResultLimit(statement, prepared.all(...params));
-		if (statement.result === "get") return enforceResultLimit(statement, prepared.get(...params));
+		if (statement.result === "all" && statement.readonly !== false)
+			return enforceResultLimit(statement, prepared.all(...params));
+		if (statement.result === "get" && statement.readonly !== false)
+			return enforceResultLimit(statement, prepared.get(...params));
+		if (statement.result === "all" || statement.result === "get") {
+			return withBusyRetry(
+				() =>
+					enforceResultLimit(statement, statement.result === "all" ? prepared.all(...params) : prepared.get(...params)),
+				context,
+			);
+		}
 		if (statement.transactional === false) {
 			const result = prepared.run(...params);
 			if (context !== undefined) context.committed = true;
@@ -875,7 +884,7 @@ export function runDbOwnerWorker(): void {
 		}
 		const embedding = await getDbAccessor().withReadDbAsync(
 			async (db) => resolveActiveEmbeddingConfig(db, config.embedding),
-			{ siteToken: "db-owner-worker.ts:876" },
+			{ siteToken: "db-owner-worker.ts:885" },
 		);
 		const query = payload.query;
 		const queryEmbedding =
@@ -908,7 +917,7 @@ export function runDbOwnerWorker(): void {
 		const { getDbAccessor } = await import("./db-accessor");
 		return await getDbAccessor().withReadDbAsync(
 			(db) => vectorSearchWithMetadata(db, new Float32Array(payload.queryEmbedding), payload.options),
-			{ siteToken: "db-owner-worker.ts:909" },
+			{ siteToken: "db-owner-worker.ts:918" },
 		);
 	}
 

@@ -879,35 +879,35 @@
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 876,
+      "line": 885,
       "api": "withReadDbAsync",
       "source": "const embedding = await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 909,
+      "line": 918,
       "api": "withReadDbAsync",
       "source": "return await getDbAccessor().withReadDbAsync(",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 919,
+      "line": 928,
       "api": "writeFileSync",
       "source": "writeFileSync(startedMarker, \"started\\n\");",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 920,
+      "line": 929,
       "api": "existsSync",
       "source": "while (!existsSync(releaseMarker)) await new Promise((resolve) => setTimeout(resolve, 5));",
       "category": "hot-path"
     },
     {
       "path": "db-owner-worker.ts",
-      "line": 1014,
+      "line": 1023,
       "api": "writeFileSync",
       "source": "if (activeFile) writeFileSync(activeFile, `${Date.now()}\\n`);",
       "category": "hot-path"
@@ -2912,76 +2912,6 @@
       "siteToken": "db:maintenance.dead-memory-count.read"
     },
     {
-      "path": "pipeline/maintenance-worker.ts",
-      "line": 535,
-      "api": "withReadDbAsync",
-      "source": ": await accessor.withReadDbAsync(async (db) => getFreePageRatio(db), {",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/prospective-index.ts",
-      "line": 284,
-      "api": "withWriteDbAsync",
-      "source": "await accessor.withWriteDbAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/prospective-index.ts",
-      "line": 300,
-      "api": "withWriteDbAsync",
-      "source": "await accessor.withWriteDbAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/prospective-index.ts",
-      "line": 336,
-      "api": "withWriteTxAsync",
-      "source": "await accessor.withWriteTxAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/prospective-index.ts",
-      "line": 394,
-      "api": "withWriteTxAsync",
-      "source": "job = await accessor.withWriteTxAsync((db: import(\"../db-accessor\").WriteDb) => leaseJob(db, 3), {",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/prospective-index.ts",
-      "line": 412,
-      "api": "withWriteTxAsync",
-      "source": "await accessor.withWriteTxAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/prospective-index.ts",
-      "line": 436,
-      "api": "withWriteTxAsync",
-      "source": "await accessor.withWriteTxAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/prospective-index.ts",
-      "line": 459,
-      "api": "withWriteTxAsync",
-      "source": "await accessor.withWriteTxAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/prospective-index.ts",
-      "line": 485,
-      "api": "withWriteTxAsync",
-      "source": "await accessor.withWriteTxAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/prospective-index.ts",
-      "line": 590,
-      "api": "withWriteTxAsync",
-      "source": ".withWriteTxAsync(",
-      "category": "hot-path"
-    },
-    {
       "path": "pipeline/provider.ts",
       "line": 930,
       "api": "mkdirSync",
@@ -4708,34 +4638,6 @@
       "line": 42,
       "api": "readFileSync",
       "source": "const raw = readFileSync(skillPath, \"utf-8\");",
-      "category": "hot-path"
-    },
-    {
-      "path": "scheduler/worker.ts",
-      "line": 107,
-      "api": "withWriteTxAsync",
-      "source": ".withWriteTxAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "scheduler/worker.ts",
-      "line": 131,
-      "api": "withReadDbAsync",
-      "source": "const dueTasks = await db.withReadDbAsync<ReadonlyArray<DueTaskRow>>(",
-      "category": "hot-path"
-    },
-    {
-      "path": "scheduler/worker.ts",
-      "line": 202,
-      "api": "withWriteTxAsync",
-      "source": "await db.withWriteTxAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "scheduler/worker.ts",
-      "line": 291,
-      "api": "withWriteTxAsync",
-      "source": "await db.withWriteTxAsync(",
       "category": "hot-path"
     },
     {

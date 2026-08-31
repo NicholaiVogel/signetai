@@ -7,6 +7,8 @@
 
 import type { TaskHarness } from "@signet/core";
 import type { DbAccessor, ReadDb } from "../db-accessor";
+import { ownerQueryAll, ownerRunStatement, ownerTransaction } from "../db-owner-maintenance";
+import { getDbOwnerForAccessor } from "../db-owner-runtime";
 import { logger } from "../logger";
 import { recordSkillInvocation } from "../skill-invocations";
 import { computeNextRun } from "./cron";
@@ -37,27 +39,25 @@ export interface DueTaskRow {
 	readonly skill_mode: string | null;
 }
 
+const SELECT_DUE_TASKS_SQL = `SELECT t.id, COALESCE(h.agent_id, 'default') AS agent_id, t.name, t.prompt, t.cron_expression,
+        t.harness, t.working_directory,
+        t.skill_name, t.skill_mode
+ FROM scheduled_tasks t
+ LEFT JOIN task_scope_hints h ON h.task_id = t.id
+ WHERE t.enabled = 1
+   AND t.next_run_at IS NOT NULL
+   AND t.next_run_at <= ?
+   AND NOT EXISTS (
+       SELECT 1 FROM task_runs r
+       WHERE r.task_id = t.id AND r.status = 'running'
+   )
+ ORDER BY t.next_run_at ASC
+ LIMIT ?`;
+
 export function selectDueTasks(db: ReadDb, nowIso: string, limit: number): ReadonlyArray<DueTaskRow> {
 	if (limit <= 0) return [];
 
-	return db
-		.prepare(
-			`SELECT t.id, COALESCE(h.agent_id, 'default') AS agent_id, t.name, t.prompt, t.cron_expression,
-			        t.harness, t.working_directory,
-			        t.skill_name, t.skill_mode
-			 FROM scheduled_tasks t
-			 LEFT JOIN task_scope_hints h ON h.task_id = t.id
-			 WHERE t.enabled = 1
-			   AND t.next_run_at IS NOT NULL
-			   AND t.next_run_at <= ?
-			   AND NOT EXISTS (
-			       SELECT 1 FROM task_runs r
-			       WHERE r.task_id = t.id AND r.status = 'running'
-			   )
-			 ORDER BY t.next_run_at ASC
-			 LIMIT ?`,
-		)
-		.all(nowIso, limit) as ReadonlyArray<DueTaskRow>;
+	return db.prepare(SELECT_DUE_TASKS_SQL).all(nowIso, limit) as ReadonlyArray<DueTaskRow>;
 }
 
 export function resolveTaskModel(harness: DueTaskRow["harness"], _agentsDir?: string): string | undefined {
@@ -98,23 +98,27 @@ export function startSchedulerWorker(db: DbAccessor): SchedulerHandle {
 	let running = true;
 	let timer: ReturnType<typeof setTimeout> | null = null;
 	const activeProcesses = new Set<Promise<void>>();
+	const ownerPromise = getDbOwnerForAccessor(db);
 
 	// On startup, mark any leftover "running" runs as failed (daemon restart).
 	// Keep this out of the caller's synchronous startup turn: the scheduler is
 	// optional background work and must not make readiness depend on a database
 	// write.
-	void db
-		.withWriteTxAsync(
-			(wdb) =>
-				wdb
-					.prepare(
+	void ownerPromise
+		.then((owner) =>
+			ownerTransaction(
+				owner,
+				"scheduler.recover-runs",
+				[
+					ownerRunStatement(
 						`UPDATE task_runs
-					 SET status = 'failed', error = 'daemon_restart',
-					     completed_at = datetime('now')
-					 WHERE status IN ('pending', 'running')`,
-					)
-					.run(),
-			{ siteToken: "scheduler/worker.ts:107", operation: "scheduler.recover-runs" },
+						 SET status = 'failed', error = 'daemon_restart',
+						     completed_at = datetime('now')
+						 WHERE status IN ('pending', 'running')`,
+					),
+				],
+				{ estimatedWorkUnits: 1 },
+			),
 		)
 		.catch((error: unknown) => {
 			logger.warn("scheduler", "Startup run recovery failed", {
@@ -128,9 +132,12 @@ export function startSchedulerWorker(db: DbAccessor): SchedulerHandle {
 		try {
 			// Find due tasks (enabled, next_run_at <= now, not already running)
 			const nowIso = new Date().toISOString();
-			const dueTasks = await db.withReadDbAsync<ReadonlyArray<DueTaskRow>>(
-				(rdb) => selectDueTasks(rdb, nowIso, MAX_CONCURRENT - activeProcesses.size),
-				{ siteToken: "scheduler/worker.ts:131", operation: "scheduler.select-due-tasks" },
+			const dueTasks = await ownerQueryAll<DueTaskRow>(
+				await ownerPromise,
+				"scheduler.select-due-tasks",
+				SELECT_DUE_TASKS_SQL,
+				[nowIso, MAX_CONCURRENT - activeProcesses.size],
+				{ estimatedWorkUnits: 1 },
 			);
 
 			for (const task of dueTasks) {
@@ -199,24 +206,23 @@ export async function executeTask(
 		return;
 	}
 
-	await db.withWriteTxAsync(
-		(wdb) => {
-			wdb
-				.prepare(
-					`INSERT INTO task_runs (id, task_id, status, started_at)
-					 VALUES (?, ?, 'running', ?)`,
-				)
-				.run(runId, task.id, now);
-
-			wdb
-				.prepare(
-					`UPDATE scheduled_tasks
-					 SET next_run_at = ?, last_run_at = ?, updated_at = ?
-					 WHERE id = ?`,
-				)
-				.run(nextRun, now, now, task.id);
-		},
-		{ siteToken: "scheduler/worker.ts:202", operation: "scheduler.lease-task" },
+	await ownerTransaction(
+		await getDbOwnerForAccessor(db),
+		"scheduler.lease-task",
+		[
+			ownerRunStatement(
+				`INSERT INTO task_runs (id, task_id, status, started_at)
+				 VALUES (?, ?, 'running', ?)`,
+				[runId, task.id, now],
+			),
+			ownerRunStatement(
+				`UPDATE scheduled_tasks
+				 SET next_run_at = ?, last_run_at = ?, updated_at = ?
+				 WHERE id = ?`,
+				[nextRun, now, now, task.id],
+			),
+		],
+		{ estimatedWorkUnits: 2 },
 	);
 
 	deps.emitTaskStream({
@@ -288,17 +294,19 @@ export async function executeTask(
 	const completedAt = new Date().toISOString();
 	const status = result.error !== null || (result.exitCode !== null && result.exitCode !== 0) ? "failed" : "completed";
 
-	await db.withWriteTxAsync(
-		(wdb) =>
-			wdb
-				.prepare(
-					`UPDATE task_runs
-					 SET status = ?, completed_at = ?, exit_code = ?,
-					     stdout = ?, stderr = ?, error = ?
-					 WHERE id = ?`,
-				)
-				.run(status, completedAt, result.exitCode, result.stdout, result.stderr, result.error, runId),
-		{ siteToken: "scheduler/worker.ts:291", operation: "scheduler.complete-task" },
+	await ownerTransaction(
+		await getDbOwnerForAccessor(db),
+		"scheduler.complete-task",
+		[
+			ownerRunStatement(
+				`UPDATE task_runs
+				 SET status = ?, completed_at = ?, exit_code = ?,
+				     stdout = ?, stderr = ?, error = ?
+				 WHERE id = ?`,
+				[status, completedAt, result.exitCode, result.stdout, result.stderr, result.error, runId],
+			),
+		],
+		{ estimatedWorkUnits: 1 },
 	);
 
 	deps.emitTaskStream({

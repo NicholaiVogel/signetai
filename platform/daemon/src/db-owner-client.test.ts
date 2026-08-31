@@ -521,6 +521,30 @@ describe("DB owner client", () => {
 		expect(rows).toEqual([{ id: "m1" }, { id: "m2" }]);
 	});
 
+	test("commits a write query that returns its changed row", async () => {
+		const database = makeDb();
+		directory = database.directory;
+		client = createDbOwnerClient({ dbPath: database.path });
+		const update = client.submit<{ readonly id: string; readonly content: string }>(
+			{
+				kind: "query",
+				statement: {
+					sql: "UPDATE memories SET content = ? WHERE id = ? RETURNING id, content",
+					params: ["updated by owner", "m1"],
+					result: "get",
+					readonly: false,
+				},
+			},
+			{ operation: "memory.update-returning", lane: "write", deadlineMs: 1_000 },
+		);
+		expect(await update.result).toEqual({ id: "m1", content: "updated by owner" });
+		const rows = await recallThroughDbOwner<{ id: string; content: string }>(
+			client,
+			"SELECT id, content FROM memories",
+		);
+		expect(rows).toEqual([{ id: "m1", content: "updated by owner" }]);
+	});
+
 	test("waits through a busy writer instead of failing the owner transaction", async () => {
 		const database = makeDb();
 		directory = database.directory;
