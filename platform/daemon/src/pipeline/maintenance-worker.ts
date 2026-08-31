@@ -12,7 +12,8 @@
 import type { DbAccessor } from "../db-accessor";
 import type { DbOwnerMaintenance } from "../db-owner-maintenance";
 import { ownerQueryAll, ownerQueryOne } from "../db-owner-maintenance";
-import { getFreePageRatio, reclaimIncrementalVacuum } from "../db-vacuum";
+import { getFreePageRatio } from "../db-vacuum";
+import { reclaimIncrementalVacuum } from "../db-vacuum-worker";
 import type { DiagnosticsReport, ProviderTracker } from "../diagnostics";
 import { getDiagnostics } from "../diagnostics";
 import { isActiveEmbeddingConfig } from "../embedding-index-state";

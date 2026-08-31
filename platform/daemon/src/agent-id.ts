@@ -3,6 +3,7 @@
  */
 
 import type { AgentRosterReadPolicy } from "@signet/core";
+import { registerDbAccessorCloseParticipant } from "./db-accessor-lifecycle";
 import { getDbAccessorPath } from "./db-accessor";
 import { getDbOwner } from "./db-owner-runtime";
 import { ownerReadOne, ownerRun } from "./db-owner-sql";
@@ -77,6 +78,12 @@ export function invalidateAgentScopeCache(agentId?: string): void {
 	}
 	agentScopeCache.delete(normalizedAgentId(agentId));
 }
+
+registerDbAccessorCloseParticipant({
+	name: "agent-scope-cache",
+	order: 200,
+	close: () => invalidateAgentScopeCache(),
+});
 
 /**
  * Read an agent's policy through the async DB boundary.

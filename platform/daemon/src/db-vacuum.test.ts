@@ -22,9 +22,8 @@ import {
 	DbSpacePreflightError,
 	getFreePageRatio,
 	getVacuumConversionStatus,
-	reclaimIncrementalVacuum,
-	startVacuumConversionWorker,
 } from "./db-vacuum";
+import { reclaimIncrementalVacuum, startVacuumConversionWorker } from "./db-vacuum-worker";
 
 // The functions accept a narrower interface; bun:sqlite.Database satisfies it.
 type PragmaDb = Parameters<typeof convertToIncrementalVacuum>[0];
