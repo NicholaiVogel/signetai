@@ -7,7 +7,7 @@
  *   - source_section column on memories: which section the memory came from
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Helper: add a column only if it doesn't already exist. */
 function addColumnIfMissing(db: MigrationDb, table: string, column: string, definition: string): void {

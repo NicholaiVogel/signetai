@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /**
  * Auditable, scoped trace of the capability calls made during a Dreaming pass.

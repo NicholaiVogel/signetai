@@ -7,7 +7,7 @@
  *   - continuity_reasoning column on session_scores: full LLM reasoning for audit
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Helper: add a column only if it doesn't already exist. */
 function addColumnIfMissing(db: MigrationDb, table: string, column: string, definition: string): void {

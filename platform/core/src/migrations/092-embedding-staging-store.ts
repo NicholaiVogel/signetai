@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /**
  * The inactive half of a rolling embedding migration. sqlite-vec's matching

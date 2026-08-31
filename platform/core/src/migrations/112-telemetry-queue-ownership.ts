@@ -5,7 +5,7 @@
  * claim so concurrent processes cannot send the same batch simultaneously.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 function hasColumn(db: MigrationDb, table: string, column: string): boolean {
 	const rows = db.prepare(`PRAGMA table_info(${table})`).all();

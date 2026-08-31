@@ -6,7 +6,7 @@
  * rows remain available to retrieval; without immutable source artifacts,
  * they are deliberately not promoted into Dreaming evidence here.
  */
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	db.exec("DROP TABLE IF EXISTS ingestion_jobs");

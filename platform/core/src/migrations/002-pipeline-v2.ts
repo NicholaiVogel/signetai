@@ -6,7 +6,7 @@
  * entity graph.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Check whether a column already exists on a table. */
 function hasColumn(db: MigrationDb, table: string, column: string): boolean {

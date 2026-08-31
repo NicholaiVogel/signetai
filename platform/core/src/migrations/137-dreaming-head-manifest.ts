@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Pass-level audit manifest for content Dreaming MEMORY.md curation. */
 export function up(db: MigrationDb): void {

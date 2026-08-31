@@ -1,5 +1,5 @@
 import { memoriesFtsNeedsTokenizerRepair, readMemoriesFtsSql, recreateMemoriesFts } from "../fts-schema";
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /**
  * Migration 057: Repair legacy porter-tokenized memories_fts tables.

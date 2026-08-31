@@ -6,7 +6,7 @@
  * with per-agent scoping, usage tracking, and decay.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	// Check if table already exists (idempotent)

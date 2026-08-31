@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Durable post-commit publication intents for the DB-authoritative memory head. */
 export function up(db: MigrationDb): void {
