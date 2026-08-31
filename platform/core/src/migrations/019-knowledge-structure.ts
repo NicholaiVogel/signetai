@@ -8,7 +8,7 @@
  * Part of KA-1 (Schema + Types + Read/Write Helpers).
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	// -- 1a. Backfill agent_id on entities (idempotent) --

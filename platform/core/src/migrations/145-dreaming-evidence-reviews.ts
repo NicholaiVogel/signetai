@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Migration 145: durable reviewed exclusions for immutable Dreaming evidence revisions. */
 export function up(db: MigrationDb): void {

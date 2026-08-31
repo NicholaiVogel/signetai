@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 function hasTable(db: MigrationDb, name: string): boolean {
 	return (

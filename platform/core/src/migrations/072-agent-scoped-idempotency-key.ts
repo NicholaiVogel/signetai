@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 function ensureMemoriesScopeColumns(db: MigrationDb): void {
 	const cols = db.prepare("PRAGMA table_info(memories)").all() as ReadonlyArray<Record<string, unknown>>;

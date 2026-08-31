@@ -4,7 +4,7 @@
  * The table is local correlation state only. The source key is a digest of
  * the configured source identity; it is never copied into telemetry events.
  */
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	db.exec(`

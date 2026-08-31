@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Add restart-safe repair-aware retry state to quarantined Dreaming evidence. */
 export function up(db: MigrationDb): void {

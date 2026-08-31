@@ -37,7 +37,7 @@ import { DAEMON_DERIVED_MEMORY_SOURCE_TYPES } from "../memory-provenance";
  * Idempotent: re-runs are no-ops because the UPDATE is conditional on
  * `memory_kind IS NULL`.
  */
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Daemon-derived source_types that are NOT primary episodic evidence. */
 const DERIVED_SOURCE_TYPES = DAEMON_DERIVED_MEMORY_SOURCE_TYPES;

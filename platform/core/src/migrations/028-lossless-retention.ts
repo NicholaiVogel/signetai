@@ -6,7 +6,7 @@
  * memories_cold before being removed from the active table.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	db.exec(`

@@ -6,7 +6,7 @@
  * metadata from the prior session.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 export function up(db: MigrationDb): void {
 	const columns = db.prepare("PRAGMA table_info(session_checkpoints)").all() as ReadonlyArray<Record<string, unknown>>;

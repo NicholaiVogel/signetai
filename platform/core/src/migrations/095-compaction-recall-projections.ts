@@ -3,7 +3,7 @@
  * not primary episodic evidence. Their temporal-DAG summary is Dreaming's
  * canonical input, while the memory row remains available to ordinary recall.
  */
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 function hasColumn(db: MigrationDb, table: string, column: string): boolean {
 	return (db.prepare(`PRAGMA table_info(${table})`).all() as ReadonlyArray<Record<string, unknown>>).some(

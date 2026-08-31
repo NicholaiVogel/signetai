@@ -9,7 +9,7 @@
  * before those columns were added to the baseline CREATE TABLE.
  */
 
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Conditionally add a column if it doesn't exist yet. */
 function addColumnIfMissing(db: MigrationDb, table: string, column: string, definition: string): boolean {

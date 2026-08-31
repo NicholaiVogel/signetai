@@ -1,4 +1,4 @@
-import type { MigrationDb } from "./index";
+import type { MigrationDb } from "./contract";
 
 /** Adds the audited entry-level contract to the lineage revision table. */
 export function up(db: MigrationDb): void {
