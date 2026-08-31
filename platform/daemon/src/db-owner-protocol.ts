@@ -207,6 +207,12 @@ export interface DbOwnerSourceArtifactUpsert {
 	readonly conflictGuardSourceId?: boolean;
 }
 
+export interface DbOwnerSourceEvidenceEligibility {
+	readonly agentId: string;
+	readonly sourceEntryId: string;
+	readonly legacyObsidianRoot?: string;
+}
+
 export type DbOwnerRequest =
 	| { readonly kind: "initialize"; readonly agentsDir?: string }
 	| { readonly kind: "query"; readonly statement: DbOwnerStatement }
@@ -236,6 +242,7 @@ export type DbOwnerRequest =
 	| { readonly kind: "source_artifact_purge"; readonly input: DbOwnerSourceArtifactPurge }
 	| { readonly kind: "source_artifact_upsert"; readonly input: DbOwnerSourceArtifactUpsert }
 	| { readonly kind: "source_artifact_upsert_batch"; readonly input: readonly DbOwnerSourceArtifactUpsert[] }
+	| { readonly kind: "source_evidence_eligibility"; readonly input: DbOwnerSourceEvidenceEligibility }
 	| { readonly kind: "dreaming_hygiene_attention"; readonly input: DbOwnerDreamingHygieneAttention }
 	| { readonly kind: "dreaming_surprisal_attention"; readonly input: DbOwnerDreamingSurprisalAttention }
 	| { readonly kind: "dreaming_episodic_backlog"; readonly input: DbOwnerDreamingEpisodicBacklog }

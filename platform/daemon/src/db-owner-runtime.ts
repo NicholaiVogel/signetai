@@ -23,6 +23,7 @@ import type {
 	DbOwnerNativeMemoryIndex,
 	DbOwnerSourceArtifactPurge,
 	DbOwnerSourceArtifactUpsert,
+	DbOwnerSourceEvidenceEligibility,
 	DbOwnerStatement,
 	DbOwnerWorkloadClass,
 } from "./db-owner-protocol";
@@ -89,6 +90,17 @@ async function inlineRequest(accessor: DbAccessor, request: DbOwnerRequest): Pro
 			}
 			return results;
 		});
+	}
+	if (request.kind === "source_evidence_eligibility") {
+		const { sourceHasEligibleUnconsumedEvidence } = await import("./pipeline/dreaming-evidence-consumption");
+		return await invokeAccessor(accessor, "withReadDb", (db) =>
+			sourceHasEligibleUnconsumedEvidence(
+				db as never,
+				request.input.agentId,
+				request.input.sourceEntryId,
+				request.input.legacyObsidianRoot,
+			),
+		);
 	}
 	if (request.kind === "dreaming_hygiene_attention") {
 		const { getDreamingHygieneCandidatesInDb } = await import("./knowledge-graph-hygiene");
@@ -475,6 +487,18 @@ export async function dbOwnerSourceArtifactUpsert(
 		owner,
 		{ kind: "source_artifact_upsert", input },
 		{ ...options, lane: options.lane ?? "write" },
+	);
+}
+
+export async function dbOwnerSourceEvidenceEligibility(
+	input: DbOwnerSourceEvidenceEligibility,
+	options: DbOwnerSqlOptions,
+): Promise<boolean> {
+	const owner = await getDbOwner();
+	return await submitWithAdmission<boolean>(
+		owner,
+		{ kind: "source_evidence_eligibility", input },
+		{ ...options, lane: "read" },
 	);
 }
 

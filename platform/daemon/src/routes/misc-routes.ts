@@ -5,8 +5,7 @@ import type { Hono } from "hono";
 import { invalidateAgentScopeCache } from "../agent-id.js";
 import { requirePermission } from "../auth";
 import { checkPermission } from "../auth/policy";
-import { getDbAccessor, runWriteTxAsync } from "../db-accessor.js";
-import { dbOwnerQuery } from "../db-owner-runtime.js";
+import { dbOwnerBatch, dbOwnerQuery } from "../db-owner-runtime.js";
 import { type LogCategory, type LogEntry, logger } from "../logger.js";
 import { loadPipelineConfig } from "../memory-config.js";
 import {
@@ -18,7 +17,7 @@ import {
 	validateCron,
 } from "../scheduler";
 import { emitTaskStream, getTaskStreamSnapshot, subscribeTaskStream } from "../scheduler/task-stream.js";
-import { readScopedTask, readTaskAgentId } from "../task-scope.js";
+import { readTaskAgentId } from "../task-scope.js";
 import {
 	MAX_UPDATE_INTERVAL_SECONDS,
 	MIN_UPDATE_INTERVAL_SECONDS,
@@ -281,19 +280,23 @@ export function registerMiscRoutes(app: Hono): void {
 		const readPolicy = resolved.readPolicy;
 		const group = resolved.policyGroup;
 		const now = new Date().toISOString();
-		await runWriteTxAsync(getDbAccessor(), (db) => {
-			db.prepare(
-				`INSERT INTO agents (id, name, read_policy, policy_group, created_at, updated_at)
+		await dbOwnerQuery(
+			{
+				sql: `INSERT INTO agents (id, name, read_policy, policy_group, created_at, updated_at)
 				 VALUES (?, ?, ?, ?, ?, ?)`,
-			).run(name, name, readPolicy, group, now, now);
-		});
+				params: [name, name, readPolicy, group, now, now],
+				result: "run",
+			},
+			{ operation: "agents.create", lane: "write", deadlineMs: 5_000 },
+		);
 		invalidateAgentScopeCache(name);
-		const created = await getDbAccessor().withReadDbAsync(
-			async (db) =>
-				db
-					.prepare("SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents WHERE id = ?")
-					.get(name) as unknown as AgentRow,
-			{ siteToken: "routes/misc-routes.ts:291" },
+		const created = await dbOwnerQuery<AgentRow | undefined>(
+			{
+				sql: "SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents WHERE id = ?",
+				params: [name],
+				result: "get",
+			},
+			{ operation: "agents.get_created", lane: "read", deadlineMs: 2_000 },
 		);
 		return c.json(created, 201);
 	});
@@ -303,12 +306,13 @@ export function registerMiscRoutes(app: Hono): void {
 		if (name === "default") return c.json({ error: "Cannot modify the default agent" }, 400);
 		const body = toRecord(await c.req.json().catch(() => null));
 		if (!body) return c.json({ error: "Invalid JSON body" }, 400);
-		const existing = await getDbAccessor().withReadDbAsync(
-			async (db) =>
-				db.prepare("SELECT id, read_policy, policy_group FROM agents WHERE name = ?").get(name) as
-					| { id: string; read_policy: string; policy_group: string | null }
-					| undefined,
-			{ siteToken: "routes/misc-routes.ts:306" },
+		const existing = await dbOwnerQuery<{ id: string; read_policy: string; policy_group: string | null } | undefined>(
+			{
+				sql: "SELECT id, read_policy, policy_group FROM agents WHERE name = ?",
+				params: [name],
+				result: "get",
+			},
+			{ operation: "agents.get_for_update", lane: "read", deadlineMs: 2_000 },
 		);
 		if (!existing) return c.json({ error: "Agent not found" }, 404);
 		let resolved: ReturnType<typeof resolveAgentMemoryPolicy>;
@@ -331,18 +335,22 @@ export function registerMiscRoutes(app: Hono): void {
 			return c.json({ error: error instanceof Error ? error.message : "Invalid memory policy" }, 400);
 		}
 		const now = new Date().toISOString();
-		await runWriteTxAsync(getDbAccessor(), (db) =>
-			db
-				.prepare("UPDATE agents SET read_policy = ?, policy_group = ?, updated_at = ? WHERE id = ?")
-				.run(resolved.readPolicy, resolved.policyGroup, now, existing.id),
+		await dbOwnerQuery(
+			{
+				sql: "UPDATE agents SET read_policy = ?, policy_group = ?, updated_at = ? WHERE id = ?",
+				params: [resolved.readPolicy, resolved.policyGroup, now, existing.id],
+				result: "run",
+			},
+			{ operation: "agents.update", lane: "write", deadlineMs: 5_000 },
 		);
 		invalidateAgentScopeCache(existing.id);
-		const updated = await getDbAccessor().withReadDbAsync(
-			async (db) =>
-				db
-					.prepare("SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents WHERE id = ?")
-					.get(existing.id) as unknown as AgentRow,
-			{ siteToken: "routes/misc-routes.ts:340" },
+		const updated = await dbOwnerQuery<AgentRow | undefined>(
+			{
+				sql: "SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents WHERE id = ?",
+				params: [existing.id],
+				result: "get",
+			},
+			{ operation: "agents.get_updated", lane: "read", deadlineMs: 2_000 },
 		);
 		return c.json({ ...updated, effective_scope: resolved.effectiveScope });
 	});
@@ -351,19 +359,24 @@ export function registerMiscRoutes(app: Hono): void {
 		const name = c.req.param("name");
 		if (name === "default") return c.json({ error: "Cannot remove the default agent" }, 400);
 		const purge = c.req.query("purge") === "true";
-		const agent = await getDbAccessor().withReadDbAsync(
-			async (db) => db.prepare("SELECT id FROM agents WHERE name = ?").get(name) as { id: string } | undefined,
-			{ siteToken: "routes/misc-routes.ts:354" },
+		const agent = await dbOwnerQuery<{ id: string } | undefined>(
+			{ sql: "SELECT id FROM agents WHERE name = ?", params: [name], result: "get" },
+			{ operation: "agents.get_for_delete", lane: "read", deadlineMs: 2_000 },
 		);
 		if (!agent) return c.json({ error: "Agent not found" }, 404);
-		await runWriteTxAsync(getDbAccessor(), (db) => {
-			if (purge) {
-				db.prepare("DELETE FROM memories WHERE agent_id = ?").run(name);
-			} else {
-				db.prepare("UPDATE memories SET visibility = 'archived' WHERE agent_id = ?").run(name);
-			}
-			db.prepare("DELETE FROM agents WHERE id = ?").run(agent.id);
-		});
+		await dbOwnerBatch(
+			[
+				{
+					sql: purge
+						? "DELETE FROM memories WHERE agent_id = ?"
+						: "UPDATE memories SET visibility = 'archived' WHERE agent_id = ?",
+					params: [name],
+					result: "run",
+				},
+				{ sql: "DELETE FROM agents WHERE id = ?", params: [agent.id], result: "run" },
+			],
+			{ operation: "agents.delete", lane: "write", deadlineMs: 10_000 },
+		);
 		invalidateAgentScopeCache(agent.id);
 		return c.json({ success: true, purged: purge });
 	});
@@ -515,9 +528,9 @@ export function registerMiscRoutes(app: Hono): void {
 	app.get("/api/tasks/:id/stream", async (c) => {
 		const taskId = c.req.param("id");
 
-		const taskExists = await getDbAccessor().withReadDbAsync(
-			async (db) => db.prepare("SELECT 1 FROM scheduled_tasks WHERE id = ?").get(taskId),
-			{ siteToken: "routes/misc-routes.ts:518" },
+		const taskExists = await dbOwnerQuery(
+			{ sql: "SELECT 1 FROM scheduled_tasks WHERE id = ?", params: [taskId], result: "get" },
+			{ operation: "tasks.stream_exists", lane: "read", deadlineMs: 2_000 },
 		);
 
 		if (!taskExists) {
@@ -612,11 +625,9 @@ export function registerMiscRoutes(app: Hono): void {
 	});
 
 	app.get("/api/tasks", async (c) => {
-		const tasks = await getDbAccessor().withReadDbAsync(
-			async (db) =>
-				db
-					.prepare(
-						`SELECT t.*,
+		const tasks = await dbOwnerQuery<unknown[]>(
+			{
+				sql: `SELECT t.*,
 					        r.status AS last_run_status,
 					        r.exit_code AS last_run_exit_code
 					 FROM scheduled_tasks t
@@ -626,9 +637,9 @@ export function registerMiscRoutes(app: Hono): void {
 					     ORDER BY started_at DESC LIMIT 1
 					 )
 					 ORDER BY t.created_at DESC`,
-					)
-					.all(),
-			{ siteToken: "routes/misc-routes.ts:615" },
+				result: "all",
+			},
+			{ operation: "tasks.list", lane: "read", deadlineMs: 5_000 },
 		);
 
 		return c.json({ tasks, presets: CRON_PRESETS });
@@ -675,31 +686,38 @@ export function registerMiscRoutes(app: Hono): void {
 		const now = new Date().toISOString();
 		const nextRunAt = computeNextRun(cronExpression);
 
-		await runWriteTxAsync(getDbAccessor(), (db) => {
-			db.prepare(
-				`INSERT INTO scheduled_tasks
+		await dbOwnerBatch(
+			[
+				{
+					sql: `INSERT INTO scheduled_tasks
 				 (id, name, prompt, cron_expression, harness, working_directory,
 				  enabled, next_run_at, skill_name, skill_mode, created_at, updated_at)
 				 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
-			).run(
-				id,
-				name,
-				prompt,
-				cronExpression,
-				harness,
-				workingDirectory || null,
-				nextRunAt,
-				skillName || null,
-				skillMode || null,
-				now,
-				now,
-			);
-			db.prepare(
-				`INSERT INTO task_scope_hints (task_id, agent_id, created_at, updated_at)
+					params: [
+						id,
+						name,
+						prompt,
+						cronExpression,
+						harness,
+						workingDirectory || null,
+						nextRunAt,
+						skillName || null,
+						skillMode || null,
+						now,
+						now,
+					],
+					result: "run",
+				},
+				{
+					sql: `INSERT INTO task_scope_hints (task_id, agent_id, created_at, updated_at)
 				 VALUES (?, ?, ?, ?)
 				 ON CONFLICT(task_id) DO UPDATE SET agent_id = excluded.agent_id, updated_at = excluded.updated_at`,
-			).run(id, scoped.agentId, now, now);
-		});
+					params: [id, scoped.agentId, now, now],
+					result: "run",
+				},
+			],
+			{ operation: "tasks.create", lane: "write", deadlineMs: 10_000 },
+		);
 
 		logger.info("scheduler", `Task created: ${name}`, { taskId: id });
 		return c.json({ id, nextRunAt }, 201);
@@ -708,26 +726,25 @@ export function registerMiscRoutes(app: Hono): void {
 	app.get("/api/tasks/:id", async (c) => {
 		const taskId = c.req.param("id");
 
-		const task = await getDbAccessor().withReadDbAsync(
-			async (db) => db.prepare("SELECT * FROM scheduled_tasks WHERE id = ?").get(taskId),
-			{ siteToken: "routes/misc-routes.ts:711" },
+		const task = await dbOwnerQuery<Record<string, unknown> | undefined>(
+			{ sql: "SELECT * FROM scheduled_tasks WHERE id = ?", params: [taskId], result: "get" },
+			{ operation: "tasks.get", lane: "read", deadlineMs: 2_000 },
 		);
 
 		if (!task) {
 			return c.json({ error: "Task not found" }, 404);
 		}
 
-		const runs = await getDbAccessor().withReadDbAsync(
-			async (db) =>
-				db
-					.prepare(
-						`SELECT * FROM task_runs
+		const runs = await dbOwnerQuery<unknown[]>(
+			{
+				sql: `SELECT * FROM task_runs
 					 WHERE task_id = ?
 					 ORDER BY started_at DESC
 					 LIMIT 20`,
-					)
-					.all(taskId),
-			{ siteToken: "routes/misc-routes.ts:720" },
+				params: [taskId],
+				result: "all",
+			},
+			{ operation: "tasks.get_runs", lane: "read", deadlineMs: 5_000 },
 		);
 
 		return c.json({ task, runs });
@@ -737,10 +754,10 @@ export function registerMiscRoutes(app: Hono): void {
 		const taskId = c.req.param("id");
 		const body = await c.req.json();
 
-		const existing = (await getDbAccessor().withReadDbAsync(
-			async (db) => db.prepare("SELECT * FROM scheduled_tasks WHERE id = ?").get(taskId),
-			{ siteToken: "routes/misc-routes.ts:740" },
-		)) as Record<string, unknown> | undefined;
+		const existing = await dbOwnerQuery<Record<string, unknown> | undefined>(
+			{ sql: "SELECT * FROM scheduled_tasks WHERE id = ?", params: [taskId], result: "get" },
+			{ operation: "tasks.get_for_update", lane: "read", deadlineMs: 2_000 },
+		);
 
 		if (!existing) {
 			return c.json({ error: "Task not found" }, 404);
@@ -771,27 +788,30 @@ export function registerMiscRoutes(app: Hono): void {
 			return c.json({ error: "skillMode must be 'inject' or 'slash' when skillName is set" }, 400);
 		}
 
-		await runWriteTxAsync(getDbAccessor(), (db) => {
-			db.prepare(
-				`UPDATE scheduled_tasks SET
+		await dbOwnerQuery(
+			{
+				sql: `UPDATE scheduled_tasks SET
 				 name = ?, prompt = ?, cron_expression = ?, harness = ?,
 				 working_directory = ?, enabled = ?, next_run_at = ?,
 				 skill_name = ?, skill_mode = ?, updated_at = ?
 				 WHERE id = ?`,
-			).run(
-				body.name ?? existing.name,
-				body.prompt ?? existing.prompt,
-				cronExpr,
-				body.harness ?? existing.harness,
-				body.workingDirectory !== undefined ? body.workingDirectory : existing.working_directory,
-				enabled,
-				nextRunAt,
-				skillName,
-				skillMode,
-				now,
-				taskId,
-			);
-		});
+				params: [
+					body.name ?? existing.name,
+					body.prompt ?? existing.prompt,
+					cronExpr,
+					body.harness ?? existing.harness,
+					body.workingDirectory !== undefined ? body.workingDirectory : existing.working_directory,
+					enabled,
+					nextRunAt,
+					skillName,
+					skillMode,
+					now,
+					taskId,
+				],
+				result: "run",
+			},
+			{ operation: "tasks.update", lane: "write", deadlineMs: 5_000 },
+		);
 
 		return c.json({ success: true });
 	});
@@ -799,10 +819,10 @@ export function registerMiscRoutes(app: Hono): void {
 	app.delete("/api/tasks/:id", async (c) => {
 		const taskId = c.req.param("id");
 
-		await runWriteTxAsync(getDbAccessor(), (db) => {
-			const info = db.prepare("DELETE FROM scheduled_tasks WHERE id = ?").run(taskId);
-			return info;
-		});
+		await dbOwnerQuery(
+			{ sql: "DELETE FROM scheduled_tasks WHERE id = ?", params: [taskId], result: "run" },
+			{ operation: "tasks.delete", lane: "write", deadlineMs: 5_000 },
+		);
 
 		return c.json({ success: true });
 	});
@@ -812,18 +832,28 @@ export function registerMiscRoutes(app: Hono): void {
 		const scoped = resolveScopedAgentId(c, c.req.query("agent_id"));
 		if (scoped.error) return c.json({ error: scoped.error }, 403);
 
-		const task = await getDbAccessor().withReadDbAsync(
-			async (db) => readScopedTask(db, taskId, scoped.agentId, shouldEnforceAuthScope(c)),
-			{ siteToken: "routes/misc-routes.ts:815" },
+		const task = await dbOwnerQuery<Record<string, unknown> | undefined>(
+			{
+				sql: shouldEnforceAuthScope(c)
+					? "SELECT t.*, COALESCE(h.agent_id, 'default') AS scoped_agent_id FROM scheduled_tasks t LEFT JOIN task_scope_hints h ON h.task_id = t.id WHERE t.id = ? AND COALESCE(h.agent_id, 'default') = ?"
+					: "SELECT t.*, COALESCE(h.agent_id, 'default') AS scoped_agent_id FROM scheduled_tasks t LEFT JOIN task_scope_hints h ON h.task_id = t.id WHERE t.id = ?",
+				params: shouldEnforceAuthScope(c) ? [taskId, scoped.agentId] : [taskId],
+				result: "get",
+			},
+			{ operation: "tasks.get_scoped", lane: "read", deadlineMs: 2_000 },
 		);
 
 		if (!task) {
 			return c.json({ error: "Task not found" }, 404);
 		}
 
-		const running = await getDbAccessor().withReadDbAsync(
-			async (db) => db.prepare("SELECT 1 FROM task_runs WHERE task_id = ? AND status = 'running' LIMIT 1").get(taskId),
-			{ siteToken: "routes/misc-routes.ts:824" },
+		const running = await dbOwnerQuery(
+			{
+				sql: "SELECT 1 FROM task_runs WHERE task_id = ? AND status = 'running' LIMIT 1",
+				params: [taskId],
+				result: "get",
+			},
+			{ operation: "tasks.running", lane: "read", deadlineMs: 2_000 },
 		);
 
 		if (running) {
@@ -833,14 +863,22 @@ export function registerMiscRoutes(app: Hono): void {
 		const runId = crypto.randomUUID();
 		const now = new Date().toISOString();
 
-		await runWriteTxAsync(getDbAccessor(), (db) => {
-			db.prepare(
-				`INSERT INTO task_runs (id, task_id, status, started_at)
+		await dbOwnerBatch(
+			[
+				{
+					sql: `INSERT INTO task_runs (id, task_id, status, started_at)
 				 VALUES (?, ?, 'running', ?)`,
-			).run(runId, taskId, now);
-
-			db.prepare("UPDATE scheduled_tasks SET last_run_at = ?, updated_at = ? WHERE id = ?").run(now, now, taskId);
-		});
+					params: [runId, taskId, now],
+					result: "run",
+				},
+				{
+					sql: "UPDATE scheduled_tasks SET last_run_at = ?, updated_at = ? WHERE id = ?",
+					params: [now, now, taskId],
+					result: "run",
+				},
+			],
+			{ operation: "tasks.start_run", lane: "write", deadlineMs: 10_000 },
+		);
 
 		emitTaskStream({
 			type: "run-started",
@@ -902,14 +940,17 @@ export function registerMiscRoutes(app: Hono): void {
 					const status =
 						result.error !== null || (result.exitCode !== null && result.exitCode !== 0) ? "failed" : "completed";
 
-					await runWriteTxAsync(getDbAccessor(), (db) => {
-						db.prepare(
-							`UPDATE task_runs
+					await dbOwnerQuery(
+						{
+							sql: `UPDATE task_runs
 						 SET status = ?, completed_at = ?, exit_code = ?,
 						     stdout = ?, stderr = ?, error = ?
 						 WHERE id = ?`,
-						).run(status, completedAt, result.exitCode, result.stdout, result.stderr, result.error, runId);
-					});
+							params: [status, completedAt, result.exitCode, result.stdout, result.stderr, result.error, runId],
+							result: "run",
+						},
+						{ operation: "tasks.complete_run", lane: "write", deadlineMs: 10_000 },
+					);
 
 					emitTaskStream({
 						type: "run-completed",
@@ -945,28 +986,23 @@ export function registerMiscRoutes(app: Hono): void {
 		const limit = Number(c.req.query("limit") ?? 20);
 		const offset = Number(c.req.query("offset") ?? 0);
 
-		const runs = await getDbAccessor().withReadDbAsync(
-			async (db) =>
-				db
-					.prepare(
-						`SELECT * FROM task_runs
+		const runs = await dbOwnerQuery<unknown[]>(
+			{
+				sql: `SELECT * FROM task_runs
 					 WHERE task_id = ?
 					 ORDER BY started_at DESC
 					 LIMIT ? OFFSET ?`,
-					)
-					.all(taskId, limit, offset),
-			{ siteToken: "routes/misc-routes.ts:948" },
+				params: [taskId, limit, offset],
+				result: "all",
+			},
+			{ operation: "tasks.list_runs", lane: "read", deadlineMs: 5_000 },
 		);
 
-		const total = await getDbAccessor().withReadDbAsync(
-			async (db) => {
-				const row = db.prepare("SELECT COUNT(*) as count FROM task_runs WHERE task_id = ?").get(taskId) as {
-					count: number;
-				};
-				return row.count;
-			},
-			{ siteToken: "routes/misc-routes.ts:961" },
+		const totalRow = await dbOwnerQuery<{ count: number } | undefined>(
+			{ sql: "SELECT COUNT(*) as count FROM task_runs WHERE task_id = ?", params: [taskId], result: "get" },
+			{ operation: "tasks.count_runs", lane: "read", deadlineMs: 2_000 },
 		);
+		const total = totalRow?.count ?? 0;
 
 		return c.json({ runs, total, hasMore: offset + limit < total });
 	});
