@@ -10,6 +10,9 @@ import type { AuthInteraction, OAuthCredentials } from "@earendil-works/pi-ai";
 import type { OAuthLoginCallbacks } from "@earendil-works/pi-ai/oauth";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { oauthSecretName, providerKeySecretName } from "./setup-inference-connect.js";
+import { registerSignetOAuthFlows } from "../../../../platform/daemon/src/inference-oauth-runtime.js";
+
+registerSignetOAuthFlows();
 
 export interface ConnectHttp {
 	/** JSON POST to the daemon secrets store; returns { ok, data?, error? }. */
