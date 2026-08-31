@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from "bun:test";
 import { runOAuthLogin, storeApiKey, storeOAuthCredentials } from "./setup-connect";
-import type { ConnectHttp, ConnectUi } from "./setup-connect";
+import type { ConnectHttp, ConnectUi, OAuthLoginFn } from "./setup-connect";
+import type { OAuthLoginCallbacks } from "@earendil-works/pi-ai/oauth";
 
 function mockHttp(overrides: Partial<ConnectHttp> = {}): ConnectHttp {
 	return {
@@ -52,9 +53,9 @@ describe("storeOAuthCredentials", () => {
 describe("runOAuthLogin", () => {
 	// A fake pi-ai login() that drives the UI callbacks, then returns creds.
 	const fakeLogin =
-		(events: Array<(cb: Record<string, (...a: unknown[]) => unknown>) => void>) =>
-		async (callbacks: Record<string, (...a: unknown[]) => unknown>) => {
-			for (const e of events) e(callbacks);
+		(events: Array<(cb: OAuthLoginCallbacks) => void | Promise<void>>): OAuthLoginFn =>
+		async (callbacks) => {
+			for (const e of events) await e(callbacks);
 			return { refresh: "r", access: "a", expires: 0 } as never;
 		};
 
@@ -78,7 +79,7 @@ describe("runOAuthLogin", () => {
 	it("answers a prompt via the UI and forwards progress", async () => {
 		const progress = mock(() => {});
 		const login = fakeLogin([
-			(cb) => cb.onProgress("exchanging"),
+			(cb) => cb.onProgress?.("exchanging"),
 			async (cb) => {
 				const v = await cb.onPrompt({ message: "Paste code" });
 				expect(v).toBe("the-code");
@@ -90,8 +91,20 @@ describe("runOAuthLogin", () => {
 		expect(progress).toHaveBeenCalledWith("exchanging");
 	});
 
+	it("passes a real abort signal to the provider and aborts it on completion", async () => {
+		let signal: AbortSignal | undefined;
+		const login: OAuthLoginFn = async (callbacks) => {
+			signal = callbacks.signal;
+			expect(signal).toBeDefined();
+			expect(typeof signal?.addEventListener).toBe("function");
+			throw new Error("login stopped");
+		};
+		await expect(runOAuthLogin(mockUi(), "anthropic", { login })).rejects.toThrow("login stopped");
+		expect(signal?.aborted).toBe(true);
+	});
+
 	it("throws on login failure (the wizard surfaces the error)", async () => {
-		const login = async () => {
+		const login: OAuthLoginFn = async () => {
 			throw new Error("bad token");
 		};
 		await expect(runOAuthLogin(mockUi(), "anthropic", { login })).rejects.toThrow("bad token");

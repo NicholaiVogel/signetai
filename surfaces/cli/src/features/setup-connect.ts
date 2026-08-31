@@ -6,7 +6,7 @@
  * because a browser can't run node:http; the CLI calls the SDK directly during
  * the wizard, before listing models.
  */
-import type { AuthInteraction, OAuthCredentials } from "@earendil-works/pi-ai";
+import type { OAuthCredentials, ProviderAuthInteraction } from "@earendil-works/pi-ai";
 import type { OAuthLoginCallbacks } from "@earendil-works/pi-ai/oauth";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { oauthSecretName, providerKeySecretName } from "./setup-inference-connect.js";
@@ -49,8 +49,9 @@ function defaultLogin(providerId: string): OAuthLoginFn {
 		if (!oauth) throw new Error(`Unknown OAuth provider: ${providerId}`);
 		// pi-ai 0.83+ drives login through AuthInteraction (notify/prompt) instead
 		// of the legacy callback surface; the compat callbacks are mapped here.
-		const interaction: AuthInteraction = {
-			signal: callbacks.signal,
+		const signal = callbacks.signal ?? new AbortController().signal;
+		const interaction: ProviderAuthInteraction = {
+			signal,
 			notify: (event) => {
 				if (event.type === "auth_url") callbacks.onAuth({ url: event.url, instructions: event.instructions });
 				else if (event.type === "device_code")
@@ -90,7 +91,9 @@ export async function runOAuthLogin(
 	deps?: { readonly login: OAuthLoginFn },
 ): Promise<OAuthCredentials> {
 	const login = deps?.login ?? defaultLogin(providerId);
+	const loginController = new AbortController();
 	const callbacks: OAuthLoginCallbacks = {
+		signal: loginController.signal,
 		onAuth: (info) => ui.openUrl(info.url),
 		onDeviceCode: (info) => ui.showDeviceCode(info.userCode, info.verificationUri),
 		onPrompt: async (prompt) => ui.promptText(prompt.message),
@@ -104,6 +107,7 @@ export async function runOAuthLogin(
 	};
 	return new Promise<OAuthCredentials>((resolve, reject) => {
 		const cleanup = () => {
+			loginController.abort();
 			clearInterval(keepalive);
 			process.off("unhandledRejection", onUnhandled);
 		};
