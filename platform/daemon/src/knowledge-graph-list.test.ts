@@ -452,8 +452,9 @@ describe("listKnowledgeEntities (issue #515)", () => {
 			// Regression (#1759 re-verdict): the ownerMaintenance branch must record the
 			// parent-visible backlog mirror before returning, or the constellation cache
 			// reads zero until an inline path happens to run.
-			const { getDreamingEpisodicTokenBacklogCached, recordDreamingEpisodicTokenBacklog } =
-				await import("./pipeline/dreaming-token-cache");
+			const { getDreamingEpisodicTokenBacklogCached, recordDreamingEpisodicTokenBacklog } = await import(
+				"./pipeline/dreaming-token-cache"
+			);
 			recordDreamingEpisodicTokenBacklog("default", 0); // prime stale value
 			const maintenance = {
 				dreamingEpisodicBacklog: async () => 123,
