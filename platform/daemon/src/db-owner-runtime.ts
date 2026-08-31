@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { vectorSearchWithMetadata } from "@signet/core";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { getDbAccessorPath, hasDbAccessor, resolveSqliteAgentsDir } from "./db-accessor";
+import { registerDbAccessorCloseParticipant } from "./db-accessor-lifecycle";
 import {
 	createDbOwnerClient,
 	DbOwnerAdmissionError,
@@ -615,3 +616,9 @@ export async function closeDbOwner(dbPath?: string): Promise<void> {
 	await Promise.all(entries.map((entry) => entry.owner.close()));
 	isolatedTestAccessor = null;
 }
+
+registerDbAccessorCloseParticipant({
+	name: "db-owner",
+	order: 100,
+	close: closeDbOwner,
+});

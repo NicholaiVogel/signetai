@@ -12,7 +12,7 @@
 import type { DbAccessor } from "../db-accessor";
 import type { DbOwnerMaintenance } from "../db-owner-maintenance";
 import { ownerQueryAll, ownerQueryOne } from "../db-owner-maintenance";
-import { getFreePageRatio, reclaimIncrementalVacuum } from "../db-vacuum";
+import { reclaimIncrementalVacuum } from "../db-vacuum-worker";
 import type { DiagnosticsReport, ProviderTracker } from "../diagnostics";
 import { getDiagnostics } from "../diagnostics";
 import { isActiveEmbeddingConfig } from "../embedding-index-state";
@@ -516,27 +516,20 @@ export function startMaintenanceWorker(
 		// Only run when the free-page ratio is high and the system is not under pressure.
 		try {
 			const owner = deps.ownerMaintenance;
-			const ratio = owner
-				? await (async (): Promise<number> => {
-						const freelist = await ownerQueryOne<{ freelist_count: number }>(
-							owner.owner,
-							"pipeline/maintenance-worker.freelist-count",
-							"PRAGMA freelist_count",
-						);
-						const pages = await ownerQueryOne<{ page_count: number }>(
-							owner.owner,
-							"pipeline/maintenance-worker.page-count",
-							"PRAGMA page_count",
-						);
-						const free = freelist?.freelist_count ?? 0;
-						const total = pages?.page_count ?? 0;
-						return total > 0 ? free / total : 0;
-					})()
-				: await accessor.withReadDbAsync(async (db) => getFreePageRatio(db), {
-						siteToken: "pipeline/maintenance-worker.ts:535",
-					});
-			if (ratio >= 0.2) {
-				await reclaimIncrementalVacuum(accessor, { owner: deps.ownerMaintenance?.owner });
+			if (owner) {
+				const freelist = await ownerQueryOne<{ freelist_count: number }>(
+					owner.owner,
+					"pipeline/maintenance-worker.freelist-count",
+					"PRAGMA freelist_count",
+				);
+				const pages = await ownerQueryOne<{ page_count: number }>(
+					owner.owner,
+					"pipeline/maintenance-worker.page-count",
+					"PRAGMA page_count",
+				);
+				const free = freelist?.freelist_count ?? 0;
+				const total = pages?.page_count ?? 0;
+				if (total > 0 && free / total >= 0.2) await reclaimIncrementalVacuum(owner.owner);
 			}
 		} catch {
 			// Non-fatal — vacuum should never interrupt the maintenance cycle

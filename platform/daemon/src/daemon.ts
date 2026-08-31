@@ -80,7 +80,7 @@ import {
 	registerDbOwnerHealthProvider,
 	setDatabaseIntegrityWritesBlocked,
 } from "./db-accessor";
-import { type VacuumConversionHandle, startVacuumConversionWorker } from "./db-vacuum";
+import { type VacuumConversionHandle, startVacuumConversionWorker } from "./db-vacuum-worker";
 import { createDbOwnerClient, type DbOwnerClient, type DbOwnerClientOptions } from "./db-owner-client";
 import {
 	type DbOwnerMaintenance,
