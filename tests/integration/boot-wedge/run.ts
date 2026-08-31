@@ -8,6 +8,7 @@
  *   bun tests/integration/boot-wedge/run.ts [--out DIR]
  */
 
+import { Database } from "bun:sqlite";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -385,6 +386,9 @@ async function run(): Promise<BootWedgeReport> {
 	const workspace = mkdtempSync(join(tmpdir(), "signet-boot-wedge-"));
 	const agentsDir = join(workspace, "agents");
 	mkdirSync(join(agentsDir, ".daemon", "logs"), { recursive: true });
+	mkdirSync(join(agentsDir, "memory"), { recursive: true });
+	const database = new Database(join(agentsDir, "memory", "memories.db"));
+	database.close();
 	writeConfig(agentsDir);
 
 	let child: ChildProcess | null = null;
