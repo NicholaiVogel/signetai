@@ -20,7 +20,13 @@ import type {
 	LlmUsage,
 } from "@signet/core";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
-import type { DbOwnerDreamingPassFinalize } from "../db-owner-protocol";
+import type {
+	DbOwnerDreamingEpisodicBacklog,
+	DbOwnerDreamingEvidenceSource,
+	DbOwnerDreamingHygieneAttention,
+	DbOwnerDreamingPassFinalize,
+	DbOwnerDreamingSurprisalAttention,
+} from "../db-owner-protocol";
 import {
 	ownerDreamingHygieneAttention,
 	ownerDreamingSurprisalAttention,
@@ -33,7 +39,7 @@ import {
 	type DbOwnerMaintenance,
 } from "../db-owner-maintenance";
 import { DB_OWNER_MAX_WORK_UNITS } from "../db-owner-protocol";
-import { getDbOwnerForAccessor } from "../db-owner-runtime";
+import { getDbOwnerForAccessor, runDbOwnerDomainOperation } from "../db-owner-runtime";
 import {
 	EPISODIC_CAPTURED_AT_FLOOR,
 	type EpisodicCursor,
@@ -43,7 +49,7 @@ import {
 	searchEpisodicSources,
 	timestampMillis,
 } from "../episodic-sources";
-import type { GraphHygieneCaps } from "../knowledge-graph-hygiene";
+import { type GraphHygieneCaps, getDreamingHygieneCandidatesInDb } from "../knowledge-graph-hygiene";
 import { logger } from "../logger";
 import { upsertMemoryContentSafetyInTx } from "../memory-content-safety";
 import type { GraphWriteCaps } from "../ontology-proposals";
@@ -52,7 +58,7 @@ import { normalizePipelineCause, recordPipelineOperation } from "../pipeline-ope
 import { getActiveTelemetry } from "../telemetry";
 import { upsertThreadHead } from "../thread-heads";
 import { createDreamingAgentTools } from "./dreaming-agent-tools";
-import { getDreamingAttentionWorkloadDiagnostics } from "./dreaming-attention";
+import { enqueueDreamingAttentionInTx, getDreamingAttentionWorkloadDiagnostics } from "./dreaming-attention";
 import type { DreamingToolCallTrace } from "./dreaming-capabilities";
 import { renderDreamingEvidence } from "./dreaming-evidence";
 import { deliveredOffsetForSource, recordDreamingEvidenceConsumptionInTx } from "./dreaming-evidence-consumption";
@@ -66,7 +72,11 @@ import {
 	recordRejectedDreamingEvidenceInTx,
 } from "./dreaming-evidence-retry";
 import type { ApplyDreamingOperationsResult, DreamingOperationRequest } from "./dreaming-operations";
-import type { DreamingSurprisalSelection } from "./dreaming-surprisal";
+import {
+	DREAMING_SURPRISAL_SELECTOR_VERSION,
+	type DreamingSurprisalSelection,
+	selectDreamingSurprisalInDb,
+} from "./dreaming-surprisal";
 import { DreamingBacklogTokenCache, type DreamingBacklogTokenEntry } from "./dreaming-token-cache";
 import {
 	dreamingLiveEvents,
@@ -104,12 +114,25 @@ export async function enqueueDreamingHygieneAttention(
 	caps?: GraphHygieneCaps,
 	ownerMaintenance?: DbOwnerMaintenance,
 ): Promise<number> {
-	const owner = ownerMaintenance?.owner ?? (await getDbOwnerForAccessor(accessor));
-	return await ownerDreamingHygieneAttention(
-		owner,
-		{ agentId, limit, caps },
-		{ deadlineMs: 60_000, estimatedWorkUnits: 100 },
-	);
+	const input: DbOwnerDreamingHygieneAttention = { agentId, limit, caps };
+	const options = { deadlineMs: 60_000, estimatedWorkUnits: 100 };
+	if (ownerMaintenance) return await ownerMaintenance.dreamingHygieneAttention(input, options);
+	return await runDbOwnerDomainOperation(accessor, {
+		runWithOwner: async (owner) => await ownerDreamingHygieneAttention(owner, input, options),
+		runInline: ({ write }) =>
+			write((db) => {
+				const candidates = getDreamingHygieneCandidatesInDb(db, input);
+				for (const candidate of candidates) {
+					enqueueDreamingAttentionInTx(db, {
+						...candidate,
+						agentId: input.agentId,
+						kind: "hygiene",
+						reopen: false,
+					});
+				}
+				return candidates.length;
+			}),
+	});
 }
 
 /**
@@ -127,12 +150,37 @@ export async function enqueueDreamingSurprisalAttention(
 ): Promise<DreamingSurprisalSelection | null> {
 	const surprisal = cfg.surprisal;
 	if (!surprisal?.enabled) return null;
-	const owner = ownerMaintenance?.owner ?? (await getDbOwnerForAccessor(accessor));
-	const selection = await ownerDreamingSurprisalAttention(
-		owner,
-		{ agentId, config: surprisal },
-		{ deadlineMs: 60_000, estimatedWorkUnits: 500 },
-	);
+	const input: DbOwnerDreamingSurprisalAttention = { agentId, config: surprisal };
+	const options = { deadlineMs: 60_000, estimatedWorkUnits: 500 };
+	const selection = ownerMaintenance
+		? await ownerMaintenance.dreamingSurprisalAttention(input, options)
+		: await runDbOwnerDomainOperation(accessor, {
+				runWithOwner: async (owner) => await ownerDreamingSurprisalAttention(owner, input, options),
+				runInline: ({ read, write }) => {
+					const selected = read((db) => selectDreamingSurprisalInDb(db, input.agentId, input.config, null));
+					if (selected.candidates.length === 0) return selected;
+					write((db) => {
+						for (const candidate of selected.candidates) {
+							enqueueDreamingAttentionInTx(db, {
+								agentId: input.agentId,
+								kind: "surprisal",
+								subjectRef: `memory:${candidate.id}`,
+								details: {
+									selector: DREAMING_SURPRISAL_SELECTOR_VERSION,
+									score: candidate.score.toFixed(6),
+									rank: String(candidate.rank),
+									sampleSize: String(candidate.sampleSize),
+									dimensions: String(candidate.dimensions),
+									capturedAt: candidate.capturedAt,
+								},
+								priority: Math.round(60 + candidate.score * 40),
+								reopen: false,
+							});
+						}
+					});
+					return selected;
+				},
+			});
 	if (selection === null) return null;
 	logger.info("dreaming", "Embedding-surprisal attention sweep completed", {
 		agentId,
@@ -1522,18 +1570,23 @@ async function readDreamingEvidenceSource(
 	agentId: string,
 	sourceRef: string,
 ): Promise<EpisodicSourceRecord | null> {
-	const owner = await getDbOwnerForAccessor(accessor);
-	const handle = owner.submit<EpisodicSourceRecord | null>(
-		{ kind: "dreaming_evidence_source", input: { agentId, sourceRef } },
-		{
-			operation: "dreaming.evidence.source",
-			lane: "read",
-			workloadClass: "foreground",
-			deadlineMs: 30_000,
-			estimatedWorkUnits: 10,
+	const input: DbOwnerDreamingEvidenceSource = { agentId, sourceRef };
+	return await runDbOwnerDomainOperation(accessor, {
+		runWithOwner: async (owner) => {
+			const handle = owner.submit<EpisodicSourceRecord | null>(
+				{ kind: "dreaming_evidence_source", input },
+				{
+					operation: "dreaming.evidence.source",
+					lane: "read",
+					workloadClass: "foreground",
+					deadlineMs: 30_000,
+					estimatedWorkUnits: 10,
+				},
+			);
+			return await handle.result;
 		},
-	);
-	return await handle.result;
+		runInline: ({ read }) => read((db) => readEpisodicSource(db, { agentId: input.agentId, from: input.sourceRef })),
+	});
 }
 
 export async function runDreamingAgentPass(
@@ -1845,40 +1898,46 @@ export async function runDreamingAgentPass(
 				),
 			)
 		).flat();
-		const owner = await getDbOwnerForAccessor(accessor);
-		const finalize = owner.submit<null>(
-			{
-				kind: "dreaming_pass_finalize",
-				input: {
-					passId,
-					mode,
-					agentId,
-					scopes,
-					transcriptManifestEntries,
-					tokensConsumed,
-					inputTokens: usage?.inputTokens ?? null,
-					outputTokens: usage?.outputTokens ?? null,
-					cacheReadTokens: usage?.cacheReadTokens ?? null,
-					cacheCreationTokens: usage?.cacheCreationTokens ?? null,
-					totalCost: usage?.totalCost ?? null,
-					applied,
-					failed,
-					summary,
-					rejectedEvidence,
-					memoryHeadResult,
-					backlogByScope: [...backlogByScope].map(([scope, backlog]) => ({ scope, backlog })),
-					nextWatermarkByScope: [...nextWatermarkByScope].map(([scope, watermark]) => ({ scope, watermark })),
-				},
+		const finalizeInput: DbOwnerDreamingPassFinalize = {
+			passId,
+			mode,
+			agentId,
+			scopes,
+			transcriptManifestEntries,
+			tokensConsumed,
+			inputTokens: usage?.inputTokens ?? null,
+			outputTokens: usage?.outputTokens ?? null,
+			cacheReadTokens: usage?.cacheReadTokens ?? null,
+			cacheCreationTokens: usage?.cacheCreationTokens ?? null,
+			totalCost: usage?.totalCost ?? null,
+			applied,
+			failed,
+			summary,
+			rejectedEvidence,
+			memoryHeadResult,
+			backlogByScope: [...backlogByScope].map(([scope, backlog]) => ({ scope, backlog })),
+			nextWatermarkByScope: [...nextWatermarkByScope].map(([scope, watermark]) => ({ scope, watermark })),
+		};
+		await runDbOwnerDomainOperation(accessor, {
+			runWithOwner: async (owner) => {
+				const finalize = owner.submit<null>(
+					{ kind: "dreaming_pass_finalize", input: finalizeInput },
+					{
+						operation: "dreaming.pass.finalize",
+						lane: "write",
+						workloadClass: "foreground",
+						deadlineMs: 60_000,
+						estimatedWorkUnits: 500,
+					},
+				);
+				return await finalize.result;
 			},
-			{
-				operation: "dreaming.pass.finalize",
-				lane: "write",
-				workloadClass: "foreground",
-				deadlineMs: 60_000,
-				estimatedWorkUnits: 500,
-			},
-		);
-		await finalize.result;
+			runInline: ({ write }) =>
+				write((db) => {
+					finalizeDreamingPassInDb(db, finalizeInput);
+					return null;
+				}),
+		});
 		const outcome: DreamingPassOutcome =
 			failed > 0
 				? effects.usefulEffects === 0
@@ -2251,13 +2310,20 @@ export async function getDreamingEpisodicTokenBacklog(
 	agentId: string,
 	ownerMaintenance?: DbOwnerMaintenance,
 ): Promise<number> {
-	const owner = ownerMaintenance?.owner ?? (await getDbOwnerForAccessor(accessor));
 	const maxSources = ownerMaintenance === undefined ? undefined : DREAMING_SCHEDULE_BACKLOG_MAX_SOURCES;
-	return await ownerDreamingEpisodicBacklog(
-		owner,
-		{ agentId, ...(maxSources === undefined ? {} : { maxSources }) },
-		{ deadlineMs: 60_000, estimatedWorkUnits: maxSources === undefined ? DB_OWNER_MAX_WORK_UNITS : maxSources * 10 },
-	);
+	const input: DbOwnerDreamingEpisodicBacklog = {
+		agentId,
+		...(maxSources === undefined ? {} : { maxSources }),
+	};
+	const options = {
+		deadlineMs: 60_000,
+		estimatedWorkUnits: maxSources === undefined ? DB_OWNER_MAX_WORK_UNITS : maxSources * 10,
+	};
+	if (ownerMaintenance) return await ownerMaintenance.dreamingEpisodicBacklog(input, options);
+	return await runDbOwnerDomainOperation(accessor, {
+		runWithOwner: async (owner) => await ownerDreamingEpisodicBacklog(owner, input, options),
+		runInline: ({ read }) => read((db) => getDreamingEpisodicTokenBacklogInDb(db, input.agentId, input.maxSources)),
+	});
 }
 
 /** Read the last worker-computed value for synchronous dashboard metadata. */

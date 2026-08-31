@@ -92,5 +92,10 @@ describe("DB foundation dependency invariant", () => {
 			await lifecycle.close(undefined);
 			expect(attempts).toBe(2);
 		});
+	it("keeps DB owner transport independent of Dreaming implementations", () => {
+		const runtime = source("./db-owner-runtime.ts");
+
+		expect(runtime).not.toContain('"./knowledge-graph-hygiene"');
+		expect(runtime).not.toContain('"./pipeline/dreaming');
 	});
 });
