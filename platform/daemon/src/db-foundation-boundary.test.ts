@@ -18,7 +18,7 @@ describe("DB foundation dependency invariant", () => {
 	});
 
 	describe("close participant lifecycle", () => {
-		it("preserves owner-before-cache order and rejects late registration", async () => {
+		it("preserves owner-before-cache order and rejects registration during close", async () => {
 			const lifecycle = createDbAccessorLifecycle();
 			const closed: string[] = [];
 			let duringCloseError: unknown;
@@ -51,13 +51,24 @@ describe("DB foundation dependency invariant", () => {
 			expect(closed).toEqual(["db-owner", "agent-scope-cache"]);
 			expect(duringCloseError).toBeInstanceOf(Error);
 			expect((duringCloseError as Error).message).toContain("registered after close started");
-			expect(() =>
-				lifecycle.register({
-					name: "late-participant",
-					order: 300,
-					close: () => undefined,
-				}),
-			).toThrow("registered after close started");
+
+			// A later accessor lifecycle may load a participant after the previous
+			// close has completed; only registration during close is forbidden.
+			lifecycle.register({
+				name: "next-lifecycle-participant",
+				order: 300,
+				close: () => {
+					closed.push("next-lifecycle-participant");
+				},
+			});
+			await lifecycle.close(undefined);
+			expect(closed).toEqual([
+				"db-owner",
+				"agent-scope-cache",
+				"db-owner",
+				"agent-scope-cache",
+				"next-lifecycle-participant",
+			]);
 		});
 	});
 });
