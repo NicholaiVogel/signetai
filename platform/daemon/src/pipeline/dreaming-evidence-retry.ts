@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { getDbOwnerForAccessor } from "../db-owner-runtime";
+import { runDbOwnerDomainOperation } from "../db-owner-runtime";
 
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import {
@@ -156,18 +156,22 @@ export async function collectRejectedDreamingEvidence(
 	result: ApplyDreamingOperationsResult,
 	operations: readonly Pick<DreamingOperationRequest, "evidence">[],
 ): Promise<readonly RejectedDreamingEvidence[]> {
-	const owner = await getDbOwnerForAccessor(accessor);
-	const handle = owner.submit<readonly RejectedDreamingEvidence[]>(
-		{ kind: "dreaming_evidence_classify", input: { agentId, result, operations } },
-		{
-			operation: "dreaming.evidence.classify",
-			lane: "read",
-			workloadClass: "foreground",
-			deadlineMs: 30_000,
-			estimatedWorkUnits: 200,
+	return await runDbOwnerDomainOperation(accessor, {
+		runWithOwner: async (owner) => {
+			const handle = owner.submit<readonly RejectedDreamingEvidence[]>(
+				{ kind: "dreaming_evidence_classify", input: { agentId, result, operations } },
+				{
+					operation: "dreaming.evidence.classify",
+					lane: "read",
+					workloadClass: "foreground",
+					deadlineMs: 30_000,
+					estimatedWorkUnits: 200,
+				},
+			);
+			return await handle.result;
 		},
-	);
-	return await handle.result;
+		runInline: ({ read }) => read((db) => collectRejectedDreamingEvidenceInDb(db, agentId, result, operations)),
+	});
 }
 
 export function recordRejectedDreamingEvidenceInTx(
@@ -326,16 +330,21 @@ export async function autoRequeueRepairedDreamingEvidence(
 	const hourlyBudget = Math.max(0, Math.floor(policy.hourlyBudget));
 	const maxAttempts = Math.max(0, Math.floor(policy.maxAttempts));
 	if (hourlyBudget === 0 || maxAttempts === 0) return 0;
-	const owner = await getDbOwnerForAccessor(accessor);
-	const handle = owner.submit<number>(
-		{ kind: "dreaming_evidence_requeue", input: { nowMs, policy: { cooldownMs, hourlyBudget, maxAttempts } } },
-		{
-			operation: "dreaming.evidence.requeue",
-			lane: "write",
-			workloadClass: "foreground",
-			deadlineMs: 30_000,
-			estimatedWorkUnits: 500,
+	const boundedPolicy = { cooldownMs, hourlyBudget, maxAttempts };
+	return await runDbOwnerDomainOperation(accessor, {
+		runWithOwner: async (owner) => {
+			const handle = owner.submit<number>(
+				{ kind: "dreaming_evidence_requeue", input: { nowMs, policy: boundedPolicy } },
+				{
+					operation: "dreaming.evidence.requeue",
+					lane: "write",
+					workloadClass: "foreground",
+					deadlineMs: 30_000,
+					estimatedWorkUnits: 500,
+				},
+			);
+			return await handle.result;
 		},
-	);
-	return await handle.result;
+		runInline: ({ write }) => write((db) => autoRequeueRepairedDreamingEvidenceInDb(db, boundedPolicy, nowMs)),
+	});
 }

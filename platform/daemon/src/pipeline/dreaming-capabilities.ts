@@ -9,7 +9,7 @@
  */
 import { type Entity, type EntityAttribute, MEMORY_CONTENT_WITHHELD_NOTICE, scanMemoryContent } from "@signet/core";
 import { z } from "zod";
-import { getDbOwnerForAccessor } from "../db-owner-runtime";
+import { getDbOwnerForAccessor, runDbOwnerDomainOperation } from "../db-owner-runtime";
 import { ownerReadAll, ownerReadOne } from "../db-owner-sql";
 import type {
 	DbOwnerDreamingEvidenceSearch,
@@ -675,31 +675,36 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 				chunkSize: z.number().finite().optional(),
 			}),
 			async ({ agentId: scopeId, query, since, before, kind, limit, sourceRef, offset, chunkSize }) => {
-				const owner = await getDbOwnerForAccessor(accessor);
-				const handle = owner.submit<DreamingCapabilityOutput>(
-					{
-						kind: "dreaming_evidence_search",
-						input: {
-							agentId: scopeId,
-							...(query === undefined ? {} : { query }),
-							...(since === undefined ? {} : { since }),
-							...(before === undefined ? {} : { before }),
-							...(kind === undefined ? {} : { kind }),
-							...(limit === undefined ? {} : { limit }),
-							...(sourceRef === undefined ? {} : { sourceRef }),
-							...(offset === undefined ? {} : { offset }),
-							...(chunkSize === undefined ? {} : { chunkSize }),
-						},
+				const input: DbOwnerDreamingEvidenceSearch = {
+					agentId: scopeId,
+					...(query === undefined ? {} : { query }),
+					...(since === undefined ? {} : { since }),
+					...(before === undefined ? {} : { before }),
+					...(kind === undefined ? {} : { kind }),
+					...(limit === undefined ? {} : { limit }),
+					...(sourceRef === undefined ? {} : { sourceRef }),
+					...(offset === undefined ? {} : { offset }),
+					...(chunkSize === undefined ? {} : { chunkSize }),
+				};
+				return await runDbOwnerDomainOperation(accessor, {
+					runWithOwner: async (owner) => {
+						const handle = owner.submit<DreamingCapabilityOutput>(
+							{
+								kind: "dreaming_evidence_search",
+								input,
+							},
+							{
+								operation: "dreaming.capabilities.search-evidence",
+								lane: "read",
+								workloadClass: "foreground",
+								deadlineMs: 30_000,
+								estimatedWorkUnits: 200,
+							},
+						);
+						return await handle.result;
 					},
-					{
-						operation: "dreaming.capabilities.search-evidence",
-						lane: "read",
-						workloadClass: "foreground",
-						deadlineMs: 30_000,
-						estimatedWorkUnits: 200,
-					},
-				);
-				return await handle.result;
+					runInline: ({ read }) => read((db) => searchDreamingEvidenceInDb(db, input)),
+				});
 			},
 		),
 		capability(
@@ -837,25 +842,30 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 			async ({ agentId: scopeId, kind, status, limit }) => {
 				if (kind === "review_due") {
 					if (status === "resolved") return { ok: true, items: [] };
-					const owner = await getDbOwnerForAccessor(accessor);
-					const handle = owner.submit<ReturnType<typeof collectReviewDueClaims>>(
-						{
-							kind: "dreaming_review_due",
-							input: {
-								agentId: scopeId,
-								nowMs: Date.now(),
-								limit: bounded(limit, scopeId ? 50 : 100, scopeId ? 100 : 200),
-							},
+					const input: DbOwnerDreamingReviewDue = {
+						agentId: scopeId,
+						nowMs: Date.now(),
+						limit: bounded(limit, scopeId ? 50 : 100, scopeId ? 100 : 200),
+					};
+					const due = await runDbOwnerDomainOperation(accessor, {
+						runWithOwner: async (owner) => {
+							const handle = owner.submit<ReturnType<typeof collectReviewDueClaims>>(
+								{
+									kind: "dreaming_review_due",
+									input,
+								},
+								{
+									operation: "dreaming.capabilities.review-due",
+									lane: "read",
+									workloadClass: "foreground",
+									deadlineMs: 30_000,
+									estimatedWorkUnits: 100,
+								},
+							);
+							return await handle.result;
 						},
-						{
-							operation: "dreaming.capabilities.review-due",
-							lane: "read",
-							workloadClass: "foreground",
-							deadlineMs: 30_000,
-							estimatedWorkUnits: 100,
-						},
-					);
-					const due = await handle.result;
+						runInline: ({ read }) => read((db) => collectDreamingReviewDueInDb(db, input)),
+					});
 					return {
 						ok: true,
 						items: [

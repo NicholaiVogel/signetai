@@ -16,6 +16,7 @@ import type {
 	DbOwnerJob,
 	DbOwnerParameter,
 	DbOwnerRequest,
+	DbOwnerSourceEvidenceEligibility,
 	DbOwnerSourceGraphFilePurge,
 	DbOwnerSourceGraphIndex,
 	DbOwnerSourceGraphPurge,
@@ -24,7 +25,6 @@ import type {
 	DbOwnerNativeMemoryIndex,
 	DbOwnerSourceArtifactPurge,
 	DbOwnerSourceArtifactUpsert,
-	DbOwnerSourceEvidenceEligibility,
 	DbOwnerStatement,
 	DbOwnerWorkloadClass,
 } from "./db-owner-protocol";
@@ -64,7 +64,40 @@ function inlineStatement(db: ReadDb | WriteDb, statement: DbOwnerStatement): unk
 	return prepared.run(...params);
 }
 
-async function inlineRequest(accessor: DbAccessor, request: DbOwnerRequest): Promise<unknown> {
+export interface InlineDbOwnerAccess {
+	readonly read: <Result>(callback: (db: ReadDb) => Result) => Result;
+	readonly write: <Result>(callback: (db: WriteDb) => Result) => Result;
+}
+
+export interface DbOwnerDomainOperation<Result> {
+	readonly runWithOwner: (owner: DbOwnerClient) => Promise<Result>;
+	readonly runInline: (access: InlineDbOwnerAccess) => Result | Promise<Result>;
+}
+
+function inlineDbOwnerAccess(accessor: DbAccessor): InlineDbOwnerAccess {
+	return {
+		read: <Result>(callback: (db: ReadDb) => Result): Result =>
+			invokeAccessor(accessor, "withReadDb", callback as (db: ReadDb | WriteDb) => Result),
+		write: <Result>(callback: (db: WriteDb) => Result): Result =>
+			invokeAccessor(accessor, "withWriteTx", callback as (db: ReadDb | WriteDb) => Result),
+	};
+}
+
+export async function runDbOwnerDomainOperation<Result>(
+	accessor: DbAccessor,
+	operation: DbOwnerDomainOperation<Result>,
+): Promise<Result> {
+	if (process.env.SIGNET_DB_OWNER_WORKER === "1" || !hasDbAccessor()) {
+		return await operation.runInline(inlineDbOwnerAccess(accessor));
+	}
+	return await operation.runWithOwner(await getDbOwner(getDbAccessorPath()));
+}
+
+function unreachableInlineRequest(request: never): never {
+	throw new Error(`Unreachable inline DB owner request: ${String(request)}`);
+}
+
+async function executeInlineOwnerRequest(accessor: DbAccessor, request: DbOwnerRequest): Promise<unknown> {
 	if (request.kind === "query") {
 		if (request.statement.result === "run") {
 			return invokeAccessor(accessor, "withWriteTx", (db) => inlineStatement(db, request.statement));
@@ -92,111 +125,47 @@ async function inlineRequest(accessor: DbAccessor, request: DbOwnerRequest): Pro
 			return results;
 		});
 	}
-	if (request.kind === "source_evidence_eligibility") {
-		const { sourceHasEligibleUnconsumedEvidence } = await import("./pipeline/dreaming-evidence-consumption");
-		return await invokeAccessor(accessor, "withReadDb", (db) =>
-			sourceHasEligibleUnconsumedEvidence(
-				db as never,
-				request.input.agentId,
-				request.input.sourceEntryId,
-				request.input.legacyObsidianRoot,
-			),
-		);
-	}
-	if (request.kind === "dreaming_hygiene_attention") {
-		const { getDreamingHygieneCandidatesInDb } = await import("./knowledge-graph-hygiene");
-		const { enqueueDreamingAttentionInTx } = await import("./pipeline/dreaming-attention");
-		return invokeAccessor(accessor, "withWriteTx", (db) => {
-			const candidates = getDreamingHygieneCandidatesInDb(db as never, request.input);
-			for (const candidate of candidates)
-				enqueueDreamingAttentionInTx(db as never, {
-					...candidate,
-					agentId: request.input.agentId,
-					kind: "hygiene",
-					reopen: false,
-				});
-			return candidates.length;
-		});
-	}
-	if (request.kind === "dreaming_surprisal_attention") {
-		const { selectDreamingSurprisalInDb } = await import("./pipeline/dreaming-surprisal");
-		const { DREAMING_SURPRISAL_SELECTOR_VERSION } = await import("./pipeline/dreaming-surprisal");
-		const selection = invokeAccessor(accessor, "withReadDb", (db) =>
-			selectDreamingSurprisalInDb(db as never, request.input.agentId, request.input.config, null),
-		);
-		if (selection.candidates.length === 0) return selection;
-		await invokeAccessor(accessor, "withWriteTx", (db) => {
-			const { enqueueDreamingAttentionInTx } =
-				require("./pipeline/dreaming-attention") as typeof import("./pipeline/dreaming-attention");
-			for (const candidate of selection.candidates)
-				enqueueDreamingAttentionInTx(db as never, {
-					agentId: request.input.agentId,
-					kind: "surprisal",
-					subjectRef: `memory:${candidate.id}`,
-					details: {
-						selector: DREAMING_SURPRISAL_SELECTOR_VERSION,
-						score: candidate.score.toFixed(6),
-						rank: String(candidate.rank),
-						sampleSize: String(candidate.sampleSize),
-						dimensions: String(candidate.dimensions),
-						capturedAt: candidate.capturedAt,
-					},
-					priority: Math.round(60 + candidate.score * 40),
-					reopen: false,
-				});
-		});
-		return selection;
-	}
-	if (request.kind === "dreaming_episodic_backlog") {
-		const { getDreamingEpisodicTokenBacklogInDb } = await import("./pipeline/dreaming");
-		return await invokeAccessor(accessor, "withReadDb", (db) =>
-			getDreamingEpisodicTokenBacklogInDb(db as never, request.input.agentId, request.input.maxSources),
-		);
-	}
-	if (
-		request.kind === "dreaming_evidence_search" ||
-		request.kind === "dreaming_evidence_source" ||
-		request.kind === "dreaming_review_due"
-	) {
-		const capabilities = await import("./pipeline/dreaming-capabilities");
-		return await invokeAccessor(accessor, "withReadDb", (db) => {
-			if (request.kind === "dreaming_evidence_search")
-				return capabilities.searchDreamingEvidenceInDb(db as never, request.input);
-			if (request.kind === "dreaming_evidence_source")
-				return capabilities.readDreamingEvidenceSourceInDb(db as never, request.input);
-			return capabilities.collectDreamingReviewDueInDb(db as never, request.input);
-		});
-	}
-	if (request.kind === "dreaming_evidence_classify") {
-		const { collectRejectedDreamingEvidenceInDb } = await import("./pipeline/dreaming-evidence-retry");
-		return await invokeAccessor(accessor, "withReadDb", (db) =>
-			collectRejectedDreamingEvidenceInDb(
-				db as never,
-				request.input.agentId,
-				request.input.result as never,
-				request.input.operations as never,
-			),
-		);
-	}
-	if (request.kind === "dreaming_evidence_requeue") {
-		const { autoRequeueRepairedDreamingEvidenceInDb } = await import("./pipeline/dreaming-evidence-retry");
-		return await invokeAccessor(accessor, "withWriteTx", (db) =>
-			autoRequeueRepairedDreamingEvidenceInDb(db as never, request.input.policy, request.input.nowMs),
-		);
-	}
-	if (request.kind === "dreaming_pass_finalize") {
-		const { finalizeDreamingPassInDb } = await import("./pipeline/dreaming");
-		return invokeAccessor(accessor, "withWriteTx", (db) => finalizeDreamingPassInDb(db as never, request.input));
-	}
 	if (request.kind === "vector_search") {
 		return invokeAccessor(accessor, "withReadDb", (db) =>
 			vectorSearchWithMetadata(db as never, new Float32Array(request.payload.queryEmbedding), request.payload.options),
 		);
 	}
-	throw new Error(`Unsupported isolated owner request: ${request.kind}`);
+	switch (request.kind) {
+		case "initialize":
+		case "recall":
+		case "source_snapshot_import":
+		case "source_graph_index":
+		case "source_graph_file_purge":
+		case "source_graph_purge":
+		case "source_artifact_index":
+		case "source_native_memory_index":
+		case "source_artifact_purge":
+		case "source_artifact_upsert":
+		case "source_artifact_upsert_batch":
+		case "dreaming_hygiene_attention":
+		case "dreaming_surprisal_attention":
+		case "dreaming_episodic_backlog":
+		case "dreaming_evidence_search":
+		case "dreaming_evidence_source":
+		case "dreaming_pass_finalize":
+		case "dreaming_review_due":
+		case "dreaming_evidence_classify":
+		case "dreaming_evidence_requeue":
+		case "embedding_migration_progress":
+		case "health_ready":
+		case "diagnostics":
+		case "vector_backfill":
+		case "vacuum_conversion":
+		case "incremental_vacuum":
+		case "source_evidence_eligibility":
+		case "sleep":
+			throw new Error(`Unsupported inline owner request: ${request.kind}`);
+		default:
+			return unreachableInlineRequest(request);
+	}
 }
 
-function isolatedOwner(accessor: DbAccessor): DbOwnerClient {
+function inlineOwner(accessor: DbAccessor): DbOwnerClient {
 	const submit = <Result>(request: DbOwnerRequest, options: DbOwnerSubmitOptions): DbOwnerJobHandle<Result> => {
 		const now = Date.now();
 		const job: DbOwnerJob = {
@@ -210,7 +179,7 @@ function isolatedOwner(accessor: DbAccessor): DbOwnerClient {
 			cancellation: "pending",
 			request,
 		};
-		return { job, result: inlineRequest(accessor, request) as Promise<Result>, cancel: () => undefined };
+		return { job, result: executeInlineOwnerRequest(accessor, request) as Promise<Result>, cancel: () => undefined };
 	};
 	return {
 		start: async () => undefined,
@@ -302,18 +271,18 @@ export async function startDbRecallOwner(
 }
 
 async function getCurrentProcessOwner(): Promise<DbOwnerClient> {
-	if (isolatedTestAccessor !== null) return isolatedOwner(isolatedTestAccessor);
+	if (isolatedTestAccessor !== null) return inlineOwner(isolatedTestAccessor);
 	const { getDbAccessor } = await import("./db-accessor");
-	return isolatedOwner(getDbAccessor());
+	return inlineOwner(getDbAccessor());
 }
 
-/** Lazily start an isolated owner when the daemon has not registered its shared owner. */
+/** Resolve the process owner, or the in-process adapter used inside an owner worker. */
 export async function getDbOwner(dbPath?: string): Promise<DbOwnerClient> {
 	if (process.env.SIGNET_DB_OWNER_WORKER === "1") return await getCurrentProcessOwner();
 	const registered = getDbOwnerMaintenance()?.owner;
 	if (registered !== undefined) return registered;
 	if (hasDbAccessor()) return await startDbOwner(getDbAccessorPath());
-	if (isolatedTestAccessor !== null) return isolatedOwner(isolatedTestAccessor);
+	if (isolatedTestAccessor !== null) return inlineOwner(isolatedTestAccessor);
 	return await startDbOwner(dbPath);
 }
 
@@ -321,7 +290,7 @@ export async function getDbOwner(dbPath?: string): Promise<DbOwnerClient> {
 export async function getDbRecallOwner(dbPath?: string): Promise<DbOwnerClient> {
 	if (process.env.SIGNET_DB_OWNER_WORKER === "1") return await getCurrentProcessOwner();
 	if (hasDbAccessor()) return await startDbRecallOwner(getDbAccessorPath());
-	if (isolatedTestAccessor !== null) return isolatedOwner(isolatedTestAccessor);
+	if (isolatedTestAccessor !== null) return inlineOwner(isolatedTestAccessor);
 	return await startDbRecallOwner(dbPath);
 }
 
@@ -330,10 +299,10 @@ export async function getDbRecallOwner(dbPath?: string): Promise<DbOwnerClient> 
  * accessor without opening a second SQLite connection.
  */
 export async function getDbOwnerForAccessor(accessor: DbAccessor): Promise<DbOwnerClient> {
-	if (process.env.SIGNET_DB_OWNER_WORKER === "1") return isolatedOwner(accessor);
+	if (process.env.SIGNET_DB_OWNER_WORKER === "1") return inlineOwner(accessor);
 	if (hasDbAccessor()) return await getDbOwner(getDbAccessorPath());
 	registerDbOwnerIsolatedTestAccessor(accessor);
-	return isolatedOwner(accessor);
+	return inlineOwner(accessor);
 }
 
 export interface DbOwnerSqlOptions {
@@ -491,18 +460,6 @@ export async function dbOwnerSourceArtifactUpsert(
 	);
 }
 
-export async function dbOwnerSourceEvidenceEligibility(
-	input: DbOwnerSourceEvidenceEligibility,
-	options: DbOwnerSqlOptions,
-): Promise<boolean> {
-	const owner = await getDbOwner();
-	return await submitWithAdmission<boolean>(
-		owner,
-		{ kind: "source_evidence_eligibility", input },
-		{ ...options, lane: "read" },
-	);
-}
-
 export async function dbOwnerSourceArtifactUpsertBatch(
 	input: readonly DbOwnerSourceArtifactUpsert[],
 	options: DbOwnerSqlOptions,
@@ -622,3 +579,15 @@ registerDbAccessorCloseParticipant({
 	order: 100,
 	close: closeDbOwner,
 });
+
+export async function dbOwnerSourceEvidenceEligibility(
+	input: DbOwnerSourceEvidenceEligibility,
+	options: DbOwnerSqlOptions,
+): Promise<boolean> {
+	const owner = await getDbOwner();
+	return await submitWithAdmission<boolean>(
+		owner,
+		{ kind: "source_evidence_eligibility", input },
+		{ ...options, lane: "read" },
+	);
+}
