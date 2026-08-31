@@ -283,7 +283,7 @@ describe("Dreaming", () => {
 		expect(latencies.length).toBeGreaterThan(2);
 	});
 
-	it("drains oversized evidence only after every delivered fragment completes (#1430)", async () => {
+	it("drains oversized evidence within budget only after every delivered fragment completes (#1430, #1715)", async () => {
 		seedTranscript(db, "s1", "x".repeat(5_000));
 		expect(await getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
 		let prompt = "";
@@ -1821,7 +1821,7 @@ describe("Dreaming", () => {
 		).toBe(0);
 	});
 
-	it("records empty and failed bounded-agent passes honestly", async () => {
+	it("records sequential empty, attributed, and failed passes without dropping a token-worker response (#1766)", async () => {
 		const telemetry = captureTelemetry();
 		setActiveTelemetry(telemetry.collector);
 		const empty = await runDreamingAgentPass(

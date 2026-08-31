@@ -24,6 +24,7 @@ const platformKey = process.env.SIGNET_NATIVE_PLATFORM ?? `${platform()}-${arch(
 const binaryName = platformKey.startsWith("win32-") ? `signet-${platformKey}.exe` : `signet-${platformKey}`;
 const outfile = join(outDir, binaryName);
 const daemonRequire = createRequire(join(root, "platform", "daemon", "package.json"));
+const tokenizerWasmPath = daemonRequire.resolve("tiktoken/tiktoken_bg.wasm");
 const rootPackage = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version?: unknown };
 const nativeVersion = typeof rootPackage.version === "string" ? rootPackage.version : "0.0.0";
 
@@ -341,6 +342,7 @@ export const { env, pipeline } = transformers;
 writeFileSync(
 	join(buildDir, "cli-native.ts"),
 	`import { materializeEmbeddedAssetTree, materializeEmbeddedNativeAddon, registerNativeAssets, registerNativeTransformersBindings } from "../platform/daemon/src/native-runtime-assets";
+import tokenizerWasmAsset from ${JSON.stringify(tokenizerWasmPath)};
 import { handoffInspectorParent } from "../surfaces/cli/src/lib/inspector-proxy";
 import { connectorAssets, dashboardAssets, graphiqAssets, nativeAddonAssets, skillAssets, templateAssets, wasmAssets, workerAssets } from "./native-assets";
 import * as transformersWebRuntime from "./transformers-web-runtime";
@@ -349,6 +351,7 @@ import { dirname, join } from "node:path";
 
 registerNativeAssets({ connectors: connectorAssets, dashboard: dashboardAssets, graphiq: graphiqAssets, skills: skillAssets, templates: templateAssets, workers: workerAssets, wasm: wasmAssets, nativeAddons: nativeAddonAssets });
 registerNativeTransformersBindings(transformersWebRuntime);
+process.env.SIGNET_TIKTOKEN_WASM_PATH ??= tokenizerWasmAsset;
 process.env.SIGNET_VERSION = process.env.SIGNET_VERSION?.trim() || ${JSON.stringify(nativeVersion)};
 process.env.SIGNET_TEMPLATES_DIR ??= materializeEmbeddedAssetTree("templates") ?? "";
 process.env.SIGNET_SKILLS_SOURCE ??= materializeEmbeddedAssetTree("skills") ?? "";
@@ -396,6 +399,19 @@ if (process.env.SIGNET_INSPECTOR_PROXY_PUBLIC || process.env.SIGNET_INSPECTOR_PR
 } else if (process.env.SIGNET_MCP_STDIO_WORKER) {
 	const { runMcpStdio } = await import("../platform/daemon/src/mcp-stdio-runtime");
 	await runMcpStdio();
+} else if (process.env.SIGNET_DREAMING_TOKEN_WORKER_SMOKE) {
+	const { DreamingBacklogTokenCache } = await import("../platform/daemon/src/pipeline/dreaming-token-cache");
+	const cache = new DreamingBacklogTokenCache();
+	try {
+		const first = await cache.refresh("native-smoke", [{ key: "large", text: "x".repeat(5_000) }]);
+		const second = await cache.refresh("native-smoke", [
+			{ key: "large", text: "x".repeat(5_000) },
+			{ key: "later", text: "ok" },
+		]);
+		process.stdout.write(JSON.stringify({ type: "dreaming-token-count", first, second }) + "\\n");
+	} finally {
+		cache.stop();
+	}
 } else if (process.env.SIGNET_DB_OWNER_WORKER) {
 	const { runDbOwnerWorker } = await import("../platform/daemon/src/db-owner-worker");
 	runDbOwnerWorker();

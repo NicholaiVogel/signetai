@@ -2834,7 +2834,7 @@
     },
     {
       "path": "pipeline/dreaming-token-cache.ts",
-      "line": 36,
+      "line": 23,
       "api": "existsSync",
       "source": "return existsSync(bundled)",
       "category": "hot-path"
@@ -2869,14 +2869,14 @@
     },
     {
       "path": "pipeline/dreaming.ts",
-      "line": 885,
+      "line": 889,
       "api": "existsSync",
       "source": "if (!existsSync(path)) return { content: \"\", unreadable: false };",
       "category": "hot-path"
     },
     {
       "path": "pipeline/dreaming.ts",
-      "line": 887,
+      "line": 891,
       "api": "readFileSync",
       "source": "const raw = readFileSync(path, \"utf-8\").trim();",
       "category": "hot-path"
@@ -4684,14 +4684,14 @@
     },
     {
       "path": "routes/widget.ts",
-      "line": 75,
+      "line": 76,
       "api": "existsSync",
       "source": "if (existsSync(path)) {",
       "category": "hot-path"
     },
     {
       "path": "routes/widget.ts",
-      "line": 76,
+      "line": 77,
       "api": "statSync",
       "source": "const stat = statSync(path);",
       "category": "hot-path"
@@ -6091,49 +6091,49 @@
     },
     {
       "path": "widget-gen.ts",
-      "line": 36,
+      "line": 35,
       "api": "existsSync",
       "source": "if (!existsSync(dir)) {",
       "category": "hot-path"
     },
     {
       "path": "widget-gen.ts",
-      "line": 37,
+      "line": 36,
       "api": "mkdirSync",
       "source": "mkdirSync(dir, { recursive: true });",
       "category": "hot-path"
     },
     {
       "path": "widget-gen.ts",
-      "line": 229,
+      "line": 228,
       "api": "existsSync",
       "source": "if (!existsSync(path)) return null;",
       "category": "hot-path"
     },
     {
       "path": "widget-gen.ts",
-      "line": 232,
+      "line": 231,
       "api": "readFileSync",
       "source": "const content = readFileSync(path, \"utf-8\");",
       "category": "hot-path"
     },
     {
       "path": "widget-gen.ts",
-      "line": 241,
+      "line": 240,
       "api": "existsSync",
       "source": "if (!existsSync(path)) return false;",
       "category": "hot-path"
     },
     {
       "path": "widget-gen.ts",
-      "line": 244,
+      "line": 243,
       "api": "unlinkSync",
       "source": "unlinkSync(path);",
       "category": "hot-path"
     },
     {
       "path": "widget-gen.ts",
-      "line": 308,
+      "line": 306,
       "api": "writeFileSync",
       "source": "writeFileSync(widgetPath(serverId), html);",
       "category": "hot-path"
