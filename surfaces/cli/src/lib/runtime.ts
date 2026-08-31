@@ -1478,19 +1478,19 @@ export async function waitForDaemonLiveness(
 }
 
 export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemonPath?: string): Promise<boolean> {
-	if ((await isDaemonRunning()) || (await hasDaemonProcess(agentsDir))) return true;
-
-	const daemonPath = preferredDaemonPath ?? resolveDaemonPath();
-	if (!daemonPath) {
-		console.error(chalk.red("Daemon not found. Try reinstalling signet."));
-		return false;
-	}
-
 	const workspace = preflightWorkspace({
 		env: { ...process.env, SIGNET_PATH: agentsDir },
 	});
 	if (workspace.status === "missing" || workspace.status === "incomplete") {
 		console.error(chalk.red(formatWorkspacePreflightError(workspace)));
+		return false;
+	}
+
+	if ((await isDaemonRunning()) || (await hasDaemonProcess(agentsDir))) return true;
+
+	const daemonPath = preferredDaemonPath ?? resolveDaemonPath();
+	if (!daemonPath) {
+		console.error(chalk.red("Daemon not found. Try reinstalling signet."));
 		return false;
 	}
 
