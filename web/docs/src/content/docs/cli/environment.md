@@ -12,18 +12,18 @@ The CLI, connector base, and desktop shell use this resolution order:
 3. Persisted `$XDG_CONFIG_HOME/signet/workspace.json` with a `workspace` field
 4. `~/.agents`
 
-Use `signet workspace status` to see the effective path and its source. `signet workspace set <path>` writes the persisted selection. `SIGNET_PATH` takes precedence over both the persisted setting and `SIGNET_WORKSPACE`.
+Use `signet workspace status` to see the effective path, state, and source. `signet workspace set <path>` writes the persisted selection. `SIGNET_PATH` takes precedence over both the persisted setting and `SIGNET_WORKSPACE`.
 
-The daemon does **not** currently use that shared resolver. Its state layer resolves only `SIGNET_PATH`, then falls back to `~/.agents`; it ignores `SIGNET_WORKSPACE` and the persisted workspace selection. Restarting the daemon after `signet workspace set` is necessary but does not make it read the persisted path. Set `SIGNET_PATH` explicitly for a daemon process when the workspace is not `~/.agents`.
+The daemon and client surfaces use this same resolution order. Once a workspace is configured, daemon startup fails closed if the selected directory, workspace configuration, or memory database is missing. Restore the configured path or use an explicit setup or replacement action; Signet does not silently bootstrap a replacement at the old path.
 
-This is an implementation inconsistency, not a promise of a unified contract. Do not run a CLI/connector and daemon with different workspace inputs unless that split is intentional.
+Workspace status is `fresh` for an unconfigured default, `ready` when the configuration and database are present, `missing` when a configured directory is absent, and `incomplete` when an established workspace is missing required state. Legacy installations without a dedicated workspace identity marker remain supported through the persisted workspace selection and existing configuration/database files.
 
 ## Daemon and client variables
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `SIGNET_PATH` | CLI, connector/desktop resolver, daemon | Highest-precedence workspace path. The daemon only honors this workspace override. |
-| `SIGNET_WORKSPACE` | CLI, connector/desktop resolver | Lower-precedence workspace alias. Not honored by the daemon state resolver. |
+| `SIGNET_PATH` | CLI, connector/desktop resolver, daemon | Highest-precedence workspace path. |
+| `SIGNET_WORKSPACE` | CLI, connector/desktop resolver, daemon | Lower-precedence workspace alias. |
 | `SIGNET_PORT` | daemon and local clients | HTTP port. Default: `3850`. |
 | `SIGNET_HOST` | daemon and local clients | Explicit daemon host override. Without it, the daemon derives its host from `agent.yaml` network configuration. |
 | `SIGNET_BIND` | daemon | Explicit listen-address override. Without it, `network.mode: localhost` binds `127.0.0.1`; `network.mode: tailscale` binds `0.0.0.0`. |

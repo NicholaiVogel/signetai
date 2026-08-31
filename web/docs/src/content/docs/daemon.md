@@ -55,6 +55,8 @@ An exposed interface is not an authentication setting. Use `auth.mode: team` for
 
 The daemon loads `agent.yaml` from the selected workspace. Some files and service settings can be observed after startup, but long-running pipeline workers begin from a configuration snapshot. Restart after changing pipeline, embedding, inference, auth, or network configuration.
 
+A configured workspace is not treated as first-run state after it disappears. The daemon exits before creating `.daemon/`, opening SQLite, or writing plugin and telemetry state when the selected workspace is `missing` or `incomplete`. Use `signet workspace status` to inspect the state, then restore the configured path or run an explicit setup or replacement action.
+
 ```bash
 signet daemon restart
 signet daemon status --json
