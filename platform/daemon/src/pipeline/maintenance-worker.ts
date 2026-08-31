@@ -190,7 +190,7 @@ async function executeRecommendation(
 			return await checkFtsConsistency(deps.accessor, deps.cfg, ctx, deps.limiter, true, deps.ownerMaintenance);
 		case "triggerRetentionSweep":
 			if (deps.retentionHandle) {
-				return await triggerRetentionSweep(deps.cfg, ctx, deps.limiter, deps.retentionHandle);
+				return await triggerRetentionSweep(deps.cfg, ctx, deps.limiter, deps.retentionHandle, deps.accessor);
 			}
 			return null;
 		case "deduplicateMemories":
@@ -322,7 +322,7 @@ export function startMaintenanceWorker(
 	let running = true;
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let inFlight: Promise<MaintenanceCycleResult> | null = null;
-	const limiter = createRateLimiter();
+	const limiter = createRateLimiter(accessor);
 	const haltTracker = createHaltTracker();
 
 	// cfg is captured by value — changes require a pipeline restart.
@@ -409,6 +409,7 @@ export function startMaintenanceWorker(
 			reason: "autonomous maintenance",
 			actor: "maintenance-worker",
 			actorType: "daemon",
+			...(deps.embedding ? { agentId: deps.embedding.agentId } : {}),
 		};
 
 		const preScore = report.composite.score;

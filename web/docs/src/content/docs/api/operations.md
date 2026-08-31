@@ -386,7 +386,8 @@ recreating `memories_fts` with the canonical `unicode61` tokenizer.
 Trigger a bounded retention cleanup sweep immediately. This purges expired
 tombstones, old history rows, expired completed/dead jobs, orphaned graph links,
 and orphaned embeddings without waiting for the retention worker interval.
-Requires `admin` permission.
+The request goes through the same repair admission gate, durable rate limiter,
+and audit path as other repair actions. Requires `admin` permission.
 
 **Response**
 
@@ -436,8 +437,10 @@ Rate-limited — returns `429` when the limit is exceeded.
 ```
 
 `agentId` scopes selection and embedding-coverage checks to one agent; when
-omitted, the daemon's configured agent is used. `batchSize` is finite, positive,
-and server-bounded. The same scope is revalidated before each write.
+omitted, the daemon's configured agent is used. `batchSize` is a positive integer
+from 1 through 200; larger, fractional, non-finite, or non-numeric values return
+`400`. The same scope is revalidated before each write. `fullSweep: true` only
+requests bounded continuation; it does not bypass cooldown or hourly admission.
 
 `batchSize` defaults to `50`. `dryRun: true` reports what would be
 embedded without calling the embedding provider.
@@ -477,7 +480,8 @@ target provider/model/dimensions, estimated batches, and whether a dimension
 change requires rebuilding the vector index. Provider identity is not present
 in historical embedding metadata and is reported as `not-recorded`.
 The request is scoped to `agentId`; when omitted it uses the daemon's active
-agent.
+agent. `batchSize` is a positive integer from 1 through 200; invalid or larger
+values return `400`.
 
 **Response**
 
@@ -546,7 +550,9 @@ Exact and semantic deduplication never crosses these identity dimensions, and
 writes revalidate them in the transaction. `dryRun: true` reports what would be
 deduplicated without making changes. `semanticEnabled` adds vector-similarity
 dedup on top of hash-based deduplication. Invalid or oversized batch values
-return `400`.
+return `400`. Semantic duplicate discovery is independently bounded by candidate
+count, database operations, and elapsed time; repeated calls continue through
+bounded observations rather than running an unbounded scan.
 
 **Response**
 

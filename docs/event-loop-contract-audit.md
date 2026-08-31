@@ -4,23 +4,23 @@ This report is generated from the deterministic migration ledger in `scripts/eve
 
 ## Current inventory
 
-- Exact ledger inventory: 865 sites
+- Exact ledger inventory: 868 sites
 - Synchronous `withWriteTx()` sites: 65
 - Synchronous `withReadDb()` sites: 99
-- Async-named DB sites: 186
-- Async-named ON-PARENT DB sites: 184
+- Async-named DB sites: 189
+- Async-named ON-PARENT DB sites: 187
 - Async-named OFF-PARENT DB sites: 2
 - Synchronous filesystem/process sites: 515
 - Compile-visible legacy DB sites remaining: 164
   - `withWriteTx`: 65
   - `withReadDb`: 99
 
-The 865-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 99 synchronous reads, and 186 async-named DB sites are the complete database-call inventory; 164 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 184 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
+The 868-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 99 synchronous reads, and 189 async-named DB sites are the complete database-call inventory; 164 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 187 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## Execution-home inventory
 
-- Database accessor sites classified: 350
-- ON-PARENT callback execution: 348
+- Database accessor sites classified: 353
+- ON-PARENT callback execution: 351
 - OFF-PARENT callback execution: 2
 - Ratchet: new ON-PARENT async-named sites fail the audit; the campaign target is ON-PARENT → 0
 
@@ -217,22 +217,25 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `pipeline/synthesis-worker.ts:151` (withReadDb)
 - `prompt-entity-context.ts:671` (withReadDb)
 - `prompt-entity-context.ts:698` (withReadDb)
-- `repair-actions.ts:245` (withWriteTxAsync)
-- `repair-actions.ts:439` (withReadDbAsync)
-- `repair-actions.ts:724` (withReadDbAsync)
-- `repair-actions.ts:768` (withReadDbAsync)
-- `repair-actions.ts:772` (withReadDbAsync)
-- `repair-actions.ts:806` (withReadDbAsync)
-- `repair-actions.ts:1014` (withReadDbAsync)
-- `repair-actions.ts:1162` (withReadDbAsync)
-- `repair-actions.ts:1611` (withReadDbAsync)
-- `repair-actions.ts:1878` (withReadDbAsync)
-- `repair-actions.ts:2055` (withReadDbAsync)
-- `repair-actions.ts:2084` (withReadDbAsync)
-- `repair-actions.ts:2173` (withReadDbAsync)
-- `repair-actions.ts:2247` (withReadDbAsync)
-- `repair-actions.ts:2404` (withReadDbAsync)
-- `repair-actions.ts:2629` (withReadDbAsync)
+- `db:repair.rate-limits.check` (withReadDbAsync)
+- `db:repair.rate-limits.record` (withWriteTxAsync)
+- `db:repair.write.transaction` (withWriteTxAsync)
+- `db:repair.embedding.profile` (withReadDbAsync)
+- `db:repair.embedding.gaps` (withReadDbAsync)
+- `db:repair.embedding.repair-state` (withReadDbAsync)
+- `db:repair.embedding.repair-state-write` (withReadDbAsync)
+- `db:repair.embedding.orphans` (withReadDbAsync)
+- `db:repair.embedding.active-config` (withReadDbAsync)
+- `db:repair.embedding.migration-config` (withReadDbAsync)
+- `db:repair.embedding.migration-selection` (withReadDbAsync)
+- `db:repair.dedup.hash-clusters` (withReadDbAsync)
+- `db:repair.dedup.semantic-candidates` (withReadDbAsync)
+- `db:repair.dedup.semantic-neighbors` (withReadDbAsync)
+- `db:repair.entities.chunk-groups` (withReadDbAsync)
+- `db:repair.entities.singleton` (withReadDbAsync)
+- `db:repair.entities.generic` (withReadDbAsync)
+- `db:repair.memories.dead` (withReadDbAsync)
+- `db:repair.maintenance.embedding-config` (withReadDbAsync)
 - `routes/connectors-routes.ts:277` (withReadDb)
 - `routes/connectors-routes.ts:288` (withWriteTx)
 - `routes/connectors-routes.ts:319` (withReadDb)
@@ -289,16 +292,16 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `routes/reflection-routes.ts:172` (withReadDb)
 - `routes/reflection-routes.ts:207` (withReadDb)
 - `routes/reflection-routes.ts:225` (withWriteTx)
-- `routes/repair-routes.ts:339` (withReadDb)
-- `routes/repair-routes.ts:383` (withWriteTx)
-- `routes/repair-routes.ts:407` (withReadDb)
-- `routes/repair-routes.ts:438` (withReadDb)
-- `routes/repair-routes.ts:489` (withWriteTx)
-- `routes/repair-routes.ts:500` (withReadDb)
-- `routes/repair-routes.ts:544` (withReadDb)
-- `routes/repair-routes.ts:570` (withWriteTx)
-- `routes/repair-routes.ts:578` (withReadDb)
-- `routes/repair-routes.ts:622` (withReadDb)
+- `db:routes.repair.cold-stats.read` (withReadDb)
+- `db:routes.repair.cluster.write` (withWriteTx)
+- `db:routes.repair.relink.select` (withReadDb)
+- `db:routes.repair.relink.preview` (withReadDb)
+- `db:routes.repair.relink.write` (withWriteTx)
+- `db:routes.repair.relink.remaining` (withReadDb)
+- `db:routes.repair.hints.select` (withReadDb)
+- `db:routes.repair.hints.enqueue` (withWriteTx)
+- `db:routes.repair.hints.remaining` (withReadDb)
+- `db:routes.repair.dead.select` (withReadDb)
 - `routes/session-routes.ts:168` (withReadDb)
 - `routes/session-routes.ts:349` (withReadDb)
 - `routes/session-routes.ts:359` (withReadDb)
