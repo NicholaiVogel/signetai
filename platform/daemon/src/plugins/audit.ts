@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { resolveDefaultBasePath } from "@signet/core";
+import { preflightWorkspace, resolveDefaultBasePath } from "@signet/core";
 import { logger } from "../logger.js";
 
 export type PluginAuditResultV1 = "ok" | "denied" | "degraded" | "error";
@@ -56,6 +56,8 @@ export function getDefaultPluginAuditPath(): string {
 
 export function recordPluginAuditEvent(input: RecordPluginAuditEventInputV1, auditPath?: string | null): void {
 	if (auditPath === null) return;
+	const workspace = preflightWorkspace();
+	if (workspace.status === "missing" || workspace.status === "incomplete") return;
 	const path = auditPath ?? getDefaultPluginAuditPath();
 	const event: PluginAuditEventV1 = {
 		id: makeAuditId(),

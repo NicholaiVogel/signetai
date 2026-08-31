@@ -46,6 +46,13 @@ export interface WorkspaceResolution {
 	readonly configuredPath: string | null;
 }
 
+export type WorkspaceStartupStatus = "fresh" | "ready" | "missing" | "incomplete";
+
+export interface WorkspaceStartupPreflight extends WorkspaceResolution {
+	readonly status: WorkspaceStartupStatus;
+	readonly reasons: readonly string[];
+}
+
 export interface ResolveWorkspacePathOptions {
 	readonly env?: NodeJS.ProcessEnv;
 	readonly home?: string;
@@ -274,6 +281,65 @@ export function resolveWorkspacePath(options: ResolveWorkspacePathOptions = {}):
 		configPath,
 		configuredPath: configValue,
 	};
+}
+
+/**
+ * Read-only startup classification. This must run before any daemon-owned
+ * directory, database, identity, plugin, or telemetry initialization.
+ *
+ * A missing explicit/configured path is never treated as a fresh workspace:
+ * recreating it would hide data loss. The unconfigured default remains
+ * bootstrap-compatible for explicit first-run setup.
+ */
+export function preflightWorkspace(options: ResolveWorkspacePathOptions = {}): WorkspaceStartupPreflight {
+	const env = options.env ?? process.env;
+	const home = options.home ?? homedir();
+	let resolution: WorkspaceResolution;
+	try {
+		// A malformed persisted pointer is itself an incomplete configured
+		// workspace. Never fall through to the default and bootstrap there.
+		resolution = resolveWorkspacePath({ ...options, strict: true });
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		return {
+			path: join(home, DEFAULT_AGENTS_DIRNAME),
+			source: "default",
+			configPath: getWorkspaceConfigPath(env, home),
+			configuredPath: null,
+			status: "incomplete",
+			reasons: [detail],
+		};
+	}
+	const reasons: string[] = [];
+	const hasExplicitConfiguration = resolution.source === "env" || resolution.configuredPath !== null;
+
+	if (!isExistingDirectory(resolution.path)) {
+		if (hasExplicitConfiguration) {
+			reasons.push("configured workspace directory is missing");
+			return { ...resolution, status: "missing", reasons };
+		}
+		return { ...resolution, status: "fresh", reasons };
+	}
+
+	const hasAgentConfig =
+		existsSync(join(resolution.path, "agent.yaml")) || existsSync(join(resolution.path, "config.yaml"));
+	const hasMemoryDb = existsSync(join(resolution.path, "memory", "memories.db"));
+	if (hasAgentConfig && hasMemoryDb) {
+		return { ...resolution, status: "ready", reasons };
+	}
+
+	if (!hasExplicitConfiguration && !hasAgentConfig && !hasMemoryDb) {
+		return { ...resolution, status: "fresh", reasons };
+	}
+
+	if (!hasAgentConfig) reasons.push("workspace configuration is missing (agent.yaml or config.yaml)");
+	if (!hasMemoryDb) reasons.push("workspace database is missing (memory/memories.db)");
+	return { ...resolution, status: "incomplete", reasons };
+}
+
+export function formatWorkspacePreflightError(preflight: WorkspaceStartupPreflight): string {
+	const detail = preflight.reasons.length > 0 ? ` ${preflight.reasons.join("; ")}.` : "";
+	return `Signet cannot start: ${preflight.status} workspace at ${preflight.path}.${detail} Restore the configured workspace or run explicit setup; Signet will not recreate it.`;
 }
 
 function resolveEnvWorkspace(env: NodeJS.ProcessEnv, home: string, requireExisting: boolean): string | null {

@@ -163,6 +163,8 @@ subsystem, and always returns 200 while the process is alive.
 }
 ```
 
+The response includes a `workspace` object with `status`, `path`, `source`, and `reasons`. Its status is `fresh`, `ready`, `missing`, or `incomplete`. `/health` reports `degraded` for `missing` or `incomplete`; it does not recreate the selected workspace.
+
 `status` is `"healthy"`, or `"shutting_down"` once shutdown has begun. The
 `eventLoop` block is diagnostic only and does not make this independent probe
 depend on database availability. It reports the current heartbeat stall and
@@ -181,6 +183,8 @@ No authentication required. Readiness probe: reports whether the daemon can
 actually serve work. Returns 200 only when every gate passes, otherwise 503
 with a human-readable `reasons` list. Gates:
 
+- `workspace` — the selected workspace is `ready`; `missing` and `incomplete`
+  states include recovery reasons and return 503.
 - `db` — a readonly database connection answers `SELECT 1`.
 - `migrations` — no pending database migrations.
 - `embedding` — the configured embedding provider is reachable. Passes with

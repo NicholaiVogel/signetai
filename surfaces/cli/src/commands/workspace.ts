@@ -25,11 +25,13 @@ export function registerWorkspaceCommands(program: Command, deps: WorkspaceDeps)
 			const status = getWorkspaceStatus();
 			console.log(chalk.bold("  Workspace status\n"));
 			console.log(chalk.dim(`  Active:  ${status.path}`));
+			console.log(chalk.dim(`  State:   ${status.status}`));
 			console.log(chalk.dim(`  Source:  ${status.source}`));
 			console.log(chalk.dim(`  Config:  ${status.configPath}`));
 			if (status.configuredPath) {
 				console.log(chalk.dim(`  Stored:  ${status.configuredPath}`));
 			}
+			for (const reason of status.reasons) console.log(chalk.yellow(`  Note:    ${reason}`));
 			console.log();
 		});
 

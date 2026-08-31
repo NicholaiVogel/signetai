@@ -2,13 +2,8 @@ import { createHash } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readSync, readdirSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import { OpenClawConnector } from "@signet/connector-openclaw";
-import { detectExistingSetup } from "@signet/core";
-import {
-	type WorkspaceResolution,
-	normalizeWorkspacePath,
-	resolveAgentsDir,
-	writeConfiguredWorkspacePath,
-} from "../lib/workspace.js";
+import { detectExistingSetup, preflightWorkspace } from "@signet/core";
+import { normalizeWorkspacePath, resolveAgentsDir, writeConfiguredWorkspacePath } from "../lib/workspace.js";
 
 export interface WorkspaceCandidate {
 	readonly path: string;
@@ -61,8 +56,8 @@ const WORKSPACE_PRESETS = [
 const SKIP_PATHS = new Set([".daemon/pid"]);
 const SKIP_DIRS = new Set([".daemon/logs"]);
 
-export function getWorkspaceStatus(env: NodeJS.ProcessEnv = process.env): WorkspaceResolution {
-	return resolveAgentsDir(env);
+export function getWorkspaceStatus(env: NodeJS.ProcessEnv = process.env): ReturnType<typeof preflightWorkspace> {
+	return preflightWorkspace({ env });
 }
 
 export function listWorkspaceCandidates(currentPath: string): WorkspaceCandidate[] {

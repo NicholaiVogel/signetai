@@ -13,6 +13,16 @@ YAML
 	printf '%s\n' "[docker] wrote default auth.mode=team to $cfg"
 fi
 
+# A fresh Docker volume is initialized by this entrypoint. Seed an empty,
+# valid SQLite container so the daemon preflight can distinguish it from an
+# established workspace whose database disappeared.
+db="$root/memory/memories.db"
+if [ ! -f "$db" ]; then
+	mkdir -p "$(dirname "$db")"
+	bun -e 'import { Database } from "bun:sqlite"; const db = new Database(process.argv[1]); db.close();' "$db"
+	printf '%s\n' "[docker] initialized workspace database at $db"
+fi
+
 
 # seed default workspace scripts/skills for fresh volumes
 tpl="/app/dist/signetai/templates"

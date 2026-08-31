@@ -1,5 +1,5 @@
 import type { SQLQueryBindings } from "bun:sqlite";
-import { type MigrationDb, hasPendingMigrations } from "@signet/core";
+import { type MigrationDb, hasPendingMigrations, preflightWorkspace } from "@signet/core";
 import type { Hono } from "hono";
 import { getDatabaseIntegrityStatus } from "../database-integrity";
 import { type ReadDb, type ReadPressure, type WritePressure, getDbAccessor } from "../db-accessor";
@@ -205,6 +205,7 @@ function checkInference(): { ok: boolean; detail: InferenceCheck; reason: string
 export function mountHealthRoutes(app: Hono): void {
 	app.get("/health", async (c) => {
 		const us = getUpdateState();
+		const workspace = preflightWorkspace();
 		let dbOk = false;
 		let dbWriter: WritePressure | null = null;
 		let dbReader: ReadPressure | null = null;
@@ -226,7 +227,7 @@ export function mountHealthRoutes(app: Hono): void {
 						// /health is a liveness-adjacent probe. Do not let a queued
 						// database-owner/read lease turn a transient DB stall into an
 						// HTTP stall. The structured response below reports db: false.
-						{ siteToken: "routes/health.ts:221", operation: "health", timeoutMs: 500 },
+						{ siteToken: "routes/health.ts:222", operation: "health", timeoutMs: 500 },
 					);
 				}
 			} catch {
@@ -243,16 +244,24 @@ export function mountHealthRoutes(app: Hono): void {
 		return c.json({
 			status: shuttingDown
 				? "shutting_down"
-				: databaseIntegrity.state === "corrupt" ||
-						databaseIntegrity.state === "unavailable" ||
-						databaseIntegrity.state === "degraded"
+				: workspace.status === "missing" || workspace.status === "incomplete"
 					? "degraded"
-					: "healthy",
+					: databaseIntegrity.state === "corrupt" ||
+							databaseIntegrity.state === "unavailable" ||
+							databaseIntegrity.state === "degraded"
+						? "degraded"
+						: "healthy",
 			uptime: process.uptime(),
 			pid: process.pid,
 			version: CURRENT_VERSION,
 			port: PORT,
 			agentsDir: AGENTS_DIR,
+			workspace: {
+				status: workspace.status,
+				path: workspace.path,
+				source: workspace.source,
+				reasons: workspace.reasons,
+			},
 			db: dbOk,
 			dbWriter,
 			dbReader,
@@ -282,7 +291,11 @@ export function mountHealthRoutes(app: Hono): void {
 
 	// Readiness: composed per-check results. 200 only when every gate passes.
 	app.get("/health/ready", async (c) => {
+		const workspace = preflightWorkspace();
 		const reasons: string[] = [];
+		if (workspace.status === "missing" || workspace.status === "incomplete") {
+			reasons.push(...workspace.reasons);
+		}
 
 		// db, migrations, and queue share one readonly connection.
 		let dbResult: { readonly migrationsOk: boolean; readonly queueHealth: QueueHealth } | null = null;
@@ -301,7 +314,7 @@ export function mountHealthRoutes(app: Hono): void {
 								queueHealth: getQueueHealth(db),
 							};
 						},
-						{ siteToken: "routes/health.ts:296", operation: "health.ready" },
+						{ siteToken: "routes/health.ts:309", operation: "health.ready" },
 					);
 			dbReader = accessor.getReadPressure?.() ?? null;
 			dbRuntime = accessor.getDbRuntimePressure?.().runtime ?? dbRuntime;
@@ -358,6 +371,12 @@ export function mountHealthRoutes(app: Hono): void {
 				version: CURRENT_VERSION,
 				shuttingDown,
 				checks: {
+					workspace: {
+						status: workspace.status,
+						path: workspace.path,
+						source: workspace.source,
+						reasons: workspace.reasons,
+					},
 					db: dbOk,
 					dbReader,
 					dbRuntime,

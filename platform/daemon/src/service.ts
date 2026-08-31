@@ -7,7 +7,14 @@ import { execSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import { LOOPBACK_HOST, buildLaunchdEnvironment, buildLaunchdPlist, resolveDefaultBasePath } from "@signet/core";
+import {
+	LOOPBACK_HOST,
+	buildLaunchdEnvironment,
+	buildLaunchdPlist,
+	formatWorkspacePreflightError,
+	preflightWorkspace,
+	resolveDefaultBasePath,
+} from "@signet/core";
 
 const AGENTS_DIR = resolveDefaultBasePath();
 const DAEMON_DIR = join(AGENTS_DIR, ".daemon");
@@ -288,7 +295,15 @@ function isSystemdRunning(): boolean {
 // Direct Process Management (fallback)
 // ============================================================================
 
+function assertWorkspaceStartable(): void {
+	const workspace = preflightWorkspace();
+	if (workspace.status === "missing" || workspace.status === "incomplete") {
+		throw new Error(formatWorkspacePreflightError(workspace));
+	}
+}
+
 async function startDirect(port: number = 3850): Promise<number> {
+	assertWorkspaceStartable();
 	mkdirSync(DAEMON_DIR, { recursive: true });
 	mkdirSync(LOG_DIR, { recursive: true });
 
@@ -396,6 +411,7 @@ export async function uninstallService(): Promise<void> {
  * Start the daemon
  */
 export async function startDaemon(port: number = 3850): Promise<void> {
+	assertWorkspaceStartable();
 	const os = platform();
 
 	if (os === "darwin" && existsSync(LAUNCHD_PLIST)) {
