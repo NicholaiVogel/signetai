@@ -51,6 +51,16 @@ function invokeAccessor<Result>(
 	return method.call(accessor, callback);
 }
 
+function invokeAccessorAsync<Result>(
+	accessor: DbAccessor,
+	methodName: "withReadDbAsync" | "withWriteDbAsync" | "withWriteTxAsync",
+	callback: (db: ReadDb | WriteDb) => Result,
+): Promise<Result> {
+	const method = Reflect.get(accessor, methodName);
+	if (typeof method !== "function") throw new Error(`Isolated test accessor is missing ${methodName}`);
+	return method.call(accessor, callback) as Promise<Result>;
+}
+
 function inlineParameter(value: DbOwnerParameter): string | number | boolean | null | Uint8Array {
 	if (typeof value !== "object" || value === null) return value;
 	return Uint8Array.from(Buffer.from(value.base64, "base64"));
@@ -99,18 +109,24 @@ function unreachableInlineRequest(request: never): never {
 
 async function executeInlineOwnerRequest(accessor: DbAccessor, request: DbOwnerRequest): Promise<unknown> {
 	if (request.kind === "query") {
-		if (request.statement.result === "run") {
-			return invokeAccessor(accessor, "withWriteTx", (db) => inlineStatement(db, request.statement));
+		if (
+			request.statement.readonly === false ||
+			(request.statement.result === "run" && request.statement.transactional !== false)
+		) {
+			return await invokeAccessorAsync(accessor, "withWriteTxAsync", (db) => inlineStatement(db, request.statement));
 		}
-		return invokeAccessor(accessor, "withReadDb", (db) => inlineStatement(db, request.statement));
+		if (request.statement.result === "run") {
+			return await invokeAccessorAsync(accessor, "withWriteDbAsync", (db) => inlineStatement(db, request.statement));
+		}
+		return await invokeAccessorAsync(accessor, "withReadDbAsync", (db) => inlineStatement(db, request.statement));
 	}
 	if (request.kind === "transaction") {
-		return invokeAccessor(accessor, "withWriteTx", (db) =>
+		return await invokeAccessorAsync(accessor, "withWriteTxAsync", (db) =>
 			request.transaction.statements.map((statement) => inlineStatement(db, statement)),
 		);
 	}
 	if (request.kind === "batch") {
-		return invokeAccessor(accessor, "withWriteTx", (db) => {
+		return await invokeAccessorAsync(accessor, "withWriteTxAsync", (db) => {
 			const results = request.statements.map((statement) => inlineStatement(db, statement));
 			if (
 				request.requireChanges === true ||

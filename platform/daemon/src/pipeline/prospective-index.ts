@@ -9,10 +9,18 @@
 
 import { type LlmProvider, type PipelineHintsConfig, scanMemoryContent } from "@signet/core";
 import { DbWriteQueueFullError, type DbAccessor, type WriteDb } from "../db-accessor";
+import {
+	ownerBatch,
+	ownerChanges,
+	ownerRunStatement,
+	ownerRun,
+	ownerTransaction,
+	ownerWriteQueryOne,
+} from "../db-owner-maintenance";
+import { getDbOwnerForAccessor } from "../db-owner-runtime";
 import { logger } from "../logger";
 import type { PipelineV2Config } from "../memory-config";
 import { isSystemPressureHigh } from "../system-pressure";
-import { recoverStaleLeases } from "./stale-leases";
 
 // A transient write can usually clear during one or two queue turns, but a
 // shutdown must not wait forever for an unavailable database. If recovery is
@@ -133,117 +141,123 @@ export async function generateHints(
 // Job leasing (same pattern as structural-classify)
 // ---------------------------------------------------------------------------
 
-function leaseJob(db: WriteDb, maxAttempts: number): HintJobRow | null {
+async function leaseJob(
+	owner: import("../db-owner-client").DbOwnerClient,
+	maxAttempts: number,
+): Promise<HintJobRow | null> {
 	const now = new Date().toISOString();
 	const epoch = Math.floor(Date.now() / 1000);
 	const leaseToken = crypto.randomUUID();
-
-	const row = db
-		.prepare(
-			`SELECT id, memory_id, payload, attempts, max_attempts
-			 FROM memory_jobs
-			 WHERE job_type = 'prospective_index'
-			   AND status = 'pending'
-			   AND attempts < ?
-			   AND (failed_at IS NULL
-			        OR (? - CAST(strftime('%s', failed_at) AS INTEGER))
-			           > MIN((1 << attempts) * 5, 120))
-			 ORDER BY created_at ASC
-			 LIMIT 1`,
-		)
-		.get(maxAttempts, epoch) as HintJobRow | undefined;
-
-	if (!row) return null;
-
-	db.prepare(
-		`UPDATE memory_jobs
-		 SET status = 'leased', leased_at = ?, lease_token = ?, attempts = attempts + 1, updated_at = ?
-		 WHERE id = ?`,
-	).run(now, leaseToken, now, row.id);
-
-	return { ...row, attempts: row.attempts + 1, lease_token: leaseToken };
-}
-
-function completeJob(db: WriteDb, jobId: string, leaseToken: string): boolean {
-	const now = new Date().toISOString();
-	const result = db
-		.prepare(
+	return (
+		(await ownerWriteQueryOne<HintJobRow>(
+			owner,
+			"pipeline.prospective-index.lease",
 			`UPDATE memory_jobs
-			 SET status = 'completed', completed_at = ?, leased_at = NULL, lease_token = NULL, updated_at = ?
-			 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
-		)
-		.run(now, now, jobId, leaseToken);
-	return result.changes === 1;
-}
-
-function failJob(db: WriteDb, jobId: string, leaseToken: string, error: string): void {
-	const now = new Date().toISOString();
-	db.prepare(
-		`UPDATE memory_jobs
-		 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
-		     leased_at = NULL, lease_token = NULL, failed_at = ?, updated_at = ?,
-		     payload = CASE WHEN json_valid(payload)
-		                    THEN json_set(payload, '$.lastError', ?)
-		                    ELSE payload END
-		 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
-	).run(now, now, error, jobId, leaseToken);
-}
-
-/**
- * Release a leased job without relying on the transaction callback that just
- * failed. This is deliberately a single autocommit statement: it is the last
- * recovery boundary before the in-memory pending write is allowed to clear.
- */
-function recoverFailedJob(db: WriteDb, jobId: string, leaseToken: string, error: string): void {
-	const now = new Date().toISOString();
-	db.prepare(
-		`UPDATE memory_jobs
-		 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
-		     leased_at = NULL, lease_token = NULL, failed_at = ?, updated_at = ?,
-		     payload = CASE WHEN json_valid(payload)
-		                    THEN json_set(payload, '$.lastError', ?)
-		                    ELSE payload END
-		 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
-	).run(now, now, error, jobId, leaseToken);
-}
-
-function releaseJob(db: WriteDb, jobId: string, leaseToken: string): void {
-	const now = new Date().toISOString();
-	db.prepare(
-		`UPDATE memory_jobs
-		 SET status = 'pending', leased_at = NULL, lease_token = NULL, updated_at = ?
-		 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
-	).run(now, jobId, leaseToken);
-}
-
-// ---------------------------------------------------------------------------
-// Persist hints
-// ---------------------------------------------------------------------------
-
-function writeHints(db: WriteDb, memoryId: string, hints: readonly string[]): number {
-	const memory = db.prepare("SELECT agent_id FROM memories WHERE id = ? AND is_deleted = 0").get(memoryId) as {
-		agent_id?: unknown;
-	} | null;
-	if (typeof memory?.agent_id !== "string" || memory.agent_id.length === 0) return 0;
-	const stmt = db.prepare(
-		`INSERT OR IGNORE INTO memory_hints (id, memory_id, agent_id, hint, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
+			 SET status = 'leased', leased_at = ?, lease_token = ?, attempts = attempts + 1, updated_at = ?
+			 WHERE id = (
+				 SELECT id FROM memory_jobs
+				 WHERE job_type = 'prospective_index'
+				   AND status = 'pending'
+				   AND attempts < ?
+				   AND (failed_at IS NULL
+				        OR (? - CAST(strftime('%s', failed_at) AS INTEGER))
+				           > MIN((1 << attempts) * 5, 120))
+				 ORDER BY created_at ASC
+				 LIMIT 1
+			 )
+			 RETURNING id, memory_id, payload, attempts, max_attempts, lease_token`,
+			[now, leaseToken, now, maxAttempts, epoch],
+			{ estimatedWorkUnits: 1 },
+		)) ?? null
 	);
+}
+
+async function updateJob(
+	owner: import("../db-owner-client").DbOwnerClient,
+	operation: string,
+	sql: string,
+	params: readonly (string | number)[],
+): Promise<void> {
+	await ownerTransaction(owner, operation, [ownerRunStatement(sql, params)], { estimatedWorkUnits: 1 });
+}
+
+async function completeJobAndWriteHints(
+	owner: import("../db-owner-client").DbOwnerClient,
+	job: HintJobRow,
+	memoryId: string,
+	hints: readonly string[],
+): Promise<void> {
 	const now = new Date().toISOString();
-	let inserted = 0;
-	for (const hint of hints) {
-		const id = crypto.randomUUID();
-		stmt.run(id, memoryId, memory.agent_id, hint, now);
-		inserted++;
-	}
-	return inserted;
+	await ownerBatch(
+		owner,
+		"pipeline.prospective-index.complete-with-hints",
+		[
+			{
+				...ownerRunStatement(
+					`UPDATE memory_jobs
+					 SET status = 'completed', completed_at = ?, leased_at = NULL, lease_token = NULL, updated_at = ?
+					 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+					[now, now, job.id, job.lease_token],
+				),
+				requireChanges: true,
+			},
+			ownerRunStatement(
+				`INSERT OR IGNORE INTO memory_hints (id, memory_id, agent_id, hint, created_at)
+				 SELECT lower(hex(randomblob(16))), ?, m.agent_id, value, ?
+				 FROM memories m, json_each(?)
+				 WHERE m.id = ? AND m.is_deleted = 0 AND m.agent_id IS NOT NULL AND m.agent_id <> ''`,
+				[memoryId, now, JSON.stringify(hints), memoryId],
+			),
+		],
+		{ estimatedWorkUnits: Math.max(1, hints.length) },
+		false,
+	);
+}
+
+async function completeJob(owner: import("../db-owner-client").DbOwnerClient, job: HintJobRow): Promise<void> {
+	const now = new Date().toISOString();
+	await updateJob(
+		owner,
+		"pipeline.prospective-index.complete-empty",
+		`UPDATE memory_jobs
+		 SET status = 'completed', completed_at = ?, leased_at = NULL, lease_token = NULL, updated_at = ?
+		 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+		[now, now, job.id, job.lease_token],
+	);
+}
+
+async function recoverStaleLeasesOnOwner(
+	owner: import("../db-owner-client").DbOwnerClient,
+	now: string,
+): Promise<{ readonly total: number }> {
+	const results = await ownerBatch(
+		owner,
+		"pipeline.prospective-index.recover-stale-leases",
+		[
+			ownerRunStatement(
+				`UPDATE memory_jobs
+				 SET status = 'dead', leased_at = NULL, lease_token = NULL,
+				     failed_at = ?, error = COALESCE(error, ?), updated_at = ?
+				 WHERE status = 'leased' AND job_type = 'prospective_index' AND attempts >= max_attempts`,
+				[now, "lease expired before completion", now],
+			),
+			ownerRunStatement(
+				`UPDATE memory_jobs
+				 SET status = 'pending', leased_at = NULL, lease_token = NULL, updated_at = ?
+				 WHERE status = 'leased' AND job_type = 'prospective_index' AND attempts < max_attempts`,
+				[now],
+			),
+		],
+		{ estimatedWorkUnits: 2 },
+	);
+	return { total: ownerChanges(results[0]) + ownerChanges(results[1]) };
 }
 
 function isRetryableWriteAdmissionError(error: unknown): boolean {
 	// Queue admission pressure is the only error this worker can safely retry
 	// without changing the leased job's state. Callback, transaction, timeout,
 	// and cancellation errors must go through the job failure transition.
-	return error instanceof DbWriteQueueFullError;
+	return error instanceof DbWriteQueueFullError || (error instanceof Error && error.name === "DbOwnerAdmissionError");
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +277,7 @@ export function startHintsWorker(deps: {
 	}
 	const cfg = rawCfg;
 	const recoverLeasesOnStart = deps.recoverLeasesOnStart === true;
+	const ownerPromise = getDbOwnerForAccessor(accessor);
 
 	let running = true;
 	let timer: ReturnType<typeof setTimeout> | null = null;
@@ -281,11 +296,18 @@ export function startHintsWorker(deps: {
 			kind: "recovery",
 			job,
 			run: async () => {
-				await accessor.withWriteDbAsync(
-					(db: import("../db-accessor").WriteDb) => recoverFailedJob(db, job.id, job.lease_token, error),
-					{
-						siteToken: "pipeline/prospective-index.ts:284",
-					},
+				const owner = await ownerPromise;
+				await ownerRun(
+					owner,
+					"pipeline.prospective-index.recover",
+					`UPDATE memory_jobs
+					 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
+					     leased_at = NULL, lease_token = NULL, failed_at = ?, updated_at = ?,
+					     payload = CASE WHEN json_valid(payload)
+					                    THEN json_set(payload, '$.lastError', ?)
+					                    ELSE payload END
+					 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+					[new Date().toISOString(), new Date().toISOString(), error, job.id, job.lease_token],
 				);
 			},
 			retryAt: 0,
@@ -297,9 +319,14 @@ export function startHintsWorker(deps: {
 			kind: "recovery",
 			job,
 			run: async () => {
-				await accessor.withWriteDbAsync(
-					(db: import("../db-accessor").WriteDb) => releaseJob(db, job.id, job.lease_token),
-					{ siteToken: "pipeline/prospective-index.ts:300" },
+				const owner = await ownerPromise;
+				await ownerRun(
+					owner,
+					"pipeline.prospective-index.release",
+					`UPDATE memory_jobs
+					 SET status = 'pending', leased_at = NULL, lease_token = NULL, updated_at = ?
+					 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+					[new Date().toISOString(), job.id, job.lease_token],
 				);
 			},
 			retryAt: 0,
@@ -333,9 +360,18 @@ export function startHintsWorker(deps: {
 					kind: "failure",
 					job: write.job,
 					run: async () => {
-						await accessor.withWriteTxAsync(
-							(db: import("../db-accessor").WriteDb) => failJob(db, write.job.id, write.job.lease_token, message),
-							{ siteToken: "pipeline/prospective-index.ts:336" },
+						const owner = await ownerPromise;
+						await updateJob(
+							owner,
+							"pipeline.prospective-index.fail-completion",
+							`UPDATE memory_jobs
+							 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
+							     leased_at = NULL, lease_token = NULL, failed_at = ?, updated_at = ?,
+							     payload = CASE WHEN json_valid(payload)
+							                    THEN json_set(payload, '$.lastError', ?)
+							                    ELSE payload END
+							 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+							[new Date().toISOString(), new Date().toISOString(), message, write.job.id, write.job.lease_token],
 						);
 					},
 					retryAt: 0,
@@ -391,9 +427,7 @@ export function startHintsWorker(deps: {
 				return;
 			}
 
-			job = await accessor.withWriteTxAsync((db: import("../db-accessor").WriteDb) => leaseJob(db, 3), {
-				siteToken: "pipeline/prospective-index.ts:394",
-			});
+			job = await leaseJob(await ownerPromise, 3);
 			if (!job) return;
 			const j = job;
 			if (!running) {
@@ -409,9 +443,18 @@ export function startHintsWorker(deps: {
 					kind: "failure",
 					job: j,
 					run: async () => {
-						await accessor.withWriteTxAsync(
-							(db: import("../db-accessor").WriteDb) => failJob(db, j.id, j.lease_token, "invalid payload"),
-							{ siteToken: "pipeline/prospective-index.ts:412" },
+						const owner = await ownerPromise;
+						await updateJob(
+							owner,
+							"pipeline.prospective-index.fail-invalid-payload",
+							`UPDATE memory_jobs
+							 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
+							     leased_at = NULL, lease_token = NULL, failed_at = ?, updated_at = ?,
+							     payload = CASE WHEN json_valid(payload)
+							                    THEN json_set(payload, '$.lastError', ?)
+							                    ELSE payload END
+							 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+							[new Date().toISOString(), new Date().toISOString(), "invalid payload", j.id, j.lease_token],
 						);
 					},
 					retryAt: 0,
@@ -433,15 +476,7 @@ export function startHintsWorker(deps: {
 					kind: "completion",
 					job: j,
 					run: async () => {
-						await accessor.withWriteTxAsync(
-							(db: import("../db-accessor").WriteDb) => {
-								// Complete with a compare-and-set before writing derived hints.
-								// If a restart has re-leased this job, the stale worker must
-								// not publish results under its old lease.
-								if (completeJob(db, j.id, j.lease_token)) writeHints(db, payload.memoryId, hints);
-							},
-							{ siteToken: "pipeline/prospective-index.ts:436" },
-						);
+						await completeJobAndWriteHints(await ownerPromise, j, payload.memoryId, hints);
 					},
 					retryAt: 0,
 				};
@@ -456,12 +491,7 @@ export function startHintsWorker(deps: {
 					kind: "completion",
 					job: j,
 					run: async () => {
-						await accessor.withWriteTxAsync(
-							(db: import("../db-accessor").WriteDb) => completeJob(db, j.id, j.lease_token),
-							{
-								siteToken: "pipeline/prospective-index.ts:459",
-							},
-						);
+						await completeJob(await ownerPromise, j);
 					},
 					retryAt: 0,
 				};
@@ -482,11 +512,17 @@ export function startHintsWorker(deps: {
 						kind: "failure",
 						job: j,
 						run: async () => {
-							await accessor.withWriteTxAsync(
-								(db: import("../db-accessor").WriteDb) => failJob(db, j.id, j.lease_token, msg),
-								{
-									siteToken: "pipeline/prospective-index.ts:485",
-								},
+							await updateJob(
+								await ownerPromise,
+								"pipeline.prospective-index.fail",
+								`UPDATE memory_jobs
+								 SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
+								     leased_at = NULL, lease_token = NULL, failed_at = ?, updated_at = ?,
+								     payload = CASE WHEN json_valid(payload)
+								                    THEN json_set(payload, '$.lastError', ?)
+								                    ELSE payload END
+								 WHERE id = ? AND status = 'leased' AND lease_token = ?`,
+								[new Date().toISOString(), new Date().toISOString(), msg, j.id, j.lease_token],
 							);
 						},
 						retryAt: 0,
@@ -586,12 +622,8 @@ export function startHintsWorker(deps: {
 
 	// Start
 	if (recoverLeasesOnStart) {
-		void accessor
-			.withWriteTxAsync(
-				(db: import("../db-accessor").WriteDb) =>
-					recoverStaleLeases(db, { now: new Date().toISOString(), jobType: "prospective_index" }),
-				{ siteToken: "pipeline/prospective-index.ts:590" },
-			)
+		void ownerPromise
+			.then((owner) => recoverStaleLeasesOnOwner(owner, new Date().toISOString()))
 			.then((recovered) => {
 				if (recovered.total > 0) {
 					logger.info("pipeline", "Recovered prospective index leases before worker start", {
