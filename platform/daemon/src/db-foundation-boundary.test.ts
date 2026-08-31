@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
+import { createDbAccessorLifecycle } from "./db-accessor-lifecycle";
 
 function source(relativePath: string): string {
 	return readFileSync(new URL(relativePath, import.meta.url), "utf8");
@@ -14,5 +15,49 @@ describe("DB foundation dependency invariant", () => {
 		expect(accessor).not.toContain('import("./agent-id")');
 		expect(accessor).not.toContain('from "./db-vacuum-worker"');
 		expect(vacuum).not.toContain('from "./db-owner-runtime"');
+	});
+
+	describe("close participant lifecycle", () => {
+		it("preserves owner-before-cache order and rejects late registration", async () => {
+			const lifecycle = createDbAccessorLifecycle();
+			const closed: string[] = [];
+			let duringCloseError: unknown;
+			lifecycle.register({
+				name: "test-agent-scope-cache",
+				order: 200,
+				close: () => {
+					closed.push("agent-scope-cache");
+				},
+			});
+			lifecycle.register({
+				name: "test-db-owner",
+				order: 100,
+				close: () => {
+					closed.push("db-owner");
+					try {
+						lifecycle.register({
+							name: "during-close-participant",
+							order: 300,
+							close: () => undefined,
+						});
+					} catch (error) {
+						duringCloseError = error;
+					}
+				},
+			});
+
+			await lifecycle.close(undefined);
+
+			expect(closed).toEqual(["db-owner", "agent-scope-cache"]);
+			expect(duringCloseError).toBeInstanceOf(Error);
+			expect((duringCloseError as Error).message).toContain("registered after close started");
+			expect(() =>
+				lifecycle.register({
+					name: "late-participant",
+					order: 300,
+					close: () => undefined,
+				}),
+			).toThrow("registered after close started");
+		});
 	});
 });
