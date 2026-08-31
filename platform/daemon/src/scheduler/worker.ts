@@ -210,9 +210,12 @@ export async function executeTask(
 		await getDbOwnerForAccessor(db),
 		"scheduler.lease-task",
 		[
+			// runId is the retry identity: the owner result can be lost after the
+			// transaction commits, so replaying the lease must not create a second run.
 			ownerRunStatement(
 				`INSERT INTO task_runs (id, task_id, status, started_at)
-				 VALUES (?, ?, 'running', ?)`,
+				 VALUES (?, ?, 'running', ?)
+				 ON CONFLICT(id) DO NOTHING`,
 				[runId, task.id, now],
 			),
 			ownerRunStatement(

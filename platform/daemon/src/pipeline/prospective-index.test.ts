@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { PipelineHintsConfig } from "@signet/core";
 import { type MigrationDb, runMigrations } from "../../../core/src/migrations";
 import { DbWriteQueueFullError, type DbAccessor, type ReadDb, type WriteDb } from "../db-accessor";
+import { DbOwnerDiedError } from "../db-owner-client";
 import { DEFAULT_PIPELINE_V2 } from "../memory-config";
 import { enqueueHintsJob, generateHints, HINTS_WORKER_STOP_GRACE_MS, startHintsWorker } from "./prospective-index";
 import type { LlmProvider } from "./provider";
@@ -492,6 +493,50 @@ describe("prospective-index", () => {
 			expect(prompts).toHaveLength(2);
 			expect(prompts[0]).toContain("first queued memory content");
 			expect(prompts[1]).toContain("second queued memory content");
+		});
+
+		it("reconciles a committed lease after owner death before the result", async () => {
+			const memoryId = crypto.randomUUID();
+			insertMemory(db, memoryId, "one lease committed before owner death");
+			accessor.withWriteTx((wdb) => {
+				enqueueHintsJob(wdb, memoryId, "one lease committed before owner death");
+			});
+
+			let writeCalls = 0;
+			const crashAfterCommitAccessor: DbAccessor = {
+				...accessor,
+				async withWriteTxAsync<T>(fn: (wdb: WriteDb) => T): Promise<T> {
+					writeCalls += 1;
+					db.exec("BEGIN IMMEDIATE");
+					try {
+						const result = fn(db as unknown as WriteDb);
+						db.exec("COMMIT");
+						if (writeCalls === 1) throw new DbOwnerDiedError();
+						return result;
+					} catch (error) {
+						try {
+							db.exec("ROLLBACK");
+						} catch {
+							// The simulated owner died after commit.
+						}
+						throw error;
+					}
+				},
+			};
+			const handle = startHintsWorker({
+				accessor: crashAfterCommitAccessor,
+				provider: emptyProvider(),
+				pipelineCfg: pipelineCfg(),
+			});
+			try {
+				await waitFor(() => getJob(db, memoryId)?.status === "completed", 2_000);
+			} finally {
+				await handle.stop();
+			}
+
+			expect(writeCalls).toBe(3);
+			expect(getJob(db, memoryId)).toMatchObject({ status: "completed", attempts: 1 });
+			expect(getJob(db, memoryId)?.lease_token).toBeNull();
 		});
 
 		it("does not lease one prospective job to concurrent workers twice", async () => {

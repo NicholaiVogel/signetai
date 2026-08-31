@@ -152,21 +152,30 @@ async function leaseJob(
 		(await ownerWriteQueryOne<HintJobRow>(
 			owner,
 			"pipeline.prospective-index.lease",
-			`UPDATE memory_jobs
-			 SET status = 'leased', leased_at = ?, lease_token = ?, attempts = attempts + 1, updated_at = ?
-			 WHERE id = (
-				 SELECT id FROM memory_jobs
-				 WHERE job_type = 'prospective_index'
-				   AND status = 'pending'
-				   AND attempts < ?
-				   AND (failed_at IS NULL
-				        OR (? - CAST(strftime('%s', failed_at) AS INTEGER))
-				           > MIN((1 << attempts) * 5, 120))
-				 ORDER BY created_at ASC
+			// A lost owner result replays this request with the same lease token.
+			// Reconcile that token without incrementing attempts or changing timestamps.
+			`WITH selected AS (
+				 SELECT id
+				 FROM memory_jobs
+				 WHERE (status = 'leased' AND job_type = 'prospective_index' AND lease_token = ?)
+				    OR (job_type = 'prospective_index'
+				        AND status = 'pending'
+				        AND attempts < ?
+				        AND (failed_at IS NULL
+				             OR (? - CAST(strftime('%s', failed_at) AS INTEGER))
+				                > MIN((1 << attempts) * 5, 120)))
+				 ORDER BY CASE WHEN status = 'leased' THEN 0 ELSE 1 END, created_at ASC
 				 LIMIT 1
-			 )
+			)
+			UPDATE memory_jobs
+			 SET status = 'leased',
+			     leased_at = CASE WHEN status = 'leased' THEN leased_at ELSE ? END,
+			     lease_token = CASE WHEN status = 'leased' THEN lease_token ELSE ? END,
+			     attempts = CASE WHEN status = 'leased' THEN attempts ELSE attempts + 1 END,
+			     updated_at = CASE WHEN status = 'leased' THEN updated_at ELSE ? END
+			 WHERE id = (SELECT id FROM selected)
 			 RETURNING id, memory_id, payload, attempts, max_attempts, lease_token`,
-			[now, leaseToken, now, maxAttempts, epoch],
+			[leaseToken, maxAttempts, epoch, now, leaseToken, now],
 			{ estimatedWorkUnits: 1 },
 		)) ?? null
 	);

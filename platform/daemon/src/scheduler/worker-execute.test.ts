@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { runMigrations } from "../../../core/src/migrations";
+import { DbOwnerDiedError } from "../db-owner-client";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
-import { logger } from "../logger";
+import type { logger } from "../logger";
 import { executeTask } from "./worker";
 
 function isTaskRunRow(value: unknown): value is { status: string; error: string | null } {
@@ -89,6 +90,105 @@ describe("executeTask", () => {
 		}
 		expect(run?.status).toBe("failed");
 		expect(run?.error).toContain("config read failed");
+	});
+
+	it("replays a scheduler lease safely after owner death following commit", async () => {
+		const now = "2026-03-06T15:55:00.000Z";
+		db.prepare(
+			`INSERT INTO scheduled_tasks
+			 (id, name, prompt, cron_expression, harness, working_directory,
+			  enabled, last_run_at, next_run_at, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run(
+			"task-after-owner-death",
+			"task-after-owner-death",
+			"test prompt",
+			"*/15 * * * *",
+			"codex",
+			null,
+			1,
+			null,
+			now,
+			now,
+			now,
+		);
+
+		let writeCalls = 0;
+		const accessor: DbAccessor = {
+			withReadDb<T>(fn: (rdb: ReadDb) => T): T {
+				return fn(db as unknown as ReadDb);
+			},
+			withWriteTx<T>(fn: (wdb: WriteDb) => T): T {
+				return fn(db as unknown as WriteDb);
+			},
+			async withReadDbAsync<T>(fn: (rdb: ReadDb) => T | Promise<T>): Promise<T> {
+				return await fn(db as unknown as ReadDb);
+			},
+			async withWriteTxAsync<T>(fn: (wdb: WriteDb) => T): Promise<T> {
+				writeCalls += 1;
+				db.exec("BEGIN IMMEDIATE");
+				try {
+					const result = fn(db as unknown as WriteDb);
+					db.exec("COMMIT");
+					if (writeCalls === 1) throw new DbOwnerDiedError();
+					return result;
+				} catch (error) {
+					try {
+						db.exec("ROLLBACK");
+					} catch {
+						// The simulated owner died after commit.
+					}
+					throw error;
+				}
+			},
+			close() {},
+		};
+		let spawnCalls = 0;
+
+		await executeTask(
+			accessor,
+			{
+				id: "task-after-owner-death",
+				agent_id: "default",
+				name: "task-after-owner-death",
+				prompt: "test prompt",
+				cron_expression: "*/15 * * * *",
+				harness: "codex",
+				working_directory: null,
+				skill_name: null,
+				skill_mode: null,
+			},
+			{
+				computeNextRun: () => "2026-03-06T16:00:00.000Z",
+				resolveSkillPrompt: (prompt: string) => prompt,
+				spawnTask: mock(async () => {
+					spawnCalls += 1;
+					return { exitCode: 0, stdout: "", stderr: "", error: null, timedOut: false };
+				}),
+				emitTaskStream() {},
+				logger: { debug() {}, info() {}, warn() {}, error() {} } as unknown as typeof logger,
+				resolveTaskModel: () => undefined,
+				recordSkillInvocation() {},
+			},
+		);
+
+		const runs = db
+			.prepare("SELECT id, status FROM task_runs WHERE task_id = ?")
+			.all("task-after-owner-death") as Array<{
+			id: string;
+			status: string;
+		}>;
+		expect(writeCalls).toBe(3);
+		expect(spawnCalls).toBe(1);
+		expect(runs).toHaveLength(1);
+		expect(runs[0]?.status).toBe("completed");
+		expect(
+			(
+				db.prepare("SELECT next_run_at FROM scheduled_tasks WHERE id = ?").get("task-after-owner-death") as {
+					next_run_at: string;
+				}
+			).next_run_at,
+		).toBe("2026-03-06T16:00:00.000Z");
 	});
 
 	it("records skill usage when a task runs with a skill", async () => {
