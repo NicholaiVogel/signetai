@@ -1,26 +1,26 @@
 # Event-loop synchronous contract audit
 
-This report is generated from the deterministic migration ledger in `scripts/event-loop-contract-baseline.json`. Phase A enforces the type boundary structurally: production code receives an async-only `DbAccessor`, while the synchronous compatibility module lives outside the daemon production `src/` tree and is rejected by the production TypeScript project's `rootDir`. The AST import and call checks remain belt-and-suspenders diagnostics, and new synchronous DB call sites fail closed through exact ledger matching.
+This report is generated from the deterministic migration ledger in `scripts/event-loop-contract-baseline.json`. Phase A enforces the type boundary structurally: production code receives an async-only `DbAccessor`, while the synchronous compatibility module lives outside the daemon production `src/` tree and is rejected by the production TypeScript project's `rootDir`. The AST import and call checks remain belt-and-suspenders diagnostics, and new synchronous DB call sites fail closed through exact ledger matching. Migrated DB sites use unique `db:domain.operation.action` IDs as their durable identity; file and line remain diagnostic metadata.
 
 ## Current inventory
 
-- Exact ledger inventory: 899 sites
+- Exact ledger inventory: 902 sites
 - Synchronous `withWriteTx()` sites: 65
 - Synchronous `withReadDb()` sites: 99
-- Async-named DB sites: 219
-- Async-named ON-PARENT DB sites: 217
+- Async-named DB sites: 222
+- Async-named ON-PARENT DB sites: 220
 - Async-named OFF-PARENT DB sites: 2
 - Synchronous filesystem/process sites: 516
 - Compile-visible legacy DB sites remaining: 164
   - `withWriteTx`: 65
   - `withReadDb`: 99
 
-The 899-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 99 synchronous reads, and 219 async-named DB sites are the complete database-call inventory; 164 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 217 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
+The 902-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 99 synchronous reads, and 222 async-named DB sites are the complete database-call inventory; 164 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 220 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## Execution-home inventory
 
-- Database accessor sites classified: 383
-- ON-PARENT callback execution: 381
+- Database accessor sites classified: 386
+- ON-PARENT callback execution: 384
 - OFF-PARENT callback execution: 2
 - Ratchet: new ON-PARENT async-named sites fail the audit; the campaign target is ON-PARENT → 0
 
@@ -60,11 +60,13 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `database-integrity.ts:712` (withReadDbAsync)
 - `database-integrity.ts:830` (withReadDbAsync)
 - `db-accessor.ts:3031` (withWriteTxAsync)
-- `db-vacuum.ts:331` (withReadDb)
-- `db-vacuum.ts:339` (withReadDbAsync)
-- `db-vacuum.ts:347` (withWriteTxAsync)
-- `db-vacuum.ts:367` (withWriteTxAsync)
-- `db-vacuum.ts:386` (withWriteTxAsync)
+- `db-vacuum.ts:340` (withReadDb)
+- `db-vacuum.ts:348` (withReadDbAsync)
+- `db-vacuum.ts:460` (incrementalVacuumAsync)
+- `db-vacuum.ts:498` (withWriteTxAsync)
+- `db-vacuum.ts:528` (vacuumConversionAsync)
+- `db-vacuum.ts:530` (withWriteTxAsync)
+- `db-vacuum.ts:548` (withWriteTxAsync)
 - `discord-desktop-cache-source.ts:484` (withReadDbAsync)
 - `discord-desktop-cache-source.ts:497` (withWriteTxAsync)
 - `discord-source-provider.ts:573` (withReadDbAsync)
@@ -217,9 +219,10 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `pipeline/dreaming-worker.ts:227` (withReadDbAsync)
 - `pipeline/dreaming-worker.ts:247` (withReadDbAsync)
 - `pipeline/graph-traversal.ts:92` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:148` (withReadDbAsync)
+- `db:maintenance.graph-agent-scopes.read` (withReadDbAsync)
 - `pipeline/maintenance-worker.ts:346` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:485` (withReadDbAsync)
+- `db:maintenance.dead-memory-count.read` (withReadDbAsync)
+- `pipeline/maintenance-worker.ts:535` (withReadDbAsync)
 - `pipeline/prospective-index.ts:284` (withWriteDbAsync)
 - `pipeline/prospective-index.ts:300` (withWriteDbAsync)
 - `pipeline/prospective-index.ts:336` (withWriteTxAsync)
