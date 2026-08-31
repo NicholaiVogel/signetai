@@ -208,12 +208,16 @@ export {
 	type WorkspaceResolution,
 	type ResolveWorkspacePathOptions,
 	type WorkspaceFileSystem,
+	type WorkspaceStartupPreflight,
+	type WorkspaceStartupStatus,
 	WORKSPACE_ENV_KEYS,
+	formatWorkspacePreflightError,
 	normalizeWorkspacePath,
 	getWorkspaceConfigPath,
 	readConfiguredWorkspacePath,
 	writeConfiguredWorkspacePath,
 	clearConfiguredWorkspacePath,
+	preflightWorkspace,
 	resolveWorkspacePath,
 } from "./workspace";
 export {

@@ -1,8 +1,26 @@
-import { homedir } from "os";
-import { join } from "path";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 export function resolveDefaultBasePath(): string {
-	return process.env.SIGNET_PATH || join(homedir(), ".agents");
+	const envPath = process.env.SIGNET_PATH?.trim() || process.env.SIGNET_WORKSPACE?.trim();
+	if (envPath) return resolve(expandHome(envPath));
+
+	const home = homedir();
+	const configHome = process.env.XDG_CONFIG_HOME?.trim()
+		? resolve(expandHome(process.env.XDG_CONFIG_HOME.trim(), home))
+		: join(home, ".config");
+	const configPath = join(configHome, "signet", "workspace.json");
+	if (existsSync(configPath)) {
+		try {
+			const value = JSON.parse(readFileSync(configPath, "utf8")) as { workspace?: unknown };
+			if (typeof value.workspace === "string" && value.workspace.trim())
+				return resolve(expandHome(value.workspace, home));
+		} catch {
+			// The canonical preflight reports malformed persisted configuration.
+		}
+	}
+	return join(home, ".agents");
 }
 
 export function expandHome(p: string, home = homedir()): string {

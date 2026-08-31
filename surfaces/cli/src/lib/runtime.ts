@@ -19,7 +19,9 @@ import chalk from "chalk";
 import {
 	buildLaunchdEnvironment,
 	buildLaunchdPlist,
+	formatWorkspacePreflightError,
 	parseSimpleYaml,
+	preflightWorkspace,
 	resolveLaunchdExecutable,
 	resolveSignetDaemonUrl,
 } from "@signet/core";
@@ -1481,6 +1483,14 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemo
 	const daemonPath = preferredDaemonPath ?? resolveDaemonPath();
 	if (!daemonPath) {
 		console.error(chalk.red("Daemon not found. Try reinstalling signet."));
+		return false;
+	}
+
+	const workspace = preflightWorkspace({
+		env: { ...process.env, SIGNET_PATH: agentsDir },
+	});
+	if (workspace.status === "missing" || workspace.status === "incomplete") {
+		console.error(chalk.red(formatWorkspacePreflightError(workspace)));
 		return false;
 	}
 

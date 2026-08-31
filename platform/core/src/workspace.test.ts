@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	closeSync,
+	existsSync,
 	fsyncSync,
 	mkdirSync,
 	mkdtempSync,
@@ -17,8 +18,10 @@ import {
 	type WorkspaceFileSystem,
 	type WorkspaceResolution,
 	clearConfiguredWorkspacePath,
+	formatWorkspacePreflightError,
 	getWorkspaceConfigPath,
 	normalizeWorkspacePath,
+	preflightWorkspace,
 	readConfiguredWorkspacePath,
 	resolveWorkspacePath,
 	writeConfiguredWorkspacePath,
@@ -321,5 +324,44 @@ describe("resolveWorkspacePath respects the real host default", () => {
 		const resolved: WorkspaceResolution = resolveWorkspacePath({ env: makeEnv() });
 		expect(resolved.path).toBe(join(homedir(), ".agents"));
 		expect(resolved.source).toBe("default");
+	});
+});
+
+describe("preflightWorkspace", () => {
+	it("classifies a persisted missing workspace without creating anything", () => {
+		const home = mkdtempSync(join(tmpdir(), "signet-core-ws-preflight-missing-"));
+		try {
+			const env = makeEnv({ XDG_CONFIG_HOME: join(home, "config") });
+			const missing = join(home, "moved-workspace");
+			writeConfiguredWorkspacePath(missing, env, home);
+			const result = preflightWorkspace({ env, home });
+			expect(result.status).toBe("missing");
+			expect(result.path).toBe(missing);
+			expect(existsSync(missing)).toBe(false);
+			expect(formatWorkspacePreflightError(result)).toContain("will not recreate it");
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	it("classifies fresh and established workspaces", () => {
+		const home = mkdtempSync(join(tmpdir(), "signet-core-ws-preflight-state-"));
+		try {
+			const freshEnv = makeEnv({ XDG_CONFIG_HOME: join(home, "fresh-config") });
+			expect(preflightWorkspace({ env: freshEnv, home }).status).toBe("fresh");
+
+			const ready = join(home, "ready");
+			mkdirSync(join(ready, "memory"), { recursive: true });
+			writeFileSync(join(ready, "agent.yaml"), "name: ready\n");
+			writeFileSync(join(ready, "memory", "memories.db"), "");
+			expect(preflightWorkspace({ env: makeEnv({ SIGNET_PATH: ready }), home }).status).toBe("ready");
+
+			const incomplete = join(home, "incomplete");
+			mkdirSync(incomplete);
+			writeFileSync(join(incomplete, "agent.yaml"), "name: incomplete\n");
+			expect(preflightWorkspace({ env: makeEnv({ SIGNET_PATH: incomplete }), home }).status).toBe("incomplete");
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
 	});
 });

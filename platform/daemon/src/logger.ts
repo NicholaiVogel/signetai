@@ -10,16 +10,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import {
-	appendFileSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	readdirSync,
-	renameSync,
-	statSync,
-	unlinkSync,
-} from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -168,20 +159,9 @@ export class Logger extends EventEmitter {
 		super();
 		this.config = { ...DEFAULT_CONFIG, ...config };
 		this.currentLogFile = this.getLogFileName();
-		this.ensureLogDir();
+		// Do not create workspace state during module import. The daemon startup
+		// preflight decides whether this path is safe to touch.
 		this.startFlushTimer();
-	}
-
-	private ensureLogDir() {
-		try {
-			const dir = this.config.logFilePath ? dirname(this.config.logFilePath) : this.config.logDir;
-			if (!existsSync(dir)) {
-				mkdirSync(dir, { recursive: true });
-			}
-		} catch (e) {
-			this.fileOutputEnabled = false;
-			console.error("Failed to initialize log directory, disabling file logging:", e);
-		}
 	}
 
 	private getLogFileName(): string {
@@ -582,12 +562,12 @@ export class Logger extends EventEmitter {
 	}
 
 	// Cleanup
-	shutdown() {
+	shutdown(flush = true) {
 		// Final best-effort flush. Bypass the retry backoff so the retained
 		// buffer survives a shutdown that lands inside the backoff window
 		// (e.g. SIGTERM shortly after a failed append) — otherwise the crash
 		// trail the retry exists to preserve is dropped on exit.
-		this.flush(true);
+		if (flush) this.flush(true);
 		if (this.flushTimer) {
 			clearInterval(this.flushTimer);
 		}

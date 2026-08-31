@@ -26,6 +26,8 @@ import {
 	parseRoutingConfig,
 	parseRoutingTargetRef,
 	parseSimpleYaml,
+	preflightWorkspace,
+	formatWorkspacePreflightError,
 	resolveDefaultBasePath,
 	routingTargetLocality,
 	scanMemoryContent,
@@ -2226,6 +2228,14 @@ process.on("unhandledRejection", (reason) => {
 // ============================================================================
 
 async function main() {
+	const workspace = preflightWorkspace();
+	if (workspace.status === "missing" || workspace.status === "incomplete") {
+		console.error(formatWorkspacePreflightError(workspace));
+		logger.shutdown(false);
+		process.exitCode = 1;
+		return;
+	}
+
 	logger.info("daemon", "Signet Daemon starting");
 	logger.info("daemon", `File logging to ${logger.logFilePath}`);
 	logger.info("daemon", "Agents directory", { path: AGENTS_DIR });
