@@ -22,6 +22,7 @@ import {
 	macOSLaunchAgentAttributionNotice,
 	readDaemonStartFailureDiagnostics,
 	readManagedDaemonPid,
+	resolveDaemonProbeUrls,
 	resolveLaunchdDaemonMigration,
 	resolveDaemonChildInspector,
 	resolveDaemonInspectorForwarding,
@@ -42,6 +43,21 @@ describe("resolveDaemonPaths", () => {
 	it("keeps the JavaScript daemon bundle as the default when SIGNET_DIR is set", () => {
 		const paths = resolveDaemonPaths({ SIGNET_DIR: "/opt/signet" });
 		expect(paths[0]).toBe("/opt/signet/runtime/daemon-js/daemon.js");
+	});
+});
+
+describe("resolveDaemonProbeUrls", () => {
+	it("uses the configured daemon URL instead of hard-coding the default port", () => {
+		const root = mkdtempSync(join(tmpdir(), "signet-daemon-probe-url-"));
+		try {
+			writeFileSync(join(root, "agent.yaml"), "daemon:\n  url: http://127.0.0.1:43127\n");
+			expect(resolveDaemonProbeUrls(root, {})).toEqual(["http://127.0.0.1:43127", "http://[::1]:43127"]);
+			expect(resolveDaemonProbeUrls(root, { SIGNET_DAEMON_URL: "https://signet.example.test:8443" })).toEqual([
+				"https://signet.example.test:8443",
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

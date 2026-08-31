@@ -149,13 +149,14 @@ export async function runFreshSetup(plan: SetupPlan, context: SetupApplyContext,
 			};
 		}
 
-		if (plan.embeddingProvider !== "none") {
-			config.embedding = {
-				provider: plan.embeddingProvider,
-				model: plan.embeddingModel,
-				dimensions: plan.embeddingDimensions,
-			};
-		}
+		config.embedding =
+			plan.embeddingProvider === "none"
+				? { provider: "none" }
+				: {
+						provider: plan.embeddingProvider,
+						model: plan.embeddingModel,
+						dimensions: plan.embeddingDimensions,
+					};
 
 		const memory = readRecord(config.memory);
 		memory.pipelineV2 = buildSetupPipeline(plan.extractionProvider);

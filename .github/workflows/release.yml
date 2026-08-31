@@ -316,6 +316,13 @@ jobs:
           SIGNET_TELEMETRY_OPTOUT: "1"
         run: bun test scripts/native-embedding-runtime-smoke.test.ts scripts/native-dreaming-mcp-smoke.test.ts
 
+      - name: Native first-use acceptance
+        shell: bash
+        env:
+          SIGNET_NATIVE_FIRST_USE_SMOKE: "1"
+          SIGNET_NATIVE_SMOKE_BINARY: ./dist/native/${{ matrix.asset }}
+        run: bun test scripts/native-first-use-smoke.test.ts
+
       - name: Upload to release
         shell: bash
         run: |

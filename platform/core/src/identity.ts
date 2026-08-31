@@ -569,9 +569,8 @@ export function loadIdentityFilesSync(basePath: string): IdentityMap {
 export function hasValidIdentity(basePath: string): boolean {
 	const mode = loadIdentityMode(basePath);
 	if (mode !== "managed") return true; // identity files not required
-	for (const key of REQUIRED_IDENTITY_KEYS) {
-		const spec = IDENTITY_FILES[key];
-		if (!existsSync(join(basePath, spec.path))) {
+	for (const path of resolveRequiredIdentityPaths(basePath)) {
+		if (!existsSync(join(basePath, path))) {
 			return false;
 		}
 	}
@@ -588,14 +587,34 @@ export function getMissingIdentityFiles(basePath: string): string[] {
 
 	const missing: string[] = [];
 
-	for (const key of REQUIRED_IDENTITY_KEYS) {
-		const spec = IDENTITY_FILES[key];
-		if (!existsSync(join(basePath, spec.path))) {
-			missing.push(spec.path);
+	for (const path of resolveRequiredIdentityPaths(basePath)) {
+		if (!existsSync(join(basePath, path))) {
+			missing.push(path);
 		}
 	}
 
 	return missing;
+}
+
+function resolveRequiredIdentityPaths(basePath: string): string[] {
+	const legacyRequired = () => REQUIRED_IDENTITY_KEYS.map((key) => IDENTITY_FILES[key].path);
+	const agentYaml = join(basePath, "agent.yaml");
+	if (!existsSync(agentYaml)) return legacyRequired();
+
+	try {
+		const config = parseSimpleYaml(readFileSync(agentYaml, "utf-8"));
+		const identity = readRecord(readRecord(config).identity);
+		const configured = readIdentityEntryList(readRecord(identity.startup).load);
+		if (configured.length > 0) return [...new Set(configured.map((entry) => entry.path))];
+
+		const presetName = typeof identity.preset === "string" ? identity.preset : "";
+		const preset = IDENTITY_PRESETS[presetName as IdentityPresetName];
+		if (preset) return [...new Set(preset.startup.map((entry) => entry.path))];
+	} catch {
+		// Preserve the legacy required-file contract when configuration is unreadable.
+	}
+
+	return legacyRequired();
 }
 
 /**

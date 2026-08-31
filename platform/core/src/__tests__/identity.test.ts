@@ -6,6 +6,8 @@ import { buildAgentMemoryConfig, getAgentIdentityFiles, normalizeAgentRosterEntr
 import {
 	STATIC_IDENTITY_SESSION_START_TIMEOUT_STATUS,
 	detectExistingSetup,
+	getMissingIdentityFiles,
+	hasValidIdentity,
 	loadIdentityMode,
 	readStaticIdentity,
 	resolveHermesHomePath,
@@ -196,6 +198,28 @@ describe("readStaticIdentity", () => {
 
 		const result = readStaticIdentity(TMP) ?? "";
 		expect(result.indexOf("## About Your User")).toBeLessThan(result.indexOf("## Agent Instructions"));
+	});
+});
+
+describe("managed identity health", () => {
+	test("minimal preset does not require identity files that setup intentionally omits", () => {
+		writeFileSync(join(TMP, "agent.yaml"), "identity:\n  preset: minimal\n");
+		writeFileSync(join(TMP, "AGENTS.md"), "agents");
+		writeFileSync(join(TMP, "DREAMING.md"), "dreaming");
+
+		expect(hasValidIdentity(TMP)).toBe(true);
+		expect(getMissingIdentityFiles(TMP)).toEqual([]);
+	});
+
+	test("reports only configured startup files when managed identity is incomplete", () => {
+		writeFileSync(
+			join(TMP, "agent.yaml"),
+			"identity:\n  preset: custom\n  startup:\n    load:\n      - path: AGENTS.md\n      - path: USER.md\n",
+		);
+		writeFileSync(join(TMP, "AGENTS.md"), "agents");
+
+		expect(hasValidIdentity(TMP)).toBe(false);
+		expect(getMissingIdentityFiles(TMP)).toEqual(["USER.md"]);
 	});
 });
 
