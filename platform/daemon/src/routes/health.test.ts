@@ -65,6 +65,29 @@ afterEach(() => {
 });
 
 describe("GET /health owner diagnostics", () => {
+	test("reports a missing configured workspace as degraded", async () => {
+		const missingPath = join(dir, "moved-workspace");
+		process.env.SIGNET_PATH = missingPath;
+
+		const app = makeApp();
+		const health = await app.request("http://localhost/health");
+		expect(health.status).toBe(200);
+		const healthBody = (await health.json()) as {
+			status: string;
+			workspace: { status: string; path: string; reasons: string[] };
+		};
+		expect(healthBody.status).toBe("degraded");
+		expect(healthBody.workspace.status).toBe("missing");
+		expect(healthBody.workspace.path).toBe(missingPath);
+		expect(healthBody.workspace.reasons).toContain("configured workspace directory is missing");
+
+		const ready = await app.request("http://localhost/health/ready");
+		expect(ready.status).toBe(503);
+		const readyBody = (await ready.json()) as { checks: { workspace: { status: string } }; reasons: string[] };
+		expect(readyBody.checks.workspace.status).toBe("missing");
+		expect(readyBody.reasons).toContain("configured workspace directory is missing");
+	});
+
 	test("exposes bounded per-lane owner queue and age metrics", async () => {
 		const lane = {
 			state: "ready",
