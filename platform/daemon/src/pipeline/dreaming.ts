@@ -2321,7 +2321,11 @@ export async function getDreamingEpisodicTokenBacklog(
 		deadlineMs: 60_000,
 		estimatedWorkUnits: maxSources === undefined ? DB_OWNER_MAX_WORK_UNITS : maxSources * 10,
 	};
-	if (ownerMaintenance) return await ownerMaintenance.dreamingEpisodicBacklog(input, options);
+	if (ownerMaintenance) {
+		const count = await ownerMaintenance.dreamingEpisodicBacklog(input, options);
+		recordDreamingEpisodicTokenBacklog(agentId, count);
+		return count;
+	}
 	const count = await runDbOwnerDomainOperation(accessor, {
 		runWithOwner: async (owner) => await ownerDreamingEpisodicBacklog(owner, input, options),
 		runInline: ({ read }) => read((db) => getDreamingEpisodicTokenBacklogInDb(db, input.agentId, input.maxSources)),

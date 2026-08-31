@@ -447,7 +447,23 @@ describe("listKnowledgeEntities (issue #515)", () => {
 			).run();
 		});
 
-		await getDreamingEpisodicTokenBacklog(getDbAccessor(), "default");
+		const realBacklog = await getDreamingEpisodicTokenBacklog(getDbAccessor(), "default");
+		{
+			// Regression (#1759 re-verdict): the ownerMaintenance branch must record the
+			// parent-visible backlog mirror before returning, or the constellation cache
+			// reads zero until an inline path happens to run.
+			const { getDreamingEpisodicTokenBacklogCached, recordDreamingEpisodicTokenBacklog } =
+				await import("./pipeline/dreaming-token-cache");
+			recordDreamingEpisodicTokenBacklog("default", 0); // prime stale value
+			const maintenance = {
+				dreamingEpisodicBacklog: async () => 123,
+			};
+			await getDreamingEpisodicTokenBacklog(getDbAccessor(), "default", maintenance as never);
+			if (getDreamingEpisodicTokenBacklogCached("default") !== 123) {
+				throw new Error("owner-maintenance branch did not record the backlog mirror");
+			}
+			recordDreamingEpisodicTokenBacklog("default", realBacklog); // restore for metadata assertions
+		}
 		const source = getDbAccessor().withReadDb(
 			(db) =>
 				searchEpisodicSources(db, {
