@@ -1,6 +1,6 @@
 {
 	"name": "@signet/codex-plugin",
-	"version": "0.214.41",
+	"version": "0.214.42",
 	"description": "Native Codex plugin installer for Signet",
 	"type": "module",
 	"bin": {
@@ -13,8 +13,8 @@
 		"test": "node bin/install.js --help >/dev/null"
 	},
 	"dependencies": {
-		"@signet/connector-base": "0.214.41",
-		"@signet/connector-codex": "0.214.41"
+		"@signet/connector-base": "0.214.42",
+		"@signet/connector-codex": "0.214.42"
 	},
 	"keywords": [
 		"signet",

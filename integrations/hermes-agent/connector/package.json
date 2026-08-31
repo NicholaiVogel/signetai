@@ -1,6 +1,6 @@
 {
 	"name": "@signet/connector-hermes-agent",
-	"version": "0.214.41",
+	"version": "0.214.42",
 	"description": "Signet connector for Hermes Agent — installs Signet as a pluggable memory provider",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -25,8 +25,8 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@signet/connector-base": "0.214.41",
-		"@signet/core": "0.214.41"
+		"@signet/connector-base": "0.214.42",
+		"@signet/core": "0.214.42"
 	},
 	"devDependencies": {
 		"@types/node": "^22.0.0",
