@@ -18,6 +18,7 @@ import {
 	getDedupStats,
 	getEmbeddingGapStats,
 	integrityCheck,
+	MAX_REEMBED_BATCH,
 	pruneChunkGroupEntities,
 	pruneGenericEntities,
 	pruneSingletonExtractedEntities,
@@ -26,11 +27,11 @@ import {
 	reembedModelMigration,
 	releaseStaleLeases,
 	requeueDeadJobs,
+	triggerRetentionSweep,
 	resyncVectorIndex,
 } from "../repair-actions.js";
 import { which } from "../which.js";
 import { AGENTS_DIR, authConfig, repairLimiter } from "./state.js";
-
 function resolveRepairContext(c: Context, body: Readonly<Record<string, unknown>> = {}): RepairContext {
 	const reason = c.req.header("x-signet-reason") ?? "manual repair";
 	const actor = c.req.header("x-signet-actor") ?? "operator";
@@ -48,7 +49,7 @@ function resolveRepairContext(c: Context, body: Readonly<Record<string, unknown>
 	};
 }
 
-function repairHttpStatus(result: RepairResult): 200 | 400 | 429 | 500 {
+function repairHttpStatus(result: Pick<RepairResult, "success" | "message">): 200 | 400 | 429 | 500 {
 	if (result.success) return 200;
 	if (
 		/cooldown active|hourly budget exhausted|denied by policy gate|autonomous\.|agents cannot trigger repairs|already in progress/i.test(
@@ -129,22 +130,17 @@ export function registerRepairRoutes(
 	});
 
 	app.post("/api/repair/retention-sweep", async (c) => {
-		const details = await runRetentionSweepOnce(getDbAccessor(), DEFAULT_RETENTION);
-		const affected =
-			details.graphLinksPurged +
-			details.entitiesOrphaned +
-			details.embeddingsPurged +
-			details.tombstonesPurged +
-			details.historyPurged +
-			details.completedJobsPurged +
-			details.deadJobsPurged;
-		return c.json({
-			action: "retention_sweep",
-			success: true,
-			affected,
-			message: `retention sweep completed; ${affected} row(s) purged`,
-			details,
-		});
+		const accessor = getDbAccessor();
+		const cfg = loadMemoryConfig(AGENTS_DIR);
+		const ctx = resolveRepairContext(c);
+		const result = await triggerRetentionSweep(
+			cfg.pipelineV2,
+			ctx,
+			repairLimiter,
+			{ sweep: () => runRetentionSweepOnce(accessor, DEFAULT_RETENTION) },
+			accessor,
+		);
+		return c.json(result, repairHttpStatus(result));
 	});
 
 	app.get("/api/repair/embedding-gaps", async (c) => {
@@ -162,6 +158,16 @@ export function registerRepairRoutes(
 
 		try {
 			body = asRecord(await c.req.json());
+			if (
+				"batchSize" in body &&
+				(typeof body.batchSize !== "number" ||
+					!Number.isFinite(body.batchSize) ||
+					!Number.isInteger(body.batchSize) ||
+					body.batchSize <= 0 ||
+					body.batchSize > MAX_REEMBED_BATCH)
+			) {
+				return c.json({ error: `batchSize must be a positive integer <= ${MAX_REEMBED_BATCH}` }, 400);
+			}
 			if (typeof body.batchSize === "number") batchSize = body.batchSize;
 			if (typeof body.dryRun === "boolean") dryRun = body.dryRun;
 			if (typeof body.fullSweep === "boolean") fullSweep = body.fullSweep;
@@ -180,7 +186,7 @@ export function registerRepairRoutes(
 			batchSize,
 			dryRun,
 			fullSweep,
-			fullSweep && ctx.actorType === "operator" ? 0 : undefined,
+			undefined,
 			resolveRepairAgentId(c, body),
 		);
 
@@ -190,6 +196,16 @@ export function registerRepairRoutes(
 	app.post("/api/repair/re-embed-migration", async (c) => {
 		const cfg = loadMemoryConfig(AGENTS_DIR);
 		const body = asRecord(await c.req.json().catch(() => ({})));
+		if (
+			"batchSize" in body &&
+			(typeof body.batchSize !== "number" ||
+				!Number.isFinite(body.batchSize) ||
+				!Number.isInteger(body.batchSize) ||
+				body.batchSize <= 0 ||
+				body.batchSize > MAX_REEMBED_BATCH)
+		) {
+			return c.json({ error: `batchSize must be a positive integer <= ${MAX_REEMBED_BATCH}` }, 400);
+		}
 		const result = await reembedModelMigration(
 			getDbAccessor(),
 			cfg.pipelineV2,
@@ -317,6 +333,16 @@ export function registerRepairRoutes(
 		let body: Record<string, unknown> = {};
 		try {
 			body = asRecord(await c.req.json());
+			if (
+				"batchSize" in body &&
+				(typeof body.batchSize !== "number" ||
+					!Number.isFinite(body.batchSize) ||
+					!Number.isInteger(body.batchSize) ||
+					body.batchSize <= 0 ||
+					body.batchSize > 500)
+			) {
+				return c.json({ error: "batchSize must be a positive integer <= 500" }, 400);
+			}
 			if (typeof body?.batchSize === "number") batchSize = body.batchSize;
 			if (typeof body?.dryRun === "boolean") dryRun = body.dryRun;
 		} catch {
@@ -373,7 +399,7 @@ export function registerRepairRoutes(
 					totalBytes: stats?.total_bytes ?? 0,
 					byReason: Object.fromEntries(byReason.map((r) => [r.archived_reason ?? "unknown", r.count])),
 				};
-			}, "routes/repair-routes.ts:339"),
+			}, "db:routes.repair.cold-stats.read"),
 		);
 	});
 
@@ -382,7 +408,7 @@ export function registerRepairRoutes(
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
 		const result = getDbAccessor().withWriteTx(
 			(db: import("../db-accessor").WriteDb) => clusterEntities(db, agentId),
-			"routes/repair-routes.ts:383",
+			"db:routes.repair.cluster.write",
 		);
 		return c.json(result);
 	});
@@ -415,7 +441,7 @@ export function registerRepairRoutes(
 			 LIMIT ?`,
 					)
 					.all(agentId, batchSize) as Array<{ id: string; content: string }>,
-			"routes/repair-routes.ts:407",
+			"db:routes.repair.relink.select",
 		);
 
 		if (unlinked.length === 0) {
@@ -463,7 +489,7 @@ export function registerRepairRoutes(
 				).cnt;
 
 				return { linked, entities, aspects, attributes, linkedMemories, remaining };
-			}, "routes/repair-routes.ts:438");
+			}, "db:routes.repair.relink.preview");
 			const projectedRemaining = Math.max(0, preview.remaining - preview.linkedMemories);
 			return c.json({
 				action: "relink-entities",
@@ -488,7 +514,7 @@ export function registerRepairRoutes(
 			// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withWriteTx migration site
 			const result = accessor.withWriteTx(
 				(db: import("../db-accessor").WriteDb) => linkMemoryToEntities(db, mem.id, mem.content, agentId),
-				"routes/repair-routes.ts:489",
+				"db:routes.repair.relink.write",
 			);
 			linked += result.linked;
 			entities += result.entityIds.length;
@@ -509,7 +535,7 @@ export function registerRepairRoutes(
 						)
 						.get(agentId) as { cnt: number }
 				).cnt,
-			"routes/repair-routes.ts:500",
+			"db:routes.repair.relink.remaining",
 		);
 
 		return c.json({
@@ -552,7 +578,7 @@ export function registerRepairRoutes(
 			 LIMIT ?`,
 					)
 					.all(batchSize) as Array<{ id: string; content: string }>,
-			"routes/repair-routes.ts:544",
+			"db:routes.repair.hints.select",
 		);
 
 		if (unhinted.length === 0) {
@@ -572,7 +598,7 @@ export function registerRepairRoutes(
 				enqueue(db, mem.id, mem.content);
 				enqueued++;
 			}
-		}, "routes/repair-routes.ts:570");
+		}, "db:routes.repair.hints.enqueue");
 
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
 		const remaining = accessor.withReadDb(
@@ -586,7 +612,7 @@ export function registerRepairRoutes(
 						)
 						.get() as { cnt: number }
 				).cnt,
-			"routes/repair-routes.ts:578",
+			"db:routes.repair.hints.remaining",
 		);
 
 		return c.json({
@@ -622,7 +648,7 @@ export function registerRepairRoutes(
 		const dead = getDbAccessor().withReadDb(
 			(db: import("../db-accessor").ReadDb) =>
 				findDeadMemories(db, { maxConfidence, maxAccessDays, limit, agentId: resolveRepairAgentId(c) }),
-			"routes/repair-routes.ts:622",
+			"db:routes.repair.dead.select",
 		);
 		return c.json({ count: dead.length, memories: dead });
 	});
@@ -693,8 +719,9 @@ export function registerRepairRoutes(
 			repairLimiter,
 			fetchEmbedding,
 			cfg.embedding,
+			resolveRepairAgentId(c),
 		);
-		return c.json(result);
+		return c.json(result, repairHttpStatus(result));
 	});
 
 	app.get("/api/troubleshoot/commands", (c) => {

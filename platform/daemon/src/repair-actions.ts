@@ -96,14 +96,14 @@ export interface RepairGateCheck {
 // ---------------------------------------------------------------------------
 
 interface RateLimiterEntry {
-	lastRunAt: number;
+	lastRunAt: number | null;
 	hourlyCount: number;
-	hourResetAt: number;
+	windowStartedAt: number;
 }
 
 export interface RateLimiter {
-	check(action: string, cooldownMs: number, hourlyBudget: number, scopeKey?: string): RepairGateCheck;
-	record(action: string, scopeKey?: string): void;
+	check(action: string, cooldownMs: number, hourlyBudget: number, scopeKey?: string): Promise<RepairGateCheck>;
+	record(action: string, scopeKey?: string): Promise<void>;
 }
 
 function limiterKey(action: string, scopeKey?: string): string {
@@ -119,57 +119,109 @@ function repairScopeKey(ctx: RepairContext): string {
 	});
 }
 
-export function createRateLimiter(): RateLimiter {
+interface DurableRateLimitRow {
+	last_run_at: string | null;
+	window_started_at: string;
+	hourly_count: number;
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * Create the repair limiter. Production callers pass the DB accessor so the
+ * admission history is canonical SQLite state and survives daemon restart.
+ * The memory-only form remains for pure unit tests that do not open a DB.
+ */
+export function createRateLimiter(accessor?: DbAccessor | (() => DbAccessor)): RateLimiter {
 	const state = new Map<string, RateLimiterEntry>();
+	const getAccessor = typeof accessor === "function" ? accessor : () => accessor;
 
 	return {
-		check(action: string, cooldownMs: number, hourlyBudget: number, scopeKey?: string): RepairGateCheck {
-			const now = Date.now();
-			const entry = state.get(limiterKey(action, scopeKey));
-
-			if (!entry) return { allowed: true };
-
-			if (now - entry.lastRunAt < cooldownMs) {
-				const remainingMs = cooldownMs - (now - entry.lastRunAt);
-				return {
-					allowed: false,
-					reason: `cooldown active, ${remainingMs}ms remaining`,
-				};
-			}
-
-			// Reset hourly counter if the window has passed
-			const effectiveCount = now >= entry.hourResetAt ? 0 : entry.hourlyCount;
-			if (effectiveCount >= hourlyBudget) {
-				return {
-					allowed: false,
-					reason: `hourly budget exhausted (${hourlyBudget} runs/hr)`,
-				};
-			}
-
-			return { allowed: true };
-		},
-
-		record(action: string, scopeKey?: string): void {
+		async check(action: string, cooldownMs: number, hourlyBudget: number, scopeKey?: string): Promise<RepairGateCheck> {
 			const now = Date.now();
 			const key = limiterKey(action, scopeKey);
-			const entry = state.get(key);
+			const dbAccessor = getAccessor();
+			if (dbAccessor) {
+				return await dbAccessor.withReadDbAsync(
+					(db) => {
+						const row = db
+							.prepare(
+								"SELECT last_run_at, window_started_at, hourly_count FROM repair_rate_limits WHERE action = ? AND scope_key = ?",
+							)
+							.get(action, scopeKey ?? "process") as DurableRateLimitRow | undefined;
+						if (!row) return { allowed: true };
+						const lastRunAt = row.last_run_at === null ? null : Date.parse(row.last_run_at);
+						if (lastRunAt !== null && Number.isFinite(lastRunAt) && now - lastRunAt < cooldownMs) {
+							return { allowed: false, reason: `cooldown active, ${cooldownMs - (now - lastRunAt)}ms remaining` };
+						}
+						const windowStartedAt = Date.parse(row.window_started_at);
+						const count = Number.isFinite(windowStartedAt) && now - windowStartedAt < HOUR_MS ? row.hourly_count : 0;
+						if (count >= hourlyBudget) {
+							return { allowed: false, reason: `hourly budget exhausted (${hourlyBudget} runs/hr)` };
+						}
+						return { allowed: true };
+					},
+					{ siteToken: "db:repair.rate-limits.check" },
+				);
+			}
 
-			if (!entry) {
-				state.set(key, {
-					lastRunAt: now,
-					hourlyCount: 1,
-					hourResetAt: now + 60 * 60 * 1000,
-				});
+			const entry = state.get(key);
+			if (!entry) return { allowed: true };
+			if (entry.lastRunAt !== null && now - entry.lastRunAt < cooldownMs) {
+				return { allowed: false, reason: `cooldown active, ${cooldownMs - (now - entry.lastRunAt)}ms remaining` };
+			}
+			const count = now - entry.windowStartedAt < HOUR_MS ? entry.hourlyCount : 0;
+			return count >= hourlyBudget
+				? { allowed: false, reason: `hourly budget exhausted (${hourlyBudget} runs/hr)` }
+				: { allowed: true };
+		},
+
+		async record(action: string, scopeKey?: string): Promise<void> {
+			const now = Date.now();
+			const scope = scopeKey ?? "process";
+			const dbAccessor = getAccessor();
+			if (dbAccessor) {
+				await dbAccessor.withWriteTxAsync(
+					(db) => {
+						const row = db
+							.prepare(
+								"SELECT window_started_at, hourly_count FROM repair_rate_limits WHERE action = ? AND scope_key = ?",
+							)
+							.get(action, scope) as Pick<DurableRateLimitRow, "window_started_at" | "hourly_count"> | undefined;
+						const window =
+							row &&
+							Number.isFinite(Date.parse(row.window_started_at)) &&
+							now - Date.parse(row.window_started_at) < HOUR_MS
+								? { startedAt: row.window_started_at, count: row.hourly_count + 1 }
+								: { startedAt: new Date(now).toISOString(), count: 1 };
+						db.prepare(
+							`INSERT INTO repair_rate_limits(action, scope_key, last_run_at, window_started_at, hourly_count, updated_at)
+						 VALUES (?, ?, ?, ?, ?, ?)
+						 ON CONFLICT(action, scope_key) DO UPDATE SET
+						   last_run_at = excluded.last_run_at,
+						   window_started_at = excluded.window_started_at,
+						   hourly_count = excluded.hourly_count,
+						   updated_at = excluded.updated_at`,
+						).run(
+							action,
+							scope,
+							new Date(now).toISOString(),
+							window.startedAt,
+							window.count,
+							new Date(now).toISOString(),
+						);
+					},
+					{ siteToken: "db:repair.rate-limits.record" },
+				);
 				return;
 			}
-
-			// Reset hourly count if the window has passed
-			if (now >= entry.hourResetAt) {
-				entry.hourlyCount = 1;
-				entry.hourResetAt = now + 60 * 60 * 1000;
-			} else {
-				entry.hourlyCount++;
+			const key = limiterKey(action, scopeKey);
+			const entry = state.get(key);
+			if (!entry || now - entry.windowStartedAt >= HOUR_MS) {
+				state.set(key, { lastRunAt: now, hourlyCount: 1, windowStartedAt: now });
+				return;
 			}
+			entry.hourlyCount++;
 			entry.lastRunAt = now;
 		},
 	};
@@ -179,14 +231,14 @@ export function createRateLimiter(): RateLimiter {
 // Policy gate
 // ---------------------------------------------------------------------------
 
-export function checkRepairGate(
+export async function checkRepairGate(
 	cfg: PipelineV2Config,
 	ctx: RepairContext,
 	limiter: RateLimiter,
 	action: string,
 	cooldownMs: number,
 	hourlyBudget: number,
-): RepairGateCheck {
+): Promise<RepairGateCheck> {
 	if (cfg.autonomous.frozen) {
 		return { allowed: false, reason: "autonomous.frozen is set" };
 	}
@@ -200,7 +252,7 @@ export function checkRepairGate(
 		};
 	}
 
-	return limiter.check(action, cooldownMs, hourlyBudget, repairScopeKey(ctx));
+	return await limiter.check(action, cooldownMs, hourlyBudget, repairScopeKey(ctx));
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +294,7 @@ const FTS_HOURLY_BUDGET = 5;
 
 async function withRepairWriteTx<T>(accessor: DbAccessor, fn: (db: WriteDb) => T): Promise<T> {
 	if (accessor.withWriteTxAsync) {
-		return accessor.withWriteTxAsync(fn, { siteToken: "repair-actions.ts:245" });
+		return accessor.withWriteTxAsync(fn, { siteToken: "db:repair.write.transaction" });
 	}
 	throw new Error("async write API is unavailable");
 }
@@ -309,7 +361,14 @@ export async function requeueDeadJobs(
 	const retired = rejectRetiredSummaryRepair(action, options);
 	if (retired) return retired;
 
-	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.requeueCooldownMs, cfg.repair.requeueHourlyBudget);
+	const gate = await checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
 	if (!gate.allowed) {
 		return { action, success: false, affected: 0, message: gate.reason ?? "denied by policy gate" };
 	}
@@ -339,7 +398,7 @@ export async function requeueDeadJobs(
 		return { affected, preview: [] as readonly string[], totalMatching: selected.totalMatching };
 	});
 
-	if (!dryRun) limiter.record(action, repairScopeKey(ctx));
+	if (!dryRun) await limiter.record(action, repairScopeKey(ctx));
 	logger.info("pipeline", "repair: requeued dead memory jobs", {
 		affected: result.affected,
 		dryRun,
@@ -367,7 +426,14 @@ export async function releaseStaleLeases(
 	limiter: RateLimiter,
 ): Promise<RepairResult> {
 	const action = "releaseStaleLeases";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.requeueCooldownMs, cfg.repair.requeueHourlyBudget);
+	const gate = await checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
 
 	if (!gate.allowed) {
 		return {
@@ -394,7 +460,7 @@ export async function releaseStaleLeases(
 		};
 	});
 
-	limiter.record(action, repairScopeKey(ctx));
+	await limiter.record(action, repairScopeKey(ctx));
 	logger.info("pipeline", "repair: released stale leases", {
 		affected: result.recovered.total,
 		pending: result.recovered.pending,
@@ -425,7 +491,7 @@ export async function checkFtsConsistency(
 	ownerMaintenance: DbOwnerMaintenance | null = getDbOwnerMaintenance(),
 ): Promise<RepairResult> {
 	const action = "checkFtsConsistency";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.reembedCooldownMs, FTS_HOURLY_BUDGET);
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, cfg.repair.reembedCooldownMs, FTS_HOURLY_BUDGET);
 
 	if (!gate.allowed) {
 		return {
@@ -458,13 +524,13 @@ export async function checkFtsConsistency(
 				tokenizerDrift: memoriesFtsNeedsTokenizerRepair(ftsSql),
 			};
 		},
-		{ siteToken: "repair-actions.ts:439" },
+		{ siteToken: "db:repair.embedding.profile" },
 	);
 
 	// If FTS table is missing entirely, report it (startup self-heal
 	// via ensureFtsTable should have caught this, but handle gracefully)
 	if (ftsMissing) {
-		limiter.record(action, repairScopeKey(ctx));
+		await limiter.record(action, repairScopeKey(ctx));
 		const msg = repair
 			? "FTS index state missing — restart daemon to trigger self-healing rebuild"
 			: "FTS index state missing — run with repair=true or restart daemon";
@@ -483,7 +549,7 @@ export async function checkFtsConsistency(
 	if (tokenizerDrift) {
 		if (repair) {
 			if (ftsRebuildInFlight) {
-				limiter.record(action, repairScopeKey(ctx));
+				await limiter.record(action, repairScopeKey(ctx));
 				return {
 					action,
 					success: true,
@@ -518,7 +584,7 @@ export async function checkFtsConsistency(
 			ftsMismatchPendingRebuild = false;
 		}
 
-		limiter.record(action, repairScopeKey(ctx));
+		await limiter.record(action, repairScopeKey(ctx));
 		const message = repair
 			? "FTS tokenizer drift detected — recreated with unicode61 tokenizer"
 			: "FTS tokenizer drift detected — run with repair=true to recreate";
@@ -549,7 +615,7 @@ export async function checkFtsConsistency(
 		const confirmed = ctx.actorType === "operator" || ftsMismatchPendingRebuild;
 		if (confirmed) {
 			if (ftsRebuildInFlight) {
-				limiter.record(action, repairScopeKey(ctx));
+				await limiter.record(action, repairScopeKey(ctx));
 				return {
 					action,
 					success: true,
@@ -594,7 +660,7 @@ export async function checkFtsConsistency(
 		ftsMismatchPendingRebuild = false;
 	}
 
-	limiter.record(action, repairScopeKey(ctx));
+	await limiter.record(action, repairScopeKey(ctx));
 
 	const message = mismatch
 		? rebuilt
@@ -626,9 +692,17 @@ export async function triggerRetentionSweep(
 	ctx: RepairContext,
 	limiter: RateLimiter,
 	retentionHandle: { sweep(): Promise<unknown> },
+	accessor?: DbAccessor,
 ): Promise<RepairResult> {
 	const action = "triggerRetentionSweep";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.requeueCooldownMs, cfg.repair.requeueHourlyBudget);
+	const gate = await checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
 
 	if (!gate.allowed) {
 		return {
@@ -639,8 +713,18 @@ export async function triggerRetentionSweep(
 		};
 	}
 
-	await retentionHandle.sweep();
-	limiter.record(action, repairScopeKey(ctx));
+	const rawDetails = await retentionHandle.sweep();
+	const details = rawDetails && typeof rawDetails === "object" ? (rawDetails as Record<string, unknown>) : {};
+	const affected = Object.values(details).reduce<number>(
+		(sum, value) => sum + (typeof value === "number" ? value : 0),
+		0,
+	);
+	if (accessor) {
+		await withRepairWriteTx(accessor, (db) => {
+			writeRepairAudit(db, action, ctx, affected, `retention sweep purged ${affected} row(s)`);
+		});
+	}
+	await limiter.record(action, repairScopeKey(ctx));
 
 	logger.info("pipeline", "repair: retention sweep triggered", {
 		actor: ctx.actor,
@@ -650,8 +734,9 @@ export async function triggerRetentionSweep(
 	return {
 		action,
 		success: true,
-		affected: 0,
-		message: "retention sweep triggered",
+		affected,
+		message: `retention sweep triggered; ${affected} row(s) purged`,
+		details,
 	};
 }
 
@@ -755,7 +840,7 @@ export async function getEmbeddingGapStats(accessor: DbAccessor, agentId?: strin
 				repair,
 			};
 		},
-		{ siteToken: "repair-actions.ts:724" },
+		{ siteToken: "db:repair.embedding.gaps" },
 	);
 }
 
@@ -767,10 +852,10 @@ export async function getEmbeddingRepairStats(
 	const gap = await getEmbeddingGapStats(accessor, agentId);
 	const migration = await accessor.withReadDbAsync(
 		async (db) => countEmbeddingMigrationRows(db, embeddingCfg.model, embeddingCfg.dimensions, false, agentId),
-		{ siteToken: "repair-actions.ts:768" },
+		{ siteToken: "db:repair.embedding.repair-state" },
 	);
 	const orphaned = await accessor.withReadDbAsync(async (db) => countOrphanedEmbeddings(db, agentId), {
-		siteToken: "repair-actions.ts:772",
+		siteToken: "db:repair.embedding.repair-state-write",
 	});
 	return { gap, migration, orphaned };
 }
@@ -780,6 +865,21 @@ export async function getEmbeddingRepairStats(
 // ---------------------------------------------------------------------------
 
 const DEFAULT_REEMBED_BATCH = 50;
+/** Explicit server maximum for provider-backed re-embedding requests. */
+export const MAX_REEMBED_BATCH = 200;
+
+function validateBatchSize(value: number | undefined, fallback: number, maximum: number): number | RepairResult {
+	if (value === undefined) return fallback;
+	if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0 || value > maximum) {
+		return {
+			action: "repair-validation",
+			success: false,
+			affected: 0,
+			message: `batchSize must be a positive integer <= ${maximum}`,
+		};
+	}
+	return value;
+}
 
 function normalizeRepairAgentId(agentId: string | null | undefined): string {
 	const trimmed = agentId?.trim();
@@ -807,7 +907,7 @@ async function reembedMissingMemoriesBatch(
 		async (db) => {
 			return listUnembeddedMemories(db, batchSize, agentId) as UnembeddedRow[];
 		},
-		{ siteToken: "repair-actions.ts:806" },
+		{ siteToken: "db:repair.embedding.orphans" },
 	);
 
 	if (unembedded.length === 0) {
@@ -987,7 +1087,7 @@ export async function reembedMissingMemories(
 		typeof cooldownMsOverride === "number" && Number.isFinite(cooldownMsOverride)
 			? Math.max(0, Math.floor(cooldownMsOverride))
 			: cfg.repair.reembedCooldownMs;
-	const gate = checkRepairGate(cfg, ctx, limiter, action, effectiveCooldownMs, cfg.repair.reembedHourlyBudget);
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, effectiveCooldownMs, cfg.repair.reembedHourlyBudget);
 
 	if (!gate.allowed) {
 		return {
@@ -998,8 +1098,9 @@ export async function reembedMissingMemories(
 		};
 	}
 
-	const normalizedBatchSize =
-		Number.isFinite(batchSize) && batchSize > 0 ? Math.max(1, Math.floor(batchSize)) : DEFAULT_REEMBED_BATCH;
+	const validatedBatchSize = validateBatchSize(batchSize, DEFAULT_REEMBED_BATCH, MAX_REEMBED_BATCH);
+	if (typeof validatedBatchSize !== "number") return { ...validatedBatchSize, action };
+	const normalizedBatchSize = validatedBatchSize;
 
 	// `embeddingCfg` is the raw configured value (e.g. from agent.yaml), which
 	// carries no `profile`. The durable active generation may have been
@@ -1013,7 +1114,7 @@ export async function reembedMissingMemories(
 	// profile the durable index actually owns, before doing any work.
 	const resolvedEmbeddingCfg = await accessor.withReadDbAsync(
 		async (db) => resolveActiveEmbeddingConfig(db, embeddingCfg),
-		{ siteToken: "repair-actions.ts:1014" },
+		{ siteToken: "db:repair.embedding.active-config" },
 	);
 
 	const initialStats = await getEmbeddingGapStats(accessor, agentId);
@@ -1118,7 +1219,7 @@ export async function reembedMissingMemories(
 			writeRepairAudit(db, action, ctx, written, msg);
 		});
 
-		limiter.record(action, repairScopeKey(ctx));
+		await limiter.record(action, repairScopeKey(ctx));
 		logger.info("pipeline", "repair: re-embedded missing memories", {
 			affected: written,
 			attempted,
@@ -1155,10 +1256,11 @@ export async function reembedModelMigration(
 	readVecDimensions: (db: ReadDb) => number | null = readLiveVecDimensions,
 ): Promise<RepairResult> {
 	const action = "reembedModelMigration";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, 0, cfg.repair.reembedHourlyBudget);
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, 0, cfg.repair.reembedHourlyBudget);
 	if (!gate.allowed) return { action, success: false, affected: 0, message: gate.reason ?? "denied by policy gate" };
-	const size =
-		Number.isFinite(batchSize) && batchSize > 0 ? Math.min(500, Math.floor(batchSize)) : DEFAULT_REEMBED_BATCH;
+	const validatedBatchSize = validateBatchSize(batchSize, DEFAULT_REEMBED_BATCH, MAX_REEMBED_BATCH);
+	if (typeof validatedBatchSize !== "number") return { ...validatedBatchSize, action };
+	const size = validatedBatchSize;
 	const { rows, totalMatching, sources, liveVecDimensions } = await accessor.withReadDbAsync(
 		async (db) => ({
 			rows: listEmbeddingMigrationRows(db, embeddingCfg.model, embeddingCfg.dimensions, all, size, agentId),
@@ -1166,7 +1268,7 @@ export async function reembedModelMigration(
 			sources: listEmbeddingMigrationSources(db, embeddingCfg.model, embeddingCfg.dimensions, all, agentId),
 			liveVecDimensions: readVecDimensions(db),
 		}),
-		{ siteToken: "repair-actions.ts:1162" },
+		{ siteToken: "db:repair.embedding.migration-config" },
 	);
 	const vecDimensionMismatch = liveVecDimensions !== null && liveVecDimensions !== embeddingCfg.dimensions;
 	const details = {
@@ -1373,7 +1475,7 @@ export async function reembedModelMigration(
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
-		limiter.record(action, repairScopeKey(ctx));
+		await limiter.record(action, repairScopeKey(ctx));
 	}
 	return {
 		action,
@@ -1403,7 +1505,14 @@ export async function cleanOrphanedEmbeddings(
 	agentId?: string,
 ): Promise<RepairResult> {
 	const action = "cleanOrphanedEmbeddings";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.requeueCooldownMs, cfg.repair.requeueHourlyBudget);
+	const gate = await checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
 
 	if (!gate.allowed) {
 		return {
@@ -1434,7 +1543,7 @@ export async function cleanOrphanedEmbeddings(
 		return count;
 	});
 
-	limiter.record(action, repairScopeKey(ctx));
+	await limiter.record(action, repairScopeKey(ctx));
 	logger.info("pipeline", "repair: cleaned orphaned embeddings", {
 		affected,
 		actor: ctx.actor,
@@ -1485,7 +1594,14 @@ export async function resyncVectorIndex(
 	limiter: RateLimiter,
 ): Promise<RepairResult> {
 	const action = "resyncVectorIndex";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.reembedCooldownMs, cfg.repair.reembedHourlyBudget);
+	const gate = await checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.reembedCooldownMs,
+		cfg.repair.reembedHourlyBudget,
+	);
 
 	if (!gate.allowed) {
 		return {
@@ -1573,7 +1689,7 @@ export async function resyncVectorIndex(
 		};
 	}
 
-	limiter.record(action, repairScopeKey(ctx));
+	await limiter.record(action, repairScopeKey(ctx));
 	const affected = stats.inserted + stats.deleted;
 	const message =
 		stats.skipped > 0
@@ -1640,7 +1756,7 @@ export async function getDedupStats(accessor: DbAccessor, agentId = "default"): 
 				totalActive: totalRow.n,
 			};
 		},
-		{ siteToken: "repair-actions.ts:1611" },
+		{ siteToken: "db:repair.embedding.migration-selection" },
 	);
 }
 
@@ -1832,7 +1948,14 @@ export async function deduplicateMemories(
 	},
 ): Promise<DedupResult> {
 	const action = "deduplicateMemories";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.dedupCooldownMs, cfg.repair.dedupHourlyBudget);
+	const gate = await checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.dedupCooldownMs,
+		cfg.repair.dedupHourlyBudget,
+	);
 
 	if (!gate.allowed) {
 		return {
@@ -1904,7 +2027,7 @@ export async function deduplicateMemories(
 				cnt: number;
 			}>;
 		},
-		{ siteToken: "repair-actions.ts:1878" },
+		{ siteToken: "db:repair.dedup.hash-clusters" },
 	);
 
 	if (dryRun) {
@@ -1922,7 +2045,7 @@ export async function deduplicateMemories(
 			);
 			semanticClusterCount = semanticClusters.length;
 		}
-		limiter.record(action, repairScopeKey(ctx));
+		await limiter.record(action, repairScopeKey(ctx));
 		const parts = [`${hashClusters.length} exact cluster(s), ${totalExcess} excess duplicate(s)`];
 		if (semanticEnabled) {
 			parts.push(`${semanticClusterCount} semantic cluster(s)`);
@@ -2007,7 +2130,7 @@ export async function deduplicateMemories(
 		}
 	}
 
-	limiter.record(action, repairScopeKey(ctx));
+	await limiter.record(action, repairScopeKey(ctx));
 	const msg = `deduplicated ${totalRemoved} memory/memories across ${totalClusters} cluster(s)`;
 
 	logger.info("pipeline", "repair: deduplication complete", {
@@ -2031,6 +2154,10 @@ export async function deduplicateMemories(
 // Semantic duplicate finder
 // ---------------------------------------------------------------------------
 
+const SEMANTIC_CANDIDATE_LIMIT = 100;
+const SEMANTIC_DB_OPERATION_BUDGET = 200;
+const SEMANTIC_ELAPSED_BUDGET_MS = 5_000;
+
 async function findSemanticDuplicates(
 	accessor: DbAccessor,
 	threshold: number,
@@ -2042,6 +2169,8 @@ async function findSemanticDuplicates(
 ): Promise<Array<Array<{ id: string }>>> {
 	const clusters: Array<Array<{ id: string }>> = [];
 	const seen = new Set<string>();
+	const startedAt = Date.now();
+	let dbOperations = 0;
 	const filters = [
 		["m.project", project],
 		["m.scope", scope],
@@ -2054,6 +2183,7 @@ async function findSemanticDuplicates(
 
 	const candidates = await accessor.withReadDbAsync(
 		async (db) => {
+			dbOperations++;
 			return db
 				.prepare(
 					`SELECT m.id, e.id AS embedding_id, m.agent_id, m.project, m.scope, m.visibility
@@ -2063,7 +2193,7 @@ async function findSemanticDuplicates(
 				 AND COALESCE(NULLIF(m.agent_id, ''), 'default') = ?
 				 ${optionalWhere}
 				 ORDER BY m.created_at ASC
-				 LIMIT 500`,
+				 LIMIT ${SEMANTIC_CANDIDATE_LIMIT}`,
 				)
 				.all(agentId, ...optionalArgs) as Array<{
 				id: string;
@@ -2074,15 +2204,17 @@ async function findSemanticDuplicates(
 				visibility: string | null;
 			}>;
 		},
-		{ siteToken: "repair-actions.ts:2055" },
+		{ siteToken: "db:repair.dedup.semantic-candidates" },
 	);
 
 	for (const candidate of candidates) {
 		if (seen.has(candidate.id)) continue;
 		if (clusters.length >= maxClusters) break;
+		if (dbOperations >= SEMANTIC_DB_OPERATION_BUDGET || Date.now() - startedAt >= SEMANTIC_ELAPSED_BUDGET_MS) break;
 
 		const neighbors = await accessor.withReadDbAsync(
 			async (db) => {
+				dbOperations++;
 				// Get the vector for this candidate's embedding
 				const vecRow = db.prepare("SELECT embedding FROM vec_embeddings WHERE id = ?").get(candidate.embedding_id) as
 					| { embedding: ArrayBuffer }
@@ -2126,7 +2258,7 @@ async function findSemanticDuplicates(
 					})
 					.map((r) => ({ id: r.source_id }));
 			},
-			{ siteToken: "repair-actions.ts:2084" },
+			{ siteToken: "db:repair.dedup.semantic-neighbors" },
 		);
 
 		if (neighbors.length > 0) {
@@ -2159,7 +2291,7 @@ export async function pruneChunkGroupEntities(
 	options?: { batchSize?: number; dryRun?: boolean; agentId?: string },
 ): Promise<RepairResult> {
 	const action = "pruneChunkGroupEntities";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, 60_000, 5);
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, 60_000, 5);
 	if (!gate.allowed) {
 		return { action, success: false, affected: 0, message: gate.reason ?? "denied" };
 	}
@@ -2179,7 +2311,7 @@ export async function pruneChunkGroupEntities(
 					)
 					.get(agentId) as { n: number }
 			).n,
-		{ siteToken: "repair-actions.ts:2173" },
+		{ siteToken: "db:repair.entities.chunk-groups" },
 	);
 
 	if (options?.dryRun) {
@@ -2206,7 +2338,7 @@ export async function pruneChunkGroupEntities(
 		return ids.length;
 	});
 
-	limiter.record(action, repairScopeKey(ctx));
+	await limiter.record(action, repairScopeKey(ctx));
 	logger.info("pipeline", "repair: pruned chunk_group entities", { affected, actor: ctx.actor });
 	return { action, success: true, affected, message: `deleted ${affected} chunk_group entities` };
 }
@@ -2229,7 +2361,7 @@ export async function pruneSingletonExtractedEntities(
 	options?: { batchSize?: number; dryRun?: boolean; maxMentions?: number; agentId?: string },
 ): Promise<RepairResult> {
 	const action = "pruneSingletonExtractedEntities";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, 60_000, 10);
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, 60_000, 10);
 	if (!gate.allowed) {
 		return { action, success: false, affected: 0, message: gate.reason ?? "denied" };
 	}
@@ -2271,7 +2403,7 @@ export async function pruneSingletonExtractedEntities(
 				 LIMIT ?`,
 				)
 				.all(agentId, maxMentions, batchSize) as { id: string }[],
-		{ siteToken: "repair-actions.ts:2247" },
+		{ siteToken: "db:repair.entities.singleton" },
 	);
 
 	if (options?.dryRun) {
@@ -2330,7 +2462,7 @@ export async function pruneSingletonExtractedEntities(
 		return scopedIdValues.length;
 	});
 
-	limiter.record(action, repairScopeKey(ctx));
+	await limiter.record(action, repairScopeKey(ctx));
 	logger.info("pipeline", "repair: pruned singleton extracted entities", {
 		affected,
 		actor: ctx.actor,
@@ -2394,12 +2526,14 @@ export async function pruneGenericEntities(
 	options?: { batchSize?: number; dryRun?: boolean; agentId?: string },
 ): Promise<RepairResult> {
 	const action = "pruneGenericEntities";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, 60_000, 10);
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, 60_000, 10);
 	if (!gate.allowed) {
 		return { action, success: false, affected: 0, message: gate.reason ?? "denied" };
 	}
 
-	const batchSize = Math.max(1, Math.min(Math.floor(options?.batchSize ?? 100), 500));
+	const validatedBatchSize = validateBatchSize(options?.batchSize, 100, 500);
+	if (typeof validatedBatchSize !== "number") return { ...validatedBatchSize, action };
+	const batchSize = validatedBatchSize;
 	const agentId = options?.agentId ?? ctx.agentId ?? "default";
 	const candidates = await accessor.withReadDbAsync(
 		async (db) => {
@@ -2431,7 +2565,7 @@ export async function pruneGenericEntities(
 			}
 			return candidates;
 		},
-		{ siteToken: "repair-actions.ts:2404" },
+		{ siteToken: "db:repair.entities.generic" },
 	);
 
 	if (options?.dryRun ?? true) {
@@ -2483,7 +2617,7 @@ export async function pruneGenericEntities(
 		return scopedIds.length;
 	});
 
-	limiter.record(action, repairScopeKey(ctx));
+	await limiter.record(action, repairScopeKey(ctx));
 	logger.info("pipeline", "repair: pruned generic/non-concrete entities", {
 		affected,
 		agentId,
@@ -2651,7 +2785,7 @@ export async function integrityCheck(accessor: DbAccessor): Promise<IntegrityChe
 			const fullCheck = readIntegrityCheck(db, "integrity_check");
 			return { ok: fullCheck.ok, messages: fullCheck.messages, quickCheck, fullCheck };
 		},
-		{ siteToken: "repair-actions.ts:2648" },
+		{ siteToken: "db:repair.memories.dead" },
 	);
 }
 
@@ -2660,6 +2794,10 @@ export async function integrityCheck(accessor: DbAccessor): Promise<IntegrityChe
 // ---------------------------------------------------------------------------
 
 export interface RebuildIndexesResult {
+	readonly action: string;
+	readonly success: boolean;
+	readonly affected: number;
+	readonly message: string;
 	readonly integrity: { ok: boolean; messages: readonly string[] };
 	readonly fts: { repaired: boolean; message: string };
 	readonly embeddings: { reembedded: number; totalMissing: number };
@@ -2681,14 +2819,74 @@ export async function rebuildDerivedIndexes(
 	limiter: RateLimiter,
 	embeddingFn: (content: string, cfg: EmbeddingConfig) => Promise<number[] | null>,
 	embeddingCfg: EmbeddingConfig,
+	agentId?: string,
 ): Promise<RebuildIndexesResult> {
+	const action = "rebuildDerivedIndexes";
+	const gate = await checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.reembedCooldownMs,
+		cfg.repair.reembedHourlyBudget,
+	);
+	if (!gate.allowed) {
+		return {
+			action,
+			success: false,
+			affected: 0,
+			message: gate.reason ?? "denied by policy gate",
+			integrity: { ok: false, messages: [gate.reason ?? "denied by policy gate"] },
+			fts: { repaired: false, message: "not run because repair admission was denied" },
+			embeddings: { reembedded: 0, totalMissing: 0 },
+			summary: `repair denied: ${gate.reason ?? "policy gate"}`,
+		};
+	}
+
 	const integrity = await integrityCheck(accessor);
+	if (!integrity.ok) {
+		await limiter.record(action, repairScopeKey(ctx));
+		return {
+			action,
+			success: false,
+			affected: 0,
+			message: "integrity check failed; derived indexes were not modified",
+			integrity,
+			fts: { repaired: false, message: "not run because integrity check failed" },
+			embeddings: { reembedded: 0, totalMissing: 0 },
+			summary: `integrity: ${integrity.messages.length} issue(s); repair aborted`,
+		};
+	}
 
 	// Step 1: FTS rebuild
 	const ftsResult = await checkFtsConsistency(accessor, cfg, ctx, limiter, true);
+	if (!ftsResult.success) {
+		await limiter.record(action, repairScopeKey(ctx));
+		return {
+			action,
+			success: false,
+			affected: 0,
+			message: `FTS admission denied: ${ftsResult.message}`,
+			integrity,
+			fts: { repaired: false, message: ftsResult.message },
+			embeddings: { reembedded: 0, totalMissing: 0 },
+			summary: `integrity: ok · FTS: ${ftsResult.message} · embeddings: not run`,
+		};
+	}
 
 	// Step 2: Re-embed missing memories (batch of 200, not full sweep)
-	const reembedResult = await reembedMissingMemoriesBatch(accessor, embeddingFn, embeddingCfg, 200);
+	const resolvedEmbeddingCfg = await accessor.withReadDbAsync(
+		async (db: ReadDb) => resolveActiveEmbeddingConfig(db, embeddingCfg),
+		{ siteToken: "db:repair.maintenance.embedding-config" },
+	);
+	const reembedResult = await reembedMissingMemoriesBatch(
+		accessor,
+		embeddingFn,
+		resolvedEmbeddingCfg,
+		MAX_REEMBED_BATCH,
+		agentId,
+	);
+	await limiter.record(action, repairScopeKey(ctx));
 
 	const parts: string[] = [];
 	if (!integrity.ok) {
@@ -2704,6 +2902,10 @@ export async function rebuildDerivedIndexes(
 	parts.push(`embeddings: re-embedded ${reembedResult.written} of ${reembedResult.selected} missing`);
 
 	return {
+		action,
+		success: true,
+		affected: ftsResult.affected + reembedResult.written,
+		message: parts.join(" · "),
 		integrity,
 		fts: { repaired: ftsResult.affected > 0, message: ftsResult.message },
 		embeddings: { reembedded: reembedResult.written, totalMissing: reembedResult.selected - reembedResult.written },
@@ -2881,7 +3083,14 @@ export async function cancelObsoleteJobs(
 
 	const dryRun = options.dryRun === true;
 
-	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.requeueCooldownMs, cfg.repair.requeueHourlyBudget);
+	const gate = await checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
 	if (!gate.allowed) {
 		return {
 			action,
@@ -2970,7 +3179,7 @@ export async function cancelObsoleteJobs(
 		return { affected, preview: previewIds, totalMatching };
 	});
 
-	if (!dryRun) limiter.record(action, repairScopeKey(ctx));
+	if (!dryRun) await limiter.record(action, repairScopeKey(ctx));
 	logger.info("pipeline", "repair: cancelled obsolete jobs", {
 		affected: result.affected,
 		dryRun,
@@ -3016,7 +3225,14 @@ export async function pruneTerminalJobs(
 
 	const dryRun = options.dryRun === true;
 
-	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.requeueCooldownMs, cfg.repair.requeueHourlyBudget);
+	const gate = await checkRepairGate(
+		cfg,
+		ctx,
+		limiter,
+		action,
+		cfg.repair.requeueCooldownMs,
+		cfg.repair.requeueHourlyBudget,
+	);
 	if (!gate.allowed) {
 		return {
 			action,
@@ -3118,7 +3334,7 @@ export async function pruneTerminalJobs(
 		return { affected, preview: previewIds, totalMatching };
 	});
 
-	if (!dryRun) limiter.record(action, repairScopeKey(ctx));
+	if (!dryRun) await limiter.record(action, repairScopeKey(ctx));
 	logger.info("pipeline", "repair: pruned terminal jobs", {
 		affected: result.affected,
 		dryRun,
