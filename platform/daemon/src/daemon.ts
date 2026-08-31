@@ -2236,14 +2236,14 @@ async function main() {
 		return;
 	}
 
+	mkdirSync(DAEMON_DIR, { recursive: true });
+	mkdirSync(LOG_DIR, { recursive: true });
+	mkdirSync(dirname(MEMORY_DB), { recursive: true });
+
 	logger.info("daemon", "Signet Daemon starting");
 	logger.info("daemon", `File logging to ${logger.logFilePath}`);
 	logger.info("daemon", "Agents directory", { path: AGENTS_DIR });
 	logger.info("daemon", "Network configured", { port: PORT, host: HOST, bindHost: BIND_HOST });
-
-	mkdirSync(DAEMON_DIR, { recursive: true });
-	mkdirSync(LOG_DIR, { recursive: true });
-	mkdirSync(dirname(MEMORY_DB), { recursive: true });
 
 	// Acquire an exclusive lock to prevent multiple daemon instances from
 	// competing for the SQLite write lock. Without this, a respawn (systemd,
