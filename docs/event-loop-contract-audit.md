@@ -200,6 +200,7 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `db:maintenance.graph-agent-scopes.read` (withReadDbAsync)
 - `pipeline/maintenance-worker.ts:346` (withReadDbAsync)
 - `db:maintenance.dead-memory-count.read` (withReadDbAsync)
+- `pipeline/maintenance-worker.ts:535` (withReadDbAsync)
 - `pipeline/prospective-index.ts:284` (withWriteDbAsync)
 - `pipeline/prospective-index.ts:300` (withWriteDbAsync)
 - `pipeline/prospective-index.ts:336` (withWriteTxAsync)
