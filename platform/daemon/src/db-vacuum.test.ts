@@ -15,7 +15,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
-import { createDbOwnerClient } from "./db-owner-client";
+import { createDbOwnerClient, type DbOwnerClient } from "./db-owner-client";
 import { getSyncDbAccessor } from "../legacy-sync/db-accessor-sync";
 import {
 	convertToIncrementalVacuum,
@@ -292,12 +292,17 @@ describe("deferred vacuum conversion (#1493)", () => {
 		const db = legacyDbPath();
 		dir = db.dir;
 		initDbAccessor(db.path);
-		const worker = startVacuumConversionWorker(getDbAccessor(), { startImmediately: false });
-
-		const completed = await worker.run();
-		expect(completed.state).toBe("completed");
-		expect(completed.attempts).toBe(1);
-		expect(await worker.run()).toMatchObject({ state: "completed", attempts: 1 });
+		const owner = createDbOwnerClient({ dbPath: db.path });
+		await owner.start();
+		try {
+			const worker = startVacuumConversionWorker(getDbAccessor(), { owner, startImmediately: false });
+			const completed = await worker.run();
+			expect(completed.state).toBe("completed");
+			expect(completed.attempts).toBe(1);
+			expect(await worker.run()).toMatchObject({ state: "completed", attempts: 1 });
+		} finally {
+			await owner.close();
+		}
 
 		const markerCount = getSyncDbAccessor().withReadDb(
 			(readDb) =>
@@ -384,14 +389,13 @@ describe("deferred vacuum conversion (#1493)", () => {
 		initDbAccessor(db.path);
 		expect(getVacuumConversionStatus(getDbAccessor())).toMatchObject({ state: "pending", attempts: 1 });
 
-		const accessor = getDbAccessor();
-		const originalConversion = accessor.vacuumConversionAsync;
-		accessor.vacuumConversionAsync = async () => {
-			throw new Error("simulated conversion failure");
-		};
-		const worker = startVacuumConversionWorker(accessor, { startImmediately: false });
+		const failure = new Error("simulated conversion failure");
+		const failingOwner = {
+			submit: () => ({ result: Promise.reject(failure), cancel: () => undefined }),
+			awaitResult: async <Result>(handle: { readonly result: Promise<Result> }) => await handle.result,
+		} as unknown as DbOwnerClient;
+		const worker = startVacuumConversionWorker(getDbAccessor(), { owner: failingOwner, startImmediately: false });
 		const failed = await worker.run();
-		accessor.vacuumConversionAsync = originalConversion;
 		expect(failed).toMatchObject({ state: "failed", attempts: 2, lastError: "simulated conversion failure" });
 
 		closeDbAccessor();
@@ -421,13 +425,11 @@ describe("integrated incremental reclaim resume (#1667)", () => {
 		expect(freeBefore).toBeGreaterThan(2);
 
 		const owner = createDbOwnerClient({ dbPath });
-		const accessor = {} as Parameters<typeof reclaimIncrementalVacuum>[0];
 		const checkpoints: Array<{ reclaimed: number; remaining: number }> = [];
 		let killed = false;
 		try {
 			await owner.start();
-			await reclaimIncrementalVacuum(accessor, {
-				owner,
+			await reclaimIncrementalVacuum(owner, {
 				batchPages: 1,
 				checkpointKey: "test.integrated-reclaim",
 				maxBatches: 1,
@@ -457,8 +459,7 @@ describe("integrated incremental reclaim resume (#1667)", () => {
 		const resumedOwner = createDbOwnerClient({ dbPath });
 		try {
 			await resumedOwner.start();
-			const resumed = await reclaimIncrementalVacuum(accessor, {
-				owner: resumedOwner,
+			const resumed = await reclaimIncrementalVacuum(resumedOwner, {
 				batchPages: 1,
 				checkpointKey: "test.integrated-reclaim",
 				maxBatches: 200,

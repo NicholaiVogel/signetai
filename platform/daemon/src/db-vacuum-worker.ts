@@ -20,7 +20,6 @@ import {
 import { logger } from "./logger";
 
 export interface IncrementalReclaimOptions {
-	readonly owner?: DbOwnerClient;
 	readonly batchPages?: number;
 	readonly maxBatches?: number;
 	readonly checkpointKey?: string;
@@ -35,7 +34,7 @@ export interface VacuumConversionHandle {
 
 /** Reclaim free pages in bounded batches with a real durable resume record. Conversion remains monolithic. */
 export async function reclaimIncrementalVacuum(
-	accessor: DbAccessor,
+	owner: DbOwnerClient,
 	opts: IncrementalReclaimOptions = {},
 ): Promise<{ readonly reclaimed: number; readonly remaining: number }> {
 	const batchPages = Math.max(1, Math.min(10_000, Math.trunc(opts.batchPages ?? 1_000)));
@@ -43,39 +42,32 @@ export async function reclaimIncrementalVacuum(
 	const key = opts.checkpointKey ?? "vacuum.incremental-reclaim";
 	let reclaimed = 0;
 	let remaining = 0;
-	if (opts.owner) {
-		await ownerTransaction(opts.owner, "maintenance.vacuum.checkpoint.ensure", [
-			ownerRunStatement(
-				"CREATE TABLE IF NOT EXISTS db_vacuum_reclaim_checkpoints (checkpoint_key TEXT PRIMARY KEY, reclaimed INTEGER NOT NULL, remaining INTEGER NOT NULL, updated_at TEXT NOT NULL)",
-			),
-		]);
-		const saved = await ownerQueryOne<{ reclaimed: number; remaining: number }>(
-			opts.owner,
-			"maintenance.vacuum.checkpoint.read",
-			"SELECT reclaimed, remaining FROM db_vacuum_reclaim_checkpoints WHERE checkpoint_key = ?",
-			[key],
-		);
-		reclaimed = saved?.reclaimed ?? 0;
-		remaining = saved?.remaining ?? 0;
-	}
+	await ownerTransaction(owner, "maintenance.vacuum.checkpoint.ensure", [
+		ownerRunStatement(
+			"CREATE TABLE IF NOT EXISTS db_vacuum_reclaim_checkpoints (checkpoint_key TEXT PRIMARY KEY, reclaimed INTEGER NOT NULL, remaining INTEGER NOT NULL, updated_at TEXT NOT NULL)",
+		),
+	]);
+	const saved = await ownerQueryOne<{ reclaimed: number; remaining: number }>(
+		owner,
+		"maintenance.vacuum.checkpoint.read",
+		"SELECT reclaimed, remaining FROM db_vacuum_reclaim_checkpoints WHERE checkpoint_key = ?",
+		[key],
+	);
+	reclaimed = saved?.reclaimed ?? 0;
+	remaining = saved?.remaining ?? 0;
 	let previousRemaining: number | null = remaining > 0 ? remaining : null;
 	for (let batch = 0; batch < maxBatches; batch += 1) {
 		const before = previousRemaining;
-		if (opts.owner) remaining = await dbOwnerIncrementalVacuum(opts.owner, batchPages);
-		else {
-			if (!accessor.incrementalVacuumAsync) throw new Error("incremental vacuum operation is unavailable");
-			remaining = await accessor.incrementalVacuumAsync({ siteToken: "db-vacuum-worker.ts:incremental" });
-		}
+		remaining = await dbOwnerIncrementalVacuum(owner, batchPages);
 		const progressed = before === null ? Math.max(0, batchPages) : Math.max(0, before - remaining);
 		reclaimed += progressed;
 		previousRemaining = remaining;
-		if (opts.owner)
-			await ownerTransaction(opts.owner, "maintenance.vacuum.checkpoint.write", [
-				ownerRunStatement(
-					"INSERT INTO db_vacuum_reclaim_checkpoints (checkpoint_key, reclaimed, remaining, updated_at) VALUES (?, ?, ?, datetime('now')) ON CONFLICT(checkpoint_key) DO UPDATE SET reclaimed=excluded.reclaimed, remaining=excluded.remaining, updated_at=excluded.updated_at",
-					[key, reclaimed, remaining],
-				),
-			]);
+		await ownerTransaction(owner, "maintenance.vacuum.checkpoint.write", [
+			ownerRunStatement(
+				"INSERT INTO db_vacuum_reclaim_checkpoints (checkpoint_key, reclaimed, remaining, updated_at) VALUES (?, ?, ?, datetime('now')) ON CONFLICT(checkpoint_key) DO UPDATE SET reclaimed=excluded.reclaimed, remaining=excluded.remaining, updated_at=excluded.updated_at",
+				[key, reclaimed, remaining],
+			),
+		]);
 		opts.onCheckpoint?.(reclaimed, remaining);
 		if (remaining <= 0 || progressed <= 0) break;
 		await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -90,7 +82,7 @@ export async function reclaimIncrementalVacuum(
  */
 export function startVacuumConversionWorker(
 	accessor: DbAccessor,
-	opts: { readonly startImmediately?: boolean; readonly owner?: DbOwnerClient } = {},
+	opts: { readonly owner: DbOwnerClient; readonly startImmediately?: boolean },
 ): VacuumConversionHandle {
 	let active = true;
 	let timer: ReturnType<typeof setTimeout> | null = null;
@@ -111,12 +103,7 @@ export function startVacuumConversionWorker(
 			});
 
 			try {
-				if (opts.owner !== undefined) {
-					await dbOwnerVacuumConversion(opts.owner);
-				} else {
-					if (!accessor.vacuumConversionAsync) throw new Error("VACUUM conversion operation is unavailable");
-					await accessor.vacuumConversionAsync({ siteToken: "db-vacuum-worker.ts:conversion" });
-				}
+				await dbOwnerVacuumConversion(opts.owner);
 				await markVacuumConversionCompleted(accessor);
 				logger.info("db-vacuum", "Post-ready conversion worker completed");
 			} catch (error) {

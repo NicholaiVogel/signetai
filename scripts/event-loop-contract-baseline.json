@@ -914,63 +914,49 @@
     },
     {
       "path": "db-vacuum.ts",
-      "line": 80,
+      "line": 77,
       "api": "statSync",
       "source": "const dbBytes = deps.statSync(dbPath).size;",
       "category": "hot-path"
     },
     {
       "path": "db-vacuum.ts",
-      "line": 82,
+      "line": 79,
       "api": "statfsSync",
       "source": "const stats = deps.statfsSync(directory);",
       "category": "hot-path"
     },
     {
       "path": "db-vacuum.ts",
-      "line": 340,
+      "line": 331,
       "api": "withReadDb",
       "source": "return accessor.withReadDb(",
       "category": "hot-path"
     },
     {
       "path": "db-vacuum.ts",
-      "line": 348,
+      "line": 339,
       "api": "withReadDbAsync",
       "source": "return await accessor.withReadDbAsync((db) => readStatusFromDb(toPragmaReadDb(db)), {",
       "category": "hot-path"
     },
     {
       "path": "db-vacuum.ts",
-      "line": 460,
-      "api": "incrementalVacuumAsync",
-      "source": "remaining = await accessor.incrementalVacuumAsync({ siteToken: \"db-vacuum.ts:460\" });",
-      "category": "hot-path"
-    },
-    {
-      "path": "db-vacuum.ts",
-      "line": 498,
+      "line": 347,
       "api": "withWriteTxAsync",
       "source": "await accessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "db-vacuum.ts",
-      "line": 528,
-      "api": "vacuumConversionAsync",
-      "source": "await accessor.vacuumConversionAsync({ siteToken: \"db-vacuum.ts:528\" });",
-      "category": "hot-path"
-    },
-    {
-      "path": "db-vacuum.ts",
-      "line": 530,
+      "line": 367,
       "api": "withWriteTxAsync",
       "source": "await accessor.withWriteTxAsync(",
       "category": "hot-path"
     },
     {
       "path": "db-vacuum.ts",
-      "line": 548,
+      "line": 386,
       "api": "withWriteTxAsync",
       "source": "await accessor.withWriteTxAsync(",
       "category": "hot-path"
@@ -3059,13 +3045,6 @@
       "line": 485,
       "api": "withReadDbAsync",
       "source": ": await accessor.withReadDbAsync(",
-      "category": "hot-path"
-    },
-    {
-      "path": "pipeline/maintenance-worker.ts",
-      "line": 535,
-      "api": "withReadDbAsync",
-      "source": ": await accessor.withReadDbAsync(async (db) => getFreePageRatio(db), {",
       "category": "hot-path"
     },
     {
