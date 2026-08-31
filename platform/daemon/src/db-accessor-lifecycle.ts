@@ -36,9 +36,19 @@ export function createDbAccessorLifecycle(): DbAccessorLifecycle {
 			const participants = [...closeParticipants.values()].sort(
 				(left, right) => left.order - right.order || left.name.localeCompare(right.name),
 			);
-			closePromise = (async () => {
+			let resolveClose!: () => void;
+			let rejectClose!: (reason?: unknown) => void;
+			const pendingClose = new Promise<void>((resolve, reject) => {
+				resolveClose = resolve;
+				rejectClose = reject;
+			});
+			closePromise = pendingClose;
+			void (async () => {
 				try {
 					for (const participant of participants) await participant.close(dbPath);
+					resolveClose();
+				} catch (error) {
+					rejectClose(error);
 				} finally {
 					// The registry is process-scoped while accessors are replaceable. Keep
 					// the gate closed for this close operation, then allow the next
@@ -47,7 +57,7 @@ export function createDbAccessorLifecycle(): DbAccessorLifecycle {
 					closePromise = undefined;
 				}
 			})();
-			return closePromise;
+			return pendingClose;
 		},
 	};
 }

@@ -70,5 +70,27 @@ describe("DB foundation dependency invariant", () => {
 				"next-lifecycle-participant",
 			]);
 		});
+
+		it("reopens after a participant failure without caching the rejected close", async () => {
+			const lifecycle = createDbAccessorLifecycle();
+			let attempts = 0;
+			lifecycle.register({
+				name: "flaky-participant",
+				order: 100,
+				close: () => {
+					attempts += 1;
+					if (attempts === 1) throw new Error("simulated close failure");
+				},
+			});
+
+			await expect(lifecycle.close(undefined)).rejects.toThrow("simulated close failure");
+			lifecycle.register({
+				name: "reinitialized-participant",
+				order: 200,
+				close: () => undefined,
+			});
+			await lifecycle.close(undefined);
+			expect(attempts).toBe(2);
+		});
 	});
 });
