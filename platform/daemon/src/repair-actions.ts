@@ -511,6 +511,15 @@ async function withRepairLease<T>(
 	}
 }
 
+async function withRepairWriteLease<T>(
+	limiter: RateLimiter,
+	gate: RepairGateCheck,
+	accessor: DbAccessor,
+	fn: (db: WriteDb) => T,
+): Promise<T> {
+	return await withRepairLease(limiter, gate, () => withRepairWriteTx(accessor, fn));
+}
+
 // Hold an autonomous rebuild until the same mismatch is observed on a second
 // check, so a transient spike from in-flight artifact writes cannot trigger a
 // rebuild on every maintenance cycle (#1142).
@@ -1749,11 +1758,13 @@ export async function reembedModelMigration(
 			ownershipChanged > 0 ? ` (${ownershipChanged} ownership change(s) during provider work)` : ""
 		}${crossAgentConflict > 0 ? ` (${crossAgentConflict} cross-agent hash conflict(s) skipped)` : ""}`;
 		if (profileChanged) {
+			const message = "embedding profile changed during provider work; skipped stale migration vectors";
+			await finalizeRepairGate(limiter, gate, { success: false, error: message });
 			return {
 				action,
 				success: false,
 				affected: written,
-				message: "embedding profile changed during provider work; skipped stale migration vectors",
+				message,
 				totalMatching,
 				details: { ...details, failed, contentChanged, ownershipChanged, crossAgentConflict },
 			};
@@ -1913,8 +1924,7 @@ export async function resyncVectorIndex(
 		};
 	}
 
-	const stats: VecResyncStats = await withRepairLease(limiter, gate, () =>
-		withRepairWriteTx(accessor, (db): VecResyncStats => {
+	const stats: VecResyncStats = await withRepairWriteLease(limiter, gate, accessor, (db): VecResyncStats => {
 		try {
 			db.prepare("SELECT 1 FROM vec_embeddings LIMIT 1").get();
 		} catch {
@@ -1980,8 +1990,7 @@ export async function resyncVectorIndex(
 			deleted,
 			skipped,
 		};
-		}),
-	);
+	});
 
 	if (!stats.vecAvailable) {
 		const message = "vec_embeddings table not found; restart daemon to initialize vector index";
@@ -2724,22 +2733,20 @@ export async function pruneChunkGroupEntities(
 		};
 	}
 
-	const affected = await withRepairLease(limiter, gate, () =>
-		withRepairWriteTx(accessor, (db) => {
-			const ids = db
-				.prepare(
-					"SELECT id FROM entities WHERE entity_type = 'chunk_group' AND COALESCE(NULLIF(agent_id, ''), 'default') = ? LIMIT ?",
-				)
-				.all(agentId, batchSize) as {
-					id: string;
-				}[];
-			if (ids.length === 0) return 0;
-			const placeholders = ids.map(() => "?").join(",");
-			db.prepare(`DELETE FROM entities WHERE id IN (${placeholders})`).run(...ids.map((r) => r.id));
-			writeRepairAudit(db, action, ctx, ids.length, `deleted ${ids.length} chunk_group entities`);
-			return ids.length;
-		}),
-	);
+	const affected = await withRepairWriteLease(limiter, gate, accessor, (db) => {
+		const ids = db
+			.prepare(
+				"SELECT id FROM entities WHERE entity_type = 'chunk_group' AND COALESCE(NULLIF(agent_id, ''), 'default') = ? LIMIT ?",
+			)
+			.all(agentId, batchSize) as {
+			id: string;
+		}[];
+		if (ids.length === 0) return 0;
+		const placeholders = ids.map(() => "?").join(",");
+		db.prepare(`DELETE FROM entities WHERE id IN (${placeholders})`).run(...ids.map((r) => r.id));
+		writeRepairAudit(db, action, ctx, ids.length, `deleted ${ids.length} chunk_group entities`);
+		return ids.length;
+	});
 
 	await finalizeRepairGate(limiter, gate, { success: true });
 	logger.info("pipeline", "repair: pruned chunk_group entities", { affected, actor: ctx.actor });
@@ -2830,7 +2837,7 @@ export async function pruneSingletonExtractedEntities(
 		return { action, success: true, affected: 0, message: "no singleton extracted entities found" };
 	}
 
-	const affected = await withRepairWriteTx(accessor, (db) => {
+	const affected = await withRepairWriteLease(limiter, gate, accessor, (db) => {
 		const ids = candidates.map((r) => r.id);
 		const scopedIds = db
 			.prepare(
@@ -2949,37 +2956,39 @@ export async function pruneGenericEntities(
 	}
 	const batchSize = validatedBatchSize;
 	const agentId = options?.agentId ?? ctx.agentId ?? "default";
-	const candidates = await accessor.withReadDbAsync(
-		async (db) => {
-			const candidates: GenericEntityCandidate[] = [];
-			const pageSize = Math.max(batchSize * 10, 500);
-			let offset = 0;
-			const selectPage = db.prepare(
-				`SELECT e.id, e.name, e.entity_type
-			 FROM entities e
-			 WHERE e.agent_id = ?
-			   AND COALESCE(e.pinned, 0) = 0
-			   AND e.entity_type NOT IN ('skill')
-			   AND NOT EXISTS (SELECT 1 FROM skill_meta sm WHERE sm.entity_id = e.id)
-			 ORDER BY e.updated_at DESC
-			 LIMIT ? OFFSET ?`,
-			);
+	const candidates = await withRepairLease(limiter, gate, () =>
+		accessor.withReadDbAsync(
+			async (db) => {
+				const candidates: GenericEntityCandidate[] = [];
+				const pageSize = Math.max(batchSize * 10, 500);
+				let offset = 0;
+				const selectPage = db.prepare(
+					`SELECT e.id, e.name, e.entity_type
+					 FROM entities e
+					 WHERE e.agent_id = ?
+					   AND COALESCE(e.pinned, 0) = 0
+					   AND e.entity_type NOT IN ('skill')
+					   AND NOT EXISTS (SELECT 1 FROM skill_meta sm WHERE sm.entity_id = e.id)
+					 ORDER BY e.updated_at DESC
+					 LIMIT ? OFFSET ?`,
+				);
 
-			for (;;) {
-				const rows = selectPage.all(agentId, pageSize, offset) as GenericEntityCandidate[];
-				if (rows.length === 0) break;
-				for (const row of rows) {
-					const quality = classifyEntityQuality(row.name, row.entity_type);
-					if (!quality.ok) {
-						candidates.push({ ...row, reason: quality.reason });
-						if (candidates.length >= batchSize) return candidates;
+				for (;;) {
+					const rows = selectPage.all(agentId, pageSize, offset) as GenericEntityCandidate[];
+					if (rows.length === 0) break;
+					for (const row of rows) {
+						const quality = classifyEntityQuality(row.name, row.entity_type);
+						if (!quality.ok) {
+							candidates.push({ ...row, reason: quality.reason });
+							if (candidates.length >= batchSize) return candidates;
+						}
 					}
+					offset += rows.length;
 				}
-				offset += rows.length;
-			}
-			return candidates;
-		},
-		{ siteToken: "db:repair.entities.generic" },
+				return candidates;
+			},
+			{ siteToken: "db:repair.entities.generic" },
+		),
 	);
 
 	if (options?.dryRun ?? true) {
@@ -3001,7 +3010,7 @@ export async function pruneGenericEntities(
 		return { action, success: true, affected: 0, message: "no generic/non-concrete entities found" };
 	}
 
-	const affected = await withRepairWriteTx(accessor, (db) => {
+	const affected = await withRepairWriteLease(limiter, gate, accessor, (db) => {
 		const ids = candidates.map((row) => row.id);
 		const placeholders = ids.map(() => "?").join(",");
 		// Revalidate every destructive predicate in the write transaction. The
@@ -3259,7 +3268,7 @@ export async function rebuildDerivedIndexes(
 		};
 	}
 
-	const integrity = await integrityCheck(accessor);
+	const integrity = await withRepairLease(limiter, gate, () => integrityCheck(accessor));
 	if (!integrity.ok) {
 		await finalizeRepairGate(limiter, gate, {
 			success: false,
@@ -3278,7 +3287,7 @@ export async function rebuildDerivedIndexes(
 	}
 
 	// Step 1: FTS rebuild
-	const ftsResult = await checkFtsConsistency(accessor, cfg, ctx, limiter, true);
+	const ftsResult = await withRepairLease(limiter, gate, () => checkFtsConsistency(accessor, cfg, ctx, limiter, true));
 	if (!ftsResult.success) {
 		await finalizeRepairGate(limiter, gate, { success: false, error: ftsResult.message });
 		return {
@@ -3294,16 +3303,13 @@ export async function rebuildDerivedIndexes(
 	}
 
 	// Step 2: Re-embed missing memories (batch of 200, not full sweep)
-	const resolvedEmbeddingCfg = await accessor.withReadDbAsync(
-		async (db: ReadDb) => resolveActiveEmbeddingConfig(db, embeddingCfg),
-		{ siteToken: "db:repair.maintenance.embedding-config" },
+	const resolvedEmbeddingCfg = await withRepairLease(limiter, gate, () =>
+		accessor.withReadDbAsync(async (db: ReadDb) => resolveActiveEmbeddingConfig(db, embeddingCfg), {
+			siteToken: "db:repair.maintenance.embedding-config",
+		}),
 	);
-	const reembedResult = await reembedMissingMemoriesBatch(
-		accessor,
-		embeddingFn,
-		resolvedEmbeddingCfg,
-		MAX_REEMBED_BATCH,
-		agentId,
+	const reembedResult = await withRepairLease(limiter, gate, () =>
+		reembedMissingMemoriesBatch(accessor, embeddingFn, resolvedEmbeddingCfg, MAX_REEMBED_BATCH, agentId),
 	);
 	await finalizeRepairGate(limiter, gate, { success: true });
 
@@ -3521,7 +3527,7 @@ export async function cancelObsoleteJobs(
 
 	const olderThanMs = options.olderThanMs ?? 30 * 24 * 60 * 60 * 1000;
 	const wantsMemory = !options.tables || options.tables.includes("memory");
-	const result = await withRepairWriteTx<CancelResultMeta>(accessor, (db) => {
+	const result = await withRepairWriteLease<CancelResultMeta>(limiter, gate, accessor, (db) => {
 		if (!tableExists(db, "job_cancellations")) {
 			throw new Error("job_cancellations table missing; run migrations");
 		}
@@ -3662,7 +3668,7 @@ export async function pruneTerminalJobs(
 	}
 
 	const wantsMemory = !options.tables || options.tables.includes("memory");
-	const result = await withRepairWriteTx<PruneResultMeta>(accessor, (db) => {
+	const result = await withRepairWriteLease<PruneResultMeta>(limiter, gate, accessor, (db) => {
 		if (!tableExists(db, "job_archive")) {
 			throw new Error("job_archive table missing; run migrations");
 		}
