@@ -4,23 +4,23 @@ This report is generated from the deterministic migration ledger in `scripts/eve
 
 ## Current inventory
 
-- Exact ledger inventory: 868 sites
+- Exact ledger inventory: 857 sites
 - Synchronous `withWriteTx()` sites: 65
 - Synchronous `withReadDb()` sites: 99
-- Async-named DB sites: 189
-- Async-named ON-PARENT DB sites: 187
+- Async-named DB sites: 180
+- Async-named ON-PARENT DB sites: 178
 - Async-named OFF-PARENT DB sites: 2
-- Synchronous filesystem/process sites: 515
+- Synchronous filesystem/process sites: 513
 - Compile-visible legacy DB sites remaining: 164
   - `withWriteTx`: 65
   - `withReadDb`: 99
 
-The 868-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 99 synchronous reads, and 189 async-named DB sites are the complete database-call inventory; 164 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 187 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
+The 857-site inventory excludes test, benchmark, generated, and `__tests__` fixtures and includes every synchronous filesystem, process, and database call, including async-named DB callbacks. The 65 synchronous writes, 99 synchronous reads, and 180 async-named DB sites are the complete database-call inventory; 164 compatibility DB operations remain transitional callers for the later migration phase. The async-named DB counts above separate the 178 ON-PARENT callbacks from the 2 OFF-PARENT callbacks. Those compatibility calls are marked with `@ts-expect-error LEGACY_SYNC_DB_ACCESS`, so the compiler reports every remaining site without forcing this phase to migrate them.
 
 ## Execution-home inventory
 
-- Database accessor sites classified: 353
-- ON-PARENT callback execution: 351
+- Database accessor sites classified: 344
+- ON-PARENT callback execution: 342
 - OFF-PARENT callback execution: 2
 - Ratchet: new ON-PARENT async-named sites fail the audit; the campaign target is ON-PARENT → 0
 
@@ -119,32 +119,19 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `memory-lineage.ts:2355` (withReadDbAsync)
 - `memory-search-telemetry.ts:245` (withWriteTxAsync)
 - `memory-search-telemetry.ts:321` (withReadDbAsync)
-- `memory-search.ts:1861` (withReadDbAsync)
-- `memory-search.ts:1884` (withReadDbAsync)
-- `memory-search.ts:1985` (withReadDbAsync)
-- `memory-search.ts:2012` (withReadDbAsync)
-- `memory-search.ts:2100` (withReadDbAsync)
-- `memory-search.ts:2136` (withReadDbAsync)
-- `memory-search.ts:2169` (withReadDbAsync)
-- `memory-search.ts:2251` (withReadDbAsync)
-- `memory-search.ts:2297` (withReadDbAsync)
-- `memory-search.ts:2333` (withReadDbAsync)
-- `memory-search.ts:2380` (withReadDbAsync)
-- `memory-search.ts:2459` (withReadDbAsync)
-- `memory-search.ts:2480` (withReadDbAsync)
-- `memory-search.ts:2509` (withReadDbAsync)
-- `memory-search.ts:2746` (withReadDbAsync)
-- `memory-search.ts:2773` (withReadDbAsync)
-- `memory-search.ts:2971` (withReadDbAsync)
-- `memory-search.ts:3071` (withReadDbAsync)
-- `memory-search.ts:3180` (withReadDbAsync)
-- `obsidian-source-embeddings.ts:629` (withReadDb)
-- `obsidian-source-embeddings.ts:665` (withWriteTx)
-- `obsidian-source-embeddings.ts:681` (withReadDb)
-- `obsidian-source-embeddings.ts:715` (withWriteTx)
-- `obsidian-source-embeddings.ts:776` (withWriteTx)
-- `obsidian-source-embeddings.ts:822` (withReadDb)
-- `obsidian-source-embeddings.ts:845` (withWriteTx)
+- `memory-search.ts:2308` (withReadDbAsync)
+- `memory-search.ts:2386` (withReadDbAsync)
+- `memory-search.ts:2433` (withReadDbAsync)
+- `memory-search.ts:2512` (withReadDbAsync)
+- `memory-search.ts:2793` (withReadDbAsync)
+- `memory-search.ts:2820` (withReadDbAsync)
+- `obsidian-source-embeddings.ts:630` (withReadDb)
+- `obsidian-source-embeddings.ts:666` (withWriteTx)
+- `obsidian-source-embeddings.ts:682` (withReadDb)
+- `obsidian-source-embeddings.ts:716` (withWriteTx)
+- `obsidian-source-embeddings.ts:777` (withWriteTx)
+- `obsidian-source-embeddings.ts:823` (withReadDb)
+- `obsidian-source-embeddings.ts:846` (withWriteTx)
 - `obsidian-source-graph.ts:723` (withWriteTx)
 - `obsidian-source-graph.ts:733` (withWriteTx)
 - `obsidian-source-graph.ts:817` (withWriteTx)
@@ -196,9 +183,9 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `pipeline/dreaming-worker.ts:148` (withReadDbAsync)
 - `pipeline/dreaming-worker.ts:227` (withReadDbAsync)
 - `pipeline/dreaming-worker.ts:247` (withReadDbAsync)
-- `pipeline/graph-traversal.ts:92` (withReadDbAsync)
+- `pipeline/graph-traversal.ts:101` (withReadDbAsync)
 - `db:maintenance.graph-agent-scopes.read` (withReadDbAsync)
-- `pipeline/maintenance-worker.ts:346` (withReadDbAsync)
+- `pipeline/maintenance-worker.ts:351` (withReadDbAsync)
 - `db:maintenance.dead-memory-count.read` (withReadDbAsync)
 - `pipeline/reflection-worker.ts:368` (withReadDb)
 - `pipeline/reflection-worker.ts:401` (withReadDb)
@@ -218,7 +205,11 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `prompt-entity-context.ts:671` (withReadDb)
 - `prompt-entity-context.ts:698` (withReadDb)
 - `db:repair.rate-limits.check` (withReadDbAsync)
+- `db:repair.rate-limits.acquire` (withWriteTxAsync)
+- `db:repair.rate-limits.record-state` (withReadDbAsync)
 - `db:repair.rate-limits.record` (withWriteTxAsync)
+- `db:repair.rate-limits.finalize` (withWriteTxAsync)
+- `db:repair.rate-limits.release` (withWriteTxAsync)
 - `db:repair.write.transaction` (withWriteTxAsync)
 - `db:repair.embedding.profile` (withReadDbAsync)
 - `db:repair.embedding.gaps` (withReadDbAsync)
@@ -242,8 +233,8 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 - `routes/database-diagnostics.ts:267` (withReadDbAsync)
 - `routes/database-diagnostics.ts:306` (withReadDbAsync)
 - `routes/health.ts:114` (withReadDbAsync)
-- `routes/health.ts:221` (withReadDbAsync)
-- `routes/health.ts:296` (withReadDbAsync)
+- `routes/health.ts:222` (withReadDbAsync)
+- `routes/health.ts:309` (withReadDbAsync)
 - `routes/hooks-routes.ts:1180` (withReadDb)
 - `routes/hooks-routes.ts:1209` (withWriteTx)
 - `routes/hooks-routes.ts:1329` (withWriteTx)
@@ -382,8 +373,8 @@ The classifier follows execution home, not API spelling. A direct accessor callb
 
 ### OFF-PARENT sites
 
-- `db-owner-worker.ts:885` (withReadDbAsync)
-- `db-owner-worker.ts:918` (withReadDbAsync)
+- `db:recall.embedding.config.read` (withReadDbAsync)
+- `db:recall.vector.search.read` (withReadDbAsync)
 
 ## A3 Slice 2 migration notes
 

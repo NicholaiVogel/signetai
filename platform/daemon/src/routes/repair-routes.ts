@@ -247,6 +247,7 @@ export function registerRepairRoutes(
 			semanticThreshold?: number;
 			dryRun?: boolean;
 			semanticEnabled?: boolean;
+			semanticCursor?: string;
 			agentId?: string;
 			project?: string | null;
 			scope?: string | null;
@@ -259,6 +260,7 @@ export function registerRepairRoutes(
 			if (typeof body?.dryRun === "boolean") options.dryRun = body.dryRun;
 			if (typeof body?.semanticThreshold === "number") options.semanticThreshold = body.semanticThreshold;
 			if (typeof body?.semanticEnabled === "boolean") options.semanticEnabled = body.semanticEnabled;
+			options.semanticCursor = readString(body, "semanticCursor") ?? readString(body, "semantic_cursor");
 			options.agentId = readString(body, "agentId") ?? readString(body, "agent_id");
 			options.project = readString(body, "project") ?? c.req.query("project");
 			options.scope = readString(body, "scope") ?? c.req.query("scope");

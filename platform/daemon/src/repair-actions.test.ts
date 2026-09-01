@@ -21,6 +21,7 @@ import {
 	createRateLimiter,
 	deduplicateMemories,
 	findDeadMemories,
+	findSemanticDuplicates,
 	forgetDeadMemories,
 	getDedupStats,
 	getEmbeddingGapStats,
@@ -354,6 +355,34 @@ describe("createRateLimiter", () => {
 			db.close();
 		}
 	});
+
+	it("atomically admits only one concurrent durable repair for a scope", async () => {
+		const db = new Database(":memory:");
+		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
+		try {
+			const limiter = createRateLimiter(asAccessor(db));
+			const [first, second] = await Promise.all([
+				limiter.acquire("concurrent-action", 0, 1, "agent-a"),
+				limiter.acquire("concurrent-action", 0, 1, "agent-a"),
+			]);
+
+			const results = [first, second];
+			expect(results.filter((result) => result.allowed)).toHaveLength(1);
+			expect(results.filter((result) => !result.allowed)).toHaveLength(1);
+			expect(results.find((result) => !result.allowed)?.reason).toMatch(
+				/repair already in progress|hourly budget exhausted/,
+			);
+
+			const admitted = results.find((result) => result.allowed);
+			const lease = admitted?.lease;
+			expect(lease).toBeDefined();
+			if (!lease) throw new Error("expected one concurrent repair admission");
+			await limiter.finalize(lease, { success: true });
+			expect((await limiter.check("concurrent-action", 0, 1, "agent-a")).allowed).toBe(false);
+		} finally {
+			db.close();
+		}
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -440,7 +469,9 @@ describe("pruneGenericEntities", () => {
 			expect(dryRun.affected).toBe(1);
 			expect(dryRun.message).toContain("Sender");
 
-			const result = await pruneGenericEntities(accessor, TEST_CFG, CTX_OPERATOR, limiter, { dryRun: false });
+			const result = await pruneGenericEntities(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+				dryRun: false,
+			});
 			expect(result.success).toBe(true);
 			expect(result.affected).toBe(1);
 
@@ -555,7 +586,9 @@ describe("pruneGenericEntities", () => {
 			expect(dryRun.message).toContain("Current");
 			expect(dryRun.message).toContain("**Status:**");
 
-			const result = await pruneGenericEntities(accessor, TEST_CFG, CTX_OPERATOR, limiter, { dryRun: false });
+			const result = await pruneGenericEntities(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+				dryRun: false,
+			});
 			expect(result.success).toBe(true);
 			expect(result.affected).toBe(2);
 			const remaining = db.prepare("SELECT name FROM entities ORDER BY name").all() as Array<{ name: string }>;
@@ -1145,7 +1178,9 @@ describe("reembedMissingMemories", () => {
 			1,
 			false,
 		);
-		await expect(first).rejects.toThrow("simulated embedding persistence failure");
+		const firstResult = await first;
+		expect(firstResult.success).toBe(false);
+		expect(firstResult.message).toContain("simulated embedding persistence failure");
 		expect(db.prepare("SELECT id FROM memories WHERE id = ?").get("mem-write-failure")).toBeTruthy();
 		expect(db.prepare("SELECT id FROM embeddings WHERE source_id = ?").get("mem-write-failure")).toBeNull();
 
@@ -2668,6 +2703,81 @@ describe("deduplicateMemories", () => {
 });
 
 // ---------------------------------------------------------------------------
+// findSemanticDuplicates
+// ---------------------------------------------------------------------------
+
+describe("findSemanticDuplicates", () => {
+	it("returns a stable continuation cursor after a full candidate window", async () => {
+		const createdAt = "2026-01-01T00:00:00.000Z";
+		const firstPage = Array.from({ length: 100 }, (_, index) => ({
+			id: `semantic-${String(index).padStart(3, "0")}`,
+			embedding_id: `embedding-${index}`,
+			agent_id: "agent-a",
+			project: null,
+			scope: null,
+			visibility: null,
+			created_at: createdAt,
+		}));
+		const secondPage = [
+			{
+				id: "semantic-100",
+				embedding_id: "embedding-100",
+				agent_id: "agent-a",
+				project: null,
+				scope: null,
+				visibility: null,
+				created_at: createdAt,
+			},
+		];
+		const candidateArgs: unknown[][] = [];
+		let candidatePage = 0;
+		const fakeDb = {
+			prepare(sql: string) {
+				return {
+					run: (..._args: unknown[]) => ({ changes: 0 }),
+					get: (..._args: unknown[]) =>
+						sql.includes("SELECT embedding") ? { embedding: new Float32Array([0.1]).buffer } : undefined,
+					all: (...args: unknown[]) => {
+						if (sql.includes("SELECT m.id")) {
+							candidateArgs.push(args);
+							return candidatePage++ === 0 ? firstPage : secondPage;
+						}
+						return [];
+					},
+				};
+			},
+		};
+		const accessor = {
+			withReadDbAsync: async <T>(fn: (db: ReadDb) => T | Promise<T>) => await fn(fakeDb as unknown as ReadDb),
+			withWriteTxAsync: async <T>(_fn: (db: WriteDb) => T) => {
+				throw new Error("unused in semantic finder test");
+			},
+			withWriteDbAsync: async <T>(_fn: (db: WriteDb) => T) => {
+				throw new Error("unused in semantic finder test");
+			},
+			close() {},
+		} as unknown as DbAccessor;
+
+		const first = await findSemanticDuplicates(accessor, 0.9, 100, "agent-a", null, null, null);
+		expect(first.candidates).toBe(100);
+		expect(first.settled).toBe(false);
+		expect(first.nextCursor).toBeString();
+		expect(JSON.parse(first.nextCursor as string)).toEqual({
+			createdAt,
+			id: "semantic-099",
+		});
+		const cursor = first.nextCursor;
+		if (!cursor) throw new Error("expected a semantic continuation cursor");
+
+		const second = await findSemanticDuplicates(accessor, 0.9, 100, "agent-a", null, null, null, cursor);
+		expect(second.candidates).toBe(1);
+		expect(second.settled).toBe(true);
+		expect(second.nextCursor).toBeNull();
+		expect(candidateArgs[1]).toEqual(["agent-a", createdAt, createdAt, "semantic-099"]);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // triggerRetentionSweep
 // ---------------------------------------------------------------------------
 
@@ -2702,7 +2812,16 @@ describe("triggerRetentionSweep", () => {
 
 			expect(result.success).toBe(true);
 			expect(result.affected).toBe(3);
-			expect(repairAuditCount(db, "triggerRetentionSweep")).toBe(1);
+			expect(repairAuditCount(db, "triggerRetentionSweep")).toBe(2);
+			const auditRows = db
+				.prepare("SELECT metadata FROM memory_history WHERE metadata LIKE ?")
+				.all("%triggerRetentionSweep%") as Array<{ metadata: string }>;
+			expect(auditRows.map((row) => (JSON.parse(row.metadata) as { message: string }).message)).toEqual(
+				expect.arrayContaining([
+					"retention sweep claimed; destructive work starting",
+					"retention sweep purged 3 row(s)",
+				]),
+			);
 			expect(
 				db.prepare("SELECT hourly_count FROM repair_rate_limits WHERE action = ?").get("triggerRetentionSweep"),
 			).toEqual({ hourly_count: 1 });

@@ -1318,7 +1318,21 @@ export const MIGRATIONS: readonly Migration[] = [
 		version: 146,
 		name: "repair-rate-limits",
 		up: repairRateLimits,
-		artifacts: { tables: ["repair_rate_limits"] },
+		artifacts: {
+			tables: ["repair_rate_limits"],
+			columns: [
+				{ table: "repair_rate_limits", column: "action" },
+				{ table: "repair_rate_limits", column: "scope_key" },
+				{ table: "repair_rate_limits", column: "last_run_at" },
+				{ table: "repair_rate_limits", column: "window_started_at" },
+				{ table: "repair_rate_limits", column: "hourly_count" },
+				{ table: "repair_rate_limits", column: "updated_at" },
+				{ table: "repair_rate_limits", column: "lease_id" },
+				{ table: "repair_rate_limits", column: "lease_expires_at" },
+				{ table: "repair_rate_limits", column: "last_error" },
+				{ table: "repair_rate_limits", column: "semantic_cursor" },
+			],
+		},
 	},
 ];
 

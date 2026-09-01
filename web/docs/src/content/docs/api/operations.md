@@ -537,6 +537,7 @@ Rate-limited. Requires `admin` permission.
   "dryRun": false,
   "semanticEnabled": false,
   "semanticThreshold": 0.95,
+  "semanticCursor": "<opaque cursor returned by a prior call>",
   "agentId": "default",
   "project": "app",
   "scope": "workspace",
@@ -551,8 +552,12 @@ writes revalidate them in the transaction. `dryRun: true` reports what would be
 deduplicated without making changes. `semanticEnabled` adds vector-similarity
 dedup on top of hash-based deduplication. Invalid or oversized batch values
 return `400`. Semantic duplicate discovery is independently bounded by candidate
-count, database operations, and elapsed time; repeated calls continue through
-bounded observations rather than running an unbounded scan.
+count, database operations, and elapsed time. When a bounded semantic scan is not
+settled, the response includes `details.semanticCursor`; pass that opaque value as
+`semanticCursor` on the next request with the same filters. A `null` cursor with
+`details.semanticSettled: true` means the ordered candidate set has been exhausted.
+The cursor is ordered by `(created_at, id)` and never crosses the agent, project,
+scope, or visibility filters.
 
 **Response**
 
