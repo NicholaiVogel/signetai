@@ -1402,14 +1402,51 @@ describe("reembedMissingMemories", () => {
 			"agent-a",
 		);
 
-		expect(result.success).toBe(true);
+		expect(result.success).toBe(false);
 		expect(result.affected).toBe(1);
+		expect(result.message).toContain("owned by another agent");
+		expect(result.details).toEqual({ failed: 0, stale: 0, skipped: 1 });
 		const repaired = db.prepare("SELECT agent_id FROM embeddings WHERE content_hash = 'agent-a-unique-hash'").get();
 		expect(repaired).toEqual({ agent_id: "agent-a" });
 		const after = db
 			.prepare("SELECT vector, chunk_text, source_id, agent_id, dimensions FROM embeddings WHERE id = 'emb-b'")
 			.get();
 		expect(after).toEqual(before);
+	});
+
+	it("reports a cross-agent hash collision as incomplete repair", async () => {
+		const sharedHash = "cross-agent-only-hash";
+		insertMemory(db, "mem-a-only", "agent-a", sharedHash);
+		insertMemory(db, "mem-b-owner", "agent-b", sharedHash);
+		insertEmbedding(db, {
+			id: "emb-b-owner",
+			contentHash: sharedHash,
+			sourceId: "mem-b-owner",
+			vector: [0.9, 0.8, 0.7],
+			agentId: "agent-b",
+		});
+
+		const result = await reembedMissingMemories(
+			accessor,
+			TEST_CFG,
+			CTX_AGENT,
+			createRateLimiter(),
+			async () => [0.1, 0.2, 0.3],
+			TEST_EMBEDDING_CFG,
+			10,
+			false,
+			false,
+			undefined,
+			"agent-a",
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.affected).toBe(0);
+		expect(result.message).toContain("another agent");
+		expect(db.prepare("SELECT id FROM embeddings WHERE source_id = 'mem-a-only'").get()).toBeNull();
+		expect(db.prepare("SELECT agent_id FROM embeddings WHERE id = 'emb-b-owner'").get()).toEqual({
+			agent_id: "agent-b",
+		});
 	});
 
 	it("skips stale vectors when content changes during provider work", async () => {

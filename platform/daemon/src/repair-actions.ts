@@ -1216,6 +1216,7 @@ interface ReembedBatchOutcome {
 	readonly written: number;
 	readonly failed: number;
 	readonly stale: number;
+	readonly skipped: number;
 	readonly profileChanged: boolean;
 }
 
@@ -1241,6 +1242,7 @@ async function reembedMissingMemoriesBatch(
 			written: 0,
 			failed: 0,
 			stale: 0,
+			skipped: 0,
 			profileChanged: false,
 		};
 	}
@@ -1270,6 +1272,7 @@ async function reembedMissingMemoriesBatch(
 			written: 0,
 			failed: unembedded.length,
 			stale: 0,
+			skipped: 0,
 			profileChanged: false,
 		};
 	}
@@ -1279,11 +1282,12 @@ async function reembedMissingMemoriesBatch(
 		// change the active vector space while this batch is being encoded.
 		// Never commit vectors from the superseded profile.
 		if (!isActiveEmbeddingConfig(db, embeddingCfg)) {
-			return { count: 0, stale: 0, profileChanged: true };
+			return { count: 0, stale: 0, skipped: 0, profileChanged: true };
 		}
 		const now = new Date().toISOString();
 		let count = 0;
 		let stale = 0;
+		let skipped = 0;
 		// Hoisted outside loop (pattern: db.prepare inside a loop is flagged)
 		const readCurrentMemory = db.prepare(
 			"SELECT content, content_hash, agent_id FROM memories WHERE id = ? AND is_deleted = 0",
@@ -1343,7 +1347,10 @@ async function reembedMissingMemoriesBatch(
 			const existing = readEmbeddingByHash.get(contentHash) as { id: string; agent_id: string | null } | undefined;
 			if (existing) {
 				const existingAgentId = normalizeRepairAgentId(existing.agent_id);
-				if (existingAgentId !== memoryAgentId) continue;
+				if (existingAgentId !== memoryAgentId) {
+					skipped++;
+					continue;
+				}
 			}
 
 			const embId = crypto.randomUUID();
@@ -1376,7 +1383,7 @@ async function reembedMissingMemoriesBatch(
 			}
 		}
 
-		return { count, stale, profileChanged: false };
+		return { count, stale, skipped, profileChanged: false };
 	});
 
 	return {
@@ -1384,6 +1391,7 @@ async function reembedMissingMemoriesBatch(
 		written: writeOutcome.count,
 		failed: unembedded.length - results.length,
 		stale: writeOutcome.stale,
+		skipped: writeOutcome.skipped,
 		profileChanged: writeOutcome.profileChanged,
 	};
 }
@@ -1481,6 +1489,7 @@ export async function reembedMissingMemories(
 			let written = 0;
 			let failed = 0;
 			let stale = 0;
+			let skipped = 0;
 			let batches = 0;
 			let profileChanged = false;
 
@@ -1499,6 +1508,7 @@ export async function reembedMissingMemories(
 				written += outcome.written;
 				failed += outcome.failed;
 				stale += outcome.stale;
+				skipped += outcome.skipped;
 				batches++;
 				profileChanged ||= outcome.profileChanged;
 				if (outcome.profileChanged) break;
@@ -1532,9 +1542,14 @@ export async function reembedMissingMemories(
 			}
 
 			if (written === 0) {
+				const reasons = [
+					failed > 0 ? `${failed} provider failures` : null,
+					stale > 0 ? `${stale} changed during provider work` : null,
+					skipped > 0 ? `${skipped} memories are owned by another agent` : null,
+				].filter((reason): reason is string => reason !== null);
 				const message =
-					stale > 0
-						? `re-embedded 0 of ${attempted} memories because ${stale} changed during provider work`
+					reasons.length > 0
+						? `re-embedded 0 of ${attempted} memories (${reasons.join(", ")})`
 						: `embedding provider returned no vectors for ${attempted} memories`;
 				await finalizeRepairGate(limiter, gate, { success: false, error: message });
 				return {
@@ -1542,25 +1557,36 @@ export async function reembedMissingMemories(
 					success: false,
 					affected: 0,
 					message,
+					details: { failed, stale, skipped },
 				};
 			}
 
 			const remaining = (await getEmbeddingGapStats(accessor, agentId)).unembedded;
 			const scope = runToCompletion ? `across ${batches} batch(es)` : "in one batch";
-			const msg =
-				failed > 0
-					? `re-embedded ${written} of ${attempted} memories ${scope} (${failed} failed, ${remaining} still missing)`
-					: `re-embedded ${written} of ${attempted} memories ${scope} (${remaining} still missing)`;
+			const issues = [
+				failed > 0 ? `${failed} failed` : null,
+				stale > 0 ? `${stale} stale` : null,
+				skipped > 0 ? `${skipped} owned by another agent` : null,
+			].filter((issue): issue is string => issue !== null);
+			const incomplete = issues.length > 0;
+			const msg = incomplete
+				? `re-embedded ${written} of ${attempted} memories ${scope} (${issues.join(", ")}, ${remaining} still missing)`
+				: `re-embedded ${written} of ${attempted} memories ${scope} (${remaining} still missing)`;
 
 			await withRepairWriteTx(accessor, (db) => {
 				writeRepairAudit(db, action, ctx, written, msg);
 			});
 
-			await finalizeRepairGate(limiter, gate, { success: true });
+			await finalizeRepairGate(limiter, gate, {
+				success: !incomplete,
+				error: incomplete ? "embedding repair incomplete" : undefined,
+			});
 			logger.info("pipeline", "repair: re-embedded missing memories", {
 				affected: written,
 				attempted,
 				failed,
+				stale,
+				skipped,
 				remaining,
 				batches,
 				runToCompletion,
@@ -1570,9 +1596,10 @@ export async function reembedMissingMemories(
 
 			return {
 				action,
-				success: true,
+				success: !incomplete,
 				affected: written,
 				message: msg,
+				details: { failed, stale, skipped },
 			};
 		} finally {
 			reembedInProgress = false;
@@ -3404,7 +3431,11 @@ export async function rebuildDerivedIndexes(
 	const reembedResult = await withRepairLease(limiter, gate, () =>
 		reembedMissingMemoriesBatch(accessor, embeddingFn, resolvedEmbeddingCfg, MAX_REEMBED_BATCH, agentId),
 	);
-	const embeddingSuccess = !reembedResult.profileChanged && reembedResult.failed === 0 && reembedResult.stale === 0;
+	const embeddingSuccess =
+		!reembedResult.profileChanged &&
+		reembedResult.failed === 0 &&
+		reembedResult.stale === 0 &&
+		reembedResult.skipped === 0;
 	await finalizeRepairGate(limiter, gate, {
 		success: embeddingSuccess,
 		error: embeddingSuccess ? undefined : "embedding repair incomplete",
@@ -3423,8 +3454,8 @@ export async function rebuildDerivedIndexes(
 	}
 	parts.push(
 		`embeddings: re-embedded ${reembedResult.written} of ${reembedResult.selected} missing` +
-			(reembedResult.failed > 0 || reembedResult.stale > 0
-				? ` (${reembedResult.failed} failed, ${reembedResult.stale} stale)`
+			(reembedResult.failed > 0 || reembedResult.stale > 0 || reembedResult.skipped > 0
+				? ` (${reembedResult.failed} failed, ${reembedResult.stale} stale, ${reembedResult.skipped} skipped)`
 				: ""),
 	);
 
