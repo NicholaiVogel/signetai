@@ -441,6 +441,29 @@ describe("pruneGenericEntities", () => {
 			db.close();
 		}
 	});
+
+	it("does not create admission history for invalid requests", async () => {
+		const db = new Database(":memory:");
+		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
+		try {
+			const accessor = asAccessor(db);
+			const limiter = createRateLimiter(accessor);
+			const result = await pruneGenericEntities(accessor, TEST_CFG, CTX_OPERATOR, limiter, { batchSize: 0 });
+
+			expect(result.success).toBe(false);
+			expect(
+				(
+					db
+						.prepare("SELECT COUNT(*) AS count FROM repair_rate_limits WHERE action = 'pruneGenericEntities'")
+						.get() as {
+						count: number;
+					}
+				).count,
+			).toBe(0);
+		} finally {
+			db.close();
+		}
+	});
 	it("dry-runs and deletes generic entities without touching pinned or concrete entities", async () => {
 		const db = new Database(":memory:");
 		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
@@ -687,6 +710,23 @@ describe("requeueDeadJobs", () => {
 		expect(remaining.n).toBe(2);
 	});
 
+	it("does not charge dry-run admission budget", async () => {
+		insertMemory(db, "mem-dry-run");
+		insertJob(db, "job-dry-run", "mem-dry-run", "dead");
+		const cfg = {
+			...TEST_CFG,
+			repair: { ...TEST_CFG.repair, requeueCooldownMs: 0, requeueHourlyBudget: 1 },
+		};
+		const limiter = createRateLimiter();
+
+		const preview = await requeueDeadJobs(accessor, cfg, CTX_OPERATOR, limiter, { dryRun: true });
+		const applied = await requeueDeadJobs(accessor, cfg, CTX_OPERATOR, limiter);
+
+		expect(preview.success).toBe(true);
+		expect(applied.success).toBe(true);
+		expect(applied.affected).toBe(1);
+	});
+
 	it("does not resurrect retired extraction jobs", async () => {
 		insertMemory(db, "mem-retired");
 		insertJob(db, "job-retired", "mem-retired", "dead", undefined, 3, 3, "extract");
@@ -870,23 +910,34 @@ describe("dead memory hygiene", () => {
 		const accessor = asAccessor(db);
 		const now = new Date().toISOString();
 		const insert = db.prepare(
-			`INSERT INTO memories (id, content, confidence, importance, agent_id, type, created_at, updated_at, updated_by)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'test')`,
+			`INSERT INTO memories
+			 (id, content, confidence, importance, agent_id, project, scope, visibility, type, created_at, updated_at, updated_by)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'test')`,
 		);
-		insert.run("dead-a", "dead", 0.01, 0.5, "agent-a", "fact", now, now);
-		insert.run("dead-b", "dead", 0.01, 0.5, "agent-b", "fact", now, now);
-		insert.run("protected-a", "protected", 0.01, 0.9, "agent-a", "fact", now, now);
+		insert.run("dead-a", "dead", 0.01, 0.5, "agent-a", "project-x", "scope-x", "private", "fact", now, now);
+		insert.run("dead-b", "dead", 0.01, 0.5, "agent-a", "project-y", "scope-x", "private", "fact", now, now);
+		insert.run("protected-a", "protected", 0.01, 0.9, "agent-a", "project-x", "scope-x", "private", "fact", now, now);
 
 		try {
-			expect(findDeadMemories(db as unknown as ReadDb, { agentId: "agent-a" }).map((row) => row.id)).toEqual([
-				"dead-a",
-			]);
 			expect(
-				await forgetDeadMemories(accessor, ["dead-a", "dead-b", "protected-a"], {
+				findDeadMemories(db as unknown as ReadDb, {
 					agentId: "agent-a",
-					ctx: { ...CTX_OPERATOR, agentId: "agent-a" },
-				}),
-			).toBe(1);
+					project: "project-x",
+					scope: "scope-x",
+					visibility: "private",
+				}).map((row) => row.id),
+			).toEqual(["dead-a"]);
+			const result = await forgetDeadMemories(accessor, ["dead-a", "dead-b", "protected-a"], {
+				agentId: "agent-a",
+				project: "project-x",
+				scope: "scope-x",
+				visibility: "private",
+				cfg: TEST_CFG,
+				ctx: { ...CTX_OPERATOR, agentId: "agent-a", project: "project-x", scope: "scope-x", visibility: "private" },
+				limiter: createRateLimiter(),
+			});
+			expect(result.success).toBe(true);
+			expect(result.affected).toBe(1);
 			expect(
 				(db.prepare("SELECT is_deleted FROM memories WHERE id = 'dead-a'").get() as { is_deleted: number }).is_deleted,
 			).toBe(1);
@@ -2545,6 +2596,36 @@ describe("deduplicateMemories", () => {
 		expect(result.message).toMatch(/batchSize/);
 	});
 
+	it("rejects a malformed semantic cursor before deleting exact duplicates", async () => {
+		const now = new Date().toISOString();
+		for (const [id, importance] of [
+			["cursor-keeper", 0.9],
+			["cursor-loser", 0.3],
+		] as const) {
+			db.prepare(
+				`INSERT INTO memories (id, content, content_hash, type, created_at, updated_at, updated_by, importance)
+				 VALUES (?, ?, 'hash-cursor', 'fact', ?, ?, 'test', ?)`,
+			).run(id, "content", now, now, importance);
+		}
+
+		const result = await deduplicateMemories(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+			semanticEnabled: true,
+			semanticCursor: "not-json",
+		});
+
+		expect(result.success).toBe(false);
+		expect(result.message).toMatch(/semanticCursor/);
+		expect(
+			(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM memories WHERE content_hash = 'hash-cursor' AND is_deleted = 0")
+					.get() as {
+					count: number;
+				}
+			).count,
+		).toBe(2);
+	});
+
 	it("merges tags from all duplicates into the keeper", async () => {
 		const now = new Date().toISOString();
 		db.prepare(
@@ -2806,7 +2887,7 @@ describe("triggerRetentionSweep", () => {
 				TEST_CFG,
 				CTX_OPERATOR,
 				createRateLimiter(accessor),
-				{ sweep: async () => ({ tombstonesPurged: 2, historyPurged: 1 }) },
+				{ sweep: async () => ({ tombstonesPurged: 2, historyPurged: 1, durationMs: 5_000 }) },
 				accessor,
 			);
 
@@ -2823,8 +2904,10 @@ describe("triggerRetentionSweep", () => {
 				]),
 			);
 			expect(
-				db.prepare("SELECT hourly_count FROM repair_rate_limits WHERE action = ?").get("triggerRetentionSweep"),
-			).toEqual({ hourly_count: 1 });
+				db
+					.prepare("SELECT hourly_count, scope_key FROM repair_rate_limits WHERE action = ?")
+					.get("triggerRetentionSweep"),
+			).toEqual({ hourly_count: 1, scope_key: "global" });
 		} finally {
 			db.close();
 		}

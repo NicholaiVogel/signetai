@@ -117,6 +117,7 @@ export interface RepairLeaseOutcome {
 
 export interface RateLimiter {
 	check(action: string, cooldownMs: number, hourlyBudget: number, scopeKey?: string): Promise<RepairGateCheck>;
+	/** Record a completed action when no lease was acquired. */
 	record(action: string, scopeKey?: string): Promise<void>;
 	/** Atomically admit an action and claim its action/scope slot. */
 	acquire(action: string, cooldownMs: number, hourlyBudget: number, scopeKey?: string): Promise<RepairGateCheck>;
@@ -124,6 +125,13 @@ export interface RateLimiter {
 	finalize(lease: RepairLease, outcome: RepairLeaseOutcome): Promise<void>;
 	/** Release a claim after a preflight abort while retaining admission history. */
 	release(lease: RepairLease, reason?: string): Promise<void>;
+}
+
+interface RepairGateOptions {
+	/** Preview-only actions check policy without consuming durable budget. */
+	readonly consume?: boolean;
+	/** Use a shared admission scope for operations that mutate global state. */
+	readonly scopeKey?: string;
 }
 
 function limiterKey(action: string, scopeKey?: string): string {
@@ -414,6 +422,7 @@ export async function checkRepairGate(
 	action: string,
 	cooldownMs: number,
 	hourlyBudget: number,
+	options: RepairGateOptions = {},
 ): Promise<RepairGateCheck> {
 	if (cfg.autonomous.frozen) {
 		return { allowed: false, reason: "autonomous.frozen is set" };
@@ -428,7 +437,10 @@ export async function checkRepairGate(
 		};
 	}
 
-	return await limiter.acquire(action, cooldownMs, hourlyBudget, repairScopeKey(ctx));
+	const scopeKey = options.scopeKey ?? repairScopeKey(ctx);
+	return await (options.consume === false
+		? limiter.check(action, cooldownMs, hourlyBudget, scopeKey)
+		: limiter.acquire(action, cooldownMs, hourlyBudget, scopeKey));
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +560,30 @@ function rejectRetiredSummaryRepair(
 	return { action, success: false, affected: 0, message: RETIRED_SUMMARY_REPAIR_MESSAGE };
 }
 
+function validateJobFilterOptions(action: string, options: JobFilterOptions): RepairResult | null {
+	if (
+		options.maxBatch !== undefined &&
+		(!Number.isInteger(options.maxBatch) || options.maxBatch <= 0 || options.maxBatch > MAX_BATCH_HARD_CAP)
+	) {
+		return { action, success: false, affected: 0, message: "maxBatch must be a positive integer <= 1000" };
+	}
+	for (const [name, value] of [
+		["olderThanMs", options.olderThanMs],
+		["retentionMs", options.retentionMs],
+	] as const) {
+		if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+			return { action, success: false, affected: 0, message: `${name} must be a finite non-negative number` };
+		}
+	}
+	if (options.ids?.some((id) => typeof id !== "string" || id.length === 0)) {
+		return { action, success: false, affected: 0, message: "ids must contain only non-empty strings" };
+	}
+	if (options.tables?.some((table) => table !== "memory" && table !== "summary")) {
+		return { action, success: false, affected: 0, message: "tables must contain only memory or summary" };
+	}
+	return null;
+}
+
 /**
  * Reset dead jobs to pending so the worker will retry them.
  *
@@ -581,6 +617,8 @@ export async function requeueDeadJobs(
 	const dryRun = options.dryRun === true;
 	const retired = rejectRetiredSummaryRepair(action, options);
 	if (retired) return retired;
+	const invalid = validateJobFilterOptions(action, options);
+	if (invalid) return invalid;
 
 	const gate = await checkRepairGate(
 		cfg,
@@ -589,6 +627,7 @@ export async function requeueDeadJobs(
 		action,
 		cfg.repair.requeueCooldownMs,
 		cfg.repair.requeueHourlyBudget,
+		{ consume: !dryRun },
 	);
 	if (!gate.allowed) {
 		return { action, success: false, affected: 0, message: gate.reason ?? "denied by policy gate" };
@@ -946,6 +985,7 @@ export async function triggerRetentionSweep(
 		action,
 		cfg.repair.requeueCooldownMs,
 		cfg.repair.requeueHourlyBudget,
+		{ scopeKey: "global" },
 	);
 
 	if (!gate.allowed) {
@@ -980,10 +1020,20 @@ export async function triggerRetentionSweep(
 	try {
 		const rawDetails = await retentionHandle.sweep();
 		const details = rawDetails && typeof rawDetails === "object" ? (rawDetails as Record<string, unknown>) : {};
-		const affected = Object.values(details).reduce<number>(
-			(sum, value) => sum + (typeof value === "number" ? value : 0),
-			0,
-		);
+		const affected = [
+			"graphLinksPurged",
+			"entitiesOrphaned",
+			"embeddingsPurged",
+			"tombstonesPurged",
+			"historyPurged",
+			"completedJobsPurged",
+			"deadJobsPurged",
+			"completedTranscriptCaptureJobsPurged",
+			"deadTranscriptCaptureJobsPurged",
+		].reduce<number>((sum, key) => {
+			const value = details[key];
+			return sum + (typeof value === "number" && Number.isFinite(value) ? value : 0);
+		}, 0);
 		if (accessor) {
 			await withRepairWriteTx(accessor, (db) => {
 				writeRepairAudit(db, action, ctx, affected, `retention sweep purged ${affected} row(s)`);
@@ -1362,7 +1412,12 @@ export async function reembedMissingMemories(
 		typeof cooldownMsOverride === "number" && Number.isFinite(cooldownMsOverride)
 			? Math.max(0, Math.floor(cooldownMsOverride))
 			: cfg.repair.reembedCooldownMs;
-	const gate = await checkRepairGate(cfg, ctx, limiter, action, effectiveCooldownMs, cfg.repair.reembedHourlyBudget);
+	const validatedBatchSize = validateBatchSize(batchSize, DEFAULT_REEMBED_BATCH, MAX_REEMBED_BATCH);
+	if (typeof validatedBatchSize !== "number") return { ...validatedBatchSize, action };
+	const normalizedBatchSize = validatedBatchSize;
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, effectiveCooldownMs, cfg.repair.reembedHourlyBudget, {
+		consume: !dryRun,
+	});
 
 	if (!gate.allowed) {
 		return {
@@ -1374,13 +1429,6 @@ export async function reembedMissingMemories(
 	}
 
 	try {
-		const validatedBatchSize = validateBatchSize(batchSize, DEFAULT_REEMBED_BATCH, MAX_REEMBED_BATCH);
-		if (typeof validatedBatchSize !== "number") {
-			await finalizeRepairGate(limiter, gate, { success: false, error: validatedBatchSize.message });
-			return { ...validatedBatchSize, action };
-		}
-		const normalizedBatchSize = validatedBatchSize;
-
 		// `embeddingCfg` is the raw configured value (e.g. from agent.yaml), which
 		// carries no `profile`. The durable active generation may have been
 		// promoted with a named profile (e.g. by a prior --model-mismatch
@@ -1550,15 +1598,14 @@ export async function reembedModelMigration(
 	readVecDimensions: (db: ReadDb) => number | null = readLiveVecDimensions,
 ): Promise<RepairResult> {
 	const action = "reembedModelMigration";
-	const gate = await checkRepairGate(cfg, ctx, limiter, action, 0, cfg.repair.reembedHourlyBudget);
+	const validatedBatchSize = validateBatchSize(batchSize, DEFAULT_REEMBED_BATCH, MAX_REEMBED_BATCH);
+	if (typeof validatedBatchSize !== "number") return { ...validatedBatchSize, action };
+	const size = validatedBatchSize;
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, 0, cfg.repair.reembedHourlyBudget, {
+		consume: !dryRun,
+	});
 	if (!gate.allowed) return { action, success: false, affected: 0, message: gate.reason ?? "denied by policy gate" };
 	try {
-		const validatedBatchSize = validateBatchSize(batchSize, DEFAULT_REEMBED_BATCH, MAX_REEMBED_BATCH);
-		if (typeof validatedBatchSize !== "number") {
-			await finalizeRepairGate(limiter, gate, { success: false, error: validatedBatchSize.message });
-			return { ...validatedBatchSize, action };
-		}
-		const size = validatedBatchSize;
 		const { rows, totalMatching, sources, liveVecDimensions } = await accessor.withReadDbAsync(
 			async (db) => ({
 				rows: listEmbeddingMigrationRows(db, embeddingCfg.model, embeddingCfg.dimensions, all, size, agentId),
@@ -1815,6 +1862,7 @@ export async function cleanOrphanedEmbeddings(
 	agentId?: string,
 ): Promise<RepairResult> {
 	const action = "cleanOrphanedEmbeddings";
+	const effectiveAgentId = normalizeRepairAgentId(agentId ?? ctx.agentId);
 	const gate = await checkRepairGate(
 		cfg,
 		ctx,
@@ -1836,7 +1884,7 @@ export async function cleanOrphanedEmbeddings(
 	const limit = Number.isFinite(maxBatch) && maxBatch > 0 ? Math.floor(maxBatch) : Number.MAX_SAFE_INTEGER;
 	const affected = await withRepairLease(limiter, gate, () =>
 		withRepairWriteTx(accessor, (db) => {
-			const orphans = listOrphanedEmbeddingIds(db, limit, agentId);
+			const orphans = listOrphanedEmbeddingIds(db, limit, effectiveAgentId);
 
 			if (orphans.length === 0) return 0;
 
@@ -2263,6 +2311,33 @@ export async function deduplicateMemories(
 	},
 ): Promise<DedupResult> {
 	const action = "deduplicateMemories";
+	const batchSize = options?.batchSize ?? cfg.repair.dedupBatchSize;
+	if (!Number.isInteger(batchSize) || batchSize <= 0 || batchSize > MAX_BATCH_HARD_CAP) {
+		return {
+			action,
+			success: false,
+			affected: 0,
+			clusters: 0,
+			message: "batchSize must be a positive integer <= 1000",
+		};
+	}
+	const semanticThreshold = options?.semanticThreshold ?? cfg.repair.dedupSemanticThreshold;
+	if (!Number.isFinite(semanticThreshold) || semanticThreshold < 0 || semanticThreshold > 1) {
+		return { action, success: false, affected: 0, clusters: 0, message: "semanticThreshold must be between 0 and 1" };
+	}
+	const dryRun = options?.dryRun ?? false;
+	const semanticEnabled = options?.semanticEnabled ?? false;
+	const semanticCursor = options?.semanticCursor;
+	try {
+		decodeSemanticCursor(semanticCursor);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return { action, success: false, affected: 0, clusters: 0, message };
+	}
+	const agentId = options?.agentId ?? ctx.agentId ?? "default";
+	const project = options?.project ?? ctx.project;
+	const scope = options?.scope ?? ctx.scope;
+	const visibility = options?.visibility ?? ctx.visibility;
 	const gate = await checkRepairGate(
 		cfg,
 		ctx,
@@ -2270,6 +2345,7 @@ export async function deduplicateMemories(
 		action,
 		cfg.repair.dedupCooldownMs,
 		cfg.repair.dedupHourlyBudget,
+		{ consume: !dryRun },
 	);
 
 	if (!gate.allowed) {
@@ -2283,30 +2359,6 @@ export async function deduplicateMemories(
 	}
 
 	try {
-		const batchSize = options?.batchSize ?? cfg.repair.dedupBatchSize;
-		if (!Number.isInteger(batchSize) || batchSize <= 0 || batchSize > MAX_BATCH_HARD_CAP) {
-			const message = "batchSize must be a positive integer <= 1000";
-			await finalizeRepairGate(limiter, gate, { success: false, error: message });
-			return {
-				action,
-				success: false,
-				affected: 0,
-				clusters: 0,
-				message,
-			};
-		}
-		const semanticThreshold = options?.semanticThreshold ?? cfg.repair.dedupSemanticThreshold;
-		if (!Number.isFinite(semanticThreshold) || semanticThreshold < 0 || semanticThreshold > 1) {
-			const message = "semanticThreshold must be between 0 and 1";
-			await finalizeRepairGate(limiter, gate, { success: false, error: message });
-			return { action, success: false, affected: 0, clusters: 0, message };
-		}
-		const dryRun = options?.dryRun ?? false;
-		const semanticEnabled = options?.semanticEnabled ?? false;
-		const agentId = options?.agentId ?? ctx.agentId ?? "default";
-		const project = options?.project ?? ctx.project;
-		const scope = options?.scope ?? ctx.scope;
-		const visibility = options?.visibility ?? ctx.visibility;
 		const dimensionFilters = [
 			["project", project],
 			["scope", scope],
@@ -2639,7 +2691,7 @@ export async function findSemanticDuplicates(
 					)
 					.all(
 						queryVec,
-						candidate.agent_id ?? "default",
+						normalizeRepairAgentId(candidate.agent_id),
 						candidate.project,
 						candidate.scope,
 						candidate.visibility,
@@ -2696,17 +2748,15 @@ export async function pruneChunkGroupEntities(
 	options?: { batchSize?: number; dryRun?: boolean; agentId?: string },
 ): Promise<RepairResult> {
 	const action = "pruneChunkGroupEntities";
-	const gate = await checkRepairGate(cfg, ctx, limiter, action, 60_000, 5);
-	if (!gate.allowed) {
-		return { action, success: false, affected: 0, message: gate.reason ?? "denied" };
-	}
-
 	const batchSize = options?.batchSize ?? 500;
 	const agentId = options?.agentId ?? ctx.agentId ?? "default";
+	const dryRun = options?.dryRun === true;
 	if (!Number.isInteger(batchSize) || batchSize <= 0 || batchSize > MAX_BATCH_HARD_CAP) {
-		const message = "batchSize must be a positive integer <= 1000";
-		await finalizeRepairGate(limiter, gate, { success: false, error: message });
-		return { action, success: false, affected: 0, message };
+		return { action, success: false, affected: 0, message: "batchSize must be a positive integer <= 1000" };
+	}
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, 60_000, 5, { consume: !dryRun });
+	if (!gate.allowed) {
+		return { action, success: false, affected: 0, message: gate.reason ?? "denied" };
 	}
 
 	const total = await withRepairLease(limiter, gate, () =>
@@ -2771,23 +2821,19 @@ export async function pruneSingletonExtractedEntities(
 	options?: { batchSize?: number; dryRun?: boolean; maxMentions?: number; agentId?: string },
 ): Promise<RepairResult> {
 	const action = "pruneSingletonExtractedEntities";
-	const gate = await checkRepairGate(cfg, ctx, limiter, action, 60_000, 10);
-	if (!gate.allowed) {
-		return { action, success: false, affected: 0, message: gate.reason ?? "denied" };
-	}
-
 	const batchSize = options?.batchSize ?? 200;
 	const maxMentions = options?.maxMentions ?? 1;
 	const agentId = options?.agentId ?? ctx.agentId ?? "default";
+	const dryRun = options?.dryRun === true;
 	if (!Number.isInteger(batchSize) || batchSize <= 0 || batchSize > MAX_BATCH_HARD_CAP) {
-		const message = "batchSize must be a positive integer <= 1000";
-		await finalizeRepairGate(limiter, gate, { success: false, error: message });
-		return { action, success: false, affected: 0, message };
+		return { action, success: false, affected: 0, message: "batchSize must be a positive integer <= 1000" };
 	}
 	if (!Number.isInteger(maxMentions) || maxMentions < 0 || maxMentions > 10) {
-		const message = "maxMentions must be an integer between 0 and 10";
-		await finalizeRepairGate(limiter, gate, { success: false, error: message });
-		return { action, success: false, affected: 0, message };
+		return { action, success: false, affected: 0, message: "maxMentions must be an integer between 0 and 10" };
+	}
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, 60_000, 10, { consume: !dryRun });
+	if (!gate.allowed) {
+		return { action, success: false, affected: 0, message: gate.reason ?? "denied" };
 	}
 
 	const candidates = await withRepairLease(limiter, gate, () =>
@@ -2944,18 +2990,16 @@ export async function pruneGenericEntities(
 	options?: { batchSize?: number; dryRun?: boolean; agentId?: string },
 ): Promise<RepairResult> {
 	const action = "pruneGenericEntities";
-	const gate = await checkRepairGate(cfg, ctx, limiter, action, 60_000, 10);
+	const validatedBatchSize = validateBatchSize(options?.batchSize, 100, 500);
+	if (typeof validatedBatchSize !== "number") return { ...validatedBatchSize, action };
+	const batchSize = validatedBatchSize;
+	const agentId = options?.agentId ?? ctx.agentId ?? "default";
+	const dryRun = options?.dryRun ?? true;
+	const gate = await checkRepairGate(cfg, ctx, limiter, action, 60_000, 10, { consume: !dryRun });
 	if (!gate.allowed) {
 		return { action, success: false, affected: 0, message: gate.reason ?? "denied" };
 	}
 
-	const validatedBatchSize = validateBatchSize(options?.batchSize, 100, 500);
-	if (typeof validatedBatchSize !== "number") {
-		await finalizeRepairGate(limiter, gate, { success: false, error: validatedBatchSize.message });
-		return { ...validatedBatchSize, action };
-	}
-	const batchSize = validatedBatchSize;
-	const agentId = options?.agentId ?? ctx.agentId ?? "default";
 	const candidates = await withRepairLease(limiter, gate, () =>
 		accessor.withReadDbAsync(
 			async (db) => {
@@ -3076,6 +3120,35 @@ export interface DeadMemoryOpts {
 	readonly limit?: number;
 	/** Restrict the candidate set to one agent. */
 	readonly agentId?: string;
+	readonly project?: string | null;
+	readonly scope?: string | null;
+	readonly visibility?: string | null;
+}
+
+interface DeadMemoryActionOpts extends DeadMemoryOpts {
+	readonly cfg: PipelineV2Config;
+	readonly ctx: RepairContext;
+	readonly limiter: RateLimiter;
+}
+
+function deadMemoryScope(opts: DeadMemoryOpts): { where: string; args: string[] } {
+	const clauses: string[] = [];
+	const args: string[] = [];
+	if (opts.agentId !== undefined) {
+		clauses.push("COALESCE(NULLIF(agent_id, ''), 'default') = ?");
+		args.push(normalizeRepairAgentId(opts.agentId));
+	}
+	for (const [column, value, fallback] of [
+		["project", opts.project, ""],
+		["scope", opts.scope, ""],
+		["visibility", opts.visibility, "global"],
+	] as const) {
+		if (value !== undefined && value !== null) {
+			clauses.push(`COALESCE(${column}, '${fallback}') = ?`);
+			args.push(value);
+		}
+	}
+	return { where: clauses.map((clause) => ` AND ${clause}`).join(""), args };
 }
 
 /**
@@ -3090,18 +3163,17 @@ export function findDeadMemories(db: ReadDb, opts: DeadMemoryOpts = {}): DeadMem
 	const maxConf = opts.maxConfidence ?? DEAD_MEMORY_DEFAULT_CONFIDENCE;
 	const maxDays = opts.maxAccessDays ?? DEAD_MEMORY_DEFAULT_ACCESS_DAYS;
 	const limit = opts.limit ?? 200;
-	const agentFilter = opts.agentId === undefined ? "" : " AND COALESCE(NULLIF(agent_id, ''), 'default') = ?";
-	const args =
-		opts.agentId === undefined ? [maxConf, maxDays, maxDays, limit] : [opts.agentId, maxConf, maxDays, maxDays, limit];
+	const scope = deadMemoryScope(opts);
+	const args = [...scope.args, maxConf, maxDays, maxDays, limit];
 
 	const rows = db
 		.prepare(
 			`SELECT id, content, confidence, last_accessed, importance
 			 FROM memories
 			 WHERE is_deleted = 0
-			   ${agentFilter}
+			   ${scope.where}
 			   AND importance <= 0.8
-			   AND (
+			 AND (
 			     confidence < ?
 			     OR (last_accessed IS NULL AND julianday('now') - julianday(created_at) > ?)
 			     OR (last_accessed IS NOT NULL AND julianday('now') - julianday(last_accessed) > ?)
@@ -3131,53 +3203,74 @@ export function findDeadMemories(db: ReadDb, opts: DeadMemoryOpts = {}): DeadMem
 }
 
 /**
- * Soft-delete a batch of memories by ID in a single transaction.
- * Returns the number actually deleted (skips already-deleted).
+ * Soft-delete a batch of eligible memories by ID in a single transaction.
+ * Returns a structured repair result and skips rows that no longer match the
+ * complete scope and eligibility predicate.
  */
 export async function forgetDeadMemories(
 	accessor: DbAccessor,
 	ids: readonly string[],
-	opts: DeadMemoryOpts & { readonly ctx?: RepairContext } = {},
-): Promise<number> {
-	if (ids.length === 0) return 0;
+	opts: DeadMemoryActionOpts,
+): Promise<RepairResult> {
+	const action = "forgetDeadMemories";
+	if (ids.length === 0) return { action, success: true, affected: 0, message: "no memories selected" };
+	const gate = await checkRepairGate(
+		opts.cfg,
+		opts.ctx,
+		opts.limiter,
+		action,
+		opts.cfg.repair.requeueCooldownMs,
+		opts.cfg.repair.requeueHourlyBudget,
+	);
+	if (!gate.allowed) {
+		return { action, success: false, affected: 0, message: gate.reason ?? "denied by policy gate" };
+	}
+
 	const now = new Date().toISOString();
 	const maxConf = opts.maxConfidence ?? DEAD_MEMORY_DEFAULT_CONFIDENCE;
 	const maxDays = opts.maxAccessDays ?? DEAD_MEMORY_DEFAULT_ACCESS_DAYS;
-	const agentFilter = opts.agentId === undefined ? "" : " AND COALESCE(NULLIF(agent_id, ''), 'default') = ?";
-	const ctx = opts.ctx ?? {
-		actor: "api",
-		reason: "dead-memory hygiene",
-		actorType: "daemon" as const,
-	};
-	return await withRepairWriteTx(accessor, (db) => {
-		const eligible = db.prepare(
-			`SELECT id FROM memories
-			 WHERE id = ? AND is_deleted = 0${agentFilter}
-			   AND importance <= 0.8
-			   AND (confidence < ?
-			     OR (last_accessed IS NULL AND julianday('now') - julianday(created_at) > ?)
-			     OR (last_accessed IS NOT NULL AND julianday('now') - julianday(last_accessed) > ?))`,
-		);
-		const stmt = db.prepare(
-			`UPDATE memories SET is_deleted = 1, deleted_at = ?, updated_at = ?
-			 WHERE id = ? AND is_deleted = 0${agentFilter}
-			   AND importance <= 0.8
-			   AND (confidence < ?
-			     OR (last_accessed IS NULL AND julianday('now') - julianday(created_at) > ?)
-			     OR (last_accessed IS NOT NULL AND julianday('now') - julianday(last_accessed) > ?))`,
-		);
-		let total = 0;
-		for (const id of ids) {
-			const agentArgs = opts.agentId === undefined ? [] : [opts.agentId];
-			const match = eligible.get(id, ...agentArgs, maxConf, maxDays, maxDays);
-			if (!match) continue;
-			stmt.run(now, now, id, ...agentArgs, maxConf, maxDays, maxDays);
-			total++;
-		}
-		if (total === 0) return 0;
-		writeRepairAudit(db, "forget-dead-memories", ctx, total, `soft-deleted ${total} dead memories`);
-		return total;
-	});
+	const scope = deadMemoryScope(opts);
+	try {
+		const total = await withRepairWriteLease(opts.limiter, gate, accessor, (db) => {
+			const eligible = db.prepare(
+				`SELECT id FROM memories
+				 WHERE id = ? AND is_deleted = 0${scope.where}
+				   AND importance <= 0.8
+				   AND (confidence < ?
+				     OR (last_accessed IS NULL AND julianday('now') - julianday(created_at) > ?)
+				     OR (last_accessed IS NOT NULL AND julianday('now') - julianday(last_accessed) > ?))`,
+			);
+			const stmt = db.prepare(
+				`UPDATE memories SET is_deleted = 1, deleted_at = ?, updated_at = ?
+				 WHERE id = ? AND is_deleted = 0${scope.where}
+				   AND importance <= 0.8
+				   AND (confidence < ?
+				     OR (last_accessed IS NULL AND julianday('now') - julianday(created_at) > ?)
+				     OR (last_accessed IS NOT NULL AND julianday('now') - julianday(last_accessed) > ?))`,
+			);
+			let total = 0;
+			for (const id of ids) {
+				const match = eligible.get(id, ...scope.args, maxConf, maxDays, maxDays);
+				if (!match) continue;
+				stmt.run(now, now, id, ...scope.args, maxConf, maxDays, maxDays);
+				total++;
+			}
+			if (total === 0) return 0;
+			writeRepairAudit(db, action, opts.ctx, total, `soft-deleted ${total} dead memories`);
+			return total;
+		});
+		await finalizeRepairGate(opts.limiter, gate, { success: true });
+		return {
+			action,
+			success: true,
+			affected: total,
+			message: `soft-deleted ${total} dead memories`,
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		await finalizeRepairGate(opts.limiter, gate, { success: false, error: message });
+		return { action, success: false, affected: 0, message: `forget dead memories failed: ${message}` };
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -3311,7 +3404,11 @@ export async function rebuildDerivedIndexes(
 	const reembedResult = await withRepairLease(limiter, gate, () =>
 		reembedMissingMemoriesBatch(accessor, embeddingFn, resolvedEmbeddingCfg, MAX_REEMBED_BATCH, agentId),
 	);
-	await finalizeRepairGate(limiter, gate, { success: true });
+	const embeddingSuccess = !reembedResult.profileChanged && reembedResult.failed === 0 && reembedResult.stale === 0;
+	await finalizeRepairGate(limiter, gate, {
+		success: embeddingSuccess,
+		error: embeddingSuccess ? undefined : "embedding repair incomplete",
+	});
 
 	const parts: string[] = [];
 	if (!integrity.ok) {
@@ -3324,11 +3421,16 @@ export async function rebuildDerivedIndexes(
 	} else {
 		parts.push("FTS: consistent");
 	}
-	parts.push(`embeddings: re-embedded ${reembedResult.written} of ${reembedResult.selected} missing`);
+	parts.push(
+		`embeddings: re-embedded ${reembedResult.written} of ${reembedResult.selected} missing` +
+			(reembedResult.failed > 0 || reembedResult.stale > 0
+				? ` (${reembedResult.failed} failed, ${reembedResult.stale} stale)`
+				: ""),
+	);
 
 	return {
 		action,
-		success: true,
+		success: embeddingSuccess,
 		affected: ftsResult.affected + reembedResult.written,
 		message: parts.join(" · "),
 		integrity,
@@ -3507,6 +3609,8 @@ export async function cancelObsoleteJobs(
 	if (retired) return retired;
 
 	const dryRun = options.dryRun === true;
+	const invalid = validateJobFilterOptions(action, options);
+	if (invalid) return invalid;
 
 	const gate = await checkRepairGate(
 		cfg,
@@ -3515,6 +3619,7 @@ export async function cancelObsoleteJobs(
 		action,
 		cfg.repair.requeueCooldownMs,
 		cfg.repair.requeueHourlyBudget,
+		{ consume: !dryRun },
 	);
 	if (!gate.allowed) {
 		return {
@@ -3649,6 +3754,8 @@ export async function pruneTerminalJobs(
 	if (retired) return retired;
 
 	const dryRun = options.dryRun === true;
+	const invalid = validateJobFilterOptions(action, options);
+	if (invalid) return invalid;
 
 	const gate = await checkRepairGate(
 		cfg,
@@ -3657,6 +3764,7 @@ export async function pruneTerminalJobs(
 		action,
 		cfg.repair.requeueCooldownMs,
 		cfg.repair.requeueHourlyBudget,
+		{ consume: !dryRun },
 	);
 	if (!gate.allowed) {
 		return {

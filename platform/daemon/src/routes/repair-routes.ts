@@ -8,6 +8,7 @@ import { loadMemoryConfig } from "../memory-config.js";
 import { clusterEntities } from "../pipeline/community-detection.js";
 import { DEFAULT_RETENTION, runRetentionSweepOnce } from "../pipeline/retention-worker.js";
 import {
+	type JobFilterOptions,
 	type RepairContext,
 	type RepairResult,
 	checkFtsConsistency,
@@ -58,7 +59,14 @@ function repairHttpStatus(result: Pick<RepairResult, "success" | "message">): 20
 	) {
 		return 429;
 	}
-	if (/must be (a positive integer|between 0 and 1|an integer between)/i.test(result.message)) return 400;
+	if (
+		/must be (a positive integer|between 0 and 1|an integer between|a finite number|non-negative)/i.test(
+			result.message,
+		) ||
+		/semanticCursor|ids must|tables must|maxBatch/i.test(result.message)
+	) {
+		return 400;
+	}
 	return 500;
 }
 
@@ -86,6 +94,50 @@ function resolveRepairAgentId(c: Context, body: Readonly<Record<string, unknown>
 	});
 }
 
+function parseJobFilterOptions(
+	body: Readonly<Record<string, unknown>>,
+): { readonly options: JobFilterOptions } | { readonly error: string } {
+	const options: {
+		dryRun?: boolean;
+		ids?: string[];
+		tables?: Array<"memory" | "summary">;
+		olderThanMs?: number;
+		errorPattern?: string;
+		retentionMs?: number;
+		maxBatch?: number;
+	} = {};
+	if ("dryRun" in body && typeof body.dryRun !== "boolean") return { error: "dryRun must be a boolean" };
+	if (typeof body.dryRun === "boolean") options.dryRun = body.dryRun;
+	if ("ids" in body) {
+		if (!Array.isArray(body.ids) || body.ids.some((id) => typeof id !== "string" || id.length === 0)) {
+			return { error: "ids must contain only non-empty strings" };
+		}
+		if (body.ids.length > 1000) return { error: "Maximum 1000 ids per batch" };
+		options.ids = body.ids;
+	}
+	if ("tables" in body) {
+		if (!Array.isArray(body.tables) || body.tables.some((table) => table !== "memory" && table !== "summary")) {
+			return { error: "tables must contain only memory or summary" };
+		}
+		options.tables = body.tables;
+	}
+	for (const key of ["olderThanMs", "retentionMs", "maxBatch"] as const) {
+		if (!(key in body)) continue;
+		const value = body[key];
+		if (typeof value !== "number" || !Number.isFinite(value)) return { error: `${key} must be a finite number` };
+		if (key === "maxBatch" && (!Number.isInteger(value) || value <= 0 || value > 1000)) {
+			return { error: "maxBatch must be a positive integer <= 1000" };
+		}
+		if (key !== "maxBatch" && value < 0) return { error: `${key} must be non-negative` };
+		options[key] = value;
+	}
+	if ("errorPattern" in body && typeof body.errorPattern !== "string") {
+		return { error: "errorPattern must be a string" };
+	}
+	if (typeof body.errorPattern === "string") options.errorPattern = body.errorPattern;
+	return { options };
+}
+
 export function registerRepairRoutes(
 	app: Hono,
 	deps: {
@@ -103,16 +155,19 @@ export function registerRepairRoutes(
 
 	app.post("/api/repair/requeue-dead", async (c) => {
 		const cfg = loadMemoryConfig(AGENTS_DIR);
-		const ctx = resolveRepairContext(c);
-		const result = await requeueDeadJobs(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter);
-		return c.json(result, result.success ? 200 : 429);
+		const body = asRecord(await c.req.json().catch(() => ({})));
+		const parsed = parseJobFilterOptions(body);
+		if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+		const ctx = resolveRepairContext(c, body);
+		const result = await requeueDeadJobs(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter, parsed.options);
+		return c.json(result, repairHttpStatus(result));
 	});
 
 	app.post("/api/repair/release-leases", async (c) => {
 		const cfg = loadMemoryConfig(AGENTS_DIR);
 		const ctx = resolveRepairContext(c);
 		const result = await releaseStaleLeases(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter);
-		return c.json(result, result.success ? 200 : 429);
+		return c.json(result, repairHttpStatus(result));
 	});
 
 	app.post("/api/repair/check-fts", async (c) => {
@@ -126,7 +181,7 @@ export function registerRepairRoutes(
 			// no body or invalid JSON — default repair=false
 		}
 		const result = await checkFtsConsistency(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter, repair);
-		return c.json(result, result.success ? 200 : 429);
+		return c.json(result, repairHttpStatus(result));
 	});
 
 	app.post("/api/repair/retention-sweep", async (c) => {
@@ -646,10 +701,19 @@ export function registerRepairRoutes(
 		) {
 			return c.json({ error: "maxConfidence must be 0–1, maxAccessDays and limit must be non-negative" }, 400);
 		}
+		const ctx = resolveRepairContext(c);
 		// @ts-expect-error LEGACY_SYNC_DB_ACCESS: withReadDb migration site
 		const dead = getDbAccessor().withReadDb(
 			(db: import("../db-accessor").ReadDb) =>
-				findDeadMemories(db, { maxConfidence, maxAccessDays, limit, agentId: resolveRepairAgentId(c) }),
+				findDeadMemories(db, {
+					maxConfidence,
+					maxAccessDays,
+					limit,
+					agentId: ctx.agentId,
+					project: ctx.project,
+					scope: ctx.scope,
+					visibility: ctx.visibility,
+				}),
 			"db:routes.repair.dead.select",
 		);
 		return c.json({ count: dead.length, memories: dead });
@@ -682,13 +746,19 @@ export function registerRepairRoutes(
 			return c.json({ error: "maxConfidence must be 0–1 and maxAccessDays must be a non-negative integer" }, 400);
 		}
 		const ctx = resolveRepairContext(c, body);
-		const forgotten = await forgetDeadMemories(getDbAccessor(), validIds, {
-			agentId: resolveRepairAgentId(c, body),
+		const cfg = loadMemoryConfig(AGENTS_DIR);
+		const result = await forgetDeadMemories(getDbAccessor(), validIds, {
+			agentId: ctx.agentId,
+			project: ctx.project,
+			scope: ctx.scope,
+			visibility: ctx.visibility,
 			maxConfidence,
 			maxAccessDays,
+			cfg: cfg.pipelineV2,
 			ctx,
+			limiter: repairLimiter,
 		});
-		return c.json({ forgotten });
+		return c.json({ ...result, forgotten: result.affected }, repairHttpStatus(result));
 	});
 
 	const TROUBLESHOOT_COMMANDS: Record<string, readonly [string, ReadonlyArray<string>]> = {
