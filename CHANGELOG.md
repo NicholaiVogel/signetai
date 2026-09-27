@@ -7,7 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-09-27
-- Bug fixes: stat macOS symlinks by descriptor; expose attach reasoning; mirror daemon toggle resolution; repair Windows app and settings UX.
+- Bug fixes: nest workspace layout migration; clarify recovered context; stat macOS symlinks by descriptor; expose attach reasoning; mirror daemon toggle resolution; repair Windows app and settings UX.
+- Docs: clarify checkpoint authority.
 
 ### 2026-09-26
 - Features: add migration recovery controls; harden workspace migration; add descriptor-rooted fs; unify durable admission pipeline; wire durable admission and canonical inbox layout; add bounded manual inbox worker; fence git writer by migration generation; fence transcript and import writers; fence db owner admission during migration drain; add verified root git archive retirement; expose workspace migration lifecycle; converge uploads on durable admission boundary; wire protection evidence into daemon and cli; execute disposable restore verification; add migration control drain boundary; finalize db-owned admission lifecycle; unify protection contract across surfaces; add protection and durable import status; add shared component protection status; add independent skills repository setup; add stopped resumable workspace migration engine; add workspace migration writer barrier; make JSONL authoritative for completed capture; add durable workspace import inbox admission; add canonical v1/v2 layout resolver.
@@ -36,6 +37,20 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: make HTTP embedding repair durable and bounded; qualify Bun 1.4.0; isolate native keyring; persist source item failures; bound source worker frames; simplify transcript capture ownership.
 
 ## Release Ledger
+
+## [0.228.3] - 2026-09-27
+
+Release summary: 2 bug fixes and 1 docs update.
+Tag range: `v0.228.2..v0.228.3`.
+
+### Bug Fixes
+
+- **cli**: nest workspace layout migration
+- **daemon**: clarify recovered context
+
+### Docs
+
+- **pipeline**: clarify checkpoint authority
 
 ## [0.228.2] - 2026-09-27
 
