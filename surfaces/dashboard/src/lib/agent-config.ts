@@ -13,6 +13,33 @@ function getPath(obj: YamlObject, path: readonly string[]): unknown {
 	return cur;
 }
 
+export function pv2MaintenanceMode(agent: Record<string, unknown>): string | undefined {
+	const value = getPath(agent, ["memory", "pipelineV2", "autonomous", "maintenanceMode"]);
+	return typeof value === "string" ? value : undefined;
+}
+
+export function pv2ToggleValue(
+	agent: Record<string, unknown>,
+	nested: readonly string[],
+	flat: readonly string[],
+	fallback: boolean,
+): boolean {
+	const nestedValue = getPath(agent, nested);
+	if (typeof nestedValue === "boolean") return nestedValue;
+	const flatValue = getPath(agent, flat);
+	if (typeof flatValue === "boolean") return flatValue;
+	return fallback;
+}
+export function pv2ToggleWriteForm(
+	agent: Record<string, unknown>,
+	nested: readonly string[],
+	flat: readonly string[],
+): "nested" | "flat" {
+	if (typeof getPath(agent, nested) === "boolean") return "nested";
+	if (typeof getPath(agent, flat) === "boolean") return "flat";
+	return "nested";
+}
+
 function setPath(obj: YamlObject, path: readonly string[], value: unknown): void {
 	let cur = obj;
 	for (let i = 0; i < path.length - 1; i++) {
@@ -53,8 +80,8 @@ export interface AgentConfigStore {
 	ready: boolean;
 	dirty: boolean;
 	agent: YamlObject;
-	aStr: (path: readonly string[]) => string;
-	aBool: (path: readonly string[]) => boolean;
+	aStr: (path: readonly string[], fallback?: string) => string;
+	aBool: (path: readonly string[], fallback?: boolean) => boolean;
 	aSetStr: (path: readonly string[], value: string) => void;
 	aSetBool: (path: readonly string[], value: boolean) => void;
 	aSetNum: (path: readonly string[], value: number) => void;
@@ -115,22 +142,23 @@ export function useAgentConfig(): AgentConfigStore {
 	}, []);
 
 	const aStr = useCallback(
-		(path: readonly string[]) => {
+		(path: readonly string[], fallback = "") => {
 			const v = getPath(agent, path);
-			return v == null ? "" : String(v);
+			return v == null ? fallback : String(v);
 		},
 		[agent],
 	);
 
 	const aBool = useCallback(
-		(path: readonly string[]) => {
+		(path: readonly string[], fallback = false) => {
 			const v = getPath(agent, path);
 			if (typeof v === "boolean") return v;
 			if (typeof v === "string") {
 				const s = v.trim().toLocaleLowerCase();
 				if (s === "true") return true;
+				if (s === "false") return false;
 			}
-			return false;
+			return fallback;
 		},
 		[agent],
 	);

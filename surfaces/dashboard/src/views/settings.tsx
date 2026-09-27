@@ -14,7 +14,14 @@ import {
 } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { type AgentConfigStore, isDreamingEnabled, useAgentConfig } from "@/lib/agent-config";
+import {
+	type AgentConfigStore,
+	isDreamingEnabled,
+	pv2MaintenanceMode,
+	pv2ToggleValue,
+	pv2ToggleWriteForm,
+	useAgentConfig,
+} from "@/lib/agent-config";
 import { type InferenceCatalog, type LogEntry, api } from "@/lib/api";
 import { readEmbeddingEndpoint, writeEmbeddingEndpoint } from "@/lib/embedding-config";
 import {
@@ -1099,18 +1106,22 @@ function AdvToggle({
 	path,
 	title,
 	desc,
+	fallback = false,
+	writeForm,
 }: {
 	store: AgentConfigStore;
 	path: readonly string[];
 	title: string;
 	desc: string;
+	fallback?: boolean;
+	writeForm?: readonly string[];
 }) {
 	return (
 		<Row title={title} desc={desc}>
 			<Switch
-				checked={store.aBool(path)}
+				checked={store.aBool(path, fallback)}
 				onCheckedChange={(v) => {
-					store.aSetBool(path, v);
+					store.aSetBool(writeForm ?? path, v);
 					void store.save();
 				}}
 			/>
@@ -1230,10 +1241,40 @@ function AdvNum({
 function AdvancedSection() {
 	const store = useAgentConfig();
 	const pv2 = (key: string): readonly string[] => ["memory", "pipelineV2", key];
+	const pv2Nested = (group: string, key: string): readonly string[] => ["memory", "pipelineV2", group, key];
 	const srch = (key: string): readonly string[] => ["search", key];
 	const drm = (key: string): readonly string[] => ["memory", "dreaming", key];
 	const embPath = useMemo(() => resolveEmbPath(store.agent), [store.agent]);
-	const maintenanceMode = store.aStr(pv2("maintenanceMode"));
+	const writeForm = (nested: readonly string[], flat: readonly string[]): "nested" | "flat" =>
+		pv2ToggleWriteForm(store.agent, nested, flat);
+	const maintenanceModeNestedValue = pv2MaintenanceMode(store.agent);
+	const maintenanceModeValue = maintenanceModeNestedValue ?? "";
+	const maintenanceMode =
+		maintenanceModeValue === "observe" || maintenanceModeValue === "execute" ? maintenanceModeValue : "execute";
+	const maintenanceModeWriteForm: "nested" | "flat" = maintenanceModeNestedValue !== undefined ? "nested" : "flat";
+	const graphEnabled = pv2ToggleValue(store.agent, pv2Nested("graph", "enabled"), pv2("graphEnabled"), true);
+	const autonomousEnabled = pv2ToggleValue(
+		store.agent,
+		pv2Nested("autonomous", "enabled"),
+		pv2("autonomousEnabled"),
+		true,
+	);
+	const autonomousFrozen = pv2ToggleValue(
+		store.agent,
+		pv2Nested("autonomous", "frozen"),
+		pv2("autonomousFrozen"),
+		false,
+	);
+	const allowUpdateDelete = pv2ToggleValue(
+		store.agent,
+		pv2Nested("autonomous", "allowUpdateDelete"),
+		pv2("allowUpdateDelete"),
+		true,
+	);
+	const graphWriteForm = writeForm(pv2Nested("graph", "enabled"), pv2("graphEnabled"));
+	const autonomousEnabledWriteForm = writeForm(pv2Nested("autonomous", "enabled"), pv2("autonomousEnabled"));
+	const autonomousFrozenWriteForm = writeForm(pv2Nested("autonomous", "frozen"), pv2("autonomousFrozen"));
+	const allowUpdateDeleteWriteForm = writeForm(pv2Nested("autonomous", "allowUpdateDelete"), pv2("allowUpdateDelete"));
 
 	return (
 		<div className="flex flex-col gap-3">
@@ -1264,9 +1305,11 @@ function AdvancedSection() {
 				/>
 				<AdvToggle
 					store={store}
-					path={pv2("graphEnabled")}
+					path={pv2Nested("graph", "enabled")}
+					writeForm={graphWriteForm === "flat" ? pv2("graphEnabled") : undefined}
 					title="Knowledge graph"
 					desc="Build and query a graph from extracted entity relationships."
+					fallback={graphEnabled}
 				/>
 			</div>
 
@@ -1274,21 +1317,27 @@ function AdvancedSection() {
 				<GroupLabel>Autonomy &amp; maintenance</GroupLabel>
 				<AdvToggle
 					store={store}
-					path={pv2("autonomousEnabled")}
+					path={pv2Nested("autonomous", "enabled")}
+					writeForm={autonomousEnabledWriteForm === "flat" ? pv2("autonomousEnabled") : undefined}
 					title="Autonomous operations"
 					desc="Allow autonomous pipeline operations like maintenance and repair."
+					fallback={autonomousEnabled}
 				/>
 				<AdvToggle
 					store={store}
-					path={pv2("autonomousFrozen")}
+					path={pv2Nested("autonomous", "frozen")}
+					writeForm={autonomousFrozenWriteForm === "flat" ? pv2("autonomousFrozen") : undefined}
 					title="Freeze autonomous writes"
 					desc="Block autonomous writes while still allowing autonomous reads."
+					fallback={autonomousFrozen}
 				/>
 				<AdvToggle
 					store={store}
-					path={pv2("allowUpdateDelete")}
+					path={pv2Nested("autonomous", "allowUpdateDelete")}
+					writeForm={allowUpdateDeleteWriteForm === "flat" ? pv2("allowUpdateDelete") : undefined}
 					title="Allow update/delete"
 					desc="Permit UPDATE/DELETE decisions on existing memories."
+					fallback={allowUpdateDelete}
 				/>
 				<Row
 					title="Maintenance mode"
@@ -1301,7 +1350,12 @@ function AdvancedSection() {
 							{ value: "execute", label: "execute" },
 						]}
 						onChange={(v) => {
-							store.aSetStr(pv2("maintenanceMode"), v);
+							store.aSetStr(
+								maintenanceModeWriteForm === "flat"
+									? pv2("maintenanceMode")
+									: pv2Nested("autonomous", "maintenanceMode"),
+								v,
+							);
 							void store.save();
 						}}
 					/>
