@@ -619,16 +619,26 @@ GET /api/dream/passes/pass-uuid/events?after=42
 Accept: text/event-stream
 ```
 
-Set `verbose=1` (or `verbose=true`) when the operator has opted into raw
-debugging data. The default stream omits `raw` fields; the CLI reconnects on
-the same SSE transport when **Ctrl+V** toggles this mode.
+The `snapshot` event includes the current pass metadata, replay window, and
+persisted token/cache/cost and mutation counters. Counters may be `null` until
+the pass writes its final measurements.
 
-The first event is a `snapshot` whose data contains the current pass metadata
-and replay window. Subsequent events carry a monotonic `id` and include
-assistant deltas, reasoning deltas, Pi lifecycle transitions, tool start/
-progress/end events, detailed `tool_trace` events, session metadata, and a
-terminal `pass_completed` or `pass_failed` event. Tool traces and Pi events remain ephemeral; the durable
-`dreaming_passes` and `dreaming_tool_calls` rows are the audit source.
+Subsequent events carry a monotonic `id` and include visible assistant text,
+Pi lifecycle transitions, tool start/progress/end events, detailed `tool_trace`
+events, session metadata, and a terminal `pass_completed` or `pass_failed`
+event. Tool arguments, progress payloads, results, traces, session prompt data, full
+message frames, and provider-emitted reasoning deltas are available in the
+stream by default. The legacy `verbose` query value is accepted but does not
+change the event payload. In `signet dream attach`, reasoning deltas appear in
+the activity timeline as `Model reasoning`; **Ctrl+V** toggles the local raw
+event-data view without reconnecting. A provider may omit reasoning events or
+provide only partial summaries; the stream reports what it emits and does not
+promise a complete or faithful chain-of-thought transcript.
+
+This admin-only diagnostic stream does not redact event content. Event payloads
+remain size-bounded; a truncated payload is marked as such. Tool traces and Pi
+events remain ephemeral; the durable `dreaming_passes` and
+`dreaming_tool_calls` rows are the audit source.
 
 When the requested cursor is outside the bounded in-memory replay window, the
 stream sends a `gap` event with `requestedCursor`, `availableFrom`,
@@ -636,12 +646,6 @@ stream sends a `gap` event with `requestedCursor`, `availableFrom`,
 continue from the latest cursor. Heartbeats are sent as SSE comments so idle
 connections remain detectable. Slow viewers are disconnected once their
 bounded stream queue fills and can reconnect from the last delivered cursor.
-
-The verbose event data includes bounded `raw` fields for the opt-in terminal
-view. These may contain prompts, system/developer instructions, model
-reasoning, evidence, tool arguments, and tool results. The daemon does not
-persist a second transcript for attachment and the stream exposes no control
-or prompt-submission action.
 
 ### POST /api/dream/exclusions/requeue
 

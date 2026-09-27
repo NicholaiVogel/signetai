@@ -21,7 +21,7 @@ describe("Dreaming attach stream", () => {
 		expect(parseDreamingAttachEnvelope(parsed)).toEqual({ ok: true });
 	});
 
-	it("renders concise output by default and exposes raw data after Ctrl+V", () => {
+	it("renders an auditable activity timeline with tool payloads and reasoning summaries", () => {
 		const view = new DreamingAttachView(() => {});
 		view.applySnapshot({
 			passId: "pass-1",
@@ -30,26 +30,120 @@ describe("Dreaming attach stream", () => {
 			status: "running",
 			startedAt: "2026-08-05T00:00:00.000Z",
 			completedAt: null,
-			summary: null,
+			summary: "Reviewed current evidence",
 			error: null,
 			cursor: 1,
 			replayFrom: 1,
 			replayTo: 1,
+			tokensConsumed: 130,
+			tokensInput: 100,
+			tokensOutput: 30,
+			tokensCacheRead: 4,
+			tokensCacheWrite: 2,
+			tokensCost: 0.02,
+			mutationsApplied: 2,
+			mutationsSkipped: 1,
+			mutationsFailed: 0,
 		});
 		view.applyEvent({
 			passId: "pass-1",
 			agentId: "agent-a",
 			cursor: 2,
 			timestamp: "2026-08-05T00:00:01.000Z",
-			type: "tool_start",
-			data: { toolName: "search_evidence", secret: "raw-payload" },
+			type: "assistant_delta",
+			data: { delta: "Checking the evidence." },
 		});
-		const concise = view.render(120).join("\n");
-		expect(concise).toContain("tool search_evidence started");
-		expect(concise).not.toContain("raw-payload");
+		view.applyEvent({
+			passId: "pass-1",
+			agentId: "agent-a",
+			cursor: 3,
+			timestamp: "2026-08-05T00:00:02.000Z",
+			type: "tool_start",
+			data: {
+				toolName: "search_evidence",
+				raw: { type: "tool_execution_start", toolName: "search_evidence", input: { query: "source provenance" } },
+			},
+		});
+		view.applyEvent({
+			passId: "pass-1",
+			agentId: "agent-a",
+			cursor: 4,
+			timestamp: "2026-08-05T00:00:03.000Z",
+			type: "thinking_delta",
+			data: {
+				delta: "Assessing source provenance",
+				raw: { assistantMessageEvent: { type: "thinking_delta", auditMarker: "provider-thought-event" } },
+			},
+		});
+		view.applyEvent({
+			passId: "pass-1",
+			agentId: "agent-a",
+			cursor: 5,
+			timestamp: "2026-08-05T00:00:03.100Z",
+			type: "thinking_delta",
+			data: { delta: " before deciding whether to mutate." },
+		});
+		const timeline = view.render(120).join("\n");
+		expect(timeline).toContain("Activity");
+		expect(timeline).toContain("Reviewed current evidence");
+		expect(timeline).toContain("1 observed tool calls");
+		expect(timeline).toContain("tokens 130 total · 100 in · 30 out");
+		expect(timeline).toContain("$0.020000");
+		expect(timeline).toContain("2 applied/1 skipped/0 failed");
+		expect(timeline).toContain("Assistant");
+		expect(timeline).toContain("Checking the evidence.");
+		expect(timeline).toContain("search_evidence");
+		expect(timeline).toContain("Input");
+		expect(timeline).toContain("source provenance");
+		expect(timeline).toContain("Model reasoning");
+		expect(timeline).toContain("Assessing source provenance before deciding whether to mutate.");
 		view.handleInput("\u0016");
-		expect(view.isVerbose).toBe(true);
-		expect(view.render(120).join("\n")).toContain("raw-payload");
+		expect(view.isRawDetail).toBe(true);
+		expect(view.render(120).join("\n")).toContain('"type": "tool_execution_start"');
+		expect(view.render(120).join("\n")).toContain("Assessing source provenance before deciding whether to mutate.");
+		expect(view.render(120).join("\n")).toContain("provider-thought-event");
+	});
+
+	it("keeps assistant text together across hidden updates and shows every raw delta", () => {
+		const view = new DreamingAttachView(() => {});
+		view.applyEvent({
+			passId: "pass-1",
+			agentId: "agent-a",
+			cursor: 1,
+			timestamp: "2026-08-05T00:00:01.000Z",
+			type: "assistant_delta",
+			data: {
+				delta: "hello ",
+				raw: { assistantMessageEvent: { type: "text_delta", delta: "hello " } },
+			},
+		});
+		view.applyEvent({
+			passId: "pass-1",
+			agentId: "agent-a",
+			cursor: 2,
+			timestamp: "2026-08-05T00:00:01.100Z",
+			type: "message_update",
+			data: { eventType: "toolcall_delta" },
+		});
+		view.applyEvent({
+			passId: "pass-1",
+			agentId: "agent-a",
+			cursor: 3,
+			timestamp: "2026-08-05T00:00:01.200Z",
+			type: "assistant_delta",
+			data: {
+				delta: "world",
+				raw: { assistantMessageEvent: { type: "text_delta", delta: "world" } },
+			},
+		});
+
+		const concise = view.render(120).join("\n");
+		expect(concise.match(/Assistant/g)).toHaveLength(1);
+		expect(concise).toContain("hello world");
+
+		view.handleInput("\u0016");
+		const raw = view.render(120).join("\n");
+		expect(raw.match(/"type": "text_delta"/g)).toHaveLength(2);
 	});
 
 	it("reconnects from the latest cursor and stops on the terminal event", async () => {
@@ -168,40 +262,27 @@ describe("Dreaming attach stream", () => {
 		expect(attempts).toBe(3);
 	});
 
-	it("reconnects the same SSE transport when verbose mode is toggled", async () => {
-		const view = new DreamingAttachView(() => {});
+	it("toggles raw event details locally without reconnecting the stream", async () => {
+		const controller = new AbortController();
+		const view = new DreamingAttachView(() => controller.abort());
 		const paths: string[] = [];
 		const fetchStream = async (path: string): Promise<DaemonStreamResult> => {
 			paths.push(path);
-			if (paths.length === 1) {
-				return {
-					ok: true,
-					response: new Response(new ReadableStream<Uint8Array>()),
-				};
-			}
-			return streamResult(
-				`event: pass_completed\ndata: ${JSON.stringify({
-					type: "pass_completed",
-					passId: "pass-1",
-					agentId: "agent-a",
-					cursor: 1,
-					timestamp: new Date().toISOString(),
-					data: { status: "completed" },
-				})}\n\n`,
-			);
+			return { ok: true, response: new Response(new ReadableStream<Uint8Array>()) };
 		};
 		const follow = followDreamingPass({
 			passId: "pass-1",
 			fetchStream,
 			view,
-			signal: new AbortController().signal,
+			signal: controller.signal,
 			maxReconnects: 2,
 			sleep: async () => {},
 		});
 		setTimeout(() => view.handleInput("\u0016"), 5);
+		setTimeout(() => view.handleInput("\u0003"), 10);
 
-		expect(await follow).toBe(true);
-		expect(paths).toEqual(["/api/dream/passes/pass-1/events", "/api/dream/passes/pass-1/events?verbose=1"]);
-		expect(view.isVerbose).toBe(true);
+		expect(await follow).toBe(false);
+		expect(paths).toEqual(["/api/dream/passes/pass-1/events"]);
+		expect(view.isRawDetail).toBe(true);
 	});
 });
