@@ -206,7 +206,7 @@ describe("Dreaming live routes", () => {
 		expect(text).toContain('"passId":"live-pass-a"');
 	});
 
-	it("keeps raw payloads out of concise transport until verbose mode is requested", async () => {
+	it("streams full model event payloads for the attach audit by default", async () => {
 		const app = new Hono();
 		registerPipelineRoutes(app);
 		dreamingLiveEvents.startPass({ passId: "live-pass-a", agentId: "agent-a", mode: "incremental" });
@@ -218,6 +218,23 @@ describe("Dreaming live routes", () => {
 		publishDreamingAgentEvent(
 			"live-pass-a",
 			{ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "raw-reasoning" } },
+			dreamingLiveEvents,
+		);
+		publishDreamingAgentEvent(
+			"live-pass-a",
+			{
+				type: "message_end",
+				message: { role: "assistant", content: "producer-shaped-assistant-text" },
+				secret: "private-message-payload",
+			},
+			dreamingLiveEvents,
+		);
+		publishDreamingAgentEvent(
+			"live-pass-a",
+			{
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", delta: "visible-assistant-output" },
+			},
 			dreamingLiveEvents,
 		);
 
@@ -242,13 +259,29 @@ describe("Dreaming live routes", () => {
 			await app.request("/api/dream/passes/live-pass-a/events?after=2"),
 			"event: thinking_delta",
 		);
+		const messagePayload = await readChunks(
+			await app.request("/api/dream/passes/live-pass-a/events?after=3"),
+			"event: message_end",
+		);
+		const visibleAssistant = await readChunks(
+			await app.request("/api/dream/passes/live-pass-a/events?after=4"),
+			"event: assistant_delta",
+		);
 		const verbose = await readChunks(
 			await app.request("/api/dream/passes/live-pass-a/events?after=1&verbose=1"),
 			"event: tool_start",
 		);
+		const verboseReasoning = await readChunks(
+			await app.request("/api/dream/passes/live-pass-a/events?after=2&verbose=1"),
+			"event: thinking_delta",
+		);
 		expect(concise).toContain("event: tool_start");
-		expect(concise).not.toContain("raw-secret");
-		expect(conciseReasoning).not.toContain("raw-reasoning");
+		expect(concise).toContain("raw-secret");
+		expect(conciseReasoning).toContain("raw-reasoning");
+		expect(messagePayload).toContain("producer-shaped-assistant-text");
+		expect(messagePayload).toContain("private-message-payload");
+		expect(visibleAssistant).toContain("visible-assistant-output");
 		expect(verbose).toContain("raw-secret");
+		expect(verboseReasoning).toContain("raw-reasoning");
 	});
 });

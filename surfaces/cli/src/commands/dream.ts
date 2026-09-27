@@ -260,7 +260,7 @@ export function registerDreamCommands(program: Command, deps: DreamDeps): void {
 
 	dream
 		.command("attach")
-		.description("Attach a read-only live view to a running Dreaming pass (Ctrl+V toggles raw mode; Ctrl+C detaches)")
+		.description("Attach to a running Dreaming pass (Ctrl+V inspects event data; Ctrl+C detaches)")
 		.option("--pass-id <id>", "Explicit Dreaming pass id when more than one pass is active")
 		.action(async (options: { passId?: string }) => {
 			let passId = options.passId?.trim() || undefined;

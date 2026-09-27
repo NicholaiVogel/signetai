@@ -253,13 +253,6 @@ function isTerminalDreamingEvent(event: DreamingLiveEvent): boolean {
 	return event.type === "pass_completed" || event.type === "pass_failed";
 }
 
-function dreamingEventForTransport(event: DreamingLiveEvent, verbose: boolean): DreamingLiveEvent {
-	if (verbose) return event;
-	if (event.type === "thinking_delta") return { ...event, data: { redacted: true } };
-	if (!("raw" in event.data)) return event;
-	const { raw: _raw, ...conciseData } = event.data;
-	return { ...event, data: conciseData };
-}
 const DREAMING_LIVE_STREAM_QUEUE_SIZE = 64;
 
 async function togglePipelinePause(c: Context, paused: boolean): Promise<Response> {
@@ -518,7 +511,7 @@ export function registerPipelineRoutes(app: Hono): void {
 					limit,
 					offset,
 				}),
-			"routes/pipeline-routes.ts:512",
+			"routes/pipeline-routes.ts:505",
 		);
 		return c.json({
 			agentId: resolveAgentId({ agentId: scopedAgent.agentId }),
@@ -617,7 +610,7 @@ export function registerPipelineRoutes(app: Hono): void {
 		const ownerRows = await withRegisteredDbOwnerMaintenance((maintenance) =>
 			ownerQueryAll<{ status: string; count: number }>(
 				maintenance.owner,
-				"routes/pipeline-routes.ts:620",
+				"routes/pipeline-routes.ts:613",
 				"SELECT status, COUNT(*) as count FROM memory_jobs GROUP BY status",
 			),
 		);
@@ -798,7 +791,6 @@ export function registerPipelineRoutes(app: Hono): void {
 		const cursorValue = c.req.query("after") ?? c.req.header("last-event-id");
 		const afterCursor = parseDreamingCursor(cursorValue);
 		if (afterCursor === "invalid") return c.json({ error: "after/Last-Event-ID must be a non-negative integer" }, 400);
-		const verbose = c.req.query("verbose") === "1" || c.req.query("verbose") === "true";
 
 		dreamingLiveEvents.ensurePass({
 			passId: pass.id,
@@ -849,8 +841,7 @@ export function registerPipelineRoutes(app: Hono): void {
 						return;
 					}
 					const writeLiveEvent = (event: DreamingLiveEvent): void => {
-						const transported = dreamingEventForTransport(event, verbose);
-						write(transported.type, transported, transported.cursor);
+						write(event.type, event, event.cursor);
 						if (isTerminalDreamingEvent(event)) close();
 					};
 					try {
@@ -867,7 +858,22 @@ export function registerPipelineRoutes(app: Hono): void {
 						close();
 						return;
 					}
-					write("snapshot", { type: "snapshot", passId, snapshot: subscription.snapshot });
+					write("snapshot", {
+						type: "snapshot",
+						passId,
+						snapshot: {
+							...subscription.snapshot,
+							tokensConsumed: pass.tokensConsumed,
+							tokensInput: pass.tokensInput,
+							tokensOutput: pass.tokensOutput,
+							tokensCacheRead: pass.tokensCacheRead,
+							tokensCacheWrite: pass.tokensCacheWrite,
+							tokensCost: pass.tokensCost,
+							mutationsApplied: pass.mutationsApplied,
+							mutationsSkipped: pass.mutationsSkipped,
+							mutationsFailed: pass.mutationsFailed,
+						},
+					});
 					if (subscription.gap) {
 						write("gap", { type: "gap", passId, gap: subscription.gap });
 					}
@@ -951,7 +957,7 @@ export function registerPipelineRoutes(app: Hono): void {
 				async (maintenance) =>
 					(await ownerQueryOne<{ present: number }>(
 						maintenance.owner,
-						"routes/pipeline-routes.ts:954",
+						"routes/pipeline-routes.ts:960",
 						"SELECT 1 AS present FROM dreaming_evidence_exclusions WHERE agent_id = ? AND source_kind = 'summary' AND source_id = ? AND resolved_at IS NULL",
 						[agentId, sourceId],
 					)) != null,
