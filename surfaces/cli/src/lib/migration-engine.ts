@@ -1118,6 +1118,7 @@ async function rollbackInPlace(path: string, journal: Journal): Promise<void> {
 			throw new Error("refusing to modify a replaced in-place workspace");
 		const createdEntries = new Set(journal.createdDestinationEntries ?? []);
 		const copied = new Set(journal.copied);
+		const removableEntries: { destinationPath: string; fingerprint: Fingerprint }[] = [];
 		for (const sourcePath of [...copied].reverse()) {
 			const fingerprint = journal.fingerprints.find((entry) => entry.path === sourcePath);
 			if (!fingerprint) throw new Error(`missing migration fingerprint: ${sourcePath}`);
@@ -1126,28 +1127,54 @@ async function rollbackInPlace(path: string, journal: Journal): Promise<void> {
 			const current = await optionalEntry(destination, destinationPath);
 			if (!current) continue;
 			await verifyDestinationEntry(destination, { ...fingerprint, path: destinationPath });
+			removableEntries.push({ destinationPath, fingerprint });
+		}
+		const snapshot = journal.databaseSnapshot;
+		let snapshotEntry: DescriptorEntry | undefined;
+		if (snapshot?.destinationCreated === true) {
+			snapshotEntry = await optionalEntry(destination, snapshot.destinationPath);
+			if (
+				snapshotEntry &&
+				(snapshotEntry.type !== "file" ||
+					!snapshot.destinationHash ||
+					(await destination.hashFile(snapshot.destinationPath)) !== snapshot.destinationHash)
+			)
+				throw new Error("refusing to remove a changed in-place database snapshot");
+		}
+		const createdDirectories = [...(journal.createdDestinationDirectories ?? [])].sort(
+			(left, right) => right.split("/").length - left.split("/").length,
+		);
+		for (const directoryPath of createdDirectories) {
+			const current = await optionalEntry(destination, directoryPath);
+			if (current && current.type !== "directory")
+				throw new Error(`refusing to remove changed migration directory: ${directoryPath}`);
+		}
+		for (const { destinationPath, fingerprint } of removableEntries) {
+			const current = await optionalEntry(destination, destinationPath);
+			if (!current) continue;
 			await destination.remove(destinationPath, {
 				expectedEntry: current,
 				beforeMutation: async () =>
 					await verifyDestinationEntry(destination, { ...fingerprint, path: destinationPath }),
 			});
 		}
-		const snapshot = journal.databaseSnapshot;
-		if (snapshot?.destinationCreated === true) {
+		if (snapshot?.destinationCreated === true && snapshotEntry) {
 			const current = await optionalEntry(destination, snapshot.destinationPath);
 			if (current) {
-				if (
-					current.type !== "file" ||
-					!snapshot.destinationHash ||
-					(await destination.hashFile(snapshot.destinationPath)) !== snapshot.destinationHash
-				)
-					throw new Error("refusing to remove a changed in-place database snapshot");
-				await destination.remove(snapshot.destinationPath, { expectedEntry: current });
+				await destination.remove(snapshot.destinationPath, {
+					expectedEntry: snapshotEntry,
+					beforeMutation: async () => {
+						if (
+							current.type !== "file" ||
+							!snapshot.destinationHash ||
+							(await destination.hashFile(snapshot.destinationPath)) !== snapshot.destinationHash
+						)
+							throw new Error("refusing to remove a changed in-place database snapshot");
+					},
+				});
 			}
 		}
-		for (const directoryPath of [...(journal.createdDestinationDirectories ?? [])].sort(
-			(left, right) => right.split("/").length - left.split("/").length,
-		)) {
+		for (const directoryPath of createdDirectories) {
 			const current = await optionalEntry(destination, directoryPath);
 			if (!current) continue;
 			if (current.type !== "directory")

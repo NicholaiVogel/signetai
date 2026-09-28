@@ -141,6 +141,56 @@ test("in-place rollback removes its database snapshot without walking unrelated 
 	}
 });
 
+test("in-place rollback validates every owned artifact before deleting any of them", async () => {
+	const root = mkdtempSync(join(tmpdir(), "signet-in-place-rollback-preflight-"));
+	const state = `${root}-state`;
+	const sourceFile = join(root, "memory", "imports", "managed.txt");
+	const sourceDatabase = join(root, "memory", "memories.db");
+	const destinationFile = join(root, "data", "imports", "managed.txt");
+	const destinationDatabase = join(root, "data", "signet.db");
+	mkdirSync(join(root, "memory", "imports"), { recursive: true });
+	writeFileSync(sourceFile, "managed source remains authoritative");
+	writeFileSync(sourceDatabase, "snapshot source bytes");
+	const engine = new MigrationEngine({
+		resolver: {
+			resolve: () => ({ version: 1, root, destination: root }),
+			current: async () => root,
+			verifyDestination: async () => undefined,
+		},
+		writers: { drain: async () => ({ owners: [] }) },
+		database: {
+			prepare: async () => ({
+				sourceRoot: root,
+				sourcePath: "memory/memories.db",
+				destinationPath: "data/signet.db",
+				bytes: 20,
+			}),
+			backupTo: async (from, to) => copyFileSync(from, to),
+			verifySnapshot: async () => {
+				throw new Error("stop after snapshot to exercise rollback");
+			},
+		},
+		selectSourceEntries: async (source) => ({
+			entries: [await source.inspectEntry("memory/imports/managed.txt")],
+			untouched: [],
+		}),
+		mapDestinationPath: () => "data/imports/managed.txt",
+		layoutBytes: () => Buffer.from('{"version":2}\n'),
+		journalStateDir: state,
+	});
+	try {
+		await expect(engine.run()).rejects.toThrow("stop after snapshot");
+		expect(existsSync(destinationFile)).toBe(true);
+		writeFileSync(destinationDatabase, "modified after failed migration");
+		await expect(engine.rollback()).rejects.toThrow("refusing to remove a changed in-place database snapshot");
+		expect(readFileSync(destinationFile, "utf8")).toBe("managed source remains authoritative");
+		expect(readFileSync(destinationDatabase, "utf8")).toBe("modified after failed migration");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(state, { recursive: true, force: true });
+	}
+});
+
 test("in-place migration refuses an unowned database snapshot even when its bytes match", async () => {
 	const root = mkdtempSync(join(tmpdir(), "signet-in-place-unowned-db-"));
 	const state = `${root}-state`;
