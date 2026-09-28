@@ -50,7 +50,7 @@ signet workspace layout migrate cleanup   --accept [--source <workspace>]
 
 The workspace path does not change. `--source` selects a workspace only when upgrading a non-default location; there is no destination path. The previous top-level `signet migration` command remains available as a compatibility alias.
 
-- `preflight` is read-only. It resolves overrides, inspects only registered Signet-managed entries and their Git state, checks the configured source database read-only, reports required space, and produces a redacted plan. Unregistered entries are reported as untouched; their contents are not traversed or fingerprinted. Writer draining occurs during `run`.
+- `preflight` is read-only. It resolves overrides, inspects only registered Signet-managed entries and their Git state, checks the configured source database read-only, reports required space, and produces a redacted plan. Unregistered entries and the rebuildable v1 cache are reported as untouched; their contents are not traversed or fingerprinted. Writer draining occurs during `run`.
 - `run` displays the in-place plan and asks for confirmation before writing; the prompt defaults to no. `--dry-run` prints the plan without prompting or writing, and `--yes` skips the prompt for automation. After confirmation, run acquires the migration lease, drains supported writers, copies and verifies only registered entries, snapshots SQLite, and publishes the v2 resolver cutover without changing the workspace path.
 - `resume` continues from the durable journal without duplicate evidence, Sources, or Dreaming consumption.
 - `status` reports phase, copied count, blockers, workspace-write state, and whether rollback remains eligible.

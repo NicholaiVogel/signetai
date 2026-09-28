@@ -86,6 +86,7 @@ test("run previews the in-place plan and cancellation leaves the workspace uncha
 		await program.parseAsync(["migration", "run", "--source", root], { from: "user" });
 		expect(confirmations).toBe(1);
 		expect(logs.join("\\n")).toContain(`Workspace: ${root}`);
+		expect(logs.join("\\n")).toContain("Entries left untouched: 1");
 		expect(logs.join("\\n")).toContain("contents are not inspected or hashed");
 		expect(logs.join("\\n")).toContain("Migration cancelled; no changes made.");
 		expect(existsSync(join(root, "workspace-layout.json"))).toBe(false);

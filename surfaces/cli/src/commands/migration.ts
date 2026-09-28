@@ -264,7 +264,7 @@ function formatMigrationPlan(plan: Awaited<ReturnType<MigrationEngine["preflight
 		`Workspace: ${plan.source}`,
 		`Managed files to migrate: ${plan.components.length}`,
 		`Additional disk space: ${plan.bytes} bytes`,
-		`Unregistered entries left untouched: ${untouched} (contents are not inspected or hashed)`,
+		`Entries left untouched: ${untouched} (contents are not inspected or hashed)`,
 		"The workspace path stays the same. The layout marker is updated after staged files are verified.",
 	].join("\n");
 }
