@@ -674,6 +674,7 @@ export class MigrationEngine {
 			if (!journal) return;
 			if (!journal.rollbackEligible || journal.phase === "completed")
 				throw new Error("rollback is no longer safe after cutover begins");
+			await this.drainWriters();
 			if (resolve(journal.source) === resolve(journal.destination)) {
 				await rollbackInPlace(journal.destination, journal, this.deps.hooks?.afterRollbackPreflight);
 				await state.remove(this.journalName);

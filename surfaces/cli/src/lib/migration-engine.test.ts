@@ -97,6 +97,49 @@ test("in-place migration leaves unrelated workspace data intact and rollback rem
 	}
 });
 
+test("rollback preserves copied entries when a workspace writer cannot be drained", async () => {
+	const root = mkdtempSync(join(tmpdir(), "signet-in-place-rollback-writer-"));
+	const state = `${root}-state`;
+	mkdirSync(join(root, "memory"), { recursive: true });
+	writeFileSync(join(root, "memory", "managed.txt"), "managed");
+	let drainCalls = 0;
+	let interrupted = false;
+	const engine = new MigrationEngine({
+		resolver: { resolve: () => ({ version: 1, root, destination: root }) },
+		writers: {
+			drain: async () => {
+				drainCalls++;
+				return drainCalls === 1 ? { owners: [] } : { owners: ["active writer"] };
+			},
+		},
+		database: { prepare: async () => undefined },
+		selectSourceEntries: async (source) => ({
+			entries: [await source.inspectEntry("memory/managed.txt")],
+			untouched: [],
+		}),
+		mapDestinationPath: () => "data/managed.txt",
+		layoutBytes: () => Buffer.from('{"version":2}\\n'),
+		journalStateDir: state,
+		hooks: {
+			afterCopy: async () => {
+				if (!interrupted) {
+					interrupted = true;
+					throw new Error("interrupt before cutover");
+				}
+			},
+		},
+	});
+	try {
+		await expect(engine.run()).rejects.toThrow("interrupt before cutover");
+		await expect(engine.rollback()).rejects.toThrow("migration drain blocked by: active writer");
+		expect(drainCalls).toBe(2);
+		expect(readFileSync(join(root, "data", "managed.txt"), "utf8")).toBe("managed");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(state, { recursive: true, force: true });
+	}
+});
+
 test("in-place rollback refuses to delete a copied entry replaced after preflight", async () => {
 	const root = mkdtempSync(join(tmpdir(), "signet-in-place-rollback-race-"));
 	const state = `${root}-state`;
