@@ -30,6 +30,41 @@ afterEach(() => {
 });
 
 describe("descriptor-rooted filesystem", () => {
+	test("lists immediate names without opening child directories", async () => {
+		const rootPath = temporaryRoot("descriptor-shallow-list");
+		const inaccessible = join(rootPath, "unrelated");
+		mkdirSync(inaccessible);
+		writeFileSync(join(inaccessible, "private.bin"), "not part of this listing");
+		chmodSync(inaccessible, 0);
+		const root = await openDescriptorRoot(rootPath);
+		try {
+			expect(await root.listNames()).toEqual(["unrelated"]);
+		} finally {
+			await root.close();
+			chmodSync(inaccessible, 0o700);
+		}
+	});
+
+	test("inspects one named entry without walking sibling directories", async () => {
+		const rootPath = temporaryRoot("descriptor-single-entry");
+		const inaccessible = join(rootPath, "unrelated");
+		mkdirSync(inaccessible);
+		writeFileSync(join(inaccessible, "private.bin"), "not part of this inspection");
+		chmodSync(inaccessible, 0);
+		writeFileSync(join(rootPath, "managed.txt"), "owned");
+		const root = await openDescriptorRoot(rootPath);
+		try {
+			expect(await root.inspectEntry("managed.txt")).toMatchObject({
+				path: "managed.txt",
+				type: "file",
+				size: 5,
+			});
+		} finally {
+			await root.close();
+			chmodSync(inaccessible, 0o700);
+		}
+	});
+
 	test("refuses a file or directory mode the destination filesystem cannot preserve", async () => {
 		const rootPath = temporaryRoot("descriptor-mode");
 		const probe = join(rootPath, "permission-probe");

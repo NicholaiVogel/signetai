@@ -2194,7 +2194,9 @@ function buildTerminalLifecycleRecord(reason: string, exitCode: number, error?: 
 function buildShutdownTerminalRecord(reason: string, exitCode: number, error?: unknown): DaemonLifecycle {
 	const fatalRequest = shutdownRequestGate.fatalRequest;
 	const terminalError =
-		fatalRequest === null ? (error ?? shutdownCleanupError) : (shutdownFatalError ?? new Error(fatalRequest.reason));
+		fatalRequest === null
+			? (error ?? shutdownCleanupError ?? undefined)
+			: (shutdownFatalError ?? new Error(fatalRequest.reason));
 	return buildTerminalLifecycleRecord(
 		shutdownRequestGate.primary?.reason ?? reason,
 		shutdownRequestGate.exitCode ?? exitCode,

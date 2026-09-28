@@ -28,6 +28,8 @@ export type DatabaseSnapshot = {
 	bytes: number;
 	hash: string;
 	walHash?: string | null;
+	destinationHash?: string;
+	destinationCreated?: boolean;
 };
 export type ExternalDatabaseReference = { path: string; device: string; inode: string };
 export type Journal = {
@@ -56,6 +58,8 @@ export type Journal = {
 	cutoverPreimage?: string | null;
 	pointerPublished?: boolean;
 	destinationVerified?: boolean;
+	createdDestinationEntries?: string[];
+	createdDestinationDirectories?: string[];
 };
 export type MigrationPlan = {
 	readOnly: true;
@@ -63,6 +67,7 @@ export type MigrationPlan = {
 	components: string[];
 	source: string;
 	destination: string;
+	untouched: string[];
 	fingerprints?: Fingerprint[];
 	directories?: DirectoryFingerprint[];
 	hardlinks?: string[][];
@@ -81,6 +86,7 @@ export interface MigrationDeps {
 		resolve(): Layout;
 		capture?: () => Promise<string | undefined>;
 		current?: () => Promise<string | undefined>;
+		isCutover?: () => Promise<boolean>;
 		cutover?: (layout: Layout) => Promise<void>;
 		verifyDestination?: (layout: Layout) => Promise<void>;
 	};
@@ -96,6 +102,7 @@ export interface MigrationDeps {
 	layoutBytes?: (layout: Layout) => Uint8Array;
 	gitignoreBytes?: (existing: string) => Uint8Array;
 	mapDestinationPath?: (sourcePath: string, type: "file" | "symlink" | "directory") => string | undefined;
+	selectSourceEntries?: (source: DescriptorRoot) => Promise<{ entries: DescriptorEntry[]; untouched: string[] }>;
 	journalStateDir: string;
 	hooks?: {
 		afterDatabaseFence?: () => Promise<void>;
@@ -130,13 +137,20 @@ export class MigrationEngine {
 		this.journalPath = join(deps.journalStateDir, this.journalName);
 	}
 
+	private async selectSourceEntries(
+		source: DescriptorRoot,
+	): Promise<{ entries: DescriptorEntry[]; untouched: string[] }> {
+		return (await this.deps.selectSourceEntries?.(source)) ?? { entries: await source.inventory(), untouched: [] };
+	}
+
 	async preflight(): Promise<MigrationPlan> {
 		const layout = this.deps.resolver.resolve();
 		validateLayout(layout);
 		await this.deps.database.inspect?.();
 		const source = await openDescriptorRoot(layout.root);
 		try {
-			return await inventory(layout, source, this.deps.journalStateDir, this.deps.mapDestinationPath);
+			const selection = await this.selectSourceEntries(source);
+			return await inventory(layout, source, this.deps.journalStateDir, this.deps.mapDestinationPath, selection);
 		} finally {
 			await source.close();
 		}
@@ -147,7 +161,7 @@ export class MigrationEngine {
 		if (drained.owners.length) throw new Error(`migration drain blocked by: ${drained.owners.join(", ")}`);
 	}
 
-	async run(): Promise<MigrationResult> {
+	async run(expectedPlan?: MigrationPlan): Promise<MigrationResult> {
 		const layout = this.deps.resolver.resolve();
 		validateLayout(layout);
 		const lease = this.deps.lease ? await this.deps.lease.acquire() : undefined;
@@ -188,7 +202,11 @@ export class MigrationEngine {
 			}
 			if (journal?.phase === "cutover-pending") {
 				const current = await this.deps.resolver.current?.();
-				if (journal.pointerPublished || current === layout.destination) {
+				const cutoverPublished =
+					resolve(layout.root) === resolve(layout.destination)
+						? ((await this.deps.resolver.isCutover?.()) ?? journal.pointerPublished === true)
+						: journal.pointerPublished || current === layout.destination;
+				if (cutoverPublished) {
 					await this.drainWriters();
 					databaseFence = await this.deps.database.acquireFence?.();
 					await this.verifyExternalDatabase(journal);
@@ -202,7 +220,16 @@ export class MigrationEngine {
 			const externalDatabase = (await this.deps.database.externalReference?.()) ?? null;
 			if (databaseFence?.externalDatabase !== undefined) this.assertExternalDatabase(databaseFence, externalDatabase);
 			if (journal) this.assertExternalDatabase(journal, externalDatabase);
-			const plan = await inventory(layout, source, this.deps.journalStateDir, this.deps.mapDestinationPath);
+			const selection = await this.selectSourceEntries(source);
+			const plan = await inventory(layout, source, this.deps.journalStateDir, this.deps.mapDestinationPath, selection);
+			if (
+				expectedPlan &&
+				(resolve(expectedPlan.source) !== resolve(plan.source) ||
+					resolve(expectedPlan.destination) !== resolve(plan.destination) ||
+					!sameSourceInventory(plan.fingerprints ?? [], expectedPlan.fingerprints ?? []) ||
+					!sameDirectoryInventory(plan.directories ?? [], expectedPlan.directories ?? []))
+			)
+				throw new Error("workspace changed since the migration plan; rerun preflight");
 			if (journal) await verifyJournalSources(source, journal);
 			if (journal && !sameSourceInventory(plan.fingerprints ?? [], journal.fingerprints))
 				throw new Error("source inventory changed during migration");
@@ -225,6 +252,8 @@ export class MigrationEngine {
 				directories: plan.directories ?? [],
 				requiredBytes: plan.bytes,
 				externalDatabase,
+				createdDestinationEntries: [],
+				createdDestinationDirectories: [],
 			};
 			const activeJournal = journal;
 			activeJournal.phase = "drained";
@@ -232,6 +261,7 @@ export class MigrationEngine {
 			destination = await admitDestination(
 				layout.destination,
 				activeJournal,
+				sourceIdentity,
 				async (parentIdentity) => {
 					activeJournal.destinationParentIdentity = parentIdentity;
 					activeJournal.destinationCreationPending = true;
@@ -248,12 +278,14 @@ export class MigrationEngine {
 				throw new Error("destination parent identity mismatch");
 			journal.destinationIdentity = destination.identity;
 			journal.destinationParentIdentity = destination.parentIdentity;
-			journal.destinationCreated = true;
+			journal.destinationCreated = resolve(layout.root) !== resolve(layout.destination);
 			journal.destinationCreationPending = false;
 			journal.destinationWrites = true;
 			await saveJournal(state, this.journalName, journal);
 			await this.deps.hooks?.afterDestinationAdmitted?.();
 			if (journal.pendingCopyTemporaryPath !== undefined) await removePendingCopyTemporary(destination.root, journal);
+			const inPlace = resolve(layout.root) === resolve(layout.destination);
+			if (inPlace) await recordInPlaceOwnership(destination.root, state, this.journalName, journal, plan);
 
 			const expected = new Map((plan.fingerprints ?? []).map((fingerprint) => [fingerprint.path, fingerprint]));
 			const copied = new Set(journal.copied);
@@ -349,15 +381,33 @@ export class MigrationEngine {
 						copyPath = "snapshot.sqlite";
 					}
 					const copyHash = await copyRoot.hashFile(copyPath);
-					const existing = (await destination.root.inventory()).find(
-						(entry) => entry.path === snapshot.destinationPath,
-					);
+					const existing = await optionalEntry(destination.root, snapshot.destinationPath);
+					const destinationCreated = snapshot.destinationCreated ?? existing === undefined;
 					if (existing) {
+						if (inPlace && !destinationCreated) throw new Error("unowned in-place database snapshot");
 						if (existing.type !== "file" || (await destination.root.hashFile(snapshot.destinationPath)) !== copyHash)
 							throw new Error("destination database snapshot conflicts with source");
-					} else {
-						await destination.root.copyFileFrom(copyRoot, copyPath, {}, snapshot.destinationPath);
+					} else if (!destinationCreated) {
+						throw new Error("destination database snapshot disappeared during migration");
 					}
+					if (inPlace && destinationCreated) {
+						const createdDirectories = new Set(journal.createdDestinationDirectories ?? []);
+						const pathParts = snapshot.destinationPath.split("/").slice(0, -1);
+						for (let index = 1; index <= pathParts.length; index++) {
+							const directoryPath = pathParts.slice(0, index).join("/");
+							const directory = await optionalEntry(destination.root, directoryPath);
+							if (directory && directory.type !== "directory")
+								throw new Error(`destination path is not a directory: ${directoryPath}`);
+							if (!directory) createdDirectories.add(directoryPath);
+						}
+						journal.createdDestinationDirectories = [...createdDirectories].sort();
+						const createdEntries = new Set(journal.createdDestinationEntries ?? []);
+						createdEntries.add(snapshot.destinationPath);
+						journal.createdDestinationEntries = [...createdEntries].sort();
+					}
+					journal.databaseSnapshot = { ...snapshot, destinationHash: copyHash, destinationCreated };
+					await saveJournal(state, this.journalName, journal);
+					if (!existing) await destination.root.copyFileFrom(copyRoot, copyPath, {}, snapshot.destinationPath);
 					if ((await destination.root.hashFile(snapshot.destinationPath)) !== copyHash)
 						throw new Error("database integrity verification failed");
 					if (!this.deps.database.verifySnapshot) throw new Error("semantic database verifier is not configured");
@@ -381,6 +431,11 @@ export class MigrationEngine {
 				}
 			}
 			if (this.deps.gitignoreBytes) {
+				if (inPlace) {
+					journal.phase = "cutover-pending";
+					journal.rollbackEligible = false;
+					await saveJournal(state, this.journalName, journal);
+				}
 				let existing = "";
 				try {
 					existing = new TextDecoder().decode(await destination.root.readFile(".gitignore"));
@@ -391,12 +446,23 @@ export class MigrationEngine {
 				if (new TextDecoder().decode(merged) !== existing)
 					await destination.root.replaceFileAtomic(".gitignore", merged, { mode: 0o644 });
 			}
+			if (inPlace) await finalizeInPlaceDirectories(destination.root, journal);
 			if (this.deps.layoutBytes) {
+				if (inPlace && journal.rollbackEligible) {
+					journal.phase = "cutover-pending";
+					journal.rollbackEligible = false;
+					await saveJournal(state, this.journalName, journal);
+				}
 				await destination.root.replaceFileAtomic("workspace-layout.json", this.deps.layoutBytes(layout), {
 					mode: 0o600,
 				});
+				if (inPlace) {
+					journal.pointerPublished = true;
+					await saveJournal(state, this.journalName, journal);
+					await this.deps.hooks?.afterPointerPublished?.();
+				}
 			}
-			await finalizeDirectories(destination.root, journal.directories ?? []);
+			if (!inPlace) await finalizeDirectories(destination.root, journal.directories ?? []);
 			journal.phase = "verified";
 			await saveJournal(state, this.journalName, journal);
 			await assertPathIdentity(layout.destination, journal.destinationIdentity);
@@ -607,6 +673,11 @@ export class MigrationEngine {
 			if (!journal) return;
 			if (!journal.rollbackEligible || journal.phase === "completed")
 				throw new Error("rollback is no longer safe after cutover begins");
+			if (resolve(journal.source) === resolve(journal.destination)) {
+				await rollbackInPlace(journal.destination, journal);
+				await state.remove(this.journalName);
+				return;
+			}
 			if (journal.destinationCreated !== true) throw new Error("migration destination ownership is unverified");
 			const parent = await openDescriptorRoot(dirname(journal.destination));
 			try {
@@ -708,9 +779,29 @@ async function openExistingRoot(path: string): Promise<DescriptorRoot | undefine
 async function admitDestination(
 	path: string,
 	journal: Journal,
+	expectedExistingIdentity: string,
 	recordCreationIntent: (parentIdentity: string) => Promise<void>,
 	afterCreated: () => Promise<void>,
 ): Promise<AdmittedDestination> {
+	if (resolve(path) === resolve(journal.source)) {
+		const parent = await openDescriptorRoot(dirname(path));
+		let root: DescriptorRoot | undefined;
+		try {
+			root = await openDescriptorRoot(path);
+			const identity = await root.identity();
+			const parentIdentity = await parent.identity();
+			if (identity !== expectedExistingIdentity) throw new Error("source identity changed during migration");
+			if (journal.destinationIdentity !== "missing" && journal.destinationIdentity !== identity)
+				throw new Error("destination identity mismatch");
+			if (journal.destinationParentIdentity !== "missing" && journal.destinationParentIdentity !== parentIdentity)
+				throw new Error("destination parent identity mismatch");
+			return { parent, root, parentIdentity, identity };
+		} catch (error) {
+			await root?.close();
+			await parent.close();
+			throw error;
+		}
+	}
 	const parent = await openDescriptorRoot(dirname(path));
 	let root: DescriptorRoot | undefined;
 	try {
@@ -824,11 +915,13 @@ async function inventory(
 	source: DescriptorRoot,
 	journalStateDir: string,
 	mapDestinationPath?: (sourcePath: string, type: "file" | "symlink" | "directory") => string | undefined,
+	selection?: { entries: DescriptorEntry[]; untouched: string[] },
 ): Promise<MigrationPlan> {
 	const stateRelative = contained(layout.root, journalStateDir)
 		? relative(resolve(layout.root), resolve(journalStateDir))
 		: undefined;
-	const entries = (await source.inventory()).filter(
+	const selected = selection ?? { entries: await source.inventory(), untouched: [] };
+	const entries = selected.entries.filter(
 		(entry) => !stateRelative || (entry.path !== stateRelative && !entry.path.startsWith(`${stateRelative}${sep}`)),
 	);
 	const fingerprints: Fingerprint[] = [];
@@ -867,6 +960,7 @@ async function inventory(
 		components: fingerprints.map((fingerprint) => fingerprint.path),
 		source: layout.root,
 		destination: layout.destination,
+		untouched: selected.untouched,
 		fingerprints,
 		directories,
 		hardlinks: [...hardlinkPaths.values()].filter((paths) => paths.length > 1).map((paths) => paths.sort()),
@@ -881,20 +975,32 @@ function validateSymlink(root: string, entry: DescriptorEntry): void {
 
 async function fingerprintEntry(root: DescriptorRoot, entry: DescriptorEntry): Promise<Fingerprint> {
 	if (entry.type === "directory") throw new Error(`cannot fingerprint directory: ${entry.path}`);
-	const bytes = entry.type === "symlink" ? Buffer.from(entry.target ?? "") : await root.readFile(entry.path);
+	const hash =
+		entry.type === "symlink"
+			? createHash("sha256")
+					.update(Buffer.from(entry.target ?? ""))
+					.digest("hex")
+			: await root.hashFile(entry.path);
 	return {
 		path: entry.path,
 		type: entry.type,
 		size: entry.size,
 		mtimeMs: entry.mtimeMs,
 		mode: entry.mode,
-		hash: createHash("sha256").update(bytes).digest("hex"),
+		hash,
 	};
 }
 
 async function readFingerprint(root: DescriptorRoot, expected: Fingerprint): Promise<Fingerprint> {
-	const entry = (await root.inventory()).find((candidate) => candidate.path === expected.path);
-	if (!entry || entry.type === "directory") throw new Error(`missing migration entry: ${expected.path}`);
+	let entry: DescriptorEntry;
+	try {
+		entry = await root.inspectEntry(expected.path);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT")
+			throw new Error(`missing migration entry: ${expected.path}`);
+		throw error;
+	}
+	if (entry.type === "directory") throw new Error(`missing migration entry: ${expected.path}`);
 	return fingerprintEntry(root, entry);
 }
 
@@ -949,6 +1055,126 @@ async function finalizeDirectories(destination: DescriptorRoot, directories: Dir
 		const entry = actual.get(directory.destinationPath);
 		if (!entry || entry.mode !== directory.mode || Math.abs(entry.mtimeMs - directory.mtimeMs) > 1)
 			throw new Error(`destination directory metadata mismatch: ${directory.destinationPath}`);
+	}
+}
+
+async function optionalEntry(root: DescriptorRoot, path: string): Promise<DescriptorEntry | undefined> {
+	try {
+		return await root.inspectEntry(path);
+	} catch (error) {
+		if (error && typeof error === "object" && Reflect.get(error, "code") === "ENOENT") return;
+		throw error;
+	}
+}
+
+async function recordInPlaceOwnership(
+	destination: DescriptorRoot,
+	state: DescriptorRoot,
+	journalName: string,
+	journal: Journal,
+	plan: MigrationPlan,
+): Promise<void> {
+	const createdEntries = new Set(journal.createdDestinationEntries ?? []);
+	const createdDirectories = new Set(journal.createdDestinationDirectories ?? []);
+	const addDirectoryAndParents = async (path: string): Promise<void> => {
+		const pathParts = path.split("/");
+		for (let index = 1; index <= pathParts.length; index++) {
+			const current = pathParts.slice(0, index).join("/");
+			const entry = await optionalEntry(destination, current);
+			if (entry && entry.type !== "directory") throw new Error(`destination path is not a directory: ${current}`);
+			if (!entry) createdDirectories.add(current);
+		}
+	};
+	for (const directory of plan.directories ?? []) await addDirectoryAndParents(directory.destinationPath);
+	for (const fingerprint of plan.fingerprints ?? []) {
+		const path = fingerprint.destinationPath ?? fingerprint.path;
+		const parent = relativeParent(path);
+		if (parent) await addDirectoryAndParents(parent);
+		const existing = await optionalEntry(destination, path);
+		if (existing) await verifyDestinationEntry(destination, { ...fingerprint, path });
+		else createdEntries.add(path);
+	}
+	journal.createdDestinationEntries = [...createdEntries].sort();
+	journal.createdDestinationDirectories = [...createdDirectories].sort();
+	await saveJournal(state, journalName, journal);
+}
+
+async function finalizeInPlaceDirectories(destination: DescriptorRoot, journal: Journal): Promise<void> {
+	const created = new Set(journal.createdDestinationDirectories ?? []);
+	const directories = new Map((journal.directories ?? []).map((directory) => [directory.destinationPath, directory]));
+	for (const path of [...created].sort((left, right) => right.split("/").length - left.split("/").length)) {
+		const metadata = directories.get(path);
+		await destination.createDirectory(path, metadata?.mode ?? 0o700, metadata?.mtimeMs);
+	}
+}
+
+async function rollbackInPlace(path: string, journal: Journal): Promise<void> {
+	if (journal.pendingCopy !== undefined)
+		throw new Error("in-place migration has an unreceipted write; resume it before rollback");
+	if (journal.pointerPublished) throw new Error("rollback is no longer safe after in-place cutover begins");
+	const destination = await openDescriptorRoot(path);
+	try {
+		if ((await destination.identity()) !== journal.destinationIdentity)
+			throw new Error("refusing to modify a replaced in-place workspace");
+		const createdEntries = new Set(journal.createdDestinationEntries ?? []);
+		const copied = new Set(journal.copied);
+		for (const sourcePath of [...copied].reverse()) {
+			const fingerprint = journal.fingerprints.find((entry) => entry.path === sourcePath);
+			if (!fingerprint) throw new Error(`missing migration fingerprint: ${sourcePath}`);
+			const destinationPath = fingerprint.destinationPath ?? fingerprint.path;
+			if (!createdEntries.has(destinationPath)) continue;
+			const current = await optionalEntry(destination, destinationPath);
+			if (!current) continue;
+			await verifyDestinationEntry(destination, { ...fingerprint, path: destinationPath });
+			await destination.remove(destinationPath, {
+				expectedEntry: current,
+				beforeMutation: async () =>
+					await verifyDestinationEntry(destination, { ...fingerprint, path: destinationPath }),
+			});
+		}
+		const snapshot = journal.databaseSnapshot;
+		if (snapshot?.destinationCreated === true) {
+			const current = await optionalEntry(destination, snapshot.destinationPath);
+			if (current) {
+				if (
+					current.type !== "file" ||
+					!snapshot.destinationHash ||
+					(await destination.hashFile(snapshot.destinationPath)) !== snapshot.destinationHash
+				)
+					throw new Error("refusing to remove a changed in-place database snapshot");
+				await destination.remove(snapshot.destinationPath, { expectedEntry: current });
+			}
+		}
+		for (const directoryPath of [...(journal.createdDestinationDirectories ?? [])].sort(
+			(left, right) => right.split("/").length - left.split("/").length,
+		)) {
+			const current = await optionalEntry(destination, directoryPath);
+			if (!current) continue;
+			if (current.type !== "directory")
+				throw new Error(`refusing to remove changed migration directory: ${directoryPath}`);
+			const directory = await destination.openDirectory(directoryPath);
+			let empty = false;
+			try {
+				empty = (await directory.listNames()).length === 0;
+			} finally {
+				await directory.close();
+			}
+			if (empty)
+				await destination.remove(directoryPath, {
+					expectedEntry: current,
+					beforeMutation: async () => {
+						const check = await destination.openDirectory(directoryPath);
+						try {
+							if ((await check.listNames()).length !== 0)
+								throw new Error(`migration directory is no longer empty: ${directoryPath}`);
+						} finally {
+							await check.close();
+						}
+					},
+				});
+		}
+	} finally {
+		await destination.close();
 	}
 }
 
@@ -1055,8 +1281,8 @@ function validateLayout(layout: Layout): void {
 	if (layout.version !== 1) throw new Error(`unsupported layout version: ${layout.version}`);
 	const source = resolve(layout.root);
 	const destination = resolve(layout.destination);
-	if (source === destination) throw new Error("destination must differ from source");
-	if (contained(source, destination)) throw new Error("destination must not be nested inside source");
+	if (source !== destination && contained(source, destination))
+		throw new Error("migration staging must not be nested inside the workspace");
 	try {
 		const stat = lstatSync(layout.destination);
 		if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("destination must be a real directory");

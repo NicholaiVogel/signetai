@@ -494,6 +494,41 @@ export class DescriptorRoot {
 		return `${stat.dev}:${stat.ino}:${stat.mode}`;
 	}
 
+	async listNames(): Promise<string[]> {
+		this.requireOpen();
+		return await listDirectory(this.root);
+	}
+
+	async inspectEntry(path: string): Promise<DescriptorEntry> {
+		this.requireOpen();
+		const pathParts = parts(path);
+		const name = pathParts.pop();
+		if (!name) throw new UnsafeDescriptorPathError("descriptor path is empty");
+		const parent = await openDirectoryPath(this.root, pathParts, false);
+		try {
+			const entry = await inspectChild(parent, name);
+			try {
+				return {
+					path,
+					type: entry.type,
+					mode: entry.mode,
+					mtimeMs: entry.mtimeMs,
+					size: entry.size,
+					dev: entry.dev,
+					ino: entry.ino,
+					nlink: entry.nlink,
+					uid: entry.uid,
+					gid: entry.gid,
+					...(entry.target === undefined ? {} : { target: entry.target }),
+				};
+			} finally {
+				await entry.handle?.close();
+			}
+		} finally {
+			await parent.close();
+		}
+	}
+
 	async inventory(): Promise<DescriptorEntry[]> {
 		this.requireOpen();
 		const result: DescriptorEntry[] = [];
