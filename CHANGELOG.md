@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-09-28
+- Bug fixes: retain status telemetry; reduce Windows console flashes.
+
 ### 2026-09-27
 - Bug fixes: nest workspace layout migration; clarify recovered context; stat macOS symlinks by descriptor; expose attach reasoning; mirror daemon toggle resolution; repair Windows app and settings UX.
 - Docs: clarify checkpoint authority.
@@ -33,10 +36,17 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: refresh route site tokens; prevent label collisions; bound semantic hover work; track provenance roots; expose ontology semantics; show source claims in graph; close failed daemon responses; harden all daemon requests; silence daemon failures in TUI; close prepared SQLite statements on Windows.
 - Refactoring: simplify daemon request handling.
 
-### 2026-09-21
-- Bug fixes: make HTTP embedding repair durable and bounded; qualify Bun 1.4.0; isolate native keyring; persist source item failures; bound source worker frames; simplify transcript capture ownership.
-
 ## Release Ledger
+
+## [0.228.5] - 2026-09-28
+
+Release summary: 2 bug fixes.
+Tag range: `v0.228.4..v0.228.5`.
+
+### Bug Fixes
+
+- **cli**: retain status telemetry
+- **cli**: reduce Windows console flashes
 
 ## [0.228.4] - 2026-09-27
 
