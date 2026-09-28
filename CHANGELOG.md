@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-09-28
-- Bug fixes: retain status telemetry; reduce Windows console flashes.
+- Bug fixes: verify arm64 on macOS 27; upgrade Bun to 1.4.2; retain status telemetry; reduce Windows console flashes.
 
 ### 2026-09-27
 - Bug fixes: nest workspace layout migration; clarify recovered context; stat macOS symlinks by descriptor; expose attach reasoning; mirror daemon toggle resolution; repair Windows app and settings UX.
@@ -37,6 +37,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: simplify daemon request handling.
 
 ## Release Ledger
+
+## [0.228.6] - 2026-09-28
+
+Release summary: 2 bug fixes.
+Tag range: `v0.228.5..v0.228.6`.
+
+### Bug Fixes
+
+- **release**: verify arm64 on macOS 27
+- **runtime**: upgrade Bun to 1.4.2
 
 ## [0.228.5] - 2026-09-28
 
