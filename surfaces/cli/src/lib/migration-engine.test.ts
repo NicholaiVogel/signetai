@@ -97,6 +97,91 @@ test("in-place migration leaves unrelated workspace data intact and rollback rem
 	}
 });
 
+test("in-place rollback refuses to delete a copied entry replaced after preflight", async () => {
+	const root = mkdtempSync(join(tmpdir(), "signet-in-place-rollback-race-"));
+	const state = `${root}-state`;
+	const sourceFile = join(root, "memory", "managed.txt");
+	const destinationFile = join(root, "data", "managed.txt");
+	const replacementFile = join(root, "replacement.txt");
+	mkdirSync(join(root, "memory"), { recursive: true });
+	writeFileSync(sourceFile, "managed");
+	let interrupted = false;
+	const engine = new MigrationEngine({
+		resolver: { resolve: () => ({ version: 1, root, destination: root }) },
+		writers: { drain: async () => ({ owners: [] }) },
+		database: { prepare: async () => undefined },
+		selectSourceEntries: async (source) => ({
+			entries: [await source.inspectEntry("memory/managed.txt")],
+			untouched: [],
+		}),
+		mapDestinationPath: () => "data/managed.txt",
+		layoutBytes: () => Buffer.from('{"version":2}\n'),
+		journalStateDir: state,
+		hooks: {
+			afterCopy: async () => {
+				if (!interrupted) {
+					interrupted = true;
+					throw new Error("interrupt before cutover");
+				}
+			},
+			afterRollbackPreflight: async () => {
+				rmSync(destinationFile);
+				renameSync(replacementFile, destinationFile);
+			},
+		},
+	});
+	try {
+		await expect(engine.run()).rejects.toThrow("interrupt before cutover");
+		writeFileSync(replacementFile, "managed");
+		await expect(engine.rollback()).rejects.toThrow("descriptor removal target changed");
+		expect(readFileSync(destinationFile, "utf8")).toBe("managed");
+		expect(readFileSync(sourceFile, "utf8")).toBe("managed");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(state, { recursive: true, force: true });
+	}
+});
+
+test("in-place rollback can finish after an earlier attempt already removed an entry", async () => {
+	const root = mkdtempSync(join(tmpdir(), "signet-in-place-rollback-retry-"));
+	const state = `${root}-state`;
+	mkdirSync(join(root, "memory"), { recursive: true });
+	writeFileSync(join(root, "memory", "first.txt"), "first");
+	writeFileSync(join(root, "memory", "second.txt"), "second");
+	let interrupted = false;
+	const engine = new MigrationEngine({
+		resolver: { resolve: () => ({ version: 1, root, destination: root }) },
+		writers: { drain: async () => ({ owners: [] }) },
+		database: { prepare: async () => undefined },
+		selectSourceEntries: async (source) => ({
+			entries: [await source.inspectEntry("memory/first.txt"), await source.inspectEntry("memory/second.txt")],
+			untouched: [],
+		}),
+		mapDestinationPath: (path) => `data/${path.split("/").at(-1)}`,
+		layoutBytes: () => Buffer.from('{"version":2}\n'),
+		journalStateDir: state,
+		hooks: {
+			afterCopy: async () => {
+				if (!interrupted) {
+					interrupted = true;
+					throw new Error("interrupt before cutover");
+				}
+			},
+		},
+	});
+	try {
+		await expect(engine.run()).rejects.toThrow("interrupt before cutover");
+		rmSync(join(root, "data", "first.txt"));
+		await engine.rollback();
+		expect(existsSync(join(root, "data"))).toBe(false);
+		expect(readFileSync(join(root, "memory", "first.txt"), "utf8")).toBe("first");
+		expect(readFileSync(join(root, "memory", "second.txt"), "utf8")).toBe("second");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(state, { recursive: true, force: true });
+	}
+});
+
 test("in-place rollback removes its database snapshot without walking unrelated workspace trees", async () => {
 	const root = mkdtempSync(join(tmpdir(), "signet-in-place-db-migration-"));
 	const state = `${root}-state`;

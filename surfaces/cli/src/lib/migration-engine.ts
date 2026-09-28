@@ -113,6 +113,7 @@ export interface MigrationDeps {
 		afterPointerPublished?: () => Promise<void>;
 		afterDestinationCreated?: () => Promise<void>;
 		afterDestinationAdmitted?: () => Promise<void>;
+		afterRollbackPreflight?: () => Promise<void>;
 		verifyComponent?: (receipt: Receipt) => Promise<boolean>;
 	};
 	lease?: { acquire(): Promise<{ release(): Promise<void> }> };
@@ -674,7 +675,7 @@ export class MigrationEngine {
 			if (!journal.rollbackEligible || journal.phase === "completed")
 				throw new Error("rollback is no longer safe after cutover begins");
 			if (resolve(journal.source) === resolve(journal.destination)) {
-				await rollbackInPlace(journal.destination, journal);
+				await rollbackInPlace(journal.destination, journal, this.deps.hooks?.afterRollbackPreflight);
 				await state.remove(this.journalName);
 				return;
 			}
@@ -1108,7 +1109,7 @@ async function finalizeInPlaceDirectories(destination: DescriptorRoot, journal: 
 	}
 }
 
-async function rollbackInPlace(path: string, journal: Journal): Promise<void> {
+async function rollbackInPlace(path: string, journal: Journal, afterPreflight?: () => Promise<void>): Promise<void> {
 	if (journal.pendingCopy !== undefined)
 		throw new Error("in-place migration has an unreceipted write; resume it before rollback");
 	if (journal.pointerPublished) throw new Error("rollback is no longer safe after in-place cutover begins");
@@ -1118,7 +1119,7 @@ async function rollbackInPlace(path: string, journal: Journal): Promise<void> {
 			throw new Error("refusing to modify a replaced in-place workspace");
 		const createdEntries = new Set(journal.createdDestinationEntries ?? []);
 		const copied = new Set(journal.copied);
-		const removableEntries: { destinationPath: string; fingerprint: Fingerprint }[] = [];
+		const removableEntries: { destinationPath: string; fingerprint: Fingerprint; entry: DescriptorEntry }[] = [];
 		for (const sourcePath of [...copied].reverse()) {
 			const fingerprint = journal.fingerprints.find((entry) => entry.path === sourcePath);
 			if (!fingerprint) throw new Error(`missing migration fingerprint: ${sourcePath}`);
@@ -1127,7 +1128,7 @@ async function rollbackInPlace(path: string, journal: Journal): Promise<void> {
 			const current = await optionalEntry(destination, destinationPath);
 			if (!current) continue;
 			await verifyDestinationEntry(destination, { ...fingerprint, path: destinationPath });
-			removableEntries.push({ destinationPath, fingerprint });
+			removableEntries.push({ destinationPath, fingerprint, entry: current });
 		}
 		const snapshot = journal.databaseSnapshot;
 		let snapshotEntry: DescriptorEntry | undefined;
@@ -1144,16 +1145,19 @@ async function rollbackInPlace(path: string, journal: Journal): Promise<void> {
 		const createdDirectories = [...(journal.createdDestinationDirectories ?? [])].sort(
 			(left, right) => right.split("/").length - left.split("/").length,
 		);
+		const reviewedDirectories = new Map<string, DescriptorEntry>();
 		for (const directoryPath of createdDirectories) {
 			const current = await optionalEntry(destination, directoryPath);
 			if (current && current.type !== "directory")
 				throw new Error(`refusing to remove changed migration directory: ${directoryPath}`);
+			if (current) reviewedDirectories.set(directoryPath, current);
 		}
-		for (const { destinationPath, fingerprint } of removableEntries) {
+		await afterPreflight?.();
+		for (const { destinationPath, fingerprint, entry } of removableEntries) {
 			const current = await optionalEntry(destination, destinationPath);
 			if (!current) continue;
 			await destination.remove(destinationPath, {
-				expectedEntry: current,
+				expectedEntry: entry,
 				beforeMutation: async () =>
 					await verifyDestinationEntry(destination, { ...fingerprint, path: destinationPath }),
 			});
@@ -1175,6 +1179,8 @@ async function rollbackInPlace(path: string, journal: Journal): Promise<void> {
 			}
 		}
 		for (const directoryPath of createdDirectories) {
+			const reviewedEntry = reviewedDirectories.get(directoryPath);
+			if (!reviewedEntry) continue;
 			const current = await optionalEntry(destination, directoryPath);
 			if (!current) continue;
 			if (current.type !== "directory")
@@ -1188,7 +1194,7 @@ async function rollbackInPlace(path: string, journal: Journal): Promise<void> {
 			}
 			if (empty)
 				await destination.remove(directoryPath, {
-					expectedEntry: current,
+					expectedEntry: reviewedEntry,
 					beforeMutation: async () => {
 						const check = await destination.openDirectory(directoryPath);
 						try {
