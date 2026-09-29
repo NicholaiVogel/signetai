@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-09-29
+- Bug fixes: set up unconfigured workspaces on start.
+
 ### 2026-09-28
 - Bug fixes: verify arm64 on macOS 27; upgrade Bun to 1.4.2; retain status telemetry; reduce Windows console flashes.
 
@@ -32,11 +35,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-09-23
 - Bug fixes: handle empty signing arrays; stop vacuum work on shutdown; reject stale lifecycle records; harden lifecycle attribution; force fatal exit during flush; preserve fatal shutdowns; bound startup recovery and shutdown; pace startup recovery and shutdown; tolerate slow Dream attach lookups; clarify dream attach timeout errors; keep comment cleanup security-safe; parse production comments structurally; recognize shell comment operators; preserve scalar payload comments; refresh purge line tokens; preserve only active directives; normalize stripped comment whitespace.
 
-### 2026-09-22
-- Bug fixes: refresh route site tokens; prevent label collisions; bound semantic hover work; track provenance roots; expose ontology semantics; show source claims in graph; close failed daemon responses; harden all daemon requests; silence daemon failures in TUI; close prepared SQLite statements on Windows.
-- Refactoring: simplify daemon request handling.
-
 ## Release Ledger
+
+## [0.228.7] - 2026-09-29
+
+Release summary: 1 bug fix.
+Tag range: `v0.228.6..v0.228.7`.
+
+### Bug Fixes
+
+- **cli**: set up unconfigured workspaces on start
 
 ## [0.228.6] - 2026-09-28
 
