@@ -1120,9 +1120,13 @@ async function rollbackInPlace(path: string, journal: Journal, afterPreflight?: 
 			throw new Error("refusing to modify a replaced in-place workspace");
 		const createdEntries = new Set(journal.createdDestinationEntries ?? []);
 		const copied = new Set(journal.copied);
+		const fingerprintByPath = new Map<string, Fingerprint>();
+		for (const fingerprint of journal.fingerprints) {
+			if (!fingerprintByPath.has(fingerprint.path)) fingerprintByPath.set(fingerprint.path, fingerprint);
+		}
 		const removableEntries: { destinationPath: string; fingerprint: Fingerprint; entry: DescriptorEntry }[] = [];
 		for (const sourcePath of [...copied].reverse()) {
-			const fingerprint = journal.fingerprints.find((entry) => entry.path === sourcePath);
+			const fingerprint = fingerprintByPath.get(sourcePath);
 			if (!fingerprint) throw new Error(`missing migration fingerprint: ${sourcePath}`);
 			const destinationPath = fingerprint.destinationPath ?? fingerprint.path;
 			if (!createdEntries.has(destinationPath)) continue;
