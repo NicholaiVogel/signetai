@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-09-29
-- Bug fixes: pass inline codesign requirements; stabilize macOS keyring signing; handle empty args in Bash 3.2; set up unconfigured workspaces on start.
+- Bug fixes: allow canonical source refs; pass inline codesign requirements; stabilize macOS keyring signing; handle empty args in Bash 3.2; set up unconfigured workspaces on start.
 - Docs: move owner protocol reference.
 
 ### 2026-09-28
@@ -37,6 +37,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: handle empty signing arrays; stop vacuum work on shutdown; reject stale lifecycle records; harden lifecycle attribution; force fatal exit during flush; preserve fatal shutdowns; bound startup recovery and shutdown; pace startup recovery and shutdown; tolerate slow Dream attach lookups; clarify dream attach timeout errors; keep comment cleanup security-safe; parse production comments structurally; recognize shell comment operators; preserve scalar payload comments; refresh purge line tokens; preserve only active directives; normalize stripped comment whitespace.
 
 ## Release Ledger
+
+## [0.228.10] - 2026-09-29
+
+Release summary: 1 bug fix.
+Tag range: `v0.228.9..v0.228.10`.
+
+### Bug Fixes
+
+- **dreaming**: allow canonical source refs
 
 ## [0.228.9] - 2026-09-29
 
