@@ -6,6 +6,11 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-09-30
+- Features: refresh Pi model presets.
+- Bug fixes: add cross-platform desktop handoff; guide first-run setup in dashboard; open first-run onboarding.
+- Docs: show dashboard onboarding screenshot.
+
 ### 2026-09-29
 - Bug fixes: allow canonical source refs; pass inline codesign requirements; stabilize macOS keyring signing; handle empty args in Bash 3.2; set up unconfigured workspaces on start.
 - Docs: move owner protocol reference.
@@ -33,10 +38,26 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: tolerate missing blog bodies; harden session recall dedupe; guard moved targets; harden entry removal; recheck removal identity; guard ambient uninstall; secure ambient profile writes; enforce profile marker ownership; harden profile removal; reject unsafe profile paths; harden profile writes; normalize profile paths; contain profile writes; ignore desktop build artifacts in source sync; classify loader failures at boundary; classify missing keyring; preserve source changes during sync; bound constellation work.
 - Performance: batch navigation claims.
 
-### 2026-09-23
-- Bug fixes: handle empty signing arrays; stop vacuum work on shutdown; reject stale lifecycle records; harden lifecycle attribution; force fatal exit during flush; preserve fatal shutdowns; bound startup recovery and shutdown; pace startup recovery and shutdown; tolerate slow Dream attach lookups; clarify dream attach timeout errors; keep comment cleanup security-safe; parse production comments structurally; recognize shell comment operators; preserve scalar payload comments; refresh purge line tokens; preserve only active directives; normalize stripped comment whitespace.
-
 ## Release Ledger
+
+## [0.229.0] - 2026-09-30
+
+Release summary: 1 feature, 3 bug fixes, and 1 docs update.
+Tag range: `v0.228.10..v0.229.0`.
+
+### Features
+
+- **models**: refresh Pi model presets
+
+### Bug Fixes
+
+- **cli**: add cross-platform desktop handoff
+- **cli**: guide first-run setup in dashboard
+- **cli**: open first-run onboarding
+
+### Docs
+
+- show dashboard onboarding screenshot
 
 ## [0.228.10] - 2026-09-29
 
