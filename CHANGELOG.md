@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-09-30
 - Features: refresh Pi model presets.
-- Bug fixes: add cross-platform desktop handoff; guide first-run setup in dashboard; open first-run onboarding.
+- Bug fixes: check ownership on opened marker; protect swapped uninstall entries; support macOS secure filesystem paths; add cross-platform desktop handoff; guide first-run setup in dashboard; open first-run onboarding.
 - Docs: show dashboard onboarding screenshot.
 
 ### 2026-09-29
@@ -39,6 +39,17 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Performance: batch navigation claims.
 
 ## Release Ledger
+
+## [0.229.1] - 2026-09-30
+
+Release summary: 3 bug fixes.
+Tag range: `v0.229.0..v0.229.1`.
+
+### Bug Fixes
+
+- **hermes**: check ownership on opened marker
+- **hermes**: protect swapped uninstall entries
+- **hermes**: support macOS secure filesystem paths
 
 ## [0.229.0] - 2026-09-30
 
