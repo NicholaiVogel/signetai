@@ -224,7 +224,7 @@ describe("descriptor-rooted filesystem", () => {
 			expect(lstatSync(join(destinationPath, "dir", "file.txt")).mode & 0o777).toBe(sourceFileMode);
 			if (symlinksAvailable) {
 				expect(lstatSync(join(destinationPath, "link")).isSymbolicLink()).toBe(true);
-				expect(readlinkSync(join(destinationPath, "link"))).toBe("dir/file.txt");
+				expect(readlinkSync(join(destinationPath, "link"))).toBe(join("dir", "file.txt"));
 			}
 			if (existsSync(join(sourcePath, "link-dir"))) {
 				expect(lstatSync(join(destinationPath, "link-dir")).isSymbolicLink()).toBe(true);
