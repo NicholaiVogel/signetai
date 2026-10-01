@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-10-01
+- Refactoring: align controls with repository guardrails; refresh connector source inventory; consolidate UI and cache daemon reads.
+
 ### 2026-09-30
 - Features: refresh Pi model presets.
 - Bug fixes: check ownership on opened marker; protect swapped uninstall entries; support macOS secure filesystem paths; add cross-platform desktop handoff; guide first-run setup in dashboard; open first-run onboarding.
@@ -34,11 +37,18 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: remove external server surface.
 - Docs: note legacy-schema semantics for workspace memory count; update latest schema reference.
 
-### 2026-09-24
-- Bug fixes: tolerate missing blog bodies; harden session recall dedupe; guard moved targets; harden entry removal; recheck removal identity; guard ambient uninstall; secure ambient profile writes; enforce profile marker ownership; harden profile removal; reject unsafe profile paths; harden profile writes; normalize profile paths; contain profile writes; ignore desktop build artifacts in source sync; classify loader failures at boundary; classify missing keyring; preserve source changes during sync; bound constellation work.
-- Performance: batch navigation claims.
-
 ## Release Ledger
+
+## [0.229.2] - 2026-10-01
+
+Release summary: 3 refactors.
+Tag range: `v0.229.1..v0.229.2`.
+
+### Refactoring
+
+- **dashboard**: align controls with repository guardrails
+- **dashboard**: refresh connector source inventory
+- **dashboard**: consolidate UI and cache daemon reads
 
 ## [0.229.1] - 2026-09-30
 
