@@ -19,7 +19,7 @@ jobs:
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
       PUBLIC_POSTHOG_ENV: production
-    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, 'chore: release')
+    if: "github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, 'chore: release')"
 
     steps:
       - uses: actions/checkout@v4
