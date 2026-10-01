@@ -7,6 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-10-01
+- Bug fixes: default on in onboarding; refresh route DB site tokens; enforce trigger gates; allow manual triggers.
 - Refactoring: align controls with repository guardrails; refresh connector source inventory; consolidate UI and cache daemon reads.
 
 ### 2026-09-30
@@ -38,6 +39,18 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: note legacy-schema semantics for workspace memory count; update latest schema reference.
 
 ## Release Ledger
+
+## [0.229.3] - 2026-10-01
+
+Release summary: 4 bug fixes.
+Tag range: `v0.229.2..v0.229.3`.
+
+### Bug Fixes
+
+- **dreaming**: default on in onboarding
+- **dreaming**: refresh route DB site tokens
+- **dreaming**: enforce trigger gates
+- **dreaming**: allow manual triggers
 
 ## [0.229.2] - 2026-10-01
 
