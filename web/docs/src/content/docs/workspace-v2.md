@@ -50,6 +50,8 @@ signet workspace layout migrate cleanup   --accept [--source <workspace>]
 
 The workspace path does not change. `--source` selects a workspace only when upgrading a non-default location; there is no destination path. The previous top-level `signet migration` command remains available as a compatibility alias.
 
+On Windows, migration checks native file identities and refuses reparse-point traversal. New entries inherit the workspace's Windows ACLs; POSIX mode bits are not reproduced, though read-only file state is preserved. Copying symbolic links requires Windows permission to create them, such as Developer Mode or the symbolic-link privilege.
+
 - `preflight` is read-only. It resolves overrides, inspects only registered Signet-managed entries and their Git state, checks the configured source database read-only, reports required space, and produces a redacted plan. Unregistered entries and the rebuildable v1 cache are reported as untouched; their contents are not traversed or fingerprinted. Writer draining occurs during `run`.
 - `run` displays the in-place plan and asks for confirmation before writing; the prompt defaults to no. `--dry-run` prints the plan without prompting or writing, and `--yes` skips the prompt for automation. After confirmation, run acquires the migration lease, drains supported writers, copies and verifies only registered entries, snapshots SQLite, and publishes the v2 resolver cutover without changing the workspace path.
 - `resume` continues from the durable journal without duplicate evidence, Sources, or Dreaming consumption.
@@ -59,7 +61,7 @@ The workspace path does not change. `--source` selects a workspace only when upg
 
 Before cutover, copied files are hash-checked and the SQLite snapshot is compared table by table against the source database, including row counts and typed row values. Registered v1 transcript and artifact files are copied into `transcripts/`; their legacy source files remain unchanged, and migration does not rewrite database artifact references. Unknown workspace data, including unregistered `memory/` entries, remains at its original path and is not traversed, hashed, copied, or made searchable by migration.
 
-Migration refuses ambiguous ownership, insufficient space, inconsistent snapshots, unsafe symlinks or special files, filesystems that do not preserve requested permissions, active writers that cannot drain, and unsupported custom layouts. Before requesting a daemon drain, migration checks that the daemon serves the source workspace and that its PID matches the source's managed PID; unrelated daemons are not drained or stopped. It preserves Source IDs and generations rather than disconnecting and reconnecting Sources.
+Migration refuses ambiguous ownership, insufficient space, inconsistent snapshots, unsafe symlinks or special files, unsupported filesystems or custom layouts, and active writers that cannot drain. Before requesting a daemon drain, migration checks that the daemon serves the source workspace and that its PID matches the source's managed PID; unrelated daemons are not drained or stopped. It preserves Source IDs and generations rather than disconnecting and reconnecting Sources.
 
 The daemon exposes `GET /api/workspace/migration-control` for the current
 writer-drain generation, state, and blockers. The migration CLI invokes

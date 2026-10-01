@@ -29,7 +29,7 @@ import {
 	spawnHidden as spawn,
 } from "@signet/core";
 import { MigrationEngine, type MigrationDeps, type Layout } from "../lib/migration-engine.js";
-import { createDatabase, verifyMigrationDatabaseRows } from "../sqlite.js";
+import { closeDatabase, createDatabase, verifyMigrationDatabaseRows } from "../sqlite.js";
 import { readConfiguredWorkspacePath, resolveAgentsDir, writeConfiguredWorkspacePath } from "../lib/workspace.js";
 import {
 	resolveDaemonJsNodePath,
@@ -54,10 +54,10 @@ export function initializeMigrationLeaseFile(leasePath: string): void {
 		try {
 			staged.exec("PRAGMA user_version = 1");
 		} finally {
-			staged.close();
+			closeDatabase(staged);
 		}
 		chmodSync(stagedPath, 0o600);
-		const fd = openSync(stagedPath, "r");
+		const fd = openSync(stagedPath, "r+");
 		try {
 			fsyncSync(fd);
 		} finally {
@@ -192,8 +192,9 @@ export async function verifyDestinationDaemon(
 			SIGNET_ANALYTICS_DISABLED: "1",
 			...(nodePath ? { NODE_PATH: nodePath } : {}),
 			...(wasmPath ? { SIGNET_TIKTOKEN_WASM_PATH: wasmPath } : {}),
+			...(process.platform === "win32" ? { SIGNET_MIGRATION_VERIFY: "1" } : {}),
 		},
-		stdio: ["ignore", "pipe", "pipe"],
+		stdio: process.platform === "win32" ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
 		detached: true,
 	});
 	let output = "";
@@ -236,12 +237,20 @@ export async function verifyDestinationDaemon(
 		verificationError = error;
 	} finally {
 		const childPid = child.pid;
-		if (child.exitCode === null && childPid !== undefined) process.kill(-childPid, "SIGTERM");
+		if (child.exitCode === null && childPid !== undefined) {
+			try {
+				if (process.platform === "win32") child.send({ type: "migration-verification-shutdown" });
+				else process.kill(-childPid, "SIGTERM");
+			} catch {}
+		}
 		stopped = await Promise.race([exited.then(() => true), sleep(5_000).then(() => false)]);
 		if (!stopped) {
-			try {
-				if (childPid !== undefined) process.kill(-childPid, "SIGKILL");
-			} catch {}
+			if (childPid !== undefined) {
+				try {
+					if (process.platform === "win32") await stopManagedDaemonProcess(childPid);
+					else process.kill(-childPid, "SIGKILL");
+				} catch {}
+			}
 			stopped = await Promise.race([exited.then(() => true), sleep(5_000).then(() => false)]);
 		}
 	}
@@ -279,9 +288,12 @@ export function migrationLeasePath(
 	} = {},
 ): string {
 	const pathApi = options.pathApi ?? nativeMigrationPath;
+	const platform = options.platform ?? process.platform;
 	const resolvedSource = pathApi.resolve(source);
-	const legacyPath = pathApi.join(state, `${resolvedSource.replaceAll("/", "_")}.lease`);
-	if (options.platform === "win32" || (options.platform === undefined && process.platform === "win32")) {
+	const legacyName =
+		platform === "win32" ? resolvedSource.replace(/[\\/:]/g, "_") : resolvedSource.replaceAll("/", "_");
+	const legacyPath = pathApi.join(state, `${legacyName}.lease`);
+	if (platform === "win32") {
 		if ((options.exists ?? existsSync)(legacyPath)) return legacyPath;
 		const id = createHash("sha256").update(resolvedSource).digest("hex").slice(0, 32);
 		return pathApi.join(state, `${id}.lease`);
@@ -379,7 +391,9 @@ export function createDefaultMigrationEngine(
 ): MigrationEngine {
 	const source = resolve(options.source ?? resolveAgentsDir().path);
 	const destination = resolve(options.destination ?? defaultMigrationDestination(source));
-	if (destination !== source)
+	const sameDirectory =
+		destination === source || (process.platform === "win32" && sameWindowsDirectory(source, destination));
+	if (!sameDirectory)
 		throw new Error("workspace layout migration upgrades in place; --destination must match --source");
 	const sourceLayout = resolveWorkspaceLayout(source);
 	const rootGitMode = inspectRootGit(source).mode;
@@ -467,7 +481,7 @@ export function createDefaultMigrationEngine(
 				const row = db.prepare("PRAGMA quick_check").get() as { quick_check?: string } | undefined;
 				if (row?.quick_check !== "ok") throw new Error("destination database verification failed");
 			} finally {
-				db.close();
+				closeDatabase(db);
 			}
 			await verifyDestinationDaemon(destination);
 		},
@@ -489,7 +503,7 @@ export function createDefaultMigrationEngine(
 			db.exec("PRAGMA busy_timeout = 0");
 			db.exec("BEGIN IMMEDIATE");
 		} catch (error) {
-			db.close();
+			closeDatabase(db);
 			if ((error as { code?: string }).code === "SQLITE_BUSY")
 				throw new Error("another migration is already running", { cause: error });
 			throw error;
@@ -499,7 +513,7 @@ export function createDefaultMigrationEngine(
 				try {
 					db.exec("ROLLBACK");
 				} finally {
-					db.close();
+					closeDatabase(db);
 				}
 			},
 		};
@@ -542,7 +556,7 @@ export function createDefaultMigrationEngine(
 					const row = db.prepare("PRAGMA quick_check").get() as { quick_check?: string } | undefined;
 					if (row?.quick_check !== "ok") throw new Error("source database integrity verification failed");
 				} finally {
-					db.close();
+					closeDatabase(db);
 				}
 			},
 			acquireFence: async () => {
@@ -565,7 +579,7 @@ export function createDefaultMigrationEngine(
 					if (!fencedStat.isFile() || fencedStat.dev !== sourceStat.dev || fencedStat.ino !== sourceStat.ino)
 						throw new Error("external database identity changed during migration");
 				} catch (error) {
-					db.close();
+					closeDatabase(db);
 					if (
 						(error instanceof Error && /database is locked/.test(error.message)) ||
 						(error && typeof error === "object" && Reflect.get(error, "code") === "SQLITE_BUSY")
@@ -588,7 +602,7 @@ export function createDefaultMigrationEngine(
 						try {
 							db.exec("ROLLBACK");
 						} finally {
-							db.close();
+							closeDatabase(db);
 						}
 					},
 				};
@@ -602,7 +616,7 @@ export function createDefaultMigrationEngine(
 						const row = external.prepare("PRAGMA integrity_check").get() as { integrity_check?: string } | undefined;
 						if (row?.integrity_check !== "ok") throw new Error("source database integrity verification failed");
 					} finally {
-						external.close();
+						closeDatabase(external);
 					}
 					return undefined;
 				}
@@ -611,7 +625,7 @@ export function createDefaultMigrationEngine(
 					const row = db.prepare("PRAGMA integrity_check").get() as { integrity_check?: string } | undefined;
 					if (row?.integrity_check !== "ok") throw new Error("source database integrity verification failed");
 				} finally {
-					db.close();
+					closeDatabase(db);
 				}
 				if (!contained(source, sourceLayout.database)) return undefined;
 				const legacyDatabase = join(source, "memory", "memories.db");
@@ -629,7 +643,7 @@ export function createDefaultMigrationEngine(
 				try {
 					db.exec(`VACUUM INTO '${escaped}'`);
 				} finally {
-					db.close();
+					closeDatabase(db);
 				}
 			},
 			verifySnapshot: async (sourceDatabase, destinationDatabase) => {
@@ -646,6 +660,21 @@ export function createDefaultMigrationEngine(
 		...(hooks ? { hooks } : {}),
 	};
 	return new MigrationEngine(deps);
+}
+
+function sameWindowsDirectory(source: string, destination: string): boolean {
+	try {
+		const sourceStat = statSync(source, { bigint: true });
+		const destinationStat = statSync(destination, { bigint: true });
+		return (
+			sourceStat.isDirectory() &&
+			destinationStat.isDirectory() &&
+			sourceStat.dev === destinationStat.dev &&
+			sourceStat.ino === destinationStat.ino
+		);
+	} catch {
+		return false;
+	}
 }
 
 export function registerMigrationCommands(

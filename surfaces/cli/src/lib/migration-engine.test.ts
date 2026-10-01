@@ -21,6 +21,16 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { MigrationEngine } from "./migration-engine.js";
 
+function tryCreateSymlink(target: string, path: string): boolean {
+	try {
+		symlinkSync(target, path);
+		return true;
+	} catch (error) {
+		if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") return false;
+		throw error;
+	}
+}
+
 test("preflight is read-only and inventory reports required bytes", async () => {
 	const root = mkdtempSync(join(tmpdir(), "signet-migration-"));
 	writeFileSync(join(root, "AGENTS.md"), "identity");
@@ -600,6 +610,7 @@ test("destination writes remain rooted in the admitted parent after pathname rep
 	const state = mkdtempSync(join(tmpdir(), "migration-admitted-state-"));
 	writeFileSync(join(source, "one.txt"), "one");
 	const destination = join(destinationParent, "workspace");
+	let replacementBlocked = false;
 	const engine = new MigrationEngine({
 		resolver: { resolve: () => ({ version: 1, root: source, destination }) },
 		writers: { drain: async () => ({ owners: [] }) },
@@ -607,13 +618,34 @@ test("destination writes remain rooted in the admitted parent after pathname rep
 		journalStateDir: state,
 		hooks: {
 			afterDestinationAdmitted: async () => {
-				renameSync(destinationParent, admittedParent);
-				symlinkSync(attacker, destinationParent);
+				try {
+					renameSync(destinationParent, admittedParent);
+				} catch (error) {
+					if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+					replacementBlocked = true;
+					return;
+				}
+				if (!tryCreateSymlink(attacker, destinationParent) && process.platform === "win32")
+					mkdirSync(destinationParent);
 			},
 		},
 	});
-	await expect(engine.run()).rejects.toThrow("destination identity changed");
-	expect(readFileSync(join(admittedParent, "workspace", "one.txt"), "utf8")).toBe("one");
+	let result: Awaited<ReturnType<MigrationEngine["run"]>> | undefined;
+	let failure: unknown;
+	try {
+		result = await engine.run();
+	} catch (error) {
+		failure = error;
+	}
+	if (replacementBlocked) {
+		expect(failure).toBeUndefined();
+		expect(result).toMatchObject({ status: "completed" });
+		expect(readFileSync(join(destination, "one.txt"), "utf8")).toBe("one");
+	} else {
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toContain("destination identity changed");
+		expect(readFileSync(join(admittedParent, "workspace", "one.txt"), "utf8")).toBe("one");
+	}
 	expect(existsSync(join(attacker, "workspace", "one.txt"))).toBe(false);
 });
 
@@ -842,10 +874,13 @@ test("escaping symlink is rejected without following it", async () => {
 	const root = mkdtempSync(join(tmpdir(), "signet-migration-"));
 	writeFileSync(join(root, "secret"), "no");
 	writeFileSync(join(root, "inside"), "yes");
-	const { symlinkSync } = await import("node:fs");
 	const outside = mkdtempSync(join(tmpdir(), "signet-outside-"));
 	writeFileSync(join(outside, "secret"), "no");
-	symlinkSync(join(outside, "secret"), join(root, "link"));
+	if (!tryCreateSymlink(join(outside, "secret"), join(root, "link"))) {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(outside, { recursive: true, force: true });
+		return;
+	}
 	const engine = new MigrationEngine({
 		resolver: { resolve: () => ({ version: 1, root, destination: join(`${root}-new`) }) },
 		writers: { drain: async () => ({ owners: [] }) },
@@ -1527,7 +1562,7 @@ test("cutover-pending accepts ordinary writes to the same external database inod
 			{ value: "post-cutover" },
 		]);
 	} finally {
-		verified.close();
+		verified.close(true);
 	}
 	rmSync(root, { recursive: true, force: true });
 });

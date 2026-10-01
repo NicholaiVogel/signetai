@@ -9,6 +9,7 @@ export type Fingerprint = {
 	path: string;
 	destinationPath?: string;
 	type: "file" | "symlink";
+	targetIsDirectory?: boolean;
 	size: number;
 	mtimeMs: number;
 	mode: number;
@@ -903,7 +904,13 @@ async function removePendingCopyTemporary(destination: DescriptorRoot, journal: 
 		await destination.remove(temporaryPath, {
 			beforeMutation: async () => {
 				const current = (await destination.inventory()).find((candidate) => candidate.path === temporaryPath);
-				if (current && (current.type !== "file" || current.dev !== entry.dev || current.ino !== entry.ino))
+				if (
+					current &&
+					(current.type !== "file" ||
+						current.dev !== entry.dev ||
+						current.ino !== entry.ino ||
+						current.nativeIdentity !== entry.nativeIdentity)
+				)
 					throw new Error(`migration staging entry changed: ${temporaryPath}`);
 			},
 		});
@@ -920,11 +927,11 @@ async function inventory(
 	selection?: { entries: DescriptorEntry[]; untouched: string[] },
 ): Promise<MigrationPlan> {
 	const stateRelative = contained(layout.root, journalStateDir)
-		? relative(resolve(layout.root), resolve(journalStateDir))
+		? relative(resolve(layout.root), resolve(journalStateDir)).split(sep).join("/")
 		: undefined;
 	const selected = selection ?? { entries: await source.inventory(), untouched: [] };
 	const entries = selected.entries.filter(
-		(entry) => !stateRelative || (entry.path !== stateRelative && !entry.path.startsWith(`${stateRelative}${sep}`)),
+		(entry) => !stateRelative || (entry.path !== stateRelative && !entry.path.startsWith(`${stateRelative}/`)),
 	);
 	const fingerprints: Fingerprint[] = [];
 	const directories: DirectoryFingerprint[] = [];
@@ -945,7 +952,7 @@ async function inventory(
 			continue;
 		}
 		if (entry.type === "file" && entry.nlink > 1) {
-			const key = `${entry.dev}:${entry.ino}`;
+			const key = entry.nativeIdentity ?? `${entry.dev}:${entry.ino}`;
 			const paths = hardlinkPaths.get(key) ?? [];
 			paths.push(entry.path);
 			hardlinkPaths.set(key, paths);
@@ -986,6 +993,7 @@ async function fingerprintEntry(root: DescriptorRoot, entry: DescriptorEntry): P
 	return {
 		path: entry.path,
 		type: entry.type,
+		...(entry.targetIsDirectory === undefined ? {} : { targetIsDirectory: entry.targetIsDirectory }),
 		size: entry.size,
 		mtimeMs: entry.mtimeMs,
 		mode: entry.mode,
@@ -1014,6 +1022,7 @@ function sameSourceInventory(actual: Fingerprint[], expected: Fingerprint[]): bo
 		return (
 			prior !== undefined &&
 			prior.type === fingerprint.type &&
+			prior.targetIsDirectory === fingerprint.targetIsDirectory &&
 			prior.hash === fingerprint.hash &&
 			prior.size === fingerprint.size &&
 			prior.mode === fingerprint.mode
@@ -1028,6 +1037,11 @@ function sameDirectoryInventory(actual: DirectoryFingerprint[], expected: Direct
 		const prior = byPath.get(directory.path);
 		return prior !== undefined && prior.destinationPath === directory.destinationPath && prior.mode === directory.mode;
 	});
+}
+
+function destinationModeMatches(actual: number, expected: number): boolean {
+	if (process.platform === "win32") return Boolean(actual & 0o222) === Boolean(expected & 0o222);
+	return actual === expected;
 }
 
 async function verifyJournalSources(source: DescriptorRoot, journal: Journal): Promise<void> {
@@ -1055,7 +1069,11 @@ async function finalizeDirectories(destination: DescriptorRoot, directories: Dir
 	);
 	for (const directory of directories) {
 		const entry = actual.get(directory.destinationPath);
-		if (!entry || entry.mode !== directory.mode || Math.abs(entry.mtimeMs - directory.mtimeMs) > 1)
+		if (
+			!entry ||
+			(process.platform !== "win32" && entry.mode !== directory.mode) ||
+			Math.abs(entry.mtimeMs - directory.mtimeMs) > 1
+		)
 			throw new Error(`destination directory metadata mismatch: ${directory.destinationPath}`);
 	}
 }
@@ -1232,6 +1250,7 @@ async function copyEntry(
 		await destination.createSymlink(
 			fingerprint.destinationPath ?? fingerprint.path,
 			await source.readSymlink(fingerprint.path),
+			fingerprint.targetIsDirectory,
 		);
 	} else {
 		await destination.copyFileFrom(
@@ -1254,9 +1273,10 @@ async function verifyDestinationEntry(destination: DescriptorRoot, expected: Fin
 	const actual = await readFingerprint(destination, { ...expected, path: destinationPath });
 	if (
 		actual.type !== expected.type ||
+		actual.targetIsDirectory !== expected.targetIsDirectory ||
 		actual.hash !== expected.hash ||
 		actual.size !== expected.size ||
-		actual.mode !== expected.mode
+		!destinationModeMatches(actual.mode, expected.mode)
 	)
 		throw new Error(`destination conflict during resume: ${destinationPath}`);
 }

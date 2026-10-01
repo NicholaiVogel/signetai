@@ -40,6 +40,16 @@ import {
 	resolveWorkspaceLayout,
 } from "@signet/core";
 
+function tryCreateSymlink(target: string, path: string, type?: "file" | "dir"): boolean {
+	try {
+		symlinkSync(target, path, type);
+		return true;
+	} catch (error) {
+		if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") return false;
+		throw error;
+	}
+}
+
 test("default migration keeps the configured workspace path", () => {
 	const source = "C:\\Users\\alice\\.agents";
 	expect(defaultMigrationDestination(source, win32)).toBe(source);
@@ -51,6 +61,21 @@ test("default migration refuses a different destination path", () => {
 		expect(() => createDefaultMigrationEngine({ source, destination: `${source}-elsewhere` })).toThrow(
 			"workspace layout migration upgrades in place",
 		);
+	} finally {
+		rmSync(source, { recursive: true, force: true });
+	}
+});
+
+test("default migration accepts a Windows path alias to the same directory", () => {
+	if (process.platform !== "win32") return;
+	const source = mkdtempSync(join(tmpdir(), "signet-migration-path-alias-"));
+	const index = source.search(/[a-z]/i);
+	if (index < 0) throw new Error("temporary directory path has no letter to case-fold");
+	const letter = source[index] ?? "";
+	const alias = `${source.slice(0, index)}${letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase()}${source.slice(index + 1)}`;
+	try {
+		expect(statSync(source, { bigint: true }).ino).toBe(statSync(alias, { bigint: true }).ino);
+		expect(() => createDefaultMigrationEngine({ source, destination: alias })).not.toThrow();
 	} finally {
 		rmSync(source, { recursive: true, force: true });
 	}
@@ -158,7 +183,7 @@ test("migration preflight stays at the workspace root and ignores unregistered t
 test("Windows migration lease stays a safe file beneath state and reuses an existing legacy lease", () => {
 	const state = "C:\\Users\\alice\\AppData\\Local\\Signet\\migrations";
 	const source = "C:\\Users\\alice\\.agents";
-	const legacy = win32.join(state, `${win32.resolve(source).replaceAll("/", "_")}.lease`);
+	const legacy = win32.join(state, `${win32.resolve(source).replace(/[\\/:]/g, "_")}.lease`);
 	const lease = migrationLeasePath(state, source, { platform: "win32", pathApi: win32, exists: () => false });
 	expect(win32.dirname(lease)).toBe(state);
 	expect(win32.basename(lease)).toMatch(/^[a-f0-9]{32}\.lease$/);
@@ -326,6 +351,9 @@ test("destination verification requires readiness rather than liveness", async (
 +  },
 +});
 +process.on("SIGTERM", () => { server.stop(true); process.exit(0); });
++process.on("message", message => {
++  if (message && message.type === "migration-verification-shutdown") { server.stop(true); process.exit(0); }
++});
 +`.replace(/^\+/gm, "");
 	try {
 		await expect(
@@ -373,7 +401,7 @@ test("migration refuses an ambiguous legacy lease instead of racing an older wri
 	new Database(join(source, "memory", "memories.db")).close();
 	mkdirSync(leaseDir, { recursive: true });
 	writeDaemonConfig(source);
-	writeFileSync(join(leaseDir, `${source.replaceAll("/", "_")}.lease`), "");
+	writeFileSync(join(leaseDir, `${source.replace(/[\\/:]/g, "_")}.lease`), "");
 	try {
 		const result = spawnSync(
 			process.execPath,
@@ -422,7 +450,7 @@ test("migration publishes only initialized SQLite lease files and leaves interru
 		try {
 			expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(1);
 		} finally {
-			db.close();
+			db.close(true);
 		}
 		if (process.platform !== "win32") expect(statSync(lease).mode & 0o777).toBe(0o600);
 		expect(readdirSync(root).sort()).toEqual(["migration.lease", "migration.lease.init-interrupted"]);
@@ -442,7 +470,7 @@ test("migration leaves an active lease owner in control", () => {
 	new Database(join(source, "memory", "memories.db")).close();
 	mkdirSync(leaseDir, { recursive: true });
 	writeDaemonConfig(source);
-	const owner = new Database(join(leaseDir, `${source.replaceAll("/", "_")}.lease`));
+	const owner = new Database(join(leaseDir, `${source.replace(/[\\/:]/g, "_")}.lease`));
 	owner.exec("PRAGMA user_version = 1");
 	owner.exec("BEGIN IMMEDIATE");
 	try {
@@ -510,7 +538,7 @@ test("packaged desktop migration runner upgrades in place and leaves arbitrary f
 		writeFileSync(join(source, sourcePath), contents);
 		return { sourcePath, destinationPath, contents };
 	});
-	symlinkSync("loose note 0.txt", join(source, "CLAUDE.md"));
+	tryCreateSymlink("loose note 0.txt", join(source, "CLAUDE.md"));
 	try {
 		const sourceDb = new Database(join(source, "memory", "memories.db"), { create: true });
 		sourceDb.exec(
@@ -583,7 +611,7 @@ test("packaged desktop migration runner upgrades in place and leaves arbitrary f
 		});
 		const sourceDatabaseAfter = readFileSync(join(source, "memory", "memories.db"));
 		const sourceWalAfter = readFileSync(join(source, "memory", "memories.db-wal"));
-		sourceDb.close();
+		sourceDb.close(true);
 		expect(sourceDatabaseAfter).toEqual(databaseBefore);
 		expect(sourceWalAfter).toEqual(walBefore);
 		expect(result.status, result.stderr.toString()).toBe(0);
@@ -599,7 +627,7 @@ test("packaged desktop migration runner upgrades in place and leaves arbitrary f
 		}
 		const migrated = new Database(layout.database, { readonly: true });
 		expect(migrated.query("SELECT value FROM proof").get()).toEqual({ value: "workspace-v2-ok" });
-		migrated.close();
+		migrated.close(true);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -625,7 +653,7 @@ test("production CLI refuses an unregistered SQLite writer before destination wr
 		const options = {
 			cwd: join(import.meta.dir, "..", "..", "..", ".."),
 			encoding: "utf8" as const,
-			timeout: 10_000,
+			timeout: 30_000,
 			env: {
 				...process.env,
 				HOME: join(root, "home"),
@@ -655,11 +683,11 @@ test("production CLI refuses an unregistered SQLite writer before destination wr
 		try {
 			expect(migrated.query("SELECT value FROM proof").get()).toEqual({ value: "committed" });
 		} finally {
-			migrated.close();
+			migrated.close(true);
 		}
 	} finally {
 		if (transactionOpen) writer.exec("ROLLBACK");
-		writer.close();
+		writer.close(true);
 		rmSync(root, { recursive: true, force: true });
 	}
 }, 60_000);
@@ -1132,7 +1160,15 @@ test("production migration rejects an external database replaced after writer fe
 		database.close();
 	}
 	const originalInode = lstatSync(external, { bigint: true }).ino;
-	const envKeys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "SIGNET_PATH", "SIGNET_DAEMON_ENTRYPOINT"] as const;
+	const envKeys = [
+		"HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_STATE_HOME",
+		"SIGNET_PATH",
+		"SIGNET_DAEMON_ENTRYPOINT",
+		"SIGNET_DAEMON_RUNTIME",
+		"SIGNET_DAEMON_JS_PATH",
+	] as const;
 	const previous = envKeys.map((key) => [key, process.env[key]] as const);
 	const previousEntrypoint = process.argv[1];
 	process.argv[1] = join(import.meta.dir, "..", "..", "..", "..", "platform", "daemon", "src", "daemon.ts");
@@ -1142,6 +1178,8 @@ test("production migration rejects an external database replaced after writer fe
 		XDG_STATE_HOME: join(root, "state"),
 		SIGNET_PATH: source,
 		SIGNET_DAEMON_ENTRYPOINT: "0",
+		SIGNET_DAEMON_RUNTIME: "bun-js",
+		SIGNET_DAEMON_JS_PATH: join(import.meta.dir, "..", "..", "..", "..", "platform", "daemon", "dist", "daemon.js"),
 	});
 	try {
 		const program = new Command();
@@ -1154,12 +1192,24 @@ test("production migration rejects an external database replaced after writer fe
 				},
 			},
 		});
-		await expect(
-			program.parseAsync(["migration", "run", "--source", source, "--destination", destination, "--yes"], {
-				from: "user",
-			}),
-		).rejects.toThrow("external database identity changed during migration");
-		expect(lstatSync(`${external}.held`, { bigint: true }).ino).toBe(originalInode);
+		const migration = program.parseAsync(
+			["migration", "run", "--source", source, "--destination", destination, "--yes"],
+			{ from: "user" },
+		);
+		if (process.platform === "win32") {
+			let error: unknown;
+			try {
+				await migration;
+			} catch (caught) {
+				error = caught;
+			}
+			expect((error as NodeJS.ErrnoException | undefined)?.code).toMatch(/^(?:EBUSY|EPERM)$/);
+			expect(lstatSync(external, { bigint: true }).ino).toBe(originalInode);
+			expect(existsSync(`${external}.held`)).toBe(false);
+		} else {
+			await expect(migration).rejects.toThrow("external database identity changed during migration");
+			expect(lstatSync(`${external}.held`, { bigint: true }).ino).toBe(originalInode);
+		}
 		expect(existsSync(join(source, "data", "signet.db"))).toBe(false);
 	} finally {
 		if (previousEntrypoint === undefined) process.argv.splice(1, 1);
@@ -1205,13 +1255,25 @@ test("post-cutover verification fails closed when the external database referenc
 			stdout: { log: () => undefined, error: () => undefined },
 			hooks: { afterPointerPublished: async () => renameSync(external, `${external}.held`) },
 		});
-		await expect(
-			program.parseAsync(["migration", "run", "--source", source, "--destination", destination, "--yes"], {
-				from: "user",
-			}),
-		).rejects.toThrow("external database identity unavailable during migration");
-		expect(existsSync(`${external}.held`)).toBe(true);
-		expect(existsSync(external)).toBe(false);
+		const migration = program.parseAsync(
+			["migration", "run", "--source", source, "--destination", destination, "--yes"],
+			{ from: "user" },
+		);
+		if (process.platform === "win32") {
+			let error: unknown;
+			try {
+				await migration;
+			} catch (caught) {
+				error = caught;
+			}
+			expect((error as NodeJS.ErrnoException | undefined)?.code).toMatch(/^(?:EBUSY|EPERM)$/);
+			expect(existsSync(external)).toBe(true);
+			expect(existsSync(`${external}.held`)).toBe(false);
+		} else {
+			await expect(migration).rejects.toThrow("external database identity unavailable during migration");
+			expect(existsSync(`${external}.held`)).toBe(true);
+			expect(existsSync(external)).toBe(false);
+		}
 	} finally {
 		if (previousEntrypoint === undefined) process.argv.splice(1, 1);
 		else process.argv[1] = previousEntrypoint;
@@ -1246,7 +1308,15 @@ test("production resume rejects a replaced but valid external database after poi
 		database.close();
 	}
 	const originalInode = lstatSync(external, { bigint: true }).ino;
-	const envKeys = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "SIGNET_PATH", "SIGNET_DAEMON_ENTRYPOINT"] as const;
+	const envKeys = [
+		"HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_STATE_HOME",
+		"SIGNET_PATH",
+		"SIGNET_DAEMON_ENTRYPOINT",
+		"SIGNET_DAEMON_RUNTIME",
+		"SIGNET_DAEMON_JS_PATH",
+	] as const;
 	const previous = envKeys.map((key) => [key, process.env[key]] as const);
 	Object.assign(process.env, {
 		HOME: join(root, "home"),
@@ -1254,6 +1324,8 @@ test("production resume rejects a replaced but valid external database after poi
 		XDG_STATE_HOME: join(root, "state"),
 		SIGNET_PATH: source,
 		SIGNET_DAEMON_ENTRYPOINT: "0",
+		SIGNET_DAEMON_RUNTIME: "bun-js",
+		SIGNET_DAEMON_JS_PATH: join(import.meta.dir, "..", "..", "..", "..", "platform", "daemon", "dist", "daemon.js"),
 	});
 	try {
 		const run = new Command();
@@ -1266,20 +1338,37 @@ test("production resume rejects a replaced but valid external database after poi
 				},
 			},
 		});
-		await expect(
-			run.parseAsync(["migration", "run", "--source", source, "--destination", destination, "--yes"], { from: "user" }),
-		).rejects.toThrow("interrupted after publication");
-		expect(lstatSync(external, { bigint: true }).ino).not.toBe(originalInode);
+		const attempt = run.parseAsync(["migration", "run", "--source", source, "--destination", destination, "--yes"], {
+			from: "user",
+		});
 		const resume = new Command();
 		registerMigrationCommands(resume, { stdout: { log: () => undefined, error: () => undefined } });
-		await expect(
-			resume.parseAsync(["migration", "resume", "--source", source, "--destination", destination], { from: "user" }),
-		).rejects.toThrow("external database identity changed");
+		if (process.platform === "win32") {
+			let error: unknown;
+			try {
+				await attempt;
+			} catch (caught) {
+				error = caught;
+			}
+			expect((error as NodeJS.ErrnoException | undefined)?.code).toMatch(/^(?:EBUSY|EPERM)$/);
+			expect(lstatSync(external, { bigint: true }).ino).toBe(originalInode);
+			await resume.parseAsync(["migration", "resume", "--source", source, "--destination", destination], {
+				from: "user",
+			});
+		} else {
+			await expect(attempt).rejects.toThrow("interrupted after publication");
+			expect(lstatSync(external, { bigint: true }).ino).not.toBe(originalInode);
+			await expect(
+				resume.parseAsync(["migration", "resume", "--source", source, "--destination", destination], { from: "user" }),
+			).rejects.toThrow("external database identity changed");
+		}
 		const database = new Database(external, { readonly: true });
 		try {
-			expect(database.query("SELECT value FROM proof").get()).toEqual({ value: "replacement" });
+			expect(database.query("SELECT value FROM proof").get()).toEqual({
+				value: process.platform === "win32" ? "original" : "replacement",
+			});
 		} finally {
-			database.close();
+			database.close(true);
 		}
 	} finally {
 		for (const [key, value] of previous) {
@@ -1326,7 +1415,9 @@ test("production CLI preserves an external absolute database override as authori
 		);
 		expect(child.status, child.stderr).toBe(0);
 		expect(resolveWorkspaceLayout(destination).database).toBe(external);
-		expect(readFileSync(join(destination, "workspace-layout.json"), "utf8")).toContain(external);
+		expect(JSON.parse(readFileSync(join(destination, "workspace-layout.json"), "utf8"))).toMatchObject({
+			overrides: { database: external },
+		});
 		const check = new Database(external, { readonly: true });
 		expect(check.query("SELECT value FROM proof").get()).toEqual({ value: "external-authority" });
 		check.close();

@@ -2263,6 +2263,13 @@ process.on("SIGTERM", () => {
 	requestShutdown("signal:SIGTERM", 0);
 });
 
+if (process.env.SIGNET_MIGRATION_VERIFY === "1") {
+	process.on("message", (message) => {
+		if (message && typeof message === "object" && Reflect.get(message, "type") === "migration-verification-shutdown")
+			requestShutdown("migration-verify-complete", 0);
+	});
+}
+
 process.on("uncaughtException", (err) => {
 	logger.error("daemon", "Uncaught exception", err);
 	telemetryRef?.record("error.occurred", sanitizeCrashError(err, process.uptime() * 1000));
